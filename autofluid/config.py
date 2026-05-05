@@ -1,6 +1,7 @@
 """硬编码配置定义。"""
 
 import os
+from typing import Optional
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,15 +45,15 @@ class LocalPaths:
 class RemoteConfig:
     """远程工作站配置。"""
 
+    # 需提前在本机 known_hosts 中登记远程主机密钥。
     host: str = "172.17.135.240"
     port: int = 22
     username: str = "ps"
     # 请通过环境变量 AUTOFLUID_SSH_PASSWORD 提供密码，避免写入源码。
-    password: str = field(default_factory=lambda: os.getenv("AUTOFLUID_SSH_PASSWORD", ""))
+    password: Optional[str] = field(default_factory=lambda: os.getenv("AUTOFLUID_SSH_PASSWORD"))
     project_root: str = r"D:\xkz_1020"
     remote_scdoc_dir: str = r"D:\xkz_1020\scdoc"
     conda_env: str = "pyfluent"
-    conda_activate_cmd: str = "call activate pyfluent"
     meshing_script: str = r"D:\xkz_1020\batch_meshing_gen4.py"
     solver_script: str = r"D:\xkz_1020\batch_solver_gen4.py"
     meshing_clean_cmd: str = ""

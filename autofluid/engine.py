@@ -466,10 +466,9 @@ class PipelineEngine:
 
         safe_script = self._sanitize_windows_path(script_path, "script_path")
         safe_name = self._sanitize_config_name(name)
-        safe_activate = self._sanitize_command_fragment(
-            self.config.remote.conda_activate_cmd, "conda_activate_cmd"
-        )
-        inner = f'{safe_activate} && python "{safe_script}" "{safe_name}"'
+        safe_env = self._sanitize_config_name(self.config.remote.conda_env)
+        activate_cmd = f"call activate {safe_env}"
+        inner = f'{activate_cmd} && python "{safe_script}" "{safe_name}"'
         arg_list = f'/c "{inner}"'
         return (
             'powershell -NoProfile -Command '
@@ -503,7 +502,7 @@ class PipelineEngine:
     def _sanitize_windows_path(self, path: str, label: str) -> str:
         """仅允许安全的 Windows 路径字符。"""
 
-        pattern = re.compile(r"^[A-Za-z0-9_:\-\.\\ ]+$")
+        pattern = re.compile(r"^[A-Za-z0-9_:\-\.\\]+$")
         if not pattern.fullmatch(path):
             raise ValueError(f"{label} 包含非法字符")
         return path
@@ -511,15 +510,7 @@ class PipelineEngine:
     def _sanitize_config_name(self, name: str) -> str:
         """限制构型名称，避免命令注入与路径穿越。"""
 
-        pattern = re.compile(r"^[A-Za-z0-9_.-]+$")
+        pattern = re.compile(r"^[A-Za-z0-9_-]+$")
         if not pattern.fullmatch(name):
             raise ValueError("构型名称包含非法字符")
         return name
-
-    def _sanitize_command_fragment(self, fragment: str, label: str) -> str:
-        """限制命令片段内容，避免注入符号。"""
-
-        pattern = re.compile(r"^[A-Za-z0-9_:\\\. -]+$")
-        if not pattern.fullmatch(fragment):
-            raise ValueError(f"{label} 包含非法字符")
-        return fragment
