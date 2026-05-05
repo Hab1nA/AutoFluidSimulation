@@ -1,0 +1,4 @@
+pywin32>=306
+openpyxl>=3.1.2
+paramiko>=3.4.0
+rich>=13.7.0
