@@ -1,131 +1,183 @@
 # =============================================================================
-# state_manager.py — SQLite 状态管理与断点续传逻辑（阶段1）
-# 
-# 功能：
-#   1. 维护基于 SQLite 的任务状态数据库
-#   2. 提供线程安全的状态读写操作
-#   3. 启动时自动检测并恢复未完成的任务
-#   4. 支持重试计数与错误信息记录
+# modules/state_manager.py — SQLite 状态管理与断点续传逻辑（阶段1）
+#
+# 表结构变更说明 (v2.0)：
+#   原 fluent_status 字段已拆分为 meshing_status 和 solving_status 两个独立字段，
+#   以支持网格划分与求解仿真的精细化管理。
+#
+#   状态枚举：
+#     Pending    — 未开始
+#     InProgress — 执行中
+#     Done       — 成功完成
+#     Computing  — 已提交到远程，等待完成（仅 meshing/solving 使用）
+#     Error      — 出错
+#     Completed  — 最终完成（仅 solving 使用，等同 Done 但代表全流程结束）
 # =============================================================================
 import sqlite3
 import threading
-import time
 import logging
 from datetime import datetime
-from contextlib import contextmanager
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, List, Dict, Any
 
-import config
+from config import LOCAL_CONFIG
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# 状态常量定义
+# 状态常量
 # ---------------------------------------------------------------------------
 class Status:
-    """所有可能的任务阶段状态"""
-    PENDING     = "Pending"       # 尚未开始
-    IN_PROGRESS = "InProgress"    # 正在执行中
-    DONE        = "Done"          # 已完成
-    ERROR       = "Error"         # 发生错误
-    TRANSFERRED = "Transferred"   # 文件已传输到远程
-    COMPUTING   = "Computing"     # 远程正在计算
-    COMPLETED   = "Completed"     # 全部完成（Fluent 求解结束）
+    PENDING = "Pending"
+    IN_PROGRESS = "InProgress"
+    DONE = "Done"
+    COMPUTING = "Computing"
+    COMPLETED = "Completed"
+    TRANSFERRED = "Transferred"
+    ERROR = "Error"
 
+
+# SQLite 建表语句 (v2.0)
+CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS task_state (
+    config_id        TEXT PRIMARY KEY,
+    sw_status        TEXT NOT NULL DEFAULT 'Pending',
+    sc_status        TEXT NOT NULL DEFAULT 'Pending',
+    transfer_status  TEXT NOT NULL DEFAULT 'Pending',
+    meshing_status   TEXT NOT NULL DEFAULT 'Pending',
+    solving_status   TEXT NOT NULL DEFAULT 'Pending',
+    retry_count      INTEGER NOT NULL DEFAULT 0,
+    error_msg        TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+)
+"""
 
 class StateManager:
     """
-    基于 SQLite 的流水线任务状态管理器。
-    提供线程安全的 CRUD 操作，支持断点续传。
+    SQLite 状态管理器，提供线程安全的断点续传能力。
+
+    用法:
+        sm = StateManager()
+        sm.initialize_configs(configs)
+        state = sm.get_state("R2.5_L30_A15")
+        sm.update_meshing_status("R2.5_L30_A15", Status.DONE)
     """
 
     def __init__(self, db_path: Optional[str] = None):
-        """
-        初始化数据库连接。
-
-        Args:
-            db_path: SQLite 数据库文件路径，默认使用 config 中的配置
-        """
-        self.db_path = db_path or config.LOCAL_CONFIG["db_path"]
-        self._lock = threading.Lock()  # 保护所有写操作的线程锁
+        self._db_path = db_path or LOCAL_CONFIG.get("db_path", "pipeline_state.db")
+        self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
-        self._init_database()
+        self._ensure_table()
 
     # -----------------------------------------------------------------------
-    # 数据库初始化
+    # 数据库连接管理
     # -----------------------------------------------------------------------
     def _get_connection(self) -> sqlite3.Connection:
-        """获取或创建数据库连接（每个线程独立连接）"""
+        """获取数据库连接（惰性创建，同一线程复用）"""
         if self._conn is None:
-            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
-            # 启用 WAL 模式以提高并发性能
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA busy_timeout=5000;")
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
         return self._conn
 
-    def _init_database(self):
-        """创建数据库表结构（如果尚未存在）"""
+    def _ensure_table(self):
+        """确保表存在，自动执行 v1→v2 迁移"""
         conn = self._get_connection()
         with self._lock:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS task_state (
-                    config_id       TEXT PRIMARY KEY NOT NULL,
-                    sw_status       TEXT NOT NULL DEFAULT 'Pending',
-                    sc_status       TEXT NOT NULL DEFAULT 'Pending',
-                    transfer_status TEXT NOT NULL DEFAULT 'Pending',
-                    fluent_status   TEXT NOT NULL DEFAULT 'Pending',
-                    retry_count     INTEGER NOT NULL DEFAULT 0,
-                    error_msg       TEXT,
-                    created_at      TEXT NOT NULL,
-                    updated_at      TEXT NOT NULL
-                );
-            """)
-            conn.commit()
-            logger.info("数据库初始化完成: %s", self.db_path)
+            # 检查是否有旧表
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='task_state'"
+            )
+            old_table_exists = cursor.fetchone() is not None
 
-        # 自动初始化所有参数组合的任务记录（如果尚不存在）
-        self._ensure_all_configs_exist()
+            if old_table_exists:
+                # 检查旧表结构是否有 fluent_status 列
+                cols = conn.execute("PRAGMA table_info(task_state)").fetchall()
+                col_names = [c["name"] for c in cols]
+                if "fluent_status" in col_names and "meshing_status" not in col_names:
+                    logger.info("检测到旧版数据库 schema，正在迁移...")
+                    self._migrate_v1_to_v2(conn)
+                elif "meshing_status" not in col_names:
+                    # 表存在但没有新字段，直接重建
+                    logger.info("重建数据库表结构...")
+                    conn.execute("DROP TABLE IF EXISTS task_state")
+                    conn.execute(CREATE_TABLE_SQL)
+                    conn.commit()
+            else:
+                conn.execute(CREATE_TABLE_SQL)
+                conn.commit()
 
-    def _ensure_all_configs_exist(self):
-        """确保 config.PARAMETER_SETS 中的所有构型在数据库中有对应记录"""
+    def _migrate_v1_to_v2(self, conn: sqlite3.Connection):
+        """从 v1 schema (fluent_status) 迁移到 v2 (meshing_status + solving_status)"""
+        # 创建新表
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_state_new (
+                config_id        TEXT PRIMARY KEY,
+                sw_status        TEXT NOT NULL DEFAULT 'Pending',
+                sc_status        TEXT NOT NULL DEFAULT 'Pending',
+                transfer_status  TEXT NOT NULL DEFAULT 'Pending',
+                meshing_status   TEXT NOT NULL DEFAULT 'Pending',
+                solving_status   TEXT NOT NULL DEFAULT 'Pending',
+                retry_count      INTEGER NOT NULL DEFAULT 0,
+                error_msg        TEXT,
+                created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+                updated_at       TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+            )
+        """)
+
+        # 迁移数据
+        conn.execute("""
+            INSERT OR IGNORE INTO task_state_new 
+                (config_id, sw_status, sc_status, transfer_status,
+                 meshing_status, solving_status, retry_count, error_msg,
+                 created_at, updated_at)
+            SELECT 
+                config_id, sw_status, sc_status, transfer_status,
+                CASE 
+                    WHEN fluent_status = 'Computing' THEN 'Computing'
+                    WHEN fluent_status = 'Completed' OR fluent_status = 'Done' THEN 'Done'
+                    WHEN fluent_status IN ('InProgress', 'Transferred') THEN 'Computing'
+                    WHEN fluent_status = 'Error' THEN 'Error'
+                    ELSE 'Pending'
+                END AS meshing_status,
+                CASE 
+                    WHEN fluent_status = 'Completed' THEN 'Completed'
+                    WHEN fluent_status = 'Done' THEN 'Done'
+                    WHEN fluent_status = 'Computing' THEN 'Pending'
+                    WHEN fluent_status = 'Error' THEN 'Error'
+                    ELSE 'Pending'
+                END AS solving_status,
+                retry_count, error_msg, created_at, updated_at
+            FROM task_state
+        """)
+
+        # 原子替换
+        conn.execute("DROP TABLE task_state")
+        conn.execute("ALTER TABLE task_state_new RENAME TO task_state")
+        conn.commit()
+        logger.info("数据库迁移完成：fluent_status → meshing_status + solving_status")
+
+    # -----------------------------------------------------------------------
+    # 基础 CRUD
+    # -----------------------------------------------------------------------
+    def get_state(self, config_id: str) -> Optional[Dict[str, Any]]:
+        """获取单个构型的完整状态（线程安全）"""
         conn = self._get_connection()
         with self._lock:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for param_set in config.PARAMETER_SETS:
-                cid = param_set["config_id"]
-                existing = conn.execute(
-                    "SELECT 1 FROM task_state WHERE config_id = ?", (cid,)
-                ).fetchone()
-                if not existing:
-                    conn.execute(
-                        "INSERT INTO task_state (config_id, created_at, updated_at) VALUES (?, ?, ?)",
-                        (cid, now, now),
-                    )
-            conn.commit()
-
-    # -----------------------------------------------------------------------
-    # 通用状态读写
-    # -----------------------------------------------------------------------
-    def get_state(self, config_id: str) -> Optional[Dict]:
-        """
-        获取指定构型的完整状态记录。
-
-        Returns:
-            包含所有字段的字典，若不存在则返回 None
-        """
-        conn = self._get_connection()
-        row = conn.execute(
-            "SELECT * FROM task_state WHERE config_id = ?", (config_id,)
-        ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM task_state WHERE config_id = ?", (config_id,)
+            ).fetchone()
         if row is None:
             return None
         return dict(row)
 
     def get_all_states(self) -> List[Dict]:
-        """获取所有构型的状态列表"""
+        """获取所有构型的状态列表（线程安全）"""
         conn = self._get_connection()
-        rows = conn.execute("SELECT * FROM task_state ORDER BY config_id").fetchall()
+        with self._lock:
+            rows = conn.execute("SELECT * FROM task_state ORDER BY config_id").fetchall()
         return [dict(r) for r in rows]
 
     def update_status(
@@ -134,18 +186,16 @@ class StateManager:
         sw_status: Optional[str] = None,
         sc_status: Optional[str] = None,
         transfer_status: Optional[str] = None,
-        fluent_status: Optional[str] = None,
+        meshing_status: Optional[str] = None,
+        solving_status: Optional[str] = None,
         error_msg: Optional[str] = None,
         increment_retry: bool = False,
     ):
         """
         更新指定构型的状态字段。只更新传入的非 None 字段。
 
-        Args:
-            config_id: 构型 ID
-            sw_status / sc_status / transfer_status / fluent_status: 阶段状态值
-            error_msg: 错误信息（None 表示不更新）
-            increment_retry: 是否将 retry_count +1
+        支持新字段：meshing_status, solving_status
+        保留旧字段兼容：fluent_status 将被映射到 meshing_status
         """
         conn = self._get_connection()
         with self._lock:
@@ -162,9 +212,12 @@ class StateManager:
             if transfer_status is not None:
                 fields.append("transfer_status = ?")
                 values.append(transfer_status)
-            if fluent_status is not None:
-                fields.append("fluent_status = ?")
-                values.append(fluent_status)
+            if meshing_status is not None:
+                fields.append("meshing_status = ?")
+                values.append(meshing_status)
+            if solving_status is not None:
+                fields.append("solving_status = ?")
+                values.append(solving_status)
             if error_msg is not None:
                 fields.append("error_msg = ?")
                 values.append(error_msg)
@@ -181,24 +234,23 @@ class StateManager:
             conn.commit()
 
     def reset_config(self, config_id: str):
-        """将指定构型的所有状态重置为 Pending，重试计数清零（用于手动重跑）"""
+        """将指定构型的所有状态重置为 Pending，重试计数清零"""
         conn = self._get_connection()
         with self._lock:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
                 """UPDATE task_state 
                    SET sw_status='Pending', sc_status='Pending', 
-                       transfer_status='Pending', fluent_status='Pending',
-                       retry_count=0, error_msg=NULL, updated_at=?
+                       transfer_status='Pending', meshing_status='Pending',
+                       solving_status='Pending', retry_count=0, 
+                       error_msg=NULL, updated_at=?
                    WHERE config_id = ?""",
                 (now, config_id),
             )
             conn.commit()
 
     def is_config_complete(self, config_id: str) -> bool:
-        """
-        判断一个构型是否已全部完成（所有阶段均为 Done/Completed）。
-        """
+        """判断一个构型是否已全部完成（所有阶段均为 Done/Completed）"""
         state = self.get_state(config_id)
         if state is None:
             return False
@@ -206,16 +258,18 @@ class StateManager:
             state["sw_status"] == Status.DONE
             and state["sc_status"] == Status.DONE
             and state["transfer_status"] == Status.DONE
-            and state["fluent_status"] == Status.COMPLETED
+            and state["meshing_status"] == Status.DONE
+            and state["solving_status"] in (Status.DONE, Status.COMPLETED)
         )
 
     def get_next_pending_stage(self, config_id: str) -> Optional[str]:
         """
         返回指定构型下一个待执行的阶段名称。
-        完全按照流水线顺序判断：SW → SC → Transfer → Fluent/Solver
+        完全按照流水线顺序判断：
+            sw → sc → transfer → meshing → solving
 
         Returns:
-            阶段名称 ('sw', 'sc', 'transfer', 'fluent') 或 None（全部完成）
+            阶段名称 或 None（全部完成）
         """
         state = self.get_state(config_id)
         if state is None:
@@ -227,8 +281,10 @@ class StateManager:
             return "sc"
         if state["transfer_status"] != Status.DONE:
             return "transfer"
-        if state["fluent_status"] not in (Status.COMPLETED, Status.COMPUTING):
-            return "fluent"
+        if state["meshing_status"] not in (Status.DONE, Status.COMPUTING):
+            return "meshing"
+        if state["solving_status"] not in (Status.DONE, Status.COMPLETED, Status.COMPUTING):
+            return "solving"
         return None
 
     def get_stats(self) -> Dict:
@@ -239,7 +295,8 @@ class StateManager:
             {
                 'total': 总数,
                 'completed': 全部完成数,
-                'in_progress': 进行中数,
+                'computing': 远程执行中数,
+                'in_progress': 本地执行中数,
                 'error': 出错数,
                 'pending': 等待中数,
             }
@@ -251,52 +308,68 @@ class StateManager:
             if r["sw_status"] == Status.DONE
             and r["sc_status"] == Status.DONE
             and r["transfer_status"] == Status.DONE
-            and r["fluent_status"] == Status.COMPLETED
+            and r["meshing_status"] == Status.DONE
+            and r["solving_status"] in (Status.DONE, Status.COMPLETED)
         )
         computing = sum(
             1 for r in rows
-            if r["fluent_status"] == Status.COMPUTING
+            if r["meshing_status"] == Status.COMPUTING
+            or r["solving_status"] == Status.COMPUTING
         )
         error = sum(
             1 for r in rows
             if r["sw_status"] == Status.ERROR
             or r["sc_status"] == Status.ERROR
             or r["transfer_status"] == Status.ERROR
-            or r["fluent_status"] == Status.ERROR
+            or r["meshing_status"] == Status.ERROR
+            or r["solving_status"] == Status.ERROR
         )
         in_progress = sum(
             1 for r in rows
-            if r["fluent_status"] == Status.COMPUTING
+            if r["meshing_status"] == Status.COMPUTING
+            or r["solving_status"] == Status.COMPUTING
             or r["sw_status"] == Status.IN_PROGRESS
             or r["sc_status"] == Status.IN_PROGRESS
         )
         pending = total - completed - error - in_progress
+        # 拆分 computing：网格划分与求解分开统计
+        computing_meshing = sum(
+            1 for r in rows
+            if r["meshing_status"] == Status.COMPUTING
+        )
+        computing_solving = sum(
+            1 for r in rows
+            if r["solving_status"] == Status.COMPUTING
+        )
         return {
             "total": total,
             "completed": completed,
             "computing": computing,
+            "computing_meshing": computing_meshing,
+            "computing_solving": computing_solving,
             "in_progress": in_progress,
             "error": error,
             "pending": pending,
         }
 
     def get_computing_configs(self) -> List[str]:
-        """获取所有远程正在计算的构型 ID 列表"""
+        """获取所有远程正在执行（meshing 或 solving Computing）的构型 ID 列表"""
         rows = self.get_all_states()
-        return [r["config_id"] for r in rows if r["fluent_status"] == Status.COMPUTING]
+        return [
+            r["config_id"] for r in rows
+            if r["meshing_status"] == Status.COMPUTING
+            or r["solving_status"] == Status.COMPUTING
+        ]
 
     # -----------------------------------------------------------------------
     # 便捷方法（pipeline_controller.py 直接调用）
     # -----------------------------------------------------------------------
     def initialize_configs(self, configs: List):
-        """
-        初始化/同步构型列表（兼容 ConfigCombination 与旧 PARAMETER_SETS dict）
-        """
+        """初始化/同步构型列表到数据库"""
         conn = self._get_connection()
         with self._lock:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             for item in configs:
-                # 兼容 ConfigCombination 数据类
                 if hasattr(item, "id"):
                     cid = item.id
                 elif isinstance(item, dict):
@@ -308,35 +381,46 @@ class StateManager:
                 ).fetchone()
                 if not existing:
                     conn.execute(
-                        "INSERT INTO task_state (config_id, created_at, updated_at) VALUES (?, ?, ?)",
+                        """INSERT INTO task_state 
+                           (config_id, created_at, updated_at) 
+                           VALUES (?, ?, ?)""",
                         (cid, now, now),
                     )
             conn.commit()
         logger.info("已同步 %d 个构型初始状态到数据库", len(configs))
 
-    def get_configs_by_fluent_status(self, status: str) -> List[str]:
-        """按 fluent_status 筛选构型 ID 列表"""
+    # -----------------------------------------------------------------------
+    # 按阶段筛选的便捷方法
+    # -----------------------------------------------------------------------
+    def get_configs_by_meshing_status(self, status: str) -> List[str]:
+        """按 meshing_status 筛选构型 ID 列表"""
         rows = self.get_all_states()
-        return [r["config_id"] for r in rows if r["fluent_status"] == status]
+        return [r["config_id"] for r in rows if r["meshing_status"] == status]
 
+    def get_configs_by_solving_status(self, status: str) -> List[str]:
+        """按 solving_status 筛选构型 ID 列表"""
+        rows = self.get_all_states()
+        return [r["config_id"] for r in rows if r["solving_status"] == status]
+
+    # -----------------------------------------------------------------------
+    # 便捷方法
+    # -----------------------------------------------------------------------
     def update_sw_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
-        """便捷方法：更新 SW 阶段状态"""
         self.update_status(config_id, sw_status=status, error_msg=error_msg)
 
     def update_sc_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
-        """便捷方法：更新 SC 阶段状态"""
         self.update_status(config_id, sc_status=status, error_msg=error_msg)
 
     def update_transfer_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
-        """便捷方法：更新传输阶段状态"""
         self.update_status(config_id, transfer_status=status, error_msg=error_msg)
 
-    def update_fluent_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
-        """便捷方法：更新 Fluent 求解阶段状态"""
-        self.update_status(config_id, fluent_status=status, error_msg=error_msg)
+    def update_meshing_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
+        self.update_status(config_id, meshing_status=status, error_msg=error_msg)
+
+    def update_solving_status(self, config_id: str, status: str, error_msg: Optional[str] = None):
+        self.update_status(config_id, solving_status=status, error_msg=error_msg)
 
     def increment_retry(self, config_id: str):
-        """便捷方法：将指定构型的重试计数 +1"""
         self.update_status(config_id, increment_retry=True)
 
     def close(self):
@@ -344,3 +428,71 @@ class StateManager:
         if self._conn:
             self._conn.close()
             self._conn = None
+
+    # -----------------------------------------------------------------------
+    # pipeline_controller.py / InteractiveShell 补充方法 (v2.0)
+    # -----------------------------------------------------------------------
+    def _update_field(self, config_id: str, field: str, value: str, error_msg: Optional[str] = None):
+        """通用字段更新（供 Shell reset 命令使用）。
+        
+        Raises:
+            ValueError: 传入未知字段名时抛出，拒绝静默失败。
+        """
+        _ALLOWED_FIELDS = {
+            "sw_status", "sc_status", "transfer_status",
+            "meshing_status", "solving_status",
+        }
+        if field not in _ALLOWED_FIELDS:
+            raise ValueError(
+                f"未知状态字段 '{field}'，允许的字段: {sorted(_ALLOWED_FIELDS)}"
+            )
+        if field == "sw_status":
+            self.update_sw_status(config_id, value, error_msg)
+        elif field == "sc_status":
+            self.update_sc_status(config_id, value, error_msg)
+        elif field == "transfer_status":
+            self.update_transfer_status(config_id, value, error_msg)
+        elif field == "meshing_status":
+            self.update_meshing_status(config_id, value, error_msg)
+        elif field == "solving_status":
+            self.update_solving_status(config_id, value, error_msg)
+
+    def reset_retry(self, config_id: str):
+        """重置重试计数为 0（不改变其他状态）"""
+        conn = self._get_connection()
+        with self._lock:
+            conn.execute(
+                "UPDATE task_state SET retry_count=0 WHERE config_id=?",
+                (config_id,)
+            )
+            conn.commit()
+
+    def full_reset(self, config_id: str):
+        """完全重置指定构型的所有状态（与 reset_config 等价）"""
+        self.reset_config(config_id)
+
+    def get_error_configs(self) -> List[Dict]:
+        """获取所有 Error 状态的构型信息"""
+        rows = self.get_all_states()
+        return [
+            dict(r) for r in rows
+            if r["sw_status"] == Status.ERROR
+            or r["sc_status"] == Status.ERROR
+            or r["transfer_status"] == Status.ERROR
+            or r["meshing_status"] == Status.ERROR
+            or r["solving_status"] == Status.ERROR
+        ]
+
+    def get_configs_by_status(self, field: str, status: str) -> List[str]:
+        """
+        按任意状态字段筛选构型 ID 列表。
+
+        Args:
+            field: 字段名 (e.g. 'meshing_status', 'solving_status', 'sw_status')
+            status: 状态值 (e.g. Status.COMPUTING)
+
+        Returns:
+            匹配的 config_id 列表
+        """
+        rows = self.get_all_states()
+        return [r["config_id"] for r in rows if r.get(field) == status]

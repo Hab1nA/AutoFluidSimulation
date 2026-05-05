@@ -9,10 +9,8 @@
 #   5. 与后台调度逻辑通过 queue.Queue 解耦，异步刷新
 # =============================================================================
 import queue
-import threading
 import time
-import logging
-from typing import Dict, List, Optional, Any
+from typing import List, Optional
 from datetime import datetime
 
 from rich.live import Live
@@ -32,8 +30,6 @@ from rich import box
 
 from config import GLOBAL_CONFIG
 from .state_manager import StateManager, Status
-
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 颜色映射（Rich 样式字符串）
@@ -79,7 +75,8 @@ class TUIManager:
         self.console = Console()
 
         # 事件队列：工作线程通过此队列向 UI 线程推送消息
-        self.event_queue: queue.Queue = queue.Queue()
+        # 限容 1000 条，防止生产者远快于消费者导致内存泄漏
+        self.event_queue: queue.Queue = queue.Queue(maxsize=1000)
         # 日志缓冲区（最近 N 条消息）
         self.log_buffer: List[str] = []
         self.max_log_lines = 6
@@ -94,7 +91,7 @@ class TUIManager:
         self._running = False
 
         # 阶段名称
-        self.stages = ["SW建模", "SC处理", "文件传输", "Fluent求解"]
+        self.stages = ["SW建模", "SC处理", "文件传输", "网格划分", "仿真求解"]
 
     # -----------------------------------------------------------------------
     # 事件推送（供外部线程调用）
@@ -169,7 +166,8 @@ class TUIManager:
         table.add_column("SW建模", width=12, justify="center")
         table.add_column("SC处理", width=12, justify="center")
         table.add_column("文件传输", width=12, justify="center")
-        table.add_column("Fluent求解", width=14, justify="center")
+        table.add_column("网格划分", width=12, justify="center")
+        table.add_column("仿真求解", width=12, justify="center")
         table.add_column("重试", width=6, justify="center")
 
         # 获取所有状态
@@ -180,30 +178,44 @@ class TUIManager:
             sw_style = STATUS_COLORS.get(st["sw_status"], "dim")
             sc_style = STATUS_COLORS.get(st["sc_status"], "dim")
             tr_style = STATUS_COLORS.get(st["transfer_status"], "dim")
-            fl_style = STATUS_COLORS.get(st["fluent_status"], "dim")
+            mesh_style = STATUS_COLORS.get(st.get("meshing_status", "Pending"), "dim")
+            sol_style = STATUS_COLORS.get(st.get("solving_status", "Pending"), "dim")
 
-            # 如果 fluent 状态是 Computing 且远程已完成，自动更新
-            if st["fluent_status"] == Status.COMPUTING:
-                fl_display = f"[{fl_style}]⚡ 计算中[/]"
-            elif st["fluent_status"] == Status.COMPLETED:
-                fl_display = f"[{fl_style}]🎯 已完成[/]"
-            elif st["fluent_status"] == Status.ERROR:
-                fl_display = f"[{fl_style}]❌ 错误[/]"
-            elif st["fluent_status"] == Status.TRANSFERRED:
-                fl_display = f"[{fl_style}]📤 已传输[/]"
-            elif st["fluent_status"] == Status.DONE:
-                fl_display = f"[{fl_style}]✅ 完成[/]"
-            elif st["fluent_status"] == Status.PENDING:
-                fl_display = f"[{fl_style}]⏳ 等待[/]"
+            # 网格划分状态显示
+            mesh_status = st.get("meshing_status", Status.PENDING)
+            if mesh_status == Status.COMPUTING:
+                mesh_display = f"[{mesh_style}]⚡ 计算中[/]"
+            elif mesh_status == Status.DONE:
+                mesh_display = f"[{mesh_style}]✅ 完成[/]"
+            elif mesh_status == Status.ERROR:
+                mesh_display = f"[{mesh_style}]❌ 错误[/]"
+            elif mesh_status == Status.PENDING:
+                mesh_display = f"[{mesh_style}]⏳ 等待[/]"
             else:
-                fl_display = f"[{fl_style}]{st['fluent_status']}[/]"
+                mesh_display = f"[{mesh_style}]{mesh_status}[/]"
+
+            # 仿真求解状态显示
+            sol_status = st.get("solving_status", Status.PENDING)
+            if sol_status == Status.COMPUTING:
+                sol_display = f"[{sol_style}]⚡ 计算中[/]"
+            elif sol_status == Status.COMPLETED:
+                sol_display = f"[{sol_style}]🎯 已完成[/]"
+            elif sol_status == Status.DONE:
+                sol_display = f"[{sol_style}]✅ 完成[/]"
+            elif sol_status == Status.ERROR:
+                sol_display = f"[{sol_style}]❌ 错误[/]"
+            elif sol_status == Status.PENDING:
+                sol_display = f"[{sol_style}]⏳ 等待[/]"
+            else:
+                sol_display = f"[{sol_style}]{sol_status}[/]"
 
             table.add_row(
                 cid,
                 f"[{sw_style}]{st['sw_status']}[/]",
                 f"[{sc_style}]{st['sc_status']}[/]",
                 f"[{tr_style}]{st['transfer_status']}[/]",
-                fl_display,
+                mesh_display,
+                sol_display,
                 str(st["retry_count"]),
             )
 
@@ -361,19 +373,6 @@ class TUIManager:
         self._drain_events()
         return self._build_layout()
 
-    def run(self):
-        """启动 TUI 主循环（阻塞，在主线程中调用）"""
-        self._running = True
-        self._live = Live(
-            self._render_loop(),
-            console=self.console,
-            refresh_per_second=self.refresh_rate,
-            screen=True,
-            transient=False,
-        )
-
-        self._live.start(refresh=True)
-
     def stop(self):
         """停止 TUI 刷新"""
         self._running = False
@@ -387,12 +386,3 @@ class TUIManager:
                 self._live.update(self._render_loop())
             except Exception:
                 pass
-
-    def __enter__(self):
-        """上下文管理器入口"""
-        self.run()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """上下文管理器出口"""
-        self.stop()

@@ -39,7 +39,8 @@ REMOTE_CONFIG = {
     "host": "172.17.135.240",
     "port": 22,
     "username": "ps",
-    "password": "abc@123",
+    # 密码必须通过环境变量设置，不再提供硬编码回退值
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
     # 工程根目录
     "root_dir": r"D:\xkz_1020",
     # SCDOC 存放目录（远程）
@@ -50,8 +51,10 @@ REMOTE_CONFIG = {
     "meshing_script": r"D:\xkz_1020\batch_meshing_gen4.py",
     # 远程 Fluent 求解脚本
     "solver_script": r"D:\xkz_1020\batch_solver_gen4.py",
-    # 远程完成标志文件名模板 (config_id_done.txt)
-    "done_flag_template": r"D:\xkz_1020\scdoc\{config_id}_done.txt",
+    # 远程网格完成标志文件名模板 (config_id_meshing_done.txt)
+    "meshing_done_flag_template": r"D:\xkz_1020\scdoc\{config_id}_meshing_done.txt",
+    # 远程求解完成标志文件名模板 (config_id_solving_done.txt)
+    "solving_done_flag_template": r"D:\xkz_1020\scdoc\{config_id}_solving_done.txt",
     # SSH 连接超时（秒）
     "ssh_timeout": 15,
     # 远程任务轮询间隔（秒）
@@ -77,15 +80,6 @@ CONFIG_COMBINATIONS: List[ConfigCombination] = [
     # 在此添加更多构型...
 ]
 
-# 默认参数（用于构建 Excel 列名映射等）
-DEFAULT_PARAMS: Dict[str, float] = {}
-
-# 向后兼容：保留 PARAMETER_SETS 供旧接口使用
-PARAMETER_SETS = [
-    {"config_id": c.id, "params": c.params}
-    for c in CONFIG_COMBINATIONS
-]
-
 # =============================================================================
 # 全局行为控制
 # =============================================================================
@@ -100,6 +94,8 @@ GLOBAL_CONFIG = {
     "tui_refresh_rate": 4,
     # 是否在启动时自动恢复上次 Computing 状态的任务检查
     "auto_recover": True,
+    # 是否复用 SW 实例（True=一次打开处理所有构型，性能更优）
+    "sw_keep_alive": True,
 }
 
 # =============================================================================
@@ -127,8 +123,7 @@ def setup_logging():
     logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 
-# 启动时自动创建目录
-ensure_directories()
+# ⚠ 模块级副作用已移除 — 调用方应在入口点显式调用 setup_logging() 和 ensure_directories()
 
 # 构建完整的 SQLite 数据库路径
 LOCAL_CONFIG["db_path"] = os.path.join(

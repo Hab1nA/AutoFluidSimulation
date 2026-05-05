@@ -149,14 +149,12 @@ class SpaceClaimDriver:
             "/Headless=True",
             "/Splash=False",
         ]
-        cmd_str = " ".join(cmd)
-        logger.info("执行 SpaceClaim 命令:\n  %s", cmd_str)
+        logger.info("执行 SpaceClaim 命令:\n  %s", " ".join(cmd))
 
         # --- 执行（带超时保护）---
         try:
             process = subprocess.run(
-                cmd_str,
-                shell=True,                 # Windows 下需要 shell 来解析引号
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,       # 超时保护（防止 SC 卡死）
@@ -192,7 +190,15 @@ class SpaceClaimDriver:
             return False
 
         # --- 验证输出 ---
-        time.sleep(2)  # 等待文件系统同步
+        # 轮询确认文件系统同步完成（最多 10 次，每次 0.5s）
+        from config import GLOBAL_CONFIG
+        poll_interval = GLOBAL_CONFIG.get("sc_poll_interval", 0.5)
+        poll_max = GLOBAL_CONFIG.get("sc_poll_max", 20)  # 最多 10 秒
+        for _ in range(poll_max):
+            time.sleep(poll_interval)
+            if self._verify_scdoc_output():
+                break
+
         if not self._verify_scdoc_output():
             logger.error("构型 %s: SpaceClaim 处理完成但未生成 SCDOC 文件", config_id)
             return False

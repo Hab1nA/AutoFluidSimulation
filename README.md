@@ -129,10 +129,10 @@ AutoFluidSimulation/
 ### 4.3 Python 依赖
 
 ```
-pywin32>=306          # SolidWorks COM 接口（Windows 专用）
-openpyxl>=3.1.2       # Excel .xlsx 文件读写
-paramiko>=3.4.0       # SSH + SFTP 远程连接
-rich>=13.7.0          # 终端 TUI 动态界面
+pywin32==311          # SolidWorks COM 接口（Windows 专用）
+openpyxl==3.1.5       # Excel .xlsx 文件读写
+paramiko==3.5.0       # SSH + SFTP 远程连接
+rich==14.2.0          # 终端 TUI 动态界面
 ```
 
 安装命令：
@@ -300,8 +300,10 @@ python pipeline_controller.py
 ```
 
 程序启动时会自动检查已完成的任务状态：
-- `fluent_status = Completed` → 跳过
-- `fluent_status = Computing` → 通过 SSH 检查远程 `done.txt` 是否存在
+- `solving_status = Completed` → 跳过
+- `meshing_status = Computing` → 通过 SSH 检查远程 `{config_id}_meshing_done.txt` 是否存在
+  - 存在 → 标记为 `Done`，继续启动求解
+- `solving_status = Computing` → 通过 SSH 检查远程 `{config_id}_solving_done.txt` 是否存在
   - 存在 → 标记为 `Completed`
   - 不存在 → 保持 `Computing`，继续轮询
 
@@ -335,7 +337,8 @@ python pipeline_controller.py --poll-only
 | `sw_status` | TEXT | SolidWorks 阶段状态 | `Pending`, `InProgress`, `Done`, `Error` |
 | `sc_status` | TEXT | SpaceClaim 阶段状态 | 同上 |
 | `transfer_status` | TEXT | SFTP 传输状态 | 同上 |
-| `fluent_status` | TEXT | Fluent 求解状态 | `Pending`, `Transferred`, `Computing`, `Completed`, `Error` |
+| `meshing_status` | TEXT | 远程网格划分状态 | `Pending`, `Computing`, `Done`, `Error` |
+| `solving_status` | TEXT | 远程仿真求解状态 | `Pending`, `Computing`, `Done`, `Completed`, `Error` |
 | `retry_count` | INTEGER | 当前失败重试次数 | 0 ~ max_retry |
 | `error_msg` | TEXT | 最近一次错误信息 | — |
 | `updated_at` | TEXT | 最后更新时间戳 | ISO 8601 格式 |
@@ -356,11 +359,16 @@ Pending ──→ InProgress ──→ Done ──→ (下一阶段)
 程序启动时自动执行以下检查：
 
 1. 读取数据库中所有构型状态
-2. 对于 `fluent_status = Computing` 的任务：
+2. 对于 `meshing_status = Computing` 的任务：
    - SSH 连接远程工作站
-   - 检查 `D:\xkz_1020\scdoc\{config_id}_done.txt` 是否存在
-   - 存在 → 更新状态为 `Completed`
-   - 不存在 → 保持 `Computing`，等待后续轮询
+   - 检查 `D:\xkz_1020\scdoc\{config_id}_meshing_done.txt` 是否存在
+   - 存在 → 更新 `meshing_status` 为 `Done`，自动启动求解脚本
+   - 不存在 → 保持 `Computing`，检查进程存活后等待下一轮轮询
+3. 对于 `solving_status = Computing` 的任务：
+   - SSH 连接远程工作站
+   - 检查 `D:\xkz_1020\scdoc\{config_id}_solving_done.txt` 是否存在
+   - 存在 → 更新 `solving_status` 为 `Completed`
+   - 不存在 → 保持 `Computing`，检查进程存活后等待下一轮轮询
 3. 对于 `*_status = Error` 且 `retry_count < max_retry` 的任务：自动重新执行该阶段
 
 ---
@@ -384,9 +392,10 @@ Start-Process cmd.exe -ArgumentList '/c D:\xkz_1020\run_{config_id}.bat' -Window
 call conda activate pyfluent
 python D:\xkz_1020\batch_meshing_gen4.py --config {config_id}
 if %errorlevel% neq 0 exit /b %errorlevel%
+echo %date% %time% > D:\xkz_1020\scdoc\{config_id}_meshing_done.txt
 python D:\xkz_1020\batch_solver_gen4.py --config {config_id}
 if %errorlevel% neq 0 exit /b %errorlevel%
-echo %date% %time% > D:\xkz_1020\scdoc\{config_id}_done.txt
+echo %date% %time% > D:\xkz_1020\scdoc\{config_id}_solving_done.txt
 ```
 
 ### 方案 B：`schtasks` 计划任务（回退）
@@ -400,9 +409,10 @@ schtasks /Run /TN "FluentTask_{config_id}"
 
 ### 完成检测机制
 
-- 本地程序周期性地通过 SSH 检查 `D:\xkz_1020\scdoc\{config_id}_done.txt` 是否存在
-- 存在 → 标记 `Completed`，清理临时 `.bat` 文件和计划任务
-- 不存在 + 进程已退出 → 标记 `Error`
+- 本地程序周期性地通过 SSH 检查 `D:\xkz_1020\scdoc\{config_id}_meshing_done.txt` 和 `{config_id}_solving_done.txt` 是否存在
+- 网格 done 文件存在 → 标记 `meshing_status=Done`，自动启动求解脚本
+- 求解 done 文件存在 → 标记 `solving_status=Completed`，清理临时 `.bat` 文件和计划任务
+- done 文件不存在 + 进程已退出 → 标记对应阶段为 `Error`
 
 ---
 
@@ -419,10 +429,10 @@ schtasks /Run /TN "FluentTask_{config_id}"
 ├──────────────────────────────────────────────────────────────┤
 │  ┌─────────────────────────────────────────────────────────┐  │
 │  │  任务总览表格                                            │  │
-│  │  ID            SW建模   SC处理   文件传输   Fluent求解   │  │
-│  │  R2.5_L30_A15  Done     Done      Done      Computing  │  │
-│  │  R3.0_L35_A20  Done     InProg... Pending    Pending    │  │
-│  │  R3.5_L40_A25  Pending  Pending   Pending    Pending    │  │
+│  │  ID            SW建模   SC处理   文件传输   网格划分   仿真求解   │  │
+│  │  R2.5_L30_A15  Done     Done      Done      Done     Computing  │  │
+│  │  R3.0_L35_A20  Done     InProg... Pending   Pending   Pending    │  │
+│  │  R3.5_L40_A25  Pending  Pending   Pending   Pending   Pending    │  │
 │  └─────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  ═════════════════════════════════════════════ 45% ████▌     │
