@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import socketserver
 from typing import Any, Callable, Dict, Optional
 
 
 CommandHandler = Callable[[Dict[str, Any]], Dict[str, Any]]
+LOGGER = logging.getLogger("autofluid")
 
 
 class IPCRequestHandler(socketserver.StreamRequestHandler):
@@ -22,6 +24,7 @@ class IPCRequestHandler(socketserver.StreamRequestHandler):
             except json.JSONDecodeError:
                 response = {"ok": False, "message": "无效的 JSON 请求"}
             except Exception as exc:  # pragma: no cover - 保证 IPC 稳定
+                LOGGER.exception("IPC 处理失败")
                 response = {"ok": False, "message": f"处理失败: {exc}"}
             self.wfile.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
 

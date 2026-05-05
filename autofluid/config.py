@@ -57,7 +57,6 @@ class RemoteConfig:
     solver_script: str = r"D:\xkz_1020\batch_solver_gen4.py"
     meshing_clean_cmd: str = ""
     solver_clean_cmd: str = ""
-    ssh_auto_add_host_key: bool = False
 
 
 @dataclass

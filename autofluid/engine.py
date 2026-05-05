@@ -158,7 +158,7 @@ class PipelineEngine:
         try:
             self._ssh_exec("echo ok")
             ssh_ok = True
-        except Exception as exc:  # pragma: no cover - SSH 异常仅记录
+        except (paramiko.SSHException, OSError, RuntimeError) as exc:  # pragma: no cover - SSH 异常仅记录
             issues.append(f"SSH 连接失败: {exc}")
 
         return {"issues": issues, "ssh_ok": ssh_ok}
@@ -229,7 +229,11 @@ class PipelineEngine:
 
     def _clean_remote_dir(self, remote_dir: str) -> None:
         safe_dir = self._sanitize_windows_path(remote_dir, "remote_dir")
-        command = f'powershell -NoProfile -Command "Remove-Item -Recurse -Force \\"{safe_dir}\\\\*\\""'
+        escaped_dir = safe_dir.replace("'", "''")
+        command = (
+            'powershell -NoProfile -Command '
+            f'"Get-ChildItem -LiteralPath \'{escaped_dir}\' -Force | Remove-Item -Recurse -Force"'
+        )
         self._ssh_exec(command)
 
     def _run_optional_remote_clean(self, command: str) -> None:
@@ -462,7 +466,10 @@ class PipelineEngine:
 
         safe_script = self._sanitize_windows_path(script_path, "script_path")
         safe_name = self._sanitize_config_name(name)
-        inner = f'{self.config.remote.conda_activate_cmd} && python "{safe_script}" "{safe_name}"'
+        safe_activate = self._sanitize_command_fragment(
+            self.config.remote.conda_activate_cmd, "conda_activate_cmd"
+        )
+        inner = f'{safe_activate} && python "{safe_script}" "{safe_name}"'
         arg_list = f'/c "{inner}"'
         return (
             'powershell -NoProfile -Command '
@@ -474,10 +481,7 @@ class PipelineEngine:
             raise RuntimeError("未配置 SSH 密码，请设置环境变量 AUTOFLUID_SSH_PASSWORD")
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        if self.config.remote.ssh_auto_add_host_key:
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        else:
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client.connect(
             hostname=self.config.remote.host,
             port=self.config.remote.port,
@@ -499,7 +503,7 @@ class PipelineEngine:
     def _sanitize_windows_path(self, path: str, label: str) -> str:
         """仅允许安全的 Windows 路径字符。"""
 
-        pattern = re.compile(r"^[A-Za-z0-9_:\-\\.\\\\ ]+$")
+        pattern = re.compile(r"^[A-Za-z0-9_:\-\.\\ ]+$")
         if not pattern.fullmatch(path):
             raise ValueError(f"{label} 包含非法字符")
         return path
@@ -511,3 +515,11 @@ class PipelineEngine:
         if not pattern.fullmatch(name):
             raise ValueError("构型名称包含非法字符")
         return name
+
+    def _sanitize_command_fragment(self, fragment: str, label: str) -> str:
+        """限制命令片段内容，避免注入符号。"""
+
+        pattern = re.compile(r"^[A-Za-z0-9_:\\\. -]+$")
+        if not pattern.fullmatch(fragment):
+            raise ValueError(f"{label} 包含非法字符")
+        return fragment
