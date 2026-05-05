@@ -177,7 +177,7 @@ class PipelineEngine:
         if not self._has_config(name):
             return {"ok": False, "message": "构型不存在"}
         if self._has_active_steps(name, downstream_steps(step_name)):
-            return {"ok": False, "message": "目标步骤正在执行，无法重置"}
+            return {"ok": False, "message": "步骤或下游步骤正在执行，无法重置"}
         self.store.reset_steps(name, step_name)
         if step_name in (StepName.SOLIDWORKS, StepName.SPACECLAIM, StepName.TRANSFER, StepName.MESHING):
             self._clear_solver_gate()
