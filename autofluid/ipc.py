@@ -50,5 +50,6 @@ class IPCClient:
         with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
             sock.sendall(data)
             sock.settimeout(self.timeout)
-            response = sock.recv(65535)
-        return json.loads(response.decode("utf-8"))
+            with sock.makefile("r", encoding="utf-8") as reader:
+                response_line = reader.readline()
+        return json.loads(response_line)

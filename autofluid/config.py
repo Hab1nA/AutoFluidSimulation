@@ -1,5 +1,6 @@
 """硬编码配置定义。"""
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,7 +47,8 @@ class RemoteConfig:
     host: str = "172.17.135.240"
     port: int = 22
     username: str = "ps"
-    password: str = "abc@123"
+    # 请通过环境变量 AUTOFLUID_SSH_PASSWORD 提供密码，避免写入源码。
+    password: str = field(default_factory=lambda: os.getenv("AUTOFLUID_SSH_PASSWORD", ""))
     project_root: str = r"D:\xkz_1020"
     remote_scdoc_dir: str = r"D:\xkz_1020\scdoc"
     conda_env: str = "pyfluent"
@@ -55,6 +57,7 @@ class RemoteConfig:
     solver_script: str = r"D:\xkz_1020\batch_solver_gen4.py"
     meshing_clean_cmd: str = ""
     solver_clean_cmd: str = ""
+    ssh_auto_add_host_key: bool = False
 
 
 @dataclass

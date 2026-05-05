@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import sys
 import threading
 import time
@@ -50,6 +51,8 @@ class PipelineEngine:
         self._sw_started = False
 
         configs = read_excel_configs(self.config.local.excel_path)
+        for config in configs:
+            self._sanitize_config_name(config.name)
         self.store.initialize_configs(configs)
         self._configs_cache: List[ConfigRow] = configs
 
@@ -225,7 +228,8 @@ class PipelineEngine:
                     self.logger.warning("删除失败 %s: %s", path, exc)
 
     def _clean_remote_dir(self, remote_dir: str) -> None:
-        command = f'powershell -NoProfile -Command "Remove-Item -Recurse -Force \\"{remote_dir}\\\\*\\""'
+        safe_dir = self._sanitize_windows_path(remote_dir, "remote_dir")
+        command = f'powershell -NoProfile -Command "Remove-Item -Recurse -Force \\"{safe_dir}\\\\*\\""'
         self._ssh_exec(command)
 
     def _run_optional_remote_clean(self, command: str) -> None:
@@ -262,7 +266,7 @@ class PipelineEngine:
         self._sw_thread.start()
 
     def _run_solidworks_macro(self) -> None:
-        """启动 SolidWorks 并运行宏（一次性导出所有构型）。"""
+        """启动 SolidWorks 并运行宏（由宏脚本一次性导出所有构型）。"""
 
         if sys.platform != "win32":
             self.logger.warning("当前系统非 Windows，SolidWorks 宏将被跳过。")
@@ -406,10 +410,11 @@ class PipelineEngine:
     def _run_spaceclaim(self, name: str) -> None:
         """调用 SpaceClaim 脚本进行转换。"""
 
-        step_path = find_step_file(self.config.local.step_dir, name, ("step", "stp", "STEP", "STP"))
+        safe_name = self._sanitize_config_name(name)
+        step_path = find_step_file(self.config.local.step_dir, safe_name, ("step", "stp", "STEP", "STP"))
         if not step_path:
             raise FileNotFoundError(f"未找到 STEP 文件: {name}")
-        scdoc_path = Path(self.config.local.scdoc_dir) / f"{name}.scdoc"
+        scdoc_path = Path(self.config.local.scdoc_dir) / f"{safe_name}.scdoc"
         command = [
             self.config.local.spaceclaim_exe,
             f'/RunScript="{self.config.local.sc_script}"',
@@ -421,7 +426,8 @@ class PipelineEngine:
     def _run_transfer(self, name: str) -> None:
         """SFTP 上传到远程工作站。"""
 
-        scdoc_path = Path(self.config.local.scdoc_dir) / f"{name}.scdoc"
+        safe_name = self._sanitize_config_name(name)
+        scdoc_path = Path(self.config.local.scdoc_dir) / f"{safe_name}.scdoc"
         if not scdoc_path.exists():
             raise FileNotFoundError(f"SCDOC 不存在: {scdoc_path}")
         remote_path = str(Path(self.config.remote.remote_scdoc_dir) / scdoc_path.name)
@@ -454,7 +460,9 @@ class PipelineEngine:
     def _build_remote_background_command(self, script_path: str, name: str) -> str:
         """构建远程后台执行命令，确保 SSH 断开后进程存活。"""
 
-        inner = f'{self.config.remote.conda_activate_cmd} && python "{script_path}" "{name}"'
+        safe_script = self._sanitize_windows_path(script_path, "script_path")
+        safe_name = self._sanitize_config_name(name)
+        inner = f'{self.config.remote.conda_activate_cmd} && python "{safe_script}" "{safe_name}"'
         arg_list = f'/c "{inner}"'
         return (
             'powershell -NoProfile -Command '
@@ -462,8 +470,14 @@ class PipelineEngine:
         )
 
     def _open_ssh(self) -> paramiko.SSHClient:
+        if not self.config.remote.password:
+            raise RuntimeError("未配置 SSH 密码，请设置环境变量 AUTOFLUID_SSH_PASSWORD")
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.load_system_host_keys()
+        if self.config.remote.ssh_auto_add_host_key:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
         client.connect(
             hostname=self.config.remote.host,
             port=self.config.remote.port,
@@ -481,3 +495,19 @@ class PipelineEngine:
         if error:
             raise RuntimeError(error.strip())
         return output.strip()
+
+    def _sanitize_windows_path(self, path: str, label: str) -> str:
+        """仅允许安全的 Windows 路径字符。"""
+
+        pattern = re.compile(r"^[A-Za-z0-9_:\-\\.\\\\ ]+$")
+        if not pattern.fullmatch(path):
+            raise ValueError(f"{label} 包含非法字符")
+        return path
+
+    def _sanitize_config_name(self, name: str) -> str:
+        """限制构型名称，避免命令注入与路径穿越。"""
+
+        pattern = re.compile(r"^[A-Za-z0-9_.-]+$")
+        if not pattern.fullmatch(name):
+            raise ValueError("构型名称包含非法字符")
+        return name

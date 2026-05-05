@@ -31,14 +31,15 @@ class PipelineTUI:
         render_thread = threading.Thread(target=self._render_loop, daemon=True)
         render_thread.start()
 
-        while not self._stop_event.is_set():
-            command_line = Prompt.ask("命令")
-            if not command_line:
-                continue
-            self._handle_command(command_line.strip())
-
-        self._stop_event.set()
-        render_thread.join(timeout=2)
+        try:
+            while not self._stop_event.is_set():
+                command_line = Prompt.ask("命令")
+                if not command_line:
+                    continue
+                self._handle_command(command_line.strip())
+        finally:
+            self._stop_event.set()
+            render_thread.join(timeout=2)
 
     def _render_loop(self) -> None:
         with Live(self._build_table(), console=self.console, refresh_per_second=1) as live:
@@ -75,7 +76,7 @@ class PipelineTUI:
         if command == "full_quit":
             if not self._confirm("确认同时退出后台引擎？"):
                 return
-            response = self.ipc.send_command("full_quit")
+            response = self._send("full_quit")
             self.console.print(response.get("message", "后台已退出"))
             self._stop_event.set()
             return

@@ -65,8 +65,9 @@ def find_step_file(step_dir: str, config_name: str, extensions: Iterable[str]) -
 
     directory = Path(step_dir)
     for ext in extensions:
-        for path in directory.glob(f"{config_name}*.{ext}"):
-            return path
+        matches = sorted(directory.glob(f"{config_name}*.{ext}"), key=lambda item: item.name)
+        if matches:
+            return matches[0]
     return None
 
 
