@@ -12,12 +12,15 @@
 - [4. 环境要求](#4-环境要求)
 - [5. 安装与配置](#5-安装与配置)
 - [6. `config.py` 配置说明](#6-configpy-配置说明)
-- [7. CLI 使用方法](#7-cli-使用方法)
-- [8. 断点续传机制](#8-断点续传机制)
-- [9. 远程后台驻留方案](#9-远程后台驻留方案)
-- [10. TUI 界面说明](#10-tui-界面说明)
-- [11. 故障排查 FAQ](#11-故障排查-faq)
-- [12. 许可证](#12-许可证)
+- [7. 快速开始：三步走](#7-快速开始三步走)
+- [8. 系统自检清单](#8-系统自检清单)
+- [9. CLI 使用方法](#9-cli-使用方法)
+- [10. 交互式 Shell 完整命令参考](#10-交互式-shell-完整命令参考)
+- [11. 断点续传机制](#11-断点续传机制)
+- [12. 远程后台驻留方案](#12-远程后台驻留方案)
+- [13. TUI 界面说明](#13-tui-界面说明)
+- [14. 故障排查 FAQ](#14-故障排查-faq)
+- [15. 许可证](#15-许可证)
 
 ---
 
@@ -255,7 +258,82 @@ CONFIG_COMBINATIONS: List[ConfigCombination] = [
 
 ---
 
-## 7. CLI 使用方法
+## 7. 快速开始：三步走
+
+如果你刚克隆项目或修改了配置，按以下三步即可完成**自检 → 汇报配置 → 开始任务**的完整流程。
+
+| 步骤 | 操作 | 命令 | 用途 |
+|:--:|------|------|------|
+| ① | **自检** | `python pipeline_controller.py --shell` 后输入 `status` | 验证数据库初始化、列出所有构型初始状态 |
+| ② | **汇报配置** | 在 Shell 中输入 `stats` | 展示参数组合列表、全局配置值、统计概览 |
+| ③ | **开始任务** | `python pipeline_controller.py` | 启动标准 TUI 模式跑批 |
+
+### 示例会话
+
+```text
+$ python pipeline_controller.py --shell
+
+AutoFluidSimulation 交互式 Shell
+输入 'help' 查看命令列表
+
+>>> status
+┌──────────────────────────────────────────────────────────────┐
+│ config_id        SW建模    SC处理    文件传输   网格划分   仿真求解 │
+│ R2.5_L30_A15     Pending   Pending   Pending   Pending   Pending  │
+│ R3.0_L35_A20     Pending   Pending   Pending   Pending   Pending  │
+│ R3.5_L40_A25     Pending   Pending   Pending   Pending   Pending  │
+└──────────────────────────────────────────────────────────────┘
+(共 3 个构型，全部处于 Pending 状态)
+
+>>> stats
+总构型数: 3
+已完成: 0 | 计算中: 0 | 错误: 0
+全局配置: max_retry=3, sc_timeout=300s, sw_retry_interval=5s
+
+>>> quit
+$ python pipeline_controller.py
+```
+> 如果 `status` 或 `stats` 显示报错，请先执行 [第 8 节「系统自检清单」](#8-系统自检清单) 排查环境问题。
+
+---
+
+## 8. 系统自检清单
+
+在启动跑批前，建议逐项验证以下环境。所有检查均在**本地 PC** 执行。
+
+### 8.1 本地依赖检查
+
+| 检查项 | 命令/方法 | 成功标准 |
+|--------|----------|---------|
+| Python 依赖安装 | `pip check pywin32 openpyxl paramiko rich` | 无报错 |
+| SolidWorks 模型存在 | `dir "C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT"` | 文件存在 |
+| Excel 参数文件存在 | `dir "C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx"` | 文件存在 |
+| SW 宏文件存在 | `dir "C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\Macro1.swp"` | 文件存在 |
+| SpaceClaim 可执行 | `dir "C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe"` | 文件存在 |
+| SpaceClaim 脚本存在 | `dir "C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\spaceclaim_transit.scscript"` | 文件存在 |
+
+### 8.2 远程工作站连通性检查
+
+| 检查项 | 命令/方法 | 成功标准 |
+|--------|----------|---------|
+| 网络可达 | `ping -n 2 172.17.135.240` | 无丢包 |
+| SSH 服务可用 | `ssh ps@172.17.135.240 "echo OK"` | 输出 `OK` |
+| Conda 环境就绪 | `ssh ps@172.17.135.240 "conda activate pyfluent && python -c \"print('OK')\""` | 输出 `OK` |
+| 远程脚本存在 | `ssh ps@172.17.135.240 "dir D:\xkz_1020\batch_meshing_gen4.py && dir D:\xkz_1020\batch_solver_gen4.py"` | 两个文件均列出 |
+
+### 8.3 首次运行自动初始化
+
+程序首次启动时会自动执行以下初始化操作，无需手动干预：
+
+- 创建 `logs\`、`step\`、`scdoc\` 目录
+- 初始化 SQLite 数据库 `logs\pipeline_state.db`
+- 根据 `CONFIG_COMBINATIONS` 填充初始任务状态
+
+若自动初始化失败，请检查磁盘空间及父目录写入权限。
+
+---
+
+## 9. CLI 使用方法
 
 ### 基本命令
 
@@ -323,11 +401,85 @@ Start-Process python -ArgumentList "pipeline_controller.py --no-tui" -WindowStyl
 python pipeline_controller.py --poll-only
 ```
 
+#### 场景 5：交互式 Shell 管理（自检/汇报/手动干预）
+
+```bash
+# 仅进入交互 Shell，不启动流水线
+python pipeline_controller.py --shell
+```
+
+在 Shell 中可以执行 `status`（自检）、`stats`（汇报配置）、`retry`（手动重试）、`reset`（重置阶段）等命令。完整命令请参考 [第 10 节「交互式 Shell 完整命令参考」](#10-交互式-shell-完整命令参考)。
+
 ---
 
-## 8. 断点续传机制
+## 10. 交互式 Shell 完整命令参考
 
-### 8.1 状态数据表
+在流水线运行期间按 **Ctrl+T** 可打开内嵌交互式 Shell，或通过 `python pipeline_controller.py --shell` 直接进入独立交互模式。
+
+所有命令均**大小写不敏感**，括号内为别名。
+
+### 命令速查表
+
+| 命令 | 别名 | 参数 | 功能 |
+|------|------|------|------|
+| `help` | `h`, `?` | — | 显示命令帮助 |
+| `status` | `st`, `s` | — | 查看所有构型任务状态（表格） |
+| `stats` | — | — | 统计概览：总数/已完成/计算中/错误，并汇报当前全局配置值 |
+| `errors` | — | — | 列出所有处于 `Error` 状态的任务及错误信息 |
+| `computing` | — | — | 列出所有正在远程 `Computing` 状态的任务 |
+| `pause` | `p` | — | 暂停流水线（当前任务完成后挂起） |
+| `resume` | `r` | — | 恢复暂停的流水线 |
+| `retry` | `rt` | `<config_id>` | 手动重试某个构型（重试次数清零） |
+| `reset` | `rst` | `<config_id> <sw\|sc\|transfer\|meshing\|solving\|all>` | 重置指定构型的指定阶段为 `Pending` |
+| `quit` | `q`, `exit` | — | 优雅退出程序 |
+
+### 典型交互会话
+
+```text
+$ python pipeline_controller.py --shell
+
+AutoFluidSimulation 交互式 Shell
+输入 'help' 查看命令列表
+
+>>> status                         ← 自检：查看所有任务
+┌───────────────────────────────────────────────────────────┐
+│ config_id        SW建模  SC处理  文件传输  网格划分  仿真求解 │
+│ R2.5_L30_A15     Done    Done    Done     Done     Done      │
+│ R3.0_L35_A20     Done    Done    Done     Error    Pending   │
+│ R3.5_L40_A25     Done    Done    Done     Computing Pending  │
+└───────────────────────────────────────────────────────────┘
+
+>>> errors                         ← 列出所有出错任务
+R3.0_L35_A20: meshing_status=Error — Fluent进程崩溃 (retry: 2/3)
+
+>>> computing                      ← 查看正在远程计算的任务
+R3.5_L40_A25: meshing_status=Computing (启动于 16:30:02)
+
+>>> stats                          ← 汇总统计 + 配置汇报
+总构型数: 3
+已完成: 1 | 计算中: 1 | 错误: 1
+全局配置: max_retry=3, sc_timeout=300s, sw_retry_interval=5s
+远程: 172.17.135.240:22, conda_env=pyfluent
+
+>>> retry R3.0_L35_A20             ← 手动重试出错的构型
+[R3.0_L35_A20] 已重置 meshing 阶段，重试次数清零
+
+>>> reset R2.5_L30_A15 solving     ← 重置已完成构型的求解阶段
+[R2.5_L30_A15] solving 阶段已重置为 Pending
+
+>>> quit                           ← 退出
+正在优雅关闭...
+```
+
+### Ctrl+T 内嵌 Shell
+
+当通过 `python pipeline_controller.py` 以 TUI 模式运行时，按 **Ctrl+T** 可在 TUI 上方打开一个命令输入行，输入上述命令后按 Enter 执行，不影响后台流水线的继续运行。
+
+---
+
+## 11. 断点续传机制
+
+### 11.1 状态数据表
 
 程序使用 SQLite 数据库（`logs/pipeline_state.db`）持久化每个构型的状态，表结构如下：
 
@@ -343,7 +495,7 @@ python pipeline_controller.py --poll-only
 | `error_msg` | TEXT | 最近一次错误信息 | — |
 | `updated_at` | TEXT | 最后更新时间戳 | ISO 8601 格式 |
 
-### 8.2 状态流转图
+### 11.2 状态流转图
 
 ```
 Pending ──→ InProgress ──→ Done ──→ (下一阶段)
@@ -354,7 +506,7 @@ Pending ──→ InProgress ──→ Done ──→ (下一阶段)
                           No  ──→ 跳过该构型
 ```
 
-### 8.3 恢复逻辑
+### 11.3 恢复逻辑
 
 程序启动时自动执行以下检查：
 
@@ -373,7 +525,7 @@ Pending ──→ InProgress ──→ Done ──→ (下一阶段)
 
 ---
 
-## 9. 远程后台驻留方案
+## 12. 远程后台驻留方案
 
 为确保本地 SSH 连接断开后远程 Fluent 进程继续独立运行，本系统采用**双重保障策略**：
 
@@ -416,7 +568,7 @@ schtasks /Run /TN "FluentTask_{config_id}"
 
 ---
 
-## 10. TUI 界面说明
+## 13. TUI 界面说明
 
 基于 `rich` 库构建的动态终端界面，刷新率默认为 4 Hz。
 
@@ -459,7 +611,7 @@ schtasks /Run /TN "FluentTask_{config_id}"
 
 ---
 
-## 11. 故障排查 FAQ
+## 14. 故障排查 FAQ
 
 ### Q1：SolidWorks COM 连接失败
 
@@ -531,7 +683,7 @@ schtasks /Query /TN "FluentTask_{config_id}"
 
 ---
 
-## 12. 许可证
+## 15. 许可证
 
 本项目仅供学术研究与个人学习使用。
 
