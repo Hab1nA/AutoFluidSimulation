@@ -32,10 +32,10 @@ LOCAL_PATHS = {
 # 远程工作站 (Windows 22H2) SSH 配置
 # ============================================================================
 REMOTE_CONFIG = {
-    "host": "172.17.135.240",
-    "port": 22,
-    "username": "ps",
-    "password": "abc@123",
+    "host": os.environ.get("AUTOFLUID_SSH_HOST", "172.17.135.240"),
+    "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
+    "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", "abc@123"),
     # 远程工程根目录
     "root_dir": r"D:\xkz_1020",
     # 远程 SCDOC 接收目录
@@ -130,7 +130,14 @@ ENGINE_CONFIG = {
 for key in ["step_dir", "scdoc_dir", "log_dir"]:
     path = LOCAL_PATHS.get(key, "")
     if path:
-        os.makedirs(path, exist_ok=True)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except PermissionError:
+            import sys
+            print(f"[WARNING] 权限不足，无法创建目录: {path}", file=sys.stderr)
+        except OSError as e:
+            import sys
+            print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
 
 # 远程标志目录（在首次 SSH 连接时创建）
 REMOTE_FLAG_DIR = REMOTE_CONFIG["flag_dir"]

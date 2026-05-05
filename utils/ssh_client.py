@@ -134,6 +134,8 @@ class RemoteWorkstation:
 
     def _ensure_remote_dir(self, remote_dir: str):
         """递归创建远程目录（类似 mkdir -p）。"""
+        if not self._sftp:
+            raise ConnectionError("SFTP 未连接")
         try:
             self._sftp.stat(remote_dir)
         except FileNotFoundError:
@@ -203,22 +205,16 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
-        # 构建 PowerShell 脚本：启动独立进程，完成后写标志文件
-        # 使用 Start-Process -WindowStyle Hidden 让进程在后台不可见地运行
-        # -Wait 不适用（会阻塞），我们用 && 在命令后写入标志文件
-        ps_script = (
+        # 安全转义：防止命令注入，对路径中的双引号进行转义
+        escaped_command = command.replace('"', '\\"')
+        escaped_flag = flag_file.replace('"', '\\"')
+
+        # 使用 Start-Process 启动独立 cmd.exe 后台进程
+        # 进程不依附于 SSH 会话，SSH 断开后继续运行
+        # 命令完成后写入标志文件表示任务结束
+        ps_command = (
             f'Start-Process -FilePath "cmd.exe" '
-            f'-ArgumentList \'/c "{command} && echo done > {flag_file}"\' '
-            f'-WindowStyle Hidden -NoNewWindow'
-        )
-        # 实际上对于 Python 脚本，更稳妥的方式：
-        # cmd /c "conda activate pyfluent && python script.py args && echo done > flag"
-        # 但需要通过 Start-Process 使其脱离 SSH 会话
-        full_command = (
-            f'Start-Process -FilePath "powershell.exe" '
-            f'-ArgumentList \'-NoProfile -Command "'
-            f'cmd /c \\\"{command} && echo done > {flag_file}\\\""'
-            f'"\' '
+            f'-ArgumentList \'/c "{escaped_command} && echo done > \\"{escaped_flag}\\""\' '
             f'-WindowStyle Hidden'
         )
 
@@ -227,18 +223,16 @@ class RemoteWorkstation:
 
         try:
             # 先清理旧的标志文件
-            self.exec_command(f'if exist "{flag_file}" del /f "{flag_file}"')
+            self.exec_command(f'if exist "{escaped_flag}" del /f "{escaped_flag}"')
 
             # 通过 PowerShell 启动后台进程
-            stdin, stdout, stderr = self._ssh.exec_command(full_command, timeout=10)
-            exit_code = stdout.channel.recv_exit_status()
+            _, stderr, exit_code = self.exec_command(ps_command, timeout=15)
 
             if exit_code == 0:
                 logger.info("远程后台任务已启动")
                 return True
             else:
-                err_msg = stderr.read().decode("utf-8", errors="replace")
-                logger.error(f"远程后台任务启动失败 (exit={exit_code}): {err_msg}")
+                logger.error(f"远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
                 return False
         except Exception as e:
             logger.error(f"启动远程后台任务异常: {e}")

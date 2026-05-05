@@ -15,7 +15,6 @@
 import os
 import time
 import threading
-import queue
 from typing import Callable, Optional, Set
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG
@@ -134,8 +133,6 @@ class StepFileMonitor:
         )
         # 已处理的文件集合（避免重复处理）
         self._processed_files: Set[str] = set()
-        # 发现的新文件队列（内部使用）
-        self._pending_queue: queue.Queue = queue.Queue()
         # 已发现的文件集合
         self._known_files: Set[str] = set()
 
@@ -237,7 +234,6 @@ class StepFileMonitor:
                 config_name = self.parse_config_name(filename)
                 if config_name is not None:
                     logger.info(f"发现新的 STEP 文件: {filename} (构型{config_name})")
-                    self._pending_queue.put((config_name, filepath))
 
         # 检测已存在的文件是否写入完成
         for filename in list(self._known_files):
@@ -264,7 +260,7 @@ class StepFileMonitor:
         self._known_files = current_files
 
     def _scan_existing_files(self):
-        """扫描目录中已存在的文件（用于断点续传恢复）。"""
+        """扫描目录中已存在的文件，将其加入 known_files 以便后续稳定性检测。"""
         if not os.path.isdir(self.step_dir):
             return
 
@@ -275,11 +271,11 @@ class StepFileMonitor:
                 if os.path.isfile(filepath) and filename.endswith(self.FILE_SUFFIX):
                     config_name = self.parse_config_name(filename)
                     if config_name is not None:
-                        # 已存在的完整文件直接标记为已处理
-                        self._processed_files.add(filename)
+                        # 加入已知文件列表，由后续轮询检测写入完成
+                        self._known_files.add(filename)
                         logger.info(f"发现已存在的 STEP 文件: {filename} (构型{config_name})")
-        except OSError:
-            pass
+        except OSError as e:
+            logger.warning(f"扫描已存在文件时出错: {e}")
 
     # ------------------------------------------------------------------
     # 已处理文件查询
@@ -290,12 +286,19 @@ class StepFileMonitor:
         return filename in self._processed_files
 
     def get_pending_configs(self) -> list:
-        """获取待处理队列中的所有构型（非阻塞）。"""
+        """获取所有未被处理的构型列表（扫描 STEP 目录）。"""
         pending = []
-        while True:
-            try:
-                item = self._pending_queue.get_nowait()
-                pending.append(item)
-            except queue.Empty:
-                break
+        if not os.path.isdir(self.step_dir):
+            return pending
+        try:
+            for filename in os.listdir(self.step_dir):
+                if filename in self._processed_files:
+                    continue
+                filepath = os.path.join(self.step_dir, filename)
+                if os.path.isfile(filepath) and filename.endswith(self.FILE_SUFFIX):
+                    config_name = self.parse_config_name(filename)
+                    if config_name is not None:
+                        pending.append((config_name, filepath))
+        except OSError as e:
+            logger.warning(f"扫描待处理文件时出错: {e}")
         return pending

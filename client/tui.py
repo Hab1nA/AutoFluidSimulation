@@ -328,6 +328,9 @@ class PipelineTUI(App):
         self._refresh_timer: Optional[asyncio.Task] = None
         self._status_data: Dict[int, Dict[str, str]] = {}
         self._configs: list[int] = []
+        self._engine_info: dict = {}
+        self._refresh_counter: int = 0
+        self._data_lock = threading.Lock()  # 保护共享状态数据
 
     # ------------------------------------------------------------------
     # 界面布局
@@ -420,26 +423,43 @@ class PipelineTUI(App):
         if not ok:
             return
 
-        self._status_data = data or {}
+        with self._data_lock:
+            self._status_data = data or {}
+
         self._update_table()
+
+        # 引擎状态变化较慢，每5次刷新（5秒）更新一次
+        with self._data_lock:
+            self._refresh_counter += 1
+            should_refresh_engine = self._refresh_counter >= 5
+            if should_refresh_engine:
+                self._refresh_counter = 0
+
+        if should_refresh_engine:
+            ok2, eng_data, _ = self.ipc.get_engine_status()
+            if ok2 and eng_data:
+                with self._data_lock:
+                    self._engine_info = eng_data
         self._update_info_bar()
 
     def _update_table(self):
         """根据最新状态数据更新 DataTable。"""
         table = self.query_one("#status-table", DataTable)
 
-        if not self._status_data:
-            return
-
-        # 获取排序后的构型列表
-        configs = sorted(self._status_data.keys())
-        self._configs = configs
+        with self._data_lock:
+            if not self._status_data:
+                return
+            # 获取排序后的构型列表
+            configs = sorted(self._status_data.keys())
+            self._configs = configs
+            # 复制数据以避免在锁外迭代
+            status_data = dict(self._status_data)
 
         # 清除旧行
         table.clear()
 
         for cn in configs:
-            steps = self._status_data[cn]
+            steps = status_data[cn]
             row = [str(cn)]
             for step_name in STEP_NAMES:
                 status = steps.get(step_name, STATUS_WAITING)
@@ -452,12 +472,11 @@ class PipelineTUI(App):
         info_bar = self.query_one("#info-bar", Static)
 
         if self.ipc.is_connected():
-            ok, data, msg = self.ipc.get_engine_status()
-            if ok and data:
+            if self._engine_info:
                 engine_status = ENGINE_STATUS_DISPLAY.get(
-                    data.get("engine_status", "stopped"), "未知"
+                    self._engine_info.get("engine_status", "stopped"), "未知"
                 )
-                barrier = "已通过" if data.get("barrier_passed") else "未通过"
+                barrier = "已通过" if self._engine_info.get("barrier_passed") else "未通过"
                 info_bar.update(
                     f"引擎: {engine_status}  |  "
                     f"构型数: {len(self._configs)}  |  "
@@ -478,7 +497,9 @@ class PipelineTUI(App):
             log = self.query_one("#log-panel", RichLog)
             log.write(message)
         except Exception:
-            pass  # 界面可能还未初始化
+            # 界面可能还未初始化，降级输出到 stderr
+            import sys
+            print(f"[TUI] {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 按钮事件处理

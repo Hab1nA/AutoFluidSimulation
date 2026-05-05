@@ -157,8 +157,13 @@ class PipelineDaemon:
     def handle_start(self, params: dict = None) -> Tuple[bool, Any, str]:
         """处理 start / continue 命令。"""
         engine_status = self.state.get_engine_status()
-        if engine_status == "running" and not self.state.get_engine_status() == "paused":
+        if engine_status == "running":
             return True, None, "流水线已在运行中"
+
+        if engine_status == "paused":
+            # 暂停状态下：恢复运行
+            self.scheduler.resume()
+            return True, None, "流水线已恢复运行"
 
         # 在独立线程中启动调度器（避免阻塞 IPC 响应）
         scheduler_thread = threading.Thread(

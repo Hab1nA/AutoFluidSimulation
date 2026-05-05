@@ -7,6 +7,7 @@ Excel 读取工具 (Excel Reader)
 - 第2-5列：4个参数
 ===============================================================================
 """
+import os
 import openpyxl
 from typing import Dict, List, Tuple
 from utils.logger import setup_logger
@@ -34,26 +35,27 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
         raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
 
     wb = openpyxl.load_workbook(excel_path, data_only=True)
-    ws = wb.active
+    try:
+        ws = wb.active
 
-    configs: Dict[int, List[float]] = {}
+        configs: Dict[int, List[float]] = {}
 
-    # 从第3行开始读取（openpyxl 行号从1开始）
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        if row[0] is None:
-            # 遇到空行则停止读取
-            break
+        # 从第3行开始读取（openpyxl 行号从1开始）
+        for row in ws.iter_rows(min_row=3, values_only=True):
+            if row[0] is None:
+                # 遇到空行则停止读取
+                break
 
-        try:
-            config_name = int(row[0])  # 第1列：构型名称（整数）
-            params = [float(row[i]) for i in range(1, 5)]  # 第2-5列：参数
-            configs[config_name] = params
-            logger.debug(f"  读取构型 {config_name}: 参数 = {params}")
-        except (ValueError, TypeError, IndexError) as e:
-            logger.warning(f"  跳过无效行: {row}, 错误: {e}")
-            continue
-
-    wb.close()
+            try:
+                config_name = int(row[0])  # 第1列：构型名称（整数）
+                params = [float(row[i]) for i in range(1, 5)]  # 第2-5列：参数
+                configs[config_name] = params
+                logger.debug(f"  读取构型 {config_name}: 参数 = {params}")
+            except (ValueError, TypeError, IndexError) as e:
+                logger.warning(f"  跳过无效行: {row}, 错误: {e}")
+                continue
+    finally:
+        wb.close()
     logger.info(f"成功读取 {len(configs)} 个构型配置")
     return configs
 

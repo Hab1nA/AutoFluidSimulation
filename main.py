@@ -13,7 +13,7 @@
 import sys
 import os
 import argparse
-import subprocess
+import importlib
 import threading
 import time
 
@@ -53,8 +53,12 @@ def main():
         print("正在启动后台引擎...")
 
         # 在独立线程中启动守护进程
+        def _run_daemon():
+            mod = importlib.import_module("engine.daemon")
+            mod.main()
+
         daemon_thread = threading.Thread(
-            target=lambda: __import__("engine.daemon", fromlist=["main"]).main(),
+            target=_run_daemon,
             daemon=True,
             name="DaemonThread"
         )

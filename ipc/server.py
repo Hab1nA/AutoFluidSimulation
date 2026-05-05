@@ -178,7 +178,7 @@ class IPCServer:
                             client_sock.sendall(serialize(response))
                 except socket.timeout:
                     continue
-                except Exception as e:
+                except (ConnectionError, OSError) as e:
                     logger.error(f"处理客户端消息异常: {e}")
                     break
         finally:

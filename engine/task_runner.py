@@ -113,33 +113,36 @@ class TaskRunner:
             # 初始化 COM
             pythoncom.CoInitialize()
 
-            logger.info("正在连接 SolidWorks...")
             try:
-                sw_app = win32com.client.GetActiveObject("SldWorks.Application")
-                logger.info("已连接到运行中的 SolidWorks 实例")
-            except Exception:
-                logger.info("SolidWorks 未运行，正在启动...")
-                sw_app = win32com.client.Dispatch("SldWorks.Application")
-                sw_app.Visible = True  # 设为可见以便调试
-                logger.info("SolidWorks 已启动")
+                logger.info("正在连接 SolidWorks...")
+                try:
+                    sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+                    logger.info("已连接到运行中的 SolidWorks 实例")
+                except Exception:
+                    logger.info("SolidWorks 未运行，正在启动...")
+                    sw_app = win32com.client.Dispatch("SldWorks.Application")
+                    sw_app.Visible = True  # 设为可见以便调试
+                    logger.info("SolidWorks 已启动")
 
-            # 打开模型文件
-            logger.info(f"正在打开模型: {sw_model}")
-            sw_app.OpenDoc2(sw_model, 1)  # 1 = swDocPART
+                # 打开模型文件
+                logger.info(f"正在打开模型: {sw_model}")
+                sw_app.OpenDoc2(sw_model, 1)  # 1 = swDocPART
 
-            # 运行宏
-            logger.info(f"正在执行宏: {sw_macro}")
-            # RunMacro2 参数: 宏路径, 模块名, 过程名
-            # Macro1.swp 是 VBA 宏，通常主过程在模块的 main() 中
-            sw_app.RunMacro2(sw_macro, "Macro1", "main")
+                # 运行宏
+                logger.info(f"正在执行宏: {sw_macro}")
+                # RunMacro2 参数: 宏路径, 模块名, 过程名
+                # Macro1.swp 是 VBA 宏，通常主过程在模块的 main() 中
+                sw_app.RunMacro2(sw_macro, "Macro1", "main")
 
-            logger.info("SW 宏已启动执行（后台批量导出中...）")
-            self.state.set_sw_macro_started(True)
+                logger.info("SW 宏已启动执行（后台批量导出中...）")
+                self.state.set_sw_macro_started(True)
 
-            # 注意：不关闭 SW，让宏在后台运行
-            # COM 对象会在宏执行完毕后由用户手动或超时机制处理
+                # 注意：不关闭 SW，让宏在后台运行
+                # COM 对象会在宏执行完毕后由用户手动或超时机制处理
 
-            return True
+                return True
+            finally:
+                pythoncom.CoUninitialize()
 
         except ImportError:
             logger.error("win32com 未安装，请执行: pip install pywin32")
@@ -225,7 +228,11 @@ class TaskRunner:
                     )
                     return False
             except subprocess.TimeoutExpired:
-                process.kill()
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass  # 进程已自行退出
+                process.communicate()  # 回收子进程资源
                 logger.error(f"SC 脚本执行超时 ({timeout}s)")
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 执行超时")
                 return False
