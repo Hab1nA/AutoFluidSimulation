@@ -28,7 +28,11 @@ def run_daemon() -> None:
     signal.signal(signal.SIGTERM, _signal_handler)
 
     logger.info("后台守护进程已启动，监听 %s:%s", CONFIG.ipc_host, CONFIG.ipc_port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":

@@ -8,13 +8,13 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable, Dict, List, Optional, Tuple
 
 import paramiko
 
 from .config import PipelineConfig
-from .constants import PIPELINE_STEPS, StepName, StepStatus
+from .constants import PIPELINE_STEPS, StepName, StepStatus, downstream_steps
 from .models import ConfigRow
 from .state_store import StateStore
 from .utils import find_step_file, read_excel_configs, run_subprocess
@@ -124,12 +124,12 @@ class PipelineEngine:
             return {"ok": True, "data": self.self_check()}
         if command == "reset":
             if args.get("all"):
-                return {"ok": True, "data": self.reset_all()}
-            return {"ok": True, "data": self.reset_step(args)}
+                return self.reset_all()
+            return self.reset_step(args)
         if command == "clean":
             if args.get("all"):
-                return {"ok": True, "data": self.clean_all()}
-            return {"ok": True, "data": self.clean_step(args)}
+                return self.clean_all()
+            return self.clean_step(args)
         if command == "full_quit":
             self.shutdown()
             return {"ok": True, "message": "后台引擎已退出"}
@@ -169,34 +169,42 @@ class PipelineEngine:
         name = str(args.get("name", ""))
         step = args.get("step")
         if not name or not step:
-            return {"message": "缺少构型或步骤"}
+            return {"ok": False, "message": "缺少构型或步骤"}
         try:
             step_name = StepName(step)
         except ValueError:
-            return {"message": "步骤非法"}
+            return {"ok": False, "message": "步骤非法"}
+        if not self._has_config(name):
+            return {"ok": False, "message": "构型不存在"}
+        if self._has_active_steps(name, downstream_steps(step_name)):
+            return {"ok": False, "message": "目标步骤正在执行，无法重置"}
         self.store.reset_steps(name, step_name)
         if step_name in (StepName.SOLIDWORKS, StepName.SPACECLAIM, StepName.TRANSFER, StepName.MESHING):
             self._clear_solver_gate()
         if step_name == StepName.SOLIDWORKS:
             self._sw_started = False
-        return {"message": f"{name} 重置完成"}
+        return {"ok": True, "message": f"{name} 重置完成"}
 
     def reset_all(self) -> Dict[str, str]:
+        if self._has_any_active():
+            return {"ok": False, "message": "存在运行中的任务，请先暂停"}
         self.store.reset_all()
         self._clear_solver_gate()
         self._sw_started = False
-        return {"message": "所有构型已重置"}
+        return {"ok": True, "message": "所有构型已重置"}
 
     def clean_step(self, args: Dict[str, object]) -> Dict[str, str]:
         """清理指定步骤产物。"""
 
         step = args.get("step")
         if not step:
-            return {"message": "缺少步骤"}
+            return {"ok": False, "message": "缺少步骤"}
         try:
             step_name = StepName(step)
         except ValueError:
-            return {"message": "步骤非法"}
+            return {"ok": False, "message": "步骤非法"}
+        if self._has_active_step(step_name):
+            return {"ok": False, "message": "步骤正在执行，无法清理"}
         if step_name == StepName.SOLIDWORKS:
             self._clean_local_files(self.config.local.step_dir, ("*.step", "*.stp"))
         elif step_name == StepName.SPACECLAIM:
@@ -207,17 +215,19 @@ class PipelineEngine:
             self._run_optional_remote_clean(self.config.remote.meshing_clean_cmd)
         elif step_name == StepName.SOLVER:
             self._run_optional_remote_clean(self.config.remote.solver_clean_cmd)
-        return {"message": f"{step_name.value} 清理完成"}
+        return {"ok": True, "message": f"{step_name.value} 清理完成"}
 
     def clean_all(self) -> Dict[str, str]:
         """清理全部步骤产物。"""
 
+        if self._has_any_active():
+            return {"ok": False, "message": "存在运行中的任务，请先暂停"}
         self._clean_local_files(self.config.local.step_dir, ("*.step", "*.stp"))
         self._clean_local_files(self.config.local.scdoc_dir, ("*.scdoc",))
         self._clean_remote_dir(self.config.remote.remote_scdoc_dir)
         self._run_optional_remote_clean(self.config.remote.meshing_clean_cmd)
         self._run_optional_remote_clean(self.config.remote.solver_clean_cmd)
-        return {"message": "全部步骤清理完成"}
+        return {"ok": True, "message": "全部步骤清理完成"}
 
     def _clean_local_files(self, directory: str, patterns: Tuple[str, ...]) -> None:
         for pattern in patterns:
@@ -434,7 +444,7 @@ class PipelineEngine:
         scdoc_path = Path(self.config.local.scdoc_dir) / f"{safe_name}.scdoc"
         if not scdoc_path.exists():
             raise FileNotFoundError(f"SCDOC 不存在: {scdoc_path}")
-        remote_path = str(Path(self.config.remote.remote_scdoc_dir) / scdoc_path.name)
+        remote_path = str(PureWindowsPath(self.config.remote.remote_scdoc_dir) / scdoc_path.name)
         with self._open_ssh() as client:
             sftp = client.open_sftp()
             sftp.put(str(scdoc_path), remote_path)
@@ -514,3 +524,28 @@ class PipelineEngine:
         if not pattern.fullmatch(name):
             raise ValueError("构型名称包含非法字符")
         return name
+
+    def _has_config(self, name: str) -> bool:
+        return any(config.name == name for config in self._configs_cache)
+
+    def _has_active_steps(self, name: str, steps: List[StepName]) -> bool:
+        for step in steps:
+            status = self.store.get_step_status(name, step)
+            if status in (StepStatus.RUNNING, StepStatus.RETRYING):
+                return True
+        return False
+
+    def _has_active_step(self, step: StepName) -> bool:
+        for config in self._configs_cache:
+            status = self.store.get_step_status(config.name, step)
+            if status in (StepStatus.RUNNING, StepStatus.RETRYING):
+                return True
+        return False
+
+    def _has_any_active(self) -> bool:
+        for config in self._configs_cache:
+            for step in PIPELINE_STEPS:
+                status = self.store.get_step_status(config.name, step)
+                if status in (StepStatus.RUNNING, StepStatus.RETRYING):
+                    return True
+        return False

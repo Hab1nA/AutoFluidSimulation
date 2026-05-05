@@ -27,25 +27,28 @@ def read_excel_configs(excel_path: str) -> List[ConfigRow]:
     """读取 Excel，按需求从第 3 行开始获取构型列表。"""
 
     workbook = load_workbook(excel_path, data_only=True)
-    sheet = workbook.active
-    configs: List[ConfigRow] = []
-    for row in sheet.iter_rows(min_row=3, values_only=True):
-        name = row[0]
-        if name is None or str(name).strip() == "":
-            break
-        params = [normalize_value(value) for value in row[1:5]]
-        while len(params) < 4:
-            params.append(None)
-        configs.append(
-            ConfigRow(
-                name=str(name).strip(),
-                param1=params[0],
-                param2=params[1],
-                param3=params[2],
-                param4=params[3],
+    try:
+        sheet = workbook.active
+        configs: List[ConfigRow] = []
+        for row in sheet.iter_rows(min_row=3, values_only=True):
+            name = row[0]
+            if name is None or str(name).strip() == "":
+                break
+            params = [normalize_value(value) for value in row[1:5]]
+            while len(params) < 4:
+                params.append(None)
+            configs.append(
+                ConfigRow(
+                    name=str(name).strip(),
+                    param1=params[0],
+                    param2=params[1],
+                    param3=params[2],
+                    param4=params[3],
+                )
             )
-        )
-    return configs
+        return configs
+    finally:
+        workbook.close()
 
 
 def ensure_dir(path: str) -> None:

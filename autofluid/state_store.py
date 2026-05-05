@@ -81,7 +81,9 @@ class StateStore:
 
     def get_configs(self) -> List[ConfigRow]:
         with self._lock, self._connect() as conn:
-            rows = conn.execute("SELECT name, param1, param2, param3, param4 FROM configs").fetchall()
+            rows = conn.execute(
+                "SELECT name, param1, param2, param3, param4 FROM configs ORDER BY name"
+            ).fetchall()
         return [
             ConfigRow(
                 name=row["name"],

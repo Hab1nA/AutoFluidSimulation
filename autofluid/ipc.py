@@ -33,6 +33,7 @@ class IPCServer(socketserver.ThreadingTCPServer):
     """IPC 服务端。"""
 
     allow_reuse_address = True
+    daemon_threads = True
 
     def __init__(self, host: str, port: int, command_handler: CommandHandler) -> None:
         super().__init__((host, port), IPCRequestHandler)
@@ -55,4 +56,9 @@ class IPCClient:
             sock.settimeout(self.timeout)
             with sock.makefile("r", encoding="utf-8") as reader:
                 response_line = reader.readline()
-        return json.loads(response_line)
+        if not response_line:
+            return {"ok": False, "message": "IPC 响应为空"}
+        try:
+            return json.loads(response_line)
+        except json.JSONDecodeError:
+            return {"ok": False, "message": "IPC 响应解析失败"}
