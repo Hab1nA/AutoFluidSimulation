@@ -438,17 +438,3 @@ class StateManager:
             stats["error_count"] = row["cnt"] if row else 0
 
         return stats
-        """获取整体统计信息。"""
-        with self._get_connection() as conn:
-            total_configs = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()["cnt"]
-            stats = {"total_configs": total_configs, "steps": {}}
-            for step in STEP_NAMES:
-                counts = {}
-                for status in ALL_STATUSES:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status = ?",
-                        (step, status)
-                    ).fetchone()
-                    counts[status] = row["cnt"]
-                stats["steps"][step] = counts
-            return stats

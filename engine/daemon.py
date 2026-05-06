@@ -157,7 +157,7 @@ class PipelineDaemon:
     # ------------------------------------------------------------------
 
     def handle_start(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 start / continue 命令。"""
+        """处理 start 命令（启动或继续流水线）。"""
         engine_status = self.state.get_engine_status()
         if engine_status == "running":
             return True, None, "流水线已在运行中"
@@ -250,17 +250,41 @@ class PipelineDaemon:
         if step_name not in STEP_NAMES:
             return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES}"
 
-        self.runner.clean_step_files(step_name, config_name)
-        msg = f"已清理 {step_name} 步骤的文件"
-        if config_name:
-            msg += f" (构型{config_name})"
+        # 远程步骤（Meshing/Solver）且清理所有构型时，SSH 操作耗时长，
+        # 放到后台线程执行，避免 IPC 超时。
+        remote_steps = {"Meshing", "Solver"}
+        if step_name in remote_steps and config_name is None:
+            def _do_clean_step():
+                try:
+                    self.runner.clean_step_files(step_name, config_name)
+                    logger.info(f"clean {step_name} (all) 后台任务完成")
+                except Exception as e:
+                    logger.error(f"clean {step_name} (all) 后台任务异常: {e}", exc_info=True)
+
+            threading.Thread(target=_do_clean_step, daemon=True,
+                           name=f"CleanStep-{step_name}-Bg").start()
+            msg = f"已启动后台清理 {step_name} 步骤的文件（所有构型）"
+        else:
+            self.runner.clean_step_files(step_name, config_name)
+            msg = f"已清理 {step_name} 步骤的文件"
+            if config_name:
+                msg += f" (构型{config_name})"
         return True, None, msg
 
     def handle_clean_all(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 clean all 命令。"""
-        for step in STEP_NAMES:
-            self.runner.clean_step_files(step, None)
-        return True, None, "已清理所有步骤的文件（警告：此操作不可逆）"
+        """处理 clean all 命令（异步执行，避免阻塞 IPC 响应）。"""
+        # 清理操作可能涉及大量远程 SSH 文件删除，耗时远超 IPC 超时。
+        # 在后台线程中执行，立即返回确认，避免客户端超时和 socket 数据残留。
+        def _do_clean_all():
+            try:
+                for step in STEP_NAMES:
+                    self.runner.clean_step_files(step, None)
+                logger.info("clean all 后台任务完成")
+            except Exception as e:
+                logger.error(f"clean all 后台任务异常: {e}", exc_info=True)
+
+        threading.Thread(target=_do_clean_all, daemon=True, name="CleanAll-Bg").start()
+        return True, None, "已启动后台清理所有步骤的文件（警告：此操作不可逆）"
 
 
 # ============================================================================

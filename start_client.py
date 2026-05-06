@@ -22,6 +22,6 @@ from client.tui import main
 if __name__ == "__main__":
     print("正在启动 TUI 客户端...")
     print("提示: 使用 quit 命令仅退出界面，后台引擎继续运行")
-    print("      使用 full_quit 命令彻底停止后台引擎")
+    print("      使用 quit full 命令彻底停止后台引擎")
     print()
     main()

@@ -35,7 +35,7 @@
 - **文件系统事件驱动**: 通过文件监控检测输出文件完成，实现步骤间自动衔接
 - **远程任务编排**: 通过 SSH 远程控制 Windows 工作站，使用 PowerShell `Start-Process` 启动独立后台进程
 - **错误重试机制**: 每个步骤支持可配置的重试次数，提高鲁棒性
-- **优雅关闭**: 支持 `Ctrl+C` 信号处理和 `full_quit` 安全退出
+- **优雅关闭**: 支持 `Ctrl+C` 信号处理和 `quit full` 安全退出
 
 ---
 
@@ -249,7 +249,7 @@ TUI 客户端与 Daemon 之间通过 **TCP Socket (127.0.0.1:9527)** 通信，�
 |------|------|------|
 | `start` | `CMD_START` | 启动/继续流水线 |
 | `pause` | `CMD_PAUSE` | 暂停流水线 |
-| `stop` | `CMD_STOP` | 完全停止引擎 (full_quit) |
+| `stop` | `CMD_STOP` | 完全停止引擎 (quit full) |
 | `check` | `CMD_CHECK` | 系统自检（本地+远程） |
 | `get_all_status` | `CMD_GET_ALL_STATUS` | 获取所有构型状态 |
 | `get_statistics` | `CMD_GET_STATISTICS` | 获取统计信息 |
@@ -353,7 +353,7 @@ CREATE TABLE engine_state (
 
 - `pause` 命令设置 `threading.Event`，工作线程在取下一个任务前检查
 - 当前正在运行的步骤不会被中断（保证原子性）
-- `continue` 命令清除 Event，工作线程恢复取任务
+- `start` 命令清除 Event，工作线程恢复取任务
 
 ---
 
@@ -519,11 +519,11 @@ ENGINE_CONFIG = {
 | `check` | 系统自检 | `check` |
 | `reset <构型> [步骤]` | 重置构型步骤状态 | `reset 5 SW` 或 `reset 5` |
 | `reset all` | 重置全部（危险操作，需确认） | `reset all` |
-| `clean <步骤> [构型]` | 清理输出文件 | `clean SW` 或 `clean SW 5` |
+| `clean <构型> [步骤]` | 清理输出文件 | `clean 5 SW` 或 `clean 5` |
 | `clean all` | 清理所有文件（危险操作，需确认） | `clean all` |
 | `status` | 显示统计信息 | `status` |
 | `quit` | 退出 TUI（Daemon 继续运行） | `quit` |
-| `full_quit` | 完全停止后台引擎 | `full_quit` |
+| `quit full` | 完全停止后台引擎 | `quit full` |
 
 ### reset 命令说明
 
@@ -533,8 +533,8 @@ ENGINE_CONFIG = {
 
 ### clean 命令说明
 
-- `clean SW` — 清理所有构型的 STEP 文件
-- `clean SW 5` — 仅清理构型 5 的 STEP 文件
+- `clean 5 SW` — 清理构型 5 的 SW 步骤文件
+- `clean 5` — 清理构型 5 的所有步骤文件
 - `clean all` — 清理所有步骤的所有输出文件
 
 ---

@@ -7,6 +7,7 @@ TUI 客户端使用此模块与后台 Daemon 通信。
 ===============================================================================
 """
 import socket
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 from ipc.protocol import (
@@ -26,7 +27,7 @@ class IPCClient:
     IPC 客户端。
 
     连接到 Daemon 的 IPC 服务器，发送命令并接收响应。
-    支持自动重连。
+    支持自动重连。线程安全：所有 socket 操作受 _send_lock 保护。
     """
 
     def __init__(self, host: str = None, port: int = None):
@@ -41,6 +42,7 @@ class IPCClient:
         self.port = port or IPC_CONFIG["port"]
         self._socket: Optional[socket.socket] = None
         self._timeout = IPC_CONFIG["timeout"]
+        self._send_lock = threading.RLock()  # 可重入锁：串行化所有 socket 操作，防止多线程竞争
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -48,25 +50,29 @@ class IPCClient:
 
     def connect(self) -> bool:
         """连接到 Daemon IPC 服务器。"""
-        try:
-            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._socket.settimeout(self._timeout)
-            self._socket.connect((self.host, self.port))
-            logger.info(f"已连接到 Daemon: {self.host}:{self.port}")
-            return True
-        except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            logger.error(f"无法连接到 Daemon: {e}")
-            self._socket = None
-            return False
+        with self._send_lock:
+            if self._socket is not None:
+                return True  # 已连接
+            try:
+                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._socket.settimeout(self._timeout)
+                self._socket.connect((self.host, self.port))
+                logger.info(f"已连接到 Daemon: {self.host}:{self.port}")
+                return True
+            except (ConnectionRefusedError, socket.timeout, OSError) as e:
+                logger.error(f"无法连接到 Daemon: {e}")
+                self._socket = None
+                return False
 
     def disconnect(self):
         """断开与 Daemon 的连接。"""
-        if self._socket:
-            try:
-                self._socket.close()
-            except OSError as e:
-                logger.debug(f"关闭 socket 时出现异常: {e}")
-            self._socket = None
+        with self._send_lock:
+            if self._socket:
+                try:
+                    self._socket.close()
+                except OSError as e:
+                    logger.debug(f"关闭 socket 时出现异常: {e}")
+                self._socket = None
 
     def is_connected(self) -> bool:
         """检查是否已连接到 Daemon。"""
@@ -87,43 +93,47 @@ class IPCClient:
         Returns:
             (success, data, message) 元组
         """
-        if not self._socket:
-            if not self.connect():
-                return False, None, "未连接到后台引擎"
+        with self._send_lock:
+            if not self._socket:
+                if not self.connect():
+                    return False, None, "未连接到后台引擎"
 
-        request = create_request(command, params)
+            request = create_request(command, params)
 
-        try:
-            # 发送请求
-            self._socket.sendall(serialize(request))
+            try:
+                # 发送请求
+                self._socket.sendall(serialize(request))
 
-            # 接收响应
-            buffer = b""
-            while True:
-                try:
-                    chunk = self._socket.recv(4096)
-                    if not chunk:
-                        raise ConnectionError("连接已断开")
-                    buffer += chunk
-                    if b"\n" in buffer:
-                        break
-                except socket.timeout:
-                    return False, None, "请求超时"
+                # 接收响应
+                buffer = b""
+                while True:
+                    try:
+                        chunk = self._socket.recv(4096)
+                        if not chunk:
+                            raise ConnectionError("连接已断开")
+                        buffer += chunk
+                        if b"\n" in buffer:
+                            break
+                    except socket.timeout:
+                        # 超时后必须断开 socket 并重连，否则残留的响应数据
+                        # 会污染后续请求，导致 JSON 解析失败或数据错乱。
+                        self.disconnect()
+                        return False, None, "请求超时"
 
-            # 解析响应
-            response = deserialize(buffer)
-            if response is None:
-                return False, None, "无效的响应格式"
+                # 解析响应
+                response = deserialize(buffer)
+                if response is None:
+                    return False, None, "无效的响应格式"
 
-            ok = response.get("status") == "ok"
-            data = response.get("data")
-            message = response.get("message", "")
-            return ok, data, message
+                ok = response.get("status") == "ok"
+                data = response.get("data")
+                message = response.get("message", "")
+                return ok, data, message
 
-        except (ConnectionError, OSError) as e:
-            logger.error(f"IPC 通信异常: {e}")
-            self.disconnect()  # 确保关闭 socket，避免资源泄漏
-            return False, None, f"通信异常: {e}"
+            except (ConnectionError, OSError) as e:
+                logger.error(f"IPC 通信异常: {e}")
+                self.disconnect()  # 确保关闭 socket，避免资源泄漏
+                return False, None, f"通信异常: {e}"
 
     # ------------------------------------------------------------------
     # 便捷方法

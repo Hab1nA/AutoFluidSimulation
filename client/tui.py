@@ -500,7 +500,11 @@ class PipelineTUI(App):
             if not self._status_data:
                 return
             # 获取排序后的构型列表（按数值排序，避免字符串排序导致的 1→10→2 问题）
-            configs = sorted(self._status_data.keys(), key=lambda x: int(x))
+            # 防御：仅保留纯数字 key，过滤掉因 IPC 数据错乱混入的非构型字段（如 engine_status）
+            configs = sorted(
+                [k for k in self._status_data.keys() if isinstance(k, str) and k.isdigit()],
+                key=lambda x: int(x)
+            )
             self._configs = configs
             # 复制数据以避免在锁外迭代
             status_data = dict(self._status_data)
@@ -632,7 +636,7 @@ class PipelineTUI(App):
         # 路由命令
         if cmd == "help":
             self._show_help()
-        elif cmd in ("start", "continue"):
+        elif cmd == "start":
             self._do_start()
         elif cmd == "pause":
             self._do_pause()
@@ -642,12 +646,12 @@ class PipelineTUI(App):
             self._handle_reset_cmd(parts[1:])
         elif cmd == "clean":
             self._handle_clean_cmd(parts[1:])
+        elif cmd == "quit" and len(parts) > 1 and parts[1].lower() == "full":
+            self._do_full_quit()
         elif cmd == "quit":
             self._do_quit()
         elif cmd == "daemon":
             self._handle_daemon_cmd(parts[1:])
-        elif cmd == "full_quit":
-            self._do_full_quit()
         elif cmd == "status":
             self._do_status()
         else:
@@ -766,7 +770,7 @@ class PipelineTUI(App):
     def _handle_clean_cmd(self, args: list):
         """处理 clean 命令。"""
         if not args:
-            self._log("[yellow]用法: clean <步骤名> [构型名]  或 clean all[/yellow]")
+            self._log("[yellow]用法: clean <构型名> [步骤名]  或 clean all[/yellow]")
             return
 
         if args[0].lower() == "all":
@@ -807,14 +811,15 @@ class PipelineTUI(App):
                 )
             )
         else:
-            step_name = args[0]
-            if step_name not in STEP_NAMES:
-                self._log(f"[red]无效步骤名: {step_name}，有效值: {STEP_NAMES}[/red]")
-                return
+            # 第一个参数是构型名，第二个是步骤名（可选）
             try:
-                config_name = int(args[1]) if len(args) > 1 else None
+                config_name = int(args[0])
             except ValueError:
-                self._log("[red]构型名称必须是整数[/red]")
+                self._log(f"[red]构型名称必须是整数，收到: {args[0]}[/red]")
+                return
+            step_name = args[1] if len(args) > 1 else None
+            if step_name and step_name not in STEP_NAMES:
+                self._log(f"[red]无效步骤名: {step_name}，有效值: {STEP_NAMES}[/red]")
                 return
             self._do_clean_step(step_name, config_name)
 
@@ -868,13 +873,13 @@ class PipelineTUI(App):
     def _handle_daemon_cmd(self, args: list):
         """处理 daemon 子命令。"""
         if not args:
-            self._do_launch_daemon()
+            self._log("[yellow]用法: daemon start  或 daemon stop[/yellow]")
         elif args[0].lower() == "stop":
             self._do_stop_daemon()
         elif args[0].lower() == "start":
             self._do_launch_daemon()
         else:
-            self._log(f"[yellow]用法: daemon [start|stop]（不带参数默认启动）[/yellow]")
+            self._log(f"[yellow]用法: daemon start  或 daemon stop[/yellow]")
 
     def _do_launch_daemon(self):
         """启动后台守护进程并自动连接。"""
@@ -974,23 +979,23 @@ class PipelineTUI(App):
 
     def _show_clean_prompt(self):
         """提示用户输入 clean 参数。"""
-        self._log("[yellow]请在命令输入行使用: clean <步骤名> [构型名]  或 clean all[/yellow]")
+        self._log("[yellow]请在命令输入行使用: clean <构型名> [步骤名]  或 clean all[/yellow]")
         self.query_one("#cmd-input", Input).focus()
 
     def _show_help(self):
         """显示帮助信息。"""
         help_text = """
 [bold]可用命令:[/bold]
-  [green]start[/green] / [green]continue[/green]        - 启动或继续流水线
+  [green]start[/green]                     - 启动或继续流水线
   [yellow]pause[/yellow]                   - 暂停流水线
   [blue]check[/blue]                   - 系统自检
   [cyan]reset <XX> <step>[/cyan]       - 重置指定构型的指定步骤
   [cyan]reset all[/cyan]               - 重置所有构型（警告！）
-  [magenta]clean <step>[/magenta]            - 清理指定步骤文件
+  [magenta]clean <XX> <step>[/magenta]       - 清理指定构型的步骤文件
   [magenta]clean all[/magenta]               - 清理所有文件（警告！）
   [dim]quit[/dim]                    - 退出界面（后台继续运行）
-  [red]full_quit[/red]               - 完全退出（停止引擎 + 关闭 TUI）
-  [bold cyan]daemon[/bold cyan]                 - 启动后台引擎并自动连接
+  [red]quit full[/red]               - 完全退出（停止引擎 + 关闭 TUI）
+  [bold cyan]daemon start[/bold cyan]           - 启动后台引擎并自动连接
   [bold cyan]daemon stop[/bold cyan]           - 停止后台引擎（TUI 保持运行）
   [dim]status[/dim]                  - 显示状态摘要
   [dim]help[/dim]                    - 显示此帮助
