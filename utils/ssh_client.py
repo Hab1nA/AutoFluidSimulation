@@ -129,7 +129,7 @@ class RemoteWorkstation:
             self._sftp.put(local_path, remote_path)
             logger.info(f"上传完成: {os.path.basename(local_path)}")
             return True
-        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"文件上传失败: {e}")
             return False
 
@@ -200,7 +200,7 @@ class RemoteWorkstation:
             self.exec_command(f'if exist "{escaped}" del /f "{escaped}"')
             logger.info(f"远程文件已删除: {remote_path}")
             return True
-        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"远程文件删除失败: {remote_path}: {e}")
             return False
 
@@ -318,7 +318,7 @@ class RemoteWorkstation:
             else:
                 logger.error(f"远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
                 return False
-        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"启动远程后台任务异常: {e}")
             return False
 

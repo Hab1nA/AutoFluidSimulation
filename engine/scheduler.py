@@ -69,7 +69,7 @@ class PipelineScheduler:
         # ---- 工作线程 ----
         self._worker_threads: list[threading.Thread] = []
         self._barrier_thread: Optional[threading.Thread] = None
-        self._solver_thread: Optional[threading.Thread] = None
+        self._solver_threads: list[threading.Thread] = []   # 求解线程（屏障通过后启动）
         self._file_monitor: Optional[StepFileMonitor] = None
 
         # ---- 工作线程数 ----
@@ -222,7 +222,7 @@ class PipelineScheduler:
 
             try:
                 self._process_single_config(config_name)
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"处理构型{config_name} 时发生未预期异常: {e}", exc_info=True)
                 # 尝试标记当前未完成的步骤为 Error
                 for step in ["SC", "Transfer", "Meshing"]:
@@ -232,6 +232,20 @@ class PipelineScheduler:
                             self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
                     except Exception as mark_err:
                         logger.debug(f"标记构型{config_name}步骤{step}为Error时异常: {mark_err}")
+            except Exception as e:
+                # 最后的兜底：捕获所有其他异常类型，防止工作线程意外崩溃
+                logger.critical(
+                    f"处理构型{config_name} 时发生致命异常: {type(e).__name__}: {e}",
+                    exc_info=True
+                )
+                for step in ["SC", "Transfer", "Meshing"]:
+                    try:
+                        s = self.state.get_step_status(config_name, step)
+                        if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                            self.state.set_step_status(config_name, step, STATUS_ERROR,
+                                                        f"致命异常: {type(e).__name__}: {e}")
+                    except Exception:
+                        pass
             finally:
                 self._sc_queue.task_done()
 
@@ -298,15 +312,26 @@ class PipelineScheduler:
             if self._stopped.is_set():
                 return False
 
-            # 检查暂停
+            # 检查暂停（在设置状态前检查，避免竞态）
             while self._paused.is_set() and not self._stopped.is_set():
                 time.sleep(1)
             if self._stopped.is_set():
                 return False
 
-            # 设置状态
+            # 设置状态后立即再次检查暂停标志：
+            # 防止 pause() 在 set_step_status 之后被调用导致的竞态窗口
             status = STATUS_RETRYING if attempt > 1 else STATUS_RUNNING
             self.state.set_step_status(config_name, step_name, status)
+
+            if self._paused.is_set():
+                self.state.set_step_status(config_name, step_name, STATUS_PAUSED)
+                while self._paused.is_set() and not self._stopped.is_set():
+                    time.sleep(1)
+                if self._stopped.is_set():
+                    return False
+                # 恢复后重新设置运行状态
+                status = STATUS_RETRYING if attempt > 1 else STATUS_RUNNING
+                self.state.set_step_status(config_name, step_name, status)
 
             logger.info(f"执行 [{step_name}] 构型{config_name} (尝试 {attempt}/{max_retries})")
 
@@ -323,7 +348,7 @@ class PipelineScheduler:
                         retry_count = self.state.increment_retry(config_name, step_name)
                         logger.info(f"将在稍后重试 (已重试 {retry_count} 次)")
                         time.sleep(5 * attempt)  # 递增等待时间
-            except (RuntimeError, ValueError, OSError, IOError) as e:
+            except (RuntimeError, ValueError, OSError) as e:
                 logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
                 if attempt < max_retries:
                     time.sleep(5 * attempt)
@@ -343,6 +368,10 @@ class PipelineScheduler:
 
         持续检查所有构型的 Meshing 是否全部 Completed。
         一旦满足条件，设置屏障通过标志并启动 Solver 调度。
+        如果所有构型的 Meshing 均为 Error/Completed 且至少有一个 Error，
+        则屏障永远无法通过，报告错误并退出。
+        额外检查：若所有构型的 SW 均已终结但存在错误（表示宏执行完毕
+        但未产出任何有效 STEP），则提前检测并停止。
         """
         logger.info("[BarrierMonitor] 全局屏障监控启动")
         logger.info("[BarrierMonitor] 等待所有构型的网格划分完成...")
@@ -353,6 +382,37 @@ class PipelineScheduler:
             if self._paused.is_set():
                 time.sleep(1)
                 continue
+
+            all_configs = self.state.get_all_configs()
+
+            # ---- 前置检查：SW 阶段是否已全部终结且有错误 ----
+            # 若 SW 宏执行完毕但所有构型的 STEP 均缺失，后续流程无法推进。
+            sw_all_terminal = True
+            sw_has_error = False
+            sw_has_completed = False
+            for cn in all_configs:
+                s = self.state.get_step_status(cn, "SW")
+                if s not in (STATUS_COMPLETED, STATUS_ERROR):
+                    sw_all_terminal = False
+                    break
+                if s == STATUS_ERROR:
+                    sw_has_error = True
+                else:
+                    sw_has_completed = True
+            if sw_all_terminal and not sw_has_completed:
+                logger.error("=" * 60)
+                logger.error(">>> 流水线中止！所有构型的 SW 步骤均已失败 <<<")
+                logger.error("=" * 60)
+                logger.error("宏已执行但未产出任何有效 STEP 文件，无法继续。")
+                logger.error("请检查：SW 宏逻辑 / 设计表参数 / STEP 输出路径。")
+                for cn in all_configs:
+                    for step in ["SC", "Transfer", "Meshing", "Solver"]:
+                        if self.state.get_step_status(cn, step) == STATUS_WAITING:
+                            self.state.set_step_status(cn, step, STATUS_ERROR,
+                                                       "SW 步骤失败，后续步骤无法执行")
+                self._stopped.set()
+                self.state.set_engine_status("stopped")
+                break
 
             # 检查是否所有构型的 Meshing 都已完成
             if self.state.all_configs_completed_at_step("Meshing"):
@@ -366,16 +426,40 @@ class PipelineScheduler:
                 self._dispatch_solver_tasks()
                 break
 
-            # 检查是否有 Meshing 失败的（仅报告新增的失败）
+            # 检查是否所有 Meshing 均已终结（Completed 或 Error）
+            all_configs = self.state.get_all_configs()
+            all_terminal = True
+            has_error = False
+            for cn in all_configs:
+                s = self.state.get_step_status(cn, "Meshing")
+                if s not in (STATUS_COMPLETED, STATUS_ERROR):
+                    all_terminal = False
+                    break
+                if s == STATUS_ERROR:
+                    has_error = True
+
+            if all_terminal and has_error:
+                logger.error("=" * 60)
+                logger.error(">>> 全局屏障失败！所有构型网格划分均已终结但存在错误 <<<")
+                logger.error("=" * 60)
+                # 将所有 Meshing=Error 的构型的 Solver 也标记为 Error（屏障未通过）
+                for cn in all_configs:
+                    if self.state.get_step_status(cn, "Meshing") == STATUS_ERROR:
+                        self.state.set_step_status(cn, "Solver", STATUS_ERROR, "网格划分失败，屏障未通过")
+                self._stopped.set()
+                self.state.set_engine_status("stopped")
+                break
+
+            # 检查是否有 Meshing 失败的（仅报告新增的失败，按构型去重）
             error_configs = self.state.get_error_configs()
-            meshing_errors = {(c, m) for c, s, m in error_configs if s == "Meshing"}
-            new_errors = meshing_errors - _last_error_report
+            meshing_error_configs = {c for c, s, _ in error_configs if s == "Meshing"}
+            new_errors = meshing_error_configs - _last_error_report
             if new_errors:
                 logger.warning(
                     f"[BarrierMonitor] 检测到 {len(new_errors)} 个新的网格划分失败: "
-                    f"{sorted(c for c, _ in new_errors)}"
+                    f"{sorted(new_errors)}"
                 )
-                _last_error_report = meshing_errors
+                _last_error_report = meshing_error_configs
 
             # 轮询间隔：网格划分通常耗时较长，不需要高频检查
             time.sleep(5.0)
@@ -410,6 +494,7 @@ class PipelineScheduler:
                     daemon=True,
                 )
                 t.start()
+                self._solver_threads.append(t)
                 dispatched_count += 1
 
         logger.info(f"所有 Solver 任务已分发 ({dispatched_count} 个构型)")
@@ -453,6 +538,13 @@ class PipelineScheduler:
         self.state.set_all_paused_to_running()
         self._paused.clear()
         self.state.set_engine_status("running")
+
+        # 重置文件监控器的已处理文件集合，确保暂停期间产生的
+        # STEP 文件在恢复后被重新评估并入队
+        if self._file_monitor is not None:
+            self._file_monitor._processed_files.clear()
+            # 重新扫描已存在的 STEP 文件（断点续传/暂停恢复场景）
+            self._file_monitor._scan_existing_files()
         logger.info("流水线已恢复运行")
 
     def stop(self):
@@ -467,6 +559,10 @@ class PipelineScheduler:
                 t.join(timeout=3)
         if self._barrier_thread and self._barrier_thread.is_alive():
             self._barrier_thread.join(timeout=3)
+        for t in self._solver_threads:
+            if t.is_alive():
+                t.join(timeout=3)
+        self._solver_threads.clear()
 
         # 停止文件监控
         if self._file_monitor:

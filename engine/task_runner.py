@@ -268,6 +268,12 @@ class TaskRunner:
                         f"OpenDoc6: Errors={open_errors.value}, "
                         f"Warnings={open_warnings.value}"
                     )
+                    if open_errors.value != 0:
+                        logger.warning(
+                            f"OpenDoc6 返回错误码 {open_errors.value}，"
+                            f"模型可能存在问题（缺失参考/重建错误），"
+                            f"后续宏执行可能异常"
+                        )
                 except Exception as open_err:
                     logger.error(
                         f"OpenDoc6 异常 ({type(open_err).__name__}: {open_err})"
@@ -318,6 +324,12 @@ class TaskRunner:
                                             f"({type(e_um).__name__}: {e_um})，"
                                             f"模型可能已是最新状态"
                                         )
+                                else:
+                                    logger.warning(
+                                        "InsertFamilyTableOpen 返回 True 但 "
+                                        "GetDesignTable 返回 None，"
+                                        "设计表更改可能未应用到模型"
+                                    )
                             except Exception as e_dt2:
                                 logger.debug(
                                     f"设计表后处理异常 "
@@ -372,7 +384,13 @@ class TaskRunner:
 
                 # ---- 步骤 C: 执行宏 (RunMacro2) ----
                 # RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
-                logger.info(f"正在执行宏 (RunMacro2): {os.path.basename(sw_macro)}")
+                # 注意：RunMacro2 是同步阻塞的 COM 调用，sw_macro_timeout 作为预期
+                # 最大时长记录但不由程序强制中断（COM STA 对象不支持跨线程超时控制）。
+                # 若宏卡死，需手动结束 SolidWorks 进程。
+                logger.info(
+                    f"正在执行宏 (RunMacro2): {os.path.basename(sw_macro)} "
+                    f"(预期最大耗时 {ENGINE_CONFIG['sw_macro_timeout']}s)"
+                )
                 macro_ok = False
                 last_error_detail = ""
 
@@ -651,7 +669,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SFTP 上传失败")
                     return False
-            except (OSError, IOError, ConnectionError, EOFError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"文件传输异常: {e}")
                 self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
                 return False
@@ -695,7 +713,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "远程任务启动失败")
                     return False
-            except (OSError, IOError, ConnectionError, EOFError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"网格划分启动异常: {e}")
                 self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
                 return False
@@ -721,7 +739,7 @@ class TaskRunner:
                     poll_interval=10
                 )
                 return success
-            except (OSError, IOError, ConnectionError, EOFError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"等待网格划分异常: {e}")
                 return False
 
@@ -761,7 +779,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Solver", STATUS_ERROR, "远程求解启动失败")
                     return False
-            except (OSError, IOError, ConnectionError, EOFError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"仿真求解启动异常: {e}")
                 self.state.set_step_status(config_name, "Solver", STATUS_ERROR, str(e))
                 return False
@@ -779,7 +797,7 @@ class TaskRunner:
                     poll_interval=30  # 求解时间较长，轮询间隔加大
                 )
                 return success
-            except (OSError, IOError, ConnectionError, EOFError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"等待仿真求解异常: {e}")
                 return False
 
@@ -826,7 +844,7 @@ class TaskRunner:
                 results["remote_checks"].update(remote_info)
             else:
                 results["remote_checks"]["ssh"] = "连接失败"
-        except (OSError, IOError, ConnectionError) as e:
+        except (OSError, ConnectionError) as e:
             results["remote_checks"]["ssh"] = f"错误: {e}"
 
         return results
@@ -930,7 +948,7 @@ class TaskRunner:
                     logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
                     logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")
-            except (OSError, IOError, ConnectionError) as e:
+            except (OSError, ConnectionError) as e:
                 logger.error(f"远程文件清理异常 ({step_name}): {e}")
 
         logger.info(f"步骤 {step_name} 文件清理完成")

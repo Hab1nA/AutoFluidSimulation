@@ -143,43 +143,46 @@ ENGINE_CONFIG = {
 }
 
 # ============================================================================
-# 确保必要目录存在
+# 确保必要目录存在 & 配置验证（由 daemon 启动时调用）
 # ============================================================================
-for key in ["step_dir", "scdoc_dir", "log_dir"]:
-    path = LOCAL_PATHS.get(key, "")
-    if path:
-        try:
-            os.makedirs(path, exist_ok=True)
-        except PermissionError:
-            print(f"[WARNING] 权限不足，无法创建目录: {path}", file=sys.stderr)
-        except OSError as e:
-            print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
+
+def ensure_directories():
+    """创建必要的本地目录。"""
+    for key in ["step_dir", "scdoc_dir", "log_dir"]:
+        path = LOCAL_PATHS.get(key, "")
+        if path:
+            try:
+                os.makedirs(path, exist_ok=True)
+            except PermissionError:
+                print(f"[WARNING] 权限不足，无法创建目录: {path}", file=sys.stderr)
+            except OSError as e:
+                print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
+
+
+def validate_config() -> list:
+    """验证配置完整性，返回警告信息列表。"""
+    warnings = []
+
+    if not REMOTE_CONFIG["password"]:
+        warnings.append(
+            "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
+            "或在 config.py 中配置 password 字段"
+        )
+
+    if not os.path.exists(LOCAL_PATHS["sw_model"]):
+        warnings.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")
+
+    if not os.path.exists(LOCAL_PATHS["excel"]):
+        warnings.append(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}")
+
+    if not os.path.exists(LOCAL_PATHS["sc_exe"]):
+        warnings.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
+
+    if not os.path.exists(LOCAL_PATHS["sw_exe"]):
+        warnings.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
+
+    return warnings
+
 
 # 远程标志目录（在首次 SSH 连接时创建）
 REMOTE_FLAG_DIR = REMOTE_CONFIG["flag_dir"]
-
-# ============================================================================
-# 配置验证
-# ============================================================================
-_CONFIG_WARNINGS = []
-
-if not REMOTE_CONFIG["password"]:
-    _CONFIG_WARNINGS.append(
-        "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
-        "或在 config.py 中配置 password 字段"
-    )
-
-if not os.path.exists(LOCAL_PATHS["sw_model"]):
-    _CONFIG_WARNINGS.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")
-
-if not os.path.exists(LOCAL_PATHS["excel"]):
-    _CONFIG_WARNINGS.append(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}")
-
-if not os.path.exists(LOCAL_PATHS["sc_exe"]):
-    _CONFIG_WARNINGS.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
-
-if not os.path.exists(LOCAL_PATHS["sw_exe"]):
-    _CONFIG_WARNINGS.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
-
-for warning in _CONFIG_WARNINGS:
-    print(f"[CONFIG WARNING] {warning}", file=sys.stderr)

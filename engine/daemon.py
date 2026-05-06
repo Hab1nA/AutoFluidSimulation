@@ -27,6 +27,7 @@ from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, IPC_CONFIG, ENGINE_CONFIG,
     STEP_NAMES, STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR,
+    ensure_directories, validate_config,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -79,6 +80,12 @@ class PipelineDaemon:
         logger.info("=" * 60)
         logger.info("PipelineDaemon 启动中...")
         logger.info("=" * 60)
+
+        # 0. 确保目录存在 & 验证配置
+        ensure_directories()
+        config_warnings = validate_config()
+        for w in config_warnings:
+            logger.warning(f"[CONFIG] {w}")
 
         self._running = True
 
@@ -155,7 +162,7 @@ class PipelineDaemon:
                 return
             self.state.load_configs(configs)
             logger.info(f"已从 Excel 同步 {len(configs)} 个构型到状态库")
-        except (FileNotFoundError, ValueError, OSError, IOError) as e:
+        except (ValueError, OSError) as e:
             logger.error(f"Excel 数据加载失败: {e}")
 
     # ------------------------------------------------------------------

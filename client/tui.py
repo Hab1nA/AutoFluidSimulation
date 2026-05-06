@@ -467,24 +467,26 @@ class PipelineTUI(App):
         if not ok:
             return
 
+        # 在锁内完成所有数据快照复制，然后释放锁再进行 UI 更新
         with self._data_lock:
             self._status_data = data or {}
-
-        self._update_table()
-
-        # 引擎状态变化较慢，每5次刷新（5秒）更新一次
-        with self._data_lock:
+            # 引擎状态变化较慢，每5次刷新（5秒）更新一次
             self._refresh_counter += 1
             should_refresh_engine = self._refresh_counter >= 5
             if should_refresh_engine:
                 self._refresh_counter = 0
+            # 快照引擎信息以避免在锁外访问
+            eng_snapshot = dict(self._engine_info) if self._engine_info else {}
+
+        self._update_table()
 
         if should_refresh_engine:
             ok2, eng_data, _ = await asyncio.to_thread(self.ipc.get_engine_status)
             if ok2 and eng_data:
                 with self._data_lock:
                     self._engine_info = eng_data
-        self._update_info_bar()
+                    eng_snapshot = dict(eng_data)
+        self._update_info_bar(eng_snapshot)
 
     def _update_table(self):
         """根据最新状态数据增量更新 DataTable（保留滚动位置）。
@@ -562,24 +564,31 @@ class PipelineTUI(App):
                 if old_value != new_value:
                     table.update_cell(key, col_key, new_value)
 
-    def _update_info_bar(self):
-        """更新顶部信息栏。"""
+    def _update_info_bar(self, eng_snapshot: dict = None):
+        """更新顶部信息栏。可选择性传入引擎状态快照以避免锁争用。"""
         info_bar = self.query_one("#info-bar", Static)
 
         if self.ipc.is_connected():
-            with self._data_lock:
-                if self._engine_info:
-                    engine_status = ENGINE_STATUS_DISPLAY.get(
-                        self._engine_info.get("engine_status", "stopped"), "未知"
-                    )
-                    barrier = "已通过" if self._engine_info.get("barrier_passed") else "未通过"
-                    info_bar.update(
-                        f"引擎: {engine_status}  |  "
-                        f"构型数: {len(self._configs)}  |  "
-                        f"屏障: {barrier}"
-                    )
-                else:
-                    info_bar.update("引擎: 已连接  |  等待数据...")
+            if eng_snapshot:
+                engine_status = ENGINE_STATUS_DISPLAY.get(
+                    eng_snapshot.get("engine_status", "stopped"), "未知"
+                )
+                barrier = "已通过" if eng_snapshot.get("barrier_passed") else "未通过"
+            else:
+                with self._data_lock:
+                    if self._engine_info:
+                        engine_status = ENGINE_STATUS_DISPLAY.get(
+                            self._engine_info.get("engine_status", "stopped"), "未知"
+                        )
+                        barrier = "已通过" if self._engine_info.get("barrier_passed") else "未通过"
+                    else:
+                        info_bar.update("引擎: 已连接  |  等待数据...")
+                        return
+            info_bar.update(
+                f"引擎: {engine_status}  |  "
+                f"构型数: {len(self._configs)}  |  "
+                f"屏障: {barrier}"
+            )
         else:
             info_bar.update("引擎: 未连接  |  请先启动 Daemon")
 

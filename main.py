@@ -13,7 +13,6 @@
 import sys
 import os
 import argparse
-import importlib
 import threading
 import time
 
@@ -55,6 +54,7 @@ def main():
         # 在独立线程中启动守护进程
         def _run_daemon():
             try:
+                import importlib
                 mod = importlib.import_module("engine.daemon")
                 mod.main()
             except Exception as e:

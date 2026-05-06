@@ -46,6 +46,8 @@ class FileStableDetector:
         self.check_interval = check_interval
         # 记录每个文件的大小历史: {filepath: [(timestamp, size), ...]}
         self._history: dict[str, list] = {}
+        # 记录每个文件首次被检测到的时间: {filepath: first_seen_timestamp}
+        self._first_seen: dict[str, float] = {}
 
     def is_file_ready(self, filepath: str) -> bool:
         """
@@ -87,14 +89,11 @@ class FileStableDetector:
         if all(s == sizes[0] for s in sizes):
             # 清理所有与此文件相关的追踪记录
             del self._history[filepath]
-            if hasattr(self, '_first_seen'):
-                self._first_seen.pop(filepath, None)
+            self._first_seen.pop(filepath, None)
             return True
 
-        # 防止内存泄漏：追踪文件首次被发现的时间，而非截断后的首条记录
+        # 防止内存泄漏：追踪文件首次被发现的时间
         # （上面 cutoff 已删除 >stable_time 的条目，history[0] 始终 <=stable_time）
-        if not hasattr(self, '_first_seen'):
-            self._first_seen: dict[str, float] = {}
         if filepath not in self._first_seen:
             self._first_seen[filepath] = now
         elif now - self._first_seen[filepath] > self.stable_time * 3:
@@ -107,8 +106,7 @@ class FileStableDetector:
     def cleanup(self, filepath: str):
         """清理指定文件的检测记录。"""
         self._history.pop(filepath, None)
-        if hasattr(self, '_first_seen'):
-            self._first_seen.pop(filepath, None)
+        self._first_seen.pop(filepath, None)
 
 
 # ============================================================================
@@ -207,10 +205,8 @@ class StepFileMonitor:
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
         # 清理检测器内部历史记录，防止内存泄漏
-        if hasattr(self._detector, '_history'):
-            self._detector._history.clear()
-        if hasattr(self._detector, '_first_seen'):
-            self._detector._first_seen.clear()
+        self._detector._history.clear()
+        self._detector._first_seen.clear()
         logger.info("STEP 文件监控已停止")
 
     # ------------------------------------------------------------------
