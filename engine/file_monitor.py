@@ -109,15 +109,15 @@ class StepFileMonitor:
     """
     STEP 文件目录监控器。
 
-    持续扫描 STEP 目录，检测新生成的 model_gen4_XX.step 文件，
+    持续扫描 STEP 目录，检测新生成的 model_gen4.SLDPRT_XX.step 文件，
     当文件写入完成（大小稳定）后，通过回调函数通知调度器。
 
     设计为轮询模式（兼容性好，不依赖 watchdog 的 Native 文件系统事件），
     同时也支持 watchdog 事件驱动的混合模式。
     """
 
-    # 文件名模式: model_gen4_{构型名称}.step
-    FILE_PREFIX = "model_gen4_"
+    # 文件名模式: model_gen4.SLDPRT_{构型名称}.step
+    FILE_PREFIX = "model_gen4.SLDPRT_"
     FILE_SUFFIX = ".step"
 
     def __init__(self, step_dir: str = None,
@@ -151,8 +151,8 @@ class StepFileMonitor:
         """
         从文件名中解析构型名称。
 
-        例如: "model_gen4_5.step" -> 5
-              "model_gen4_12.step" -> 12
+        例如: "model_gen4.SLDPRT_5.step" -> 5
+              "model_gen4.SLDPRT_12.step" -> 12
 
         Args:
             filename: 文件名（不含路径）
@@ -163,7 +163,7 @@ class StepFileMonitor:
         if not filename.startswith(cls.FILE_PREFIX) or not filename.endswith(cls.FILE_SUFFIX):
             return None
         try:
-            # 提取 "model_gen4_" 和 ".step" 之间的部分
+            # 提取 "model_gen4.SLDPRT_" 和 ".step" 之间的部分
             name_part = filename[len(cls.FILE_PREFIX):-len(cls.FILE_SUFFIX)]
             return int(name_part)
         except ValueError:

@@ -21,10 +21,11 @@ IPC 通信协议 (Inter-Process Communication Protocol)
 """
 import json
 import uuid
-import logging
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from utils.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 
 # ============================================================================
@@ -40,11 +41,9 @@ CMD_STATUS = "status"           # 获取当前状态快照
 
 # ---- 状态操作命令 ----
 CMD_RESET_STEP = "reset_step"   # 重置指定构型指定步骤
-CMD_RESET_ALL = "reset_all"     # 重置全部
 
 # ---- 清理命令 ----
 CMD_CLEAN_STEP = "clean_step"   # 清理指定步骤文件
-CMD_CLEAN_ALL = "clean_all"     # 清理所有文件
 
 # ---- 查询命令 ----
 CMD_GET_ALL_STATUS = "get_all_status"   # 获取所有构型状态

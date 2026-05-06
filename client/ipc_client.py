@@ -8,12 +8,13 @@ TUI 客户端使用此模块与后台 Daemon 通信。
 """
 import socket
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from ipc.protocol import (
     create_request, serialize, deserialize, create_response,
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
-    CMD_RESET_STEP, CMD_RESET_ALL, CMD_CLEAN_STEP, CMD_CLEAN_ALL,
+    CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
 )
 from engine.config import IPC_CONFIG
@@ -104,10 +105,17 @@ class IPCClient:
                 # 发送请求
                 self._socket.sendall(serialize(request))
 
-                # 接收响应
+                # 接收响应（带超时保护）
                 buffer = b""
+                deadline = time.monotonic() + self._timeout
                 while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        # 超时：断开并重建 socket（防止残留数据污染后续请求）
+                        self.disconnect()
+                        return False, None, "请求超时"
                     try:
+                        self._socket.settimeout(remaining)
                         chunk = self._socket.recv(4096)
                         if not chunk:
                             raise ConnectionError("连接已断开")
@@ -115,8 +123,7 @@ class IPCClient:
                         if b"\n" in buffer:
                             break
                     except socket.timeout:
-                        # 超时后必须断开 socket 并重连，否则残留的响应数据
-                        # 会污染后续请求，导致 JSON 解析失败或数据错乱。
+                        # 累计超时：断开并重建 socket
                         self.disconnect()
                         return False, None, "请求超时"
 
@@ -170,28 +177,30 @@ class IPCClient:
         """获取引擎状态。"""
         return self.send_request(CMD_GET_ENGINE_STATUS)
 
-    def reset_step(self, config_name: int, step_name: str = None) -> Tuple[bool, str]:
-        """重置步骤。"""
+    def reset_step(self, config_name, step_name: str = None) -> Tuple[bool, str]:
+        """
+        重置步骤。
+
+        Args:
+            config_name: 构型名称 (int) 或 "all" 表示全部构型
+            step_name: 步骤名，None 或 "all" 表示全部步骤
+        """
         ok, data, msg = self.send_request(CMD_RESET_STEP, {
             "config_name": config_name,
             "step_name": step_name,
         })
         return ok, msg
 
-    def reset_all(self) -> Tuple[bool, str]:
-        """重置全部。"""
-        ok, data, msg = self.send_request(CMD_RESET_ALL)
-        return ok, msg
+    def clean_step(self, step_name, config_name=None) -> Tuple[bool, str]:
+        """
+        清理步骤文件。
 
-    def clean_step(self, step_name: str, config_name: int = None) -> Tuple[bool, str]:
-        """清理步骤文件。"""
+        Args:
+            step_name: 步骤名，或 "all" 表示全部步骤
+            config_name: 构型名称 (int)，None 或 "all" 表示全部构型
+        """
         ok, data, msg = self.send_request(CMD_CLEAN_STEP, {
             "step_name": step_name,
             "config_name": config_name,
         })
-        return ok, msg
-
-    def clean_all(self) -> Tuple[bool, str]:
-        """清理所有文件。"""
-        ok, data, msg = self.send_request(CMD_CLEAN_ALL)
         return ok, msg

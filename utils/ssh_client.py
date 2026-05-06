@@ -133,14 +133,21 @@ class RemoteWorkstation:
             logger.error(f"文件上传失败: {e}")
             return False
 
-    def _ensure_remote_dir(self, remote_dir: str):
+    def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
         递归创建远程目录（类似 mkdir -p）。
+
+        Args:
+            remote_dir: 远程目录路径
+            _depth: 内部递归深度计数器（外部调用方不应指定）
 
         Raises:
             ConnectionError: SFTP 未连接
             OSError: 远程目录创建失败（非"已存在"错误）
+            RecursionError: 递归深度超过安全阈值
         """
+        if _depth > 32:
+            raise RecursionError(f"远程目录递归深度超过上限: {remote_dir}")
         if not self._sftp:
             raise ConnectionError("SFTP 未连接")
         # 规范化远程路径（统一使用正斜杠，SFTP 要求）
@@ -151,7 +158,7 @@ class RemoteWorkstation:
             # 递归创建父目录
             parent = "/".join(remote_dir.rstrip("/").split("/")[:-1])
             if parent and parent != remote_dir:
-                self._ensure_remote_dir(parent)
+                self._ensure_remote_dir(parent, _depth + 1)
             try:
                 self._sftp.mkdir(remote_dir)
                 logger.debug(f"创建远程目录: {remote_dir}")
@@ -346,9 +353,12 @@ class RemoteWorkstation:
     # 系统自检
     # ------------------------------------------------------------------
 
-    def check_system(self) -> dict:
+    def check_system(self, conda_exe: str = "") -> dict:
         """
         执行远程工作站系统自检。
+
+        Args:
+            conda_exe: conda 可执行文件的完整远程路径（用于 SSH 非交互会话中定位 conda）
 
         Returns:
             包含自检结果的字典
@@ -364,9 +374,14 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return results
 
-        # 检查 Conda 是否可用
-        out, err, code = self.exec_command("where conda")
-        results["conda_available"] = (code == 0)
+        # 检查 Conda 是否可用（使用完整路径，SSH 非交互会话 PATH 不含用户级 conda）
+        if conda_exe:
+            out, err, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
+            results["conda_available"] = (code == 0)
+        else:
+            # 回退：尝试 where 命令
+            out, err, code = self.exec_command("where conda")
+            results["conda_available"] = (code == 0)
 
         # 检查 Python 版本
         out, err, code = self.exec_command("python --version")

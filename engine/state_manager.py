@@ -18,7 +18,7 @@ from contextlib import contextmanager
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
     ALL_STATUSES, IPC_CONFIG,
 )
 from utils.logger import setup_logger
@@ -60,7 +60,7 @@ class StateManager:
         try:
             yield conn
             conn.commit()
-        except sqlite3.DatabaseError:
+        except Exception:
             conn.rollback()
             raise
         finally:
@@ -128,28 +128,68 @@ class StateManager:
 
     def load_configs(self, configs: Dict[int, List[float]]):
         """
-        从 Excel 读取的构型数据加载到数据库（断点续传：保留已有状态）。
+        从 Excel 读取的构型数据同步到数据库（断点续传：保留已有状态）。
+
+        同步规则：
+        1. 设计表中有但数据库中无 → 新建构型及步骤记录（状态 Waiting）
+        2. 设计表中有且数据库中也有 → 更新参数，保留已有步骤状态
+        3. 数据库中有但设计表中无 → 删除该构型及其所有步骤记录
 
         Args:
             configs: {构型名称: [参数1, 参数2, 参数3, 参数4]}
         """
         with self._lock:
             with self._get_connection() as conn:
+                # 1) 获取数据库中已有的构型列表
+                existing_rows = conn.execute(
+                    "SELECT config_name FROM configs"
+                ).fetchall()
+                existing_configs = {row["config_name"] for row in existing_rows}
+
+                new_configs = set(configs.keys())
+
+                # 2) 删除设计表中已不存在的构型（含其所有步骤记录）
+                removed_configs = existing_configs - new_configs
+                if removed_configs:
+                    for cn in removed_configs:
+                        conn.execute(
+                            "DELETE FROM steps WHERE config_name = ?",
+                            (cn,)
+                        )
+                        conn.execute(
+                            "DELETE FROM configs WHERE config_name = ?",
+                            (cn,)
+                        )
+                    logger.info(
+                        f"已从数据库移除 {len(removed_configs)} 个已不存在的构型: "
+                        f"{sorted(removed_configs)}"
+                    )
+
+                # 3) 插入或更新构型参数；仅为新构型创建步骤记录
+                added_count = 0
+                updated_count = 0
                 for config_name, params in configs.items():
-                    # 插入或更新构型参数
+                    is_new = config_name not in existing_configs
+
                     conn.execute("""
                         INSERT OR REPLACE INTO configs (config_name, param1, param2, param3, param4)
                         VALUES (?, ?, ?, ?, ?)
                     """, (config_name, *params))
 
-                    # 仅为新构型创建步骤记录（已有状态的保留）
-                    for step_name in STEP_NAMES:
-                        conn.execute("""
-                            INSERT OR IGNORE INTO steps (config_name, step_name, status)
-                            VALUES (?, ?, ?)
-                        """, (config_name, step_name, STATUS_WAITING))
+                    if is_new:
+                        for step_name in STEP_NAMES:
+                            conn.execute("""
+                                INSERT OR IGNORE INTO steps (config_name, step_name, status)
+                                VALUES (?, ?, ?)
+                            """, (config_name, step_name, STATUS_WAITING))
+                        added_count += 1
+                    else:
+                        updated_count += 1
 
-        logger.info(f"已加载 {len(configs)} 个构型到状态库")
+        logger.info(
+            f"已同步构型数据到状态库: 新增 {added_count}，更新 {updated_count}，"
+            f"删除 {len(removed_configs) if removed_configs else 0}"
+        )
 
     def get_all_configs(self) -> List[int]:
         """获取所有构型名称列表。"""
@@ -258,14 +298,22 @@ class StateManager:
     # 批量状态操作（用于 reset 命令）
     # ------------------------------------------------------------------
 
-    def reset_config_steps(self, config_name: int, from_step: str = None):
+    def reset_config_steps(self, config_name, from_step: str = None):
         """
         重置指定构型的步骤状态。
 
         Args:
-            config_name: 构型名称
+            config_name: 构型名称 (int) 或 "all" 表示全部构型
             from_step: 从此步骤开始重置（包含此步骤），若为 None 则重置所有步骤
         """
+        if config_name == "all":
+            for cn in self.get_all_configs():
+                self._reset_single_config(cn, from_step)
+        else:
+            self._reset_single_config(config_name, from_step)
+
+    def _reset_single_config(self, config_name: int, from_step: str = None):
+        """重置单个构型的步骤状态（内部方法）。"""
         start_idx = STEP_INDEX.get(from_step, 0) if from_step else 0
         steps_to_reset = STEP_NAMES[start_idx:]
 
@@ -286,7 +334,7 @@ class StateManager:
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")
 
     def reset_all(self):
-        """重置所有构型的所有步骤。"""
+        """重置所有构型的所有步骤（含引擎全局状态）。"""
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ''",
@@ -320,6 +368,28 @@ class StateManager:
                     (status,)
                 )
         logger.info(f"引擎状态变更: -> {status}")
+
+    def set_all_running_to_paused(self):
+        """将所有 Running 和 Retrying 状态的步骤批量切换为 Paused。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                    "WHERE status IN (?, ?)",
+                    (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING)
+                )
+        logger.info("已将所有运行中/重试中步骤切换为 Paused")
+
+    def set_all_paused_to_running(self):
+        """将所有 Paused 状态的步骤恢复为 Running。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                    "WHERE status = ?",
+                    (STATUS_RUNNING, STATUS_PAUSED)
+                )
+        logger.info("已将所有 Paused 步骤恢复为 Running")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""

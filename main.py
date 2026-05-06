@@ -54,8 +54,13 @@ def main():
 
         # 在独立线程中启动守护进程
         def _run_daemon():
-            mod = importlib.import_module("engine.daemon")
-            mod.main()
+            try:
+                mod = importlib.import_module("engine.daemon")
+                mod.main()
+            except Exception as e:
+                print(f"[ERROR] 后台引擎线程异常退出: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
 
         daemon_thread = threading.Thread(
             target=_run_daemon,

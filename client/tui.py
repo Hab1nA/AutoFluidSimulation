@@ -1,27 +1,27 @@
-"""
+﻿"""
 ===============================================================================
 TUI 客户端主界面 (Textual-based Terminal UI)
 基于 Textual 框架构建的交互式终端界面。
 
 界面布局：
-┌─────────────────────────────────────────────────┐
-│  🚀 液氧甲烷火箭发动机仿真总控程序 v1.0          │
-│  引擎状态: Running | 屏障: 未通过 | 构型: 12     │
-├─────────────────────────────────────────────────┤
-│  构型  │  SW  │  SC  │ 传输 │ 网格 │ 求解       │
-│  ──────┼──────┼──────┼──────┼──────┼──────      │
-│    1   │  ✓   │  ✓   │  ✓   │  ⏳  │  ⏸       │
-│    2   │  ✓   │  ⏳   │  ⏸   │  ⏸   │  ⏸       │
-│   ...  │ ...  │ ...  │ ...  │ ...  │ ...        │
-├─────────────────────────────────────────────────┤
-│  > _                                             │
-│  [start] [pause] [check] [reset] [clean] [quit] │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│   🚀 液氧甲烷火箭发动机仿真总控程序 v1.0          │
+│  引擎状态: Running | 屏障: 未通过 | 构型: 12      │
+├──────────────────────────────────────────────────┤
+│  构型  │  SW  │  SC  │ 传输 │ 网格 │ 求解        │
+│  ──────┼──────┼──────┼──────┼──────┼──────       │
+│    1   │  ✓   │  ✓   │  ✓   │  ⏳   │  ⏳        │
+│    2   │  ✓   │  ⏳   │  ⏳   │  ⏳   │  ⏳        │
+│   ...  │ ...  │ ...  │ ...  │ ...  │ ...         │
+├──────────────────────────────────────────────────┤
+│  > _                                              │
+│  [start] [pause] [check] [reset] [clean] [quit]  │
+└──────────────────────────────────────────────────┘
 
 状态图标：
   ✓ = Completed (绿色)
   ⏳ = Running (黄色闪烁)
-  ⟳ = Retrying (橙色)
+  🔄 = Retrying (橙色)
   ⏸ = Waiting (灰色)
   ✗ = Error (红色)
 ===============================================================================
@@ -31,25 +31,23 @@ import os
 import asyncio
 import subprocess
 import threading
-from typing import Dict, Optional
+from typing import Dict
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Vertical
 from textual.widgets import (
-    Header, Footer, Static, Button, Input, DataTable,
-    Label, RichLog,
+    Static, Button, Input, DataTable,
+    RichLog,
 )
 from textual.binding import Binding
-from textual.screen import ModalScreen, Screen
-from textual.message import Message
-from textual import events
+from textual.screen import ModalScreen
 
 from engine.config import (
     STEP_NAMES, STEP_DISPLAY,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
 )
 from client.ipc_client import IPCClient
 
@@ -60,7 +58,8 @@ from client.ipc_client import IPCClient
 STATUS_ICONS = {
     STATUS_WAITING:   "⏸",   # 等待
     STATUS_RUNNING:   "⏳",   # 运行中
-    STATUS_RETRYING:  "⟳",   # 重试中
+    STATUS_PAUSED:    "⏸",   # 已暂停（用户手动暂停）
+    STATUS_RETRYING:  "🔄",   # 重试中
     STATUS_COMPLETED: "✓",   # 已完成
     STATUS_ERROR:     "✗",   # 出错
 }
@@ -68,6 +67,7 @@ STATUS_ICONS = {
 STATUS_COLORS = {
     STATUS_WAITING:   "dim",
     STATUS_RUNNING:   "yellow",
+    STATUS_PAUSED:    "grey",
     STATUS_RETRYING:  "orange1",
     STATUS_COMPLETED: "green",
     STATUS_ERROR:     "red",
@@ -154,14 +154,14 @@ class CheckResultScreen(ModalScreen):
         }
 
         lines = ["[bold]系统自检结果[/bold]\n"]
-        lines.append("[bold]━━ 本地检查 ━━[/bold]")
+        lines.append("[bold]─── 本地检查 ───[/bold]")
         for name, info in results.items():
             icon = "✓" if info.get("exists") else "✗"
             color = "green" if info.get("exists") else "red"
             path = info.get("path", "")
             lines.append(f"  [{color}]{icon} {name}[/{color}]: {path}")
 
-        lines.append("\n[bold]━━ 远程检查 ━━[/bold]")
+        lines.append("\n[bold]─── 远程检查 ───[/bold]")
         for key, val in remote.items():
             label = REMOTE_KEY_LABELS.get(key, key)
             if key == "background_processes":
@@ -276,8 +276,10 @@ class PipelineTUI(App):
     }
 
     #quick-buttons {
-        height: 1;
+        height: auto;
         margin-top: 1;
+        layout: horizontal;
+        overflow-x: auto;
     }
 
     Button {
@@ -342,6 +344,7 @@ class PipelineTUI(App):
 
     .status-waiting { color: #666; }
     .status-running { color: #ffcc00; text-style: bold; }
+    .status-paused { color: #888; }
     .status-retrying { color: #ff8800; }
     .status-completed { color: #00cc66; }
     .status-error { color: #ff4444; text-style: bold; }
@@ -390,13 +393,12 @@ class PipelineTUI(App):
             Container(
                 Button("▶ Start", id="btn-start", variant="success"),
                 Button("⏸ Pause", id="btn-pause", variant="warning"),
-                Button("🔍 Check", id="btn-check", variant="primary"),
-                Button("🔄 Reset", id="btn-reset", variant="default"),
-                Button("🧹 Clean", id="btn-clean", variant="default"),
+                Button("🔧 Check", id="btn-check", variant="primary"),
+                Button("📊 Status", id="btn-status", variant="primary"),
+                Button("🔧 Daemon Start", id="btn-daemon", variant="primary"),
+                Button("⏸ Daemon Stop", id="btn-dstop", variant="warning"),
                 Button("🚪 Quit", id="btn-quit", variant="error"),
-                Button("⚡ Daemon", id="btn-daemon", variant="primary"),
-                Button("⏹ StopD", id="btn-dstop", variant="warning"),
-                Button("⏹ FullQuit", id="btn-fullquit", variant="error"),
+                Button("⏹ Quit Full", id="btn-fullquit", variant="error"),
                 id="quick-buttons",
             ),
             id="command-area",
@@ -439,7 +441,7 @@ class PipelineTUI(App):
     def _init_table(self):
         """初始化状态表格的列，同时记录列 key 映射供增量更新使用。
 
-        Textual 8.x 中 add_column 若不指定 key 参数会自动生成唯一 ID，
+        Textual 8.x 中 add_column 若不指定 key 参数会自动生成唯一 ID；
         必须显式传入 key=display 以确保后续 update_cell 可以通过字符串匹配。
         """
         table = self.query_one("#status-table", DataTable)
@@ -517,8 +519,8 @@ class PipelineTUI(App):
         for key in removed_keys:
             try:
                 table.remove_row(key)
-            except Exception:
-                pass  # 行可能已被移除（竞态窗口），忽略错误
+            except KeyError:
+                pass  # 行可能已被移除（竞态窗口），忽略
         self._table_row_keys -= removed_keys
 
         # 2) 添加新的构型行
@@ -526,7 +528,9 @@ class PipelineTUI(App):
         for cn in configs:
             key = str(cn)
             if key in added_keys:
-                steps = status_data[cn]
+                steps = status_data.get(cn)
+                if steps is None:
+                    continue  # 并发场景下该构型数据已消失
                 row = [key]
                 for step_name in STEP_NAMES:
                     status = steps.get(step_name, STATUS_WAITING)
@@ -540,7 +544,9 @@ class PipelineTUI(App):
             key = str(cn)
             if key not in self._table_row_keys or key in added_keys:
                 continue  # 新行已在步骤 2 中创建，无需再更新
-            steps = status_data[cn]
+            steps = status_data.get(cn)
+            if steps is None:
+                continue  # 并发场景下该构型数据已消失
             for step_name in STEP_NAMES:
                 status = steps.get(step_name, STATUS_WAITING)
                 icon = STATUS_ICONS.get(status, "?")
@@ -604,10 +610,8 @@ class PipelineTUI(App):
             self._do_pause()
         elif btn_id == "btn-check":
             self._do_check()
-        elif btn_id == "btn-reset":
-            self._show_reset_prompt()
-        elif btn_id == "btn-clean":
-            self._show_clean_prompt()
+        elif btn_id == "btn-status":
+            self._do_status()
         elif btn_id == "btn-quit":
             self._do_quit()
         elif btn_id == "btn-daemon":
@@ -706,49 +710,48 @@ class PipelineTUI(App):
             self._log(f"[red]✗ {msg}[/red]")
 
     def _handle_reset_cmd(self, args: list):
-        """处理 reset 命令。"""
-        if not args:
-            self._log("[yellow]用法: reset <构型名> [步骤名]  或 reset all[/yellow]")
+        """处理 reset 命令。用法: reset <构型名|all> <步骤名|all>"""
+        if len(args) < 2:
+            self._log("[yellow]用法: reset <构型名|all> <步骤名|all>[/yellow]")
             return
 
+        # 解析构型名（支持整数或 "all"）
+        config_name: int | str
         if args[0].lower() == "all":
-            # 查询 Daemon 获取构型总数，用于警告信息
-            config_count = len(self._configs)  # 已缓存的构型列表
-            if config_count == 0 and self._check_connection():
-                ok, data, _ = self.ipc.get_statistics()
-                if ok and data:
-                    config_count = data.get("total_configs", 0)
-
-            if config_count > 0:
-                detail = f"\n\n⚠ 将重置全部 {config_count} 个构型的所有步骤状态（含 SW 宏标志、全局屏障、错误计数）。"
-            else:
-                detail = "\n\n⚠ 将重置所有构型的所有步骤状态（含 SW 宏标志、全局屏障、错误计数）。"
-
-            self.push_screen(
-                ConfirmDialog(
-                    f"确定要重置【所有构型】的所有步骤吗？此操作不可逆！{detail}",
-                    callback=self._do_reset_all
-                )
-            )
+            config_name = "all"
         else:
             try:
                 config_name = int(args[0])
-                step_name = args[1] if len(args) > 1 else None
-                if step_name and step_name not in STEP_NAMES:
-                    self._log(f"[red]无效步骤名: {step_name}，有效值: {STEP_NAMES}[/red]")
-                    return
-                self.push_screen(
-                    ConfirmDialog(
-                        f"确定要重置构型{config_name}的 "
-                        f"{step_name + '及后续步骤' if step_name else '所有步骤'} 吗？",
-                        callback=lambda: self._do_reset_step(config_name, step_name)
-                    )
-                )
             except ValueError:
-                self._log("[red]构型名称必须是整数[/red]")
+                self._log(f"[red]构型名称必须是整数或 \"all\"，收到: {args[0]}[/red]")
+                return
 
-    def _do_reset_step(self, config_name: int, step_name: str = None):
-        """执行重置步骤操作。"""
+        # 解析步骤名（支持步骤名或 "all"，必须提供）
+        raw_step = args[1]
+        if raw_step.lower() == "all":
+            step_name = "all"
+        elif raw_step in STEP_NAMES:
+            step_name = raw_step
+        else:
+            self._log(f"[red]无效步骤名: {args[1]}，有效值: {STEP_NAMES} 或 all[/red]")
+            return
+
+        # 构建确认对话框文本
+        cfg_desc = "所有构型" if config_name == "all" else f"构型{config_name}"
+        if step_name == "all":
+            step_desc = "所有步骤"
+        else:
+            step_desc = f"{step_name} 及后续步骤"
+
+        self.push_screen(
+            ConfirmDialog(
+                f"确定要重置{cfg_desc}的{step_desc}吗？此操作不可逆！",
+                callback=lambda: self._do_reset_step(config_name, step_name)
+            )
+        )
+
+    def _do_reset_step(self, config_name, step_name: str = None):
+        """执行重置步骤操作。config_name 支持 int 或 'all'，step_name 支持 str 或 'all'。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.reset_step(config_name, step_name)
@@ -757,39 +760,47 @@ class PipelineTUI(App):
         else:
             self._log(f"[red]✗ {msg}[/red]")
 
-    def _do_reset_all(self):
-        """执行重置全部操作。"""
-        if not self._check_connection():
-            return
-        ok, msg = self.ipc.reset_all()
-        if ok:
-            self._log(f"[yellow]⚠ {msg}[/yellow]")
-        else:
-            self._log(f"[red]✗ {msg}[/red]")
-
     def _handle_clean_cmd(self, args: list):
-        """处理 clean 命令。"""
-        if not args:
-            self._log("[yellow]用法: clean <构型名> [步骤名]  或 clean all[/yellow]")
+        """处理 clean 命令。用法: clean <构型名|all> <步骤名|all>"""
+        if len(args) < 2:
+            self._log("[yellow]用法: clean <构型名|all> <步骤名|all>[/yellow]")
             return
 
+        # 解析构型名（支持整数或 "all"）
+        config_name: int | str
         if args[0].lower() == "all":
-            # 构建受影响的目录列表（本地 + 远程）
+            config_name = "all"
+        else:
+            try:
+                config_name = int(args[0])
+            except ValueError:
+                self._log(f"[red]构型名称必须是整数或 \"all\"，收到: {args[0]}[/red]")
+                return
+
+        # 解析步骤名（支持步骤名或 "all"，必须提供）
+        raw_step = args[1]
+        if raw_step.lower() == "all":
+            step_name = "all"
+        elif raw_step in STEP_NAMES:
+            step_name = raw_step
+        else:
+            self._log(f"[red]无效步骤名: {args[1]}，有效值: {STEP_NAMES} 或 all[/red]")
+            return
+
+        # 对于 clean all all（全量清理），显示受影响的目录列表
+        if config_name == "all" and step_name == "all":
             from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
             dir_lines = []
-
-            # 本地目录
+            dir_lines.append("[bold]─── 本地 PC ───[/bold]")
             local_step = LOCAL_PATHS.get("step_dir", "")
             local_scdoc = LOCAL_PATHS.get("scdoc_dir", "")
-            dir_lines.append("[bold]━━ 本地 PC ━━[/bold]")
             if local_step:
                 dir_lines.append(f"  • STEP 文件: {local_step}")
             if local_scdoc:
                 dir_lines.append(f"  • SCDOC 文件: {local_scdoc}")
 
-            # 远程工作站目录
-            dir_lines.append("[bold]━━ 远程工作站 ({host}) ━━[/bold]".format(
+            dir_lines.append("[bold]─── 远程工作站 ({host}) ───[/bold]".format(
                 host=REMOTE_CONFIG.get("host", "?")))
             remote_msh = REMOTE_CONFIG.get("msh_dir", "")
             remote_result = REMOTE_CONFIG.get("result_dir", "")
@@ -799,47 +810,31 @@ class PipelineTUI(App):
                 dir_lines.append(f"  • CAS/DAT 求解结果: {remote_result}")
 
             dirs_text = "\n".join(dir_lines)
-
-            detail = (
-                f"\n\n⚠ 将清空以下目录下的所有仿真中间文件：\n{dirs_text}"
-            )
-
-            self.push_screen(
-                ConfirmDialog(
-                    f"确定要清理【所有步骤】产生的文件吗？此操作不可逆！{detail}",
-                    callback=self._do_clean_all
-                )
-            )
+            detail = f"\n\n⚠ 将清空以下目录下的所有仿真中间文件：\n{dirs_text}"
         else:
-            # 第一个参数是构型名，第二个是步骤名（可选）
-            try:
-                config_name = int(args[0])
-            except ValueError:
-                self._log(f"[red]构型名称必须是整数，收到: {args[0]}[/red]")
-                return
-            step_name = args[1] if len(args) > 1 else None
-            if step_name and step_name not in STEP_NAMES:
-                self._log(f"[red]无效步骤名: {step_name}，有效值: {STEP_NAMES}[/red]")
-                return
-            self._do_clean_step(step_name, config_name)
+            detail = ""
 
-    def _do_clean_step(self, step_name: str, config_name: int = None):
-        """执行清理步骤操作。"""
+        # 构建确认对话框文本
+        cfg_desc = "所有构型" if config_name == "all" else f"构型{config_name}"
+        if step_name == "all":
+            step_desc = "所有步骤"
+        else:
+            step_desc = f"{step_name} 步骤"
+
+        self.push_screen(
+            ConfirmDialog(
+                f"确定要清理{cfg_desc}的{step_desc}产生的文件吗？此操作不可逆！{detail}",
+                callback=lambda: self._do_clean_step(step_name, config_name)
+            )
+        )
+
+    def _do_clean_step(self, step_name, config_name=None):
+        """执行清理步骤操作。step_name 支持 str 或 'all'，config_name 支持 int、None 或 'all'。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.clean_step(step_name, config_name)
         if ok:
             self._log(f"[green]✓ {msg}[/green]")
-        else:
-            self._log(f"[red]✗ {msg}[/red]")
-
-    def _do_clean_all(self):
-        """执行清理全部操作。"""
-        if not self._check_connection():
-            return
-        ok, msg = self.ipc.clean_all()
-        if ok:
-            self._log(f"[yellow]⚠ {msg}[/yellow]")
         else:
             self._log(f"[red]✗ {msg}[/red]")
 
@@ -904,7 +899,7 @@ class PipelineTUI(App):
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            self._log("[cyan]⚡ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
+            self._log("[cyan]⚠ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
                 self._daemon_process.pid))
 
             # 启动异步轮询任务
@@ -920,7 +915,7 @@ class PipelineTUI(App):
 
         self.push_screen(
             ConfirmDialog(
-                "确定要【停止后台引擎】吗？\n所有正在运行的任务将被中止！\n\n"
+                "确定要【停止后台引擎】吗？\n所有正在运行的任务将被中止！\n"
                 "（TUI 界面将保持运行，可随时重新启动 daemon）",
                 callback=self._execute_stop_daemon
             )
@@ -974,31 +969,29 @@ class PipelineTUI(App):
 
     def _show_reset_prompt(self):
         """提示用户输入 reset 参数。"""
-        self._log("[yellow]请在命令输入行使用: reset <构型名> [步骤名]  或 reset all[/yellow]")
+        self._log("[yellow]请在命令输入行使用: reset <构型名|all> <步骤名|all>[/yellow]")
         self.query_one("#cmd-input", Input).focus()
 
     def _show_clean_prompt(self):
         """提示用户输入 clean 参数。"""
-        self._log("[yellow]请在命令输入行使用: clean <构型名> [步骤名]  或 clean all[/yellow]")
+        self._log("[yellow]请在命令输入行使用: clean <构型名|all> <步骤名|all>[/yellow]")
         self.query_one("#cmd-input", Input).focus()
 
     def _show_help(self):
         """显示帮助信息。"""
         help_text = """
 [bold]可用命令:[/bold]
-  [green]start[/green]                     - 启动或继续流水线
-  [yellow]pause[/yellow]                   - 暂停流水线
-  [blue]check[/blue]                   - 系统自检
-  [cyan]reset <XX> <step>[/cyan]       - 重置指定构型的指定步骤
-  [cyan]reset all[/cyan]               - 重置所有构型（警告！）
-  [magenta]clean <XX> <step>[/magenta]       - 清理指定构型的步骤文件
-  [magenta]clean all[/magenta]               - 清理所有文件（警告！）
-  [dim]quit[/dim]                    - 退出界面（后台继续运行）
-  [red]quit full[/red]               - 完全退出（停止引擎 + 关闭 TUI）
-  [bold cyan]daemon start[/bold cyan]           - 启动后台引擎并自动连接
-  [bold cyan]daemon stop[/bold cyan]           - 停止后台引擎（TUI 保持运行）
-  [dim]status[/dim]                  - 显示状态摘要
-  [dim]help[/dim]                    - 显示此帮助
+  [dim]help[/dim]                        - 显示此帮助
+  [green]start[/green]                       - 启动或继续流水线
+  [yellow]pause[/yellow]                       - 暂停流水线
+  [dim]check[/dim]                       - 系统自检
+  [dim]status[/dim]                      - 显示状态摘要
+  [red]reset <XX|all> <step|all>[/red]   - 重置构型步骤状态
+  [red]clean <XX|all> <step|all>[/red]   - 清理构型步骤文件
+  [cyan]daemon start[/cyan]                - 启动后台引擎并自动连接
+  [cyan]daemon stop[/cyan]                 - 停止后台引擎（TUI 继续运行）
+  [yellow]quit[/yellow]                        - 退出界面（引擎继续运行）
+  [red]quit full[/red]                   - 完全退出（停止引擎 + 关闭 TUI）
         """
         self._log(help_text)
 
@@ -1011,7 +1004,7 @@ class PipelineTUI(App):
         if not self.ipc.is_connected():
             self._log("[yellow]未连接到后台引擎，尝试重新连接...[/yellow]")
             if self.ipc.connect():
-                self._log("[green]✓ 已重新连接[/green]")
+                self._log("[green]✓ 已重新连接！[/green]")
                 if not self._refresh_timer:
                     self._refresh_timer = self.set_interval(1.0, self._refresh_status)
                 return True

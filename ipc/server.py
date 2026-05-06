@@ -7,13 +7,12 @@ IPC 服务器模块 (IPC Server)
 """
 import socket
 import threading
-import json
 from typing import Optional, Callable
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
-    CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK, CMD_STATUS,
-    CMD_RESET_STEP, CMD_RESET_ALL, CMD_CLEAN_STEP, CMD_CLEAN_ALL,
+    CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
+    CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
 )
 from engine.config import IPC_CONFIG
@@ -82,11 +81,9 @@ class IPCServer:
 
         # 重置
         self.register_handler(CMD_RESET_STEP, lambda p: daemon.handle_reset_step(p))
-        self.register_handler(CMD_RESET_ALL, lambda p: daemon.handle_reset_all(p))
 
         # 清理
         self.register_handler(CMD_CLEAN_STEP, lambda p: daemon.handle_clean_step(p))
-        self.register_handler(CMD_CLEAN_ALL, lambda p: daemon.handle_clean_all(p))
 
     # ------------------------------------------------------------------
     # 服务器生命周期

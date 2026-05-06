@@ -16,7 +16,7 @@ import os
 import subprocess
 import time
 import threading
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
@@ -84,21 +84,85 @@ class TaskRunner:
     # 阶段 2: SolidWorks 宏执行
     # ------------------------------------------------------------------
 
+    def _launch_solidworks_via_subprocess(self) -> bool:
+        """
+        备选方案：通过 subprocess 直接启动 SolidWorks.exe，
+        然后轮询等待其 COM 接口就绪。
+
+        Returns:
+            True 表示 SolidWorks 进程已成功启动
+        """
+        sw_exe = LOCAL_PATHS.get("sw_exe", "")
+        if not sw_exe or not os.path.exists(sw_exe):
+            logger.warning("未配置 SolidWorks 可执行文件路径 (sw_exe)，无法使用 subprocess 启动")
+            return False
+
+        logger.info(f"正在通过 subprocess 启动 SolidWorks: {sw_exe}")
+        try:
+            # 使用 Popen 启动 SW，不等待其退出
+            subprocess.Popen(
+                [sw_exe],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            logger.info("SolidWorks 进程已启动，等待 COM 接口就绪...")
+
+            # 轮询等待 SW 完全启动（最多等待 60 秒）
+            import pythoncom
+            import win32com.client
+            max_wait = 60
+            for attempt in range(max_wait):
+                time.sleep(1)
+                try:
+                    sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+                    if sw_app is not None:
+                        logger.info(f"SolidWorks COM 接口已就绪 (等待了 {attempt + 1} 秒)")
+                        return True
+                except Exception:
+                    pass  # SW 还没完全启动，继续等
+            logger.error(f"等待 SolidWorks 启动超时 ({max_wait} 秒)")
+            return False
+        except FileNotFoundError:
+            logger.error(f"找不到 SolidWorks 可执行文件: {sw_exe}")
+            return False
+        except OSError as e:
+            logger.error(f"启动 SolidWorks 进程失败: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # SW 2025 API 常量（硬编码以避免 import 依赖）
+    # ------------------------------------------------------------------
+    # swDocumentTypes_e
+    _SW_DOC_PART = 1
+    _SW_DOC_ASSEMBLY = 2
+    # swOpenDocOptions_e (用于 OpenDoc6)
+    _SW_OPEN_SILENT = 1       # 静默：抑制警告对话框
+    _SW_OPEN_READONLY = 2     # 只读
+    # swRunMacroOption_e (用于 RunMacro2)
+    _SW_RUN_MACRO_DEFAULT = 0
+    _SW_RUN_MACRO_UNLOAD_AFTER = 1
+
     def execute_sw_macro(self) -> bool:
         """
         执行 SolidWorks 宏 (Macro1.swp)。
 
         SW 宏会一次性批量导出所有构型的 STEP 文件到 step_dir。
-        因此整个流水线只需要调用一次此方法。
+        整个流水线只需要调用一次此方法（RunMacro2 同步阻塞至宏完成）。
 
-        执行策略：
-        1. 通过 win32com 获取或启动 SolidWorks 应用
-        2. 打开初始模型文件
-        3. 运行指定的宏
-        4. 宏在后台运行，导出所有构型
+        执行策略（三层降级）：
+        1. GetActiveObject → 连接到已运行的 SW 实例
+        2. Dispatch → 通过 COM 注册表启动新 SW 实例
+        3. subprocess → 直接启动 SLDWORKS.exe，轮询 GetActiveObject
+
+        SW 2025 API 参考：
+        - OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
+          取代已废弃的 OpenDoc2，推荐使用 OpenDoc6
+        - RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
+          需通过 GetMacroMethods() 动态获取 VBA 模块名
 
         Returns:
-            True 表示宏启动成功（注意：宏在 SW 内部异步运行）
+            True 表示宏已执行完毕（RunMacro2 同步等待完成）
         """
         logger.info("=" * 60)
         logger.info("启动 SolidWorks 宏执行")
@@ -116,41 +180,321 @@ class TaskRunner:
             return False
 
         try:
-            # 使用 win32com 连接 SolidWorks
             import win32com.client
             import pythoncom
 
-            # 初始化 COM
             pythoncom.CoInitialize()
 
             try:
-                logger.info("正在连接 SolidWorks...")
+                sw_app = None
+
+                # ---- 第1层: 连接已运行的 SW ----
+                logger.info("正在连接 SolidWorks (第1层: GetActiveObject)...")
                 try:
                     sw_app = win32com.client.GetActiveObject("SldWorks.Application")
                     logger.info("已连接到运行中的 SolidWorks 实例")
-                except (OSError, AttributeError, RuntimeError):
-                    # COM 未注册或 SW 未运行，尝试启动新实例
-                    logger.info("SolidWorks 未运行，正在启动...")
-                    sw_app = win32com.client.Dispatch("SldWorks.Application")
-                    sw_app.Visible = True  # 设为可见以便调试
-                    logger.info("SolidWorks 已启动")
+                except Exception as e1:
+                    logger.info(
+                        f"GetActiveObject 失败 ({type(e1).__name__}: {e1})，"
+                        f"尝试启动新实例..."
+                    )
 
-                # 打开模型文件
-                logger.info(f"正在打开模型: {sw_model}")
-                sw_app.OpenDoc2(sw_model, 1)  # 1 = swDocPART
+                    # ---- 第2层: 通过 COM Dispatch 启动 ----
+                    logger.info("正在启动 SolidWorks (第2层: COM Dispatch)...")
+                    try:
+                        sw_app = win32com.client.Dispatch("SldWorks.Application")
+                        sw_app.Visible = True
+                        logger.info("SolidWorks 已通过 COM Dispatch 启动")
+                        # 等待 SW 窗口完全加载
+                        time.sleep(8)
+                    except Exception as e2:
+                        logger.warning(
+                            f"COM Dispatch 失败 ({type(e2).__name__}: {e2})，"
+                            f"尝试备选方案..."
+                        )
 
-                # 运行宏
-                logger.info(f"正在执行宏: {sw_macro}")
-                # RunMacro2 参数: 宏路径, 模块名, 过程名
-                # Macro1.swp 是 VBA 宏，通常主过程在模块的 main() 中
-                sw_app.RunMacro2(sw_macro, "Macro1", "main")
+                        # ---- 第3层: 直接启动 exe ----
+                        logger.info("正在启动 SolidWorks (第3层: subprocess)...")
+                        if not self._launch_solidworks_via_subprocess():
+                            logger.error("所有启动方式均失败，无法连接 SolidWorks")
+                            return False
+                        sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+                        sw_app.Visible = True
+                        logger.info("已通过 subprocess 启动并连接 SolidWorks")
 
-                logger.info("SW 宏已启动执行（后台批量导出中...）")
+                # ---- 确保 SW 可见且就绪 ----
+                try:
+                    sw_app.Visible = True
+                except Exception:
+                    pass
+
+                # ---- 步骤 A: 动态获取宏的模块名 ----
+                logger.info("正在解析宏结构...")
+                macro_module = None
+                macro_proc = "main"
+                try:
+                    # GetMacroMethods(FilePath, DocumentType) → tuple of "Module.Proc" strings
+                    methods = sw_app.GetMacroMethods(sw_macro, self._SW_DOC_PART)
+                    logger.info(f"GetMacroMethods(PART): {methods}")
+                    if methods and isinstance(methods, (tuple, list)) and len(methods) > 0:
+                        first = methods[0]
+                        if isinstance(first, str) and "." in first:
+                            macro_module, macro_proc = first.split(".", 1)
+                            logger.info(
+                                f"发现宏入口: 模块='{macro_module}', 过程='{macro_proc}'"
+                            )
+                except Exception as e_methods:
+                    logger.warning(
+                        f"GetMacroMethods 失败 ({type(e_methods).__name__}: {e_methods})，"
+                        f"将使用启发式搜索"
+                    )
+
+                # ---- 步骤 B: 打开模型文件 (OpenDoc6) ----
+                # OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
+                logger.info(f"正在打开模型 (OpenDoc6): {os.path.basename(sw_model)}")
+                open_errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+                open_warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+
+                try:
+                    doc = sw_app.OpenDoc6(
+                        sw_model,
+                        self._SW_DOC_PART,       # Type: 1=swDocPART
+                        self._SW_OPEN_SILENT,    # Options: 1=Silent（抑制弹窗）
+                        "",                       # Configuration: 空=上次保存的配置
+                        open_errors,
+                        open_warnings,
+                    )
+                    logger.info(
+                        f"OpenDoc6: Errors={open_errors.value}, "
+                        f"Warnings={open_warnings.value}"
+                    )
+                except Exception as open_err:
+                    logger.error(
+                        f"OpenDoc6 异常 ({type(open_err).__name__}: {open_err})"
+                    )
+                    return False
+
+                if doc is None:
+                    logger.error(
+                        f"无法打开 SW 模型: {sw_model}"
+                        f"（文件可能损坏、版本不兼容，或路径含特殊字符）"
+                    )
+                    return False
+                logger.info(f"✓ 模型已打开: {os.path.basename(sw_model)}")
+
+                # ---- 步骤 B2: 从文件导入设计表 ----
+                # 模型不再内嵌链接到设计表，改为每次打开后从 Excel 文件导入。
+                # IModelDoc2::InsertFamilyTableOpen(FileName) 会将指定 Excel
+                # 作为设计表插入模型，返回 True 表示导入成功。
+                excel_path = LOCAL_PATHS.get("excel", "")
+                if excel_path and os.path.exists(excel_path):
+                    logger.info(
+                        f"正在导入设计表: {os.path.basename(excel_path)}"
+                    )
+                    try:
+                        inserted = doc.InsertFamilyTableOpen(excel_path)
+                        if inserted:
+                            logger.info("✓ 设计表已导入")
+                            # 导入后获取设计表接口，确保更新方向正确
+                            try:
+                                design_table = doc.GetDesignTable()
+                                if design_table is not None:
+                                    # 禁止反向更新（模型 → 设计表）
+                                    try:
+                                        design_table.Updatable = False
+                                        logger.info("  已禁止'模型→设计表'反向更新")
+                                    except Exception as e_upd:
+                                        logger.debug(
+                                            f"  设置 Updatable=False 失败 "
+                                            f"({type(e_upd).__name__}: {e_upd})"
+                                        )
+                                    # 显式将设计表更改应用到模型
+                                    try:
+                                        design_table.UpdateModel()
+                                        logger.info("  ✓ 设计表更改已应用到模型")
+                                    except Exception as e_um:
+                                        logger.warning(
+                                            f"  UpdateModel 失败 "
+                                            f"({type(e_um).__name__}: {e_um})，"
+                                            f"模型可能已是最新状态"
+                                        )
+                            except Exception as e_dt2:
+                                logger.debug(
+                                    f"设计表后处理异常 "
+                                    f"({type(e_dt2).__name__}: {e_dt2})"
+                                )
+                        else:
+                            logger.error(
+                                f"设计表导入失败: InsertFamilyTableOpen 返回 False"
+                            )
+                            logger.error(f"  请检查 Excel 文件格式是否正确: {excel_path}")
+                            # 关闭文档，因为模型可能缺少必要参数
+                            try:
+                                sw_app.CloseDoc(os.path.basename(sw_model))
+                            except Exception:
+                                pass
+                            return False
+                    except Exception as e_insert:
+                        logger.error(
+                            f"InsertFamilyTableOpen 异常 "
+                            f"({type(e_insert).__name__}: {e_insert})"
+                        )
+                        try:
+                            sw_app.CloseDoc(os.path.basename(sw_model))
+                        except Exception:
+                            pass
+                        return False
+                else:
+                    logger.info("未配置 Excel 设计表路径或文件不存在，跳过导入")
+
+                # ---- 步骤 B3: 重建所有构型 ----
+                # 导入设计表后，模型参数已更新但几何体未重建。
+                # 若不重建，宏文件只会导出已激活过的构型。
+                # ForceRebuildAll 强制重建所有构型而不逐个激活。
+                logger.info("正在重建所有构型（ForceRebuildAll）...")
+                try:
+                    doc.Extension.ForceRebuildAll()
+                    logger.info("✓ 所有构型重建完成")
+                except Exception as e_rebuild:
+                    logger.error(
+                        f"ForceRebuildAll 失败 "
+                        f"({type(e_rebuild).__name__}: {e_rebuild})"
+                    )
+                    # 降级：尝试普通重建
+                    try:
+                        doc.EditRebuild3()
+                        logger.info("  已降级为当前构型重建")
+                    except Exception as e_rebuild2:
+                        logger.warning(
+                            f"降级重建也失败 "
+                            f"({type(e_rebuild2).__name__}: {e_rebuild2})"
+                        )
+
+                # ---- 步骤 C: 执行宏 (RunMacro2) ----
+                # RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
+                logger.info(f"正在执行宏 (RunMacro2): {os.path.basename(sw_macro)}")
+                macro_ok = False
+                last_error_detail = ""
+
+                # 构建模块名尝试列表（动态发现的模块名优先）
+                candidate_modules = []
+                if macro_module:
+                    candidate_modules.append(macro_module)
+                # 常见回退模块名
+                for name in ["Module1", "Macro1", "Macro11", "MainModule", "Module"]:
+                    if name not in candidate_modules:
+                        candidate_modules.append(name)
+
+                # 过程名候选列表
+                candidate_procs = [macro_proc] if macro_proc else ["main"]
+                for p in ["main", "Main", "MainProc"]:
+                    if p not in candidate_procs:
+                        candidate_procs.append(p)
+
+                for mod_name in candidate_modules:
+                    if macro_ok:
+                        break
+                    for proc_name in candidate_procs:
+                        if macro_ok:
+                            break
+                        try:
+                            run_error = win32com.client.VARIANT(
+                                pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+                            )
+                            logger.info(
+                                f"  RunMacro2: module='{mod_name}', "
+                                f"proc='{proc_name}'"
+                            )
+                            result = sw_app.RunMacro2(
+                                sw_macro,
+                                mod_name,
+                                proc_name,
+                                self._SW_RUN_MACRO_DEFAULT,
+                                run_error,
+                            )
+                            logger.info(
+                                f"  RunMacro2 返回: {result}, Error={run_error.value}"
+                            )
+                            if result:
+                                logger.info(
+                                    f"✓ 宏已启动并完成 "
+                                    f"(模块: {mod_name}, 过程: {proc_name})"
+                                )
+                                macro_ok = True
+                            else:
+                                last_error_detail = (
+                                    f"module='{mod_name}', proc='{proc_name}', "
+                                    f"Error={run_error.value}"
+                                )
+                                logger.debug(f"  失败: {last_error_detail}")
+                        except Exception as e_macro:
+                            last_error_detail = (
+                                f"module='{mod_name}', proc='{proc_name}', "
+                                f"{type(e_macro).__name__}: {e_macro}"
+                            )
+                            logger.debug(f"  异常: {last_error_detail}")
+
+                if not macro_ok:
+                    logger.error("所有宏执行方式均失败。最后错误详情:")
+                    logger.error(f"  {last_error_detail}")
+                    logger.error("请检查:")
+                    logger.error(f"  1. 宏文件是否可正常运行: {sw_macro}")
+                    logger.error(
+                        f"  2. VBA 模块名（可用 GetMacroMethods 查询）"
+                    )
+                    logger.error(
+                        f"  3. VBA 过程是否为 Public Sub（无参数）"
+                    )
+                    # 关闭已打开的文档
+                    try:
+                        sw_app.CloseDoc(os.path.basename(sw_model))
+                    except Exception:
+                        pass
+                    return False
+
+                logger.info("SW 宏执行完毕，正在校验各构型 STEP 文件...")
+                logger.info(f"  输出目录: {LOCAL_PATHS.get('step_dir', '?')}")
                 self.state.set_sw_macro_started(True)
 
-                # 注意：不关闭 SW，让宏在后台运行
-                # COM 对象会在宏执行完毕后由用户手动或超时机制处理
+                # ---- 步骤 D: 逐构型校验 STEP 文件 ----
+                # RunMacro2 是同步调用，返回时宏已执行完毕。
+                # 逐个检查预期 STEP 文件是否存在：
+                #   存在 → SW 步骤 Completed
+                #   缺失 → SW 步骤 Error
+                all_configs = self.state.get_all_configs()
+                step_dir = LOCAL_PATHS.get("step_dir", "")
+                missing_configs: List[int] = []
+                found_configs: List[int] = []
 
+                for cn in all_configs:
+                    expected_file = os.path.join(
+                        step_dir,
+                        f"model_gen4.SLDPRT_{cn}.step"
+                    )
+                    if os.path.exists(expected_file):
+                        self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                        found_configs.append(cn)
+                        logger.debug(f"  构型{cn} ✓")
+                    else:
+                        self.state.set_step_status(
+                            cn, "SW", STATUS_ERROR,
+                            f"宏执行完毕但 STEP 缺失: "
+                            f"model_gen4.SLDPRT_{cn}.step"
+                        )
+                        missing_configs.append(cn)
+                        logger.warning(f"  构型{cn} ✗ STEP 缺失")
+
+                logger.info(
+                    f"STEP 校验完成: "
+                    f"{len(found_configs)}/{len(all_configs)} 成功"
+                )
+                if missing_configs:
+                    logger.warning(
+                        f"缺失构型: {sorted(missing_configs)} "
+                        f"— 可能原因: 构型重建失败 / 设计表参数错误"
+                    )
+
+                # 不关闭 SW（保留以供调试/断点续传检查）
                 return True
             finally:
                 pythoncom.CoUninitialize()
@@ -158,10 +502,10 @@ class TaskRunner:
         except ImportError:
             logger.error("win32com 未安装，请执行: pip install pywin32")
             return False
-        except (OSError, ValueError, RuntimeError) as e:
-            logger.error(f"SW 宏执行失败: {e}", exc_info=True)
-            # COM 异常类型(pywintypes.com_error)在 pythoncom 导入失败时不可用，
-            # 但 pywin32 安装后 COM 错误通常是 OSError 的子类
+        except Exception as e:
+            logger.error(
+                f"SW 宏执行失败 ({type(e).__name__}: {e})", exc_info=True
+            )
             return False
 
     # ------------------------------------------------------------------
@@ -183,7 +527,7 @@ class TaskRunner:
         """
         step_file = os.path.join(
             LOCAL_PATHS["step_dir"],
-            f"model_gen4_{config_name}.step"
+            f"model_gen4.SLDPRT_{config_name}.step"
         )
         scdoc_file = os.path.join(
             LOCAL_PATHS["scdoc_dir"],
@@ -333,8 +677,9 @@ class TaskRunner:
 
         # 构建远程命令：激活 conda 环境后执行网格脚本
         conda_env = REMOTE_CONFIG["conda_env"]
+        conda_exe = REMOTE_CONFIG["conda_exe"]
         meshing_script = REMOTE_CONFIG["meshing_script"]
-        command = f'conda activate {conda_env} && python "{meshing_script}" {config_name}'
+        command = f'call "{conda_exe}" activate {conda_env} && python "{meshing_script}" {config_name}'
 
         logger.info(f"启动远程网格划分: 构型{config_name}")
         logger.debug(f"远程命令: {command}")
@@ -400,8 +745,9 @@ class TaskRunner:
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
         conda_env = REMOTE_CONFIG["conda_env"]
+        conda_exe = REMOTE_CONFIG["conda_exe"]
         solver_script = REMOTE_CONFIG["solver_script"]
-        command = f'conda activate {conda_env} && python "{solver_script}" {config_name}'
+        command = f'call "{conda_exe}" activate {conda_env} && python "{solver_script}" {config_name}'
 
         logger.info(f"启动远程仿真求解: 构型{config_name}")
 
@@ -476,7 +822,7 @@ class TaskRunner:
             ssh = self.get_ssh()
             if ssh.is_connected():
                 results["remote_checks"]["ssh"] = "连接成功"
-                remote_info = ssh.check_system()
+                remote_info = ssh.check_system(conda_exe=REMOTE_CONFIG["conda_exe"])
                 results["remote_checks"].update(remote_info)
             else:
                 results["remote_checks"]["ssh"] = "连接失败"
@@ -489,14 +835,26 @@ class TaskRunner:
     # 文件清理
     # ------------------------------------------------------------------
 
-    def clean_step_files(self, step_name: str, config_name: int = None):
+    def clean_step_files(self, step_name, config_name=None):
         """
         清理指定步骤产生的文件（包括本地和远程工作站上的文件）。
 
         Args:
-            step_name: 步骤名
-            config_name: 构型名称，若为 None 则清理所有构型
+            step_name: 步骤名，或 "all" 表示全部步骤
+            config_name: 构型名称，若为 None 或 "all" 则清理所有构型
         """
+        # 解析 "all" 语义
+        if config_name == "all":
+            config_name = None
+
+        if step_name == "all":
+            for s in STEP_NAMES:
+                self._clean_single_step(s, config_name)
+        else:
+            self._clean_single_step(step_name, config_name)
+
+    def _clean_single_step(self, step_name: str, config_name: int = None):
+        """清理单个步骤的文件（内部方法）。"""
         # ---- 本地文件清理映射 ----
         # (目录key, 文件名模板, 额外清理的后缀对 (原后缀, 新后缀))
         local_patterns = {
@@ -527,16 +885,24 @@ class TaskRunner:
             for cn in configs:
                 filename = file_template.format(config=cn)
                 filepath = os.path.join(target_dir, filename)
-                if os.path.exists(filepath):
+                try:
                     os.remove(filepath)
                     logger.info(f"已删除本地文件: {filepath}")
+                except FileNotFoundError:
+                    pass  # 文件本就不存在，无需处理
+                except OSError as e:
+                    logger.warning(f"删除本地文件失败: {filepath}: {e}")
                 if extra_suffix_pair:
                     old_suffix, new_suffix = extra_suffix_pair
                     extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
                     extra_path = os.path.join(target_dir, extra_filename)
-                    if os.path.exists(extra_path):
+                    try:
                         os.remove(extra_path)
                         logger.info(f"已删除本地文件: {extra_path}")
+                    except FileNotFoundError:
+                        pass
+                    except OSError as e:
+                        logger.warning(f"删除本地文件失败: {extra_path}: {e}")
 
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)

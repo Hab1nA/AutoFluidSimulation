@@ -254,10 +254,8 @@ TUI 客户端与 Daemon 之间通过 **TCP Socket (127.0.0.1:9527)** 通信，�
 | `get_all_status` | `CMD_GET_ALL_STATUS` | 获取所有构型状态 |
 | `get_statistics` | `CMD_GET_STATISTICS` | 获取统计信息 |
 | `get_engine_status` | `CMD_GET_ENGINE_STATUS` | 获取引擎运行状态 |
-| `reset_step` | `CMD_RESET_STEP` | 重置指定构型指定步骤 |
-| `reset_all` | `CMD_RESET_ALL` | 重置全部构型 |
-| `clean_step` | `CMD_CLEAN_STEP` | 清理指定步骤的输出文件 |
-| `clean_all` | `CMD_CLEAN_ALL` | 清理所有输出文件 |
+| `reset_step` | `CMD_RESET_STEP` | 重置构型步骤（支持 all 参数） |
+| `clean_step` | `CMD_CLEAN_STEP` | 清理步骤文件（支持 all 参数） |
 
 ---
 
@@ -517,10 +515,8 @@ ENGINE_CONFIG = {
 | `start` | 启动或继续流水线 | `start` |
 | `pause` | 暂停流水线 | `pause` |
 | `check` | 系统自检 | `check` |
-| `reset <构型> [步骤]` | 重置构型步骤状态 | `reset 5 SW` 或 `reset 5` |
-| `reset all` | 重置全部（危险操作，需确认） | `reset all` |
-| `clean <构型> [步骤]` | 清理输出文件 | `clean 5 SW` 或 `clean 5` |
-| `clean all` | 清理所有文件（危险操作，需确认） | `clean all` |
+| `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（两个参数必填） | `reset 5 SW`、`reset all SW`、`reset all all` |
+| `clean <构型\|all> <步骤\|all>` | 清理输出文件（两个参数必填） | `clean 5 SW`、`clean all SW`、`clean all all` |
 | `status` | 显示统计信息 | `status` |
 | `quit` | 退出 TUI（Daemon 继续运行） | `quit` |
 | `quit full` | 完全停止后台引擎 | `quit full` |
@@ -528,14 +524,16 @@ ENGINE_CONFIG = {
 ### reset 命令说明
 
 - `reset 5 SW` — 重置构型 5 的 SW 阶段及所有后续步骤为 Waiting
-- `reset 5` — 重置构型 5 的所有步骤
-- `reset all` — 重置所有构型的所有步骤，并清除全局屏障状态
+- `reset 5 all` — 重置构型 5 的所有步骤
+- `reset all SW` — 重置所有构型的 SW 步骤
+- `reset all all` — 重置所有构型的所有步骤，并清除全局屏障状态
 
 ### clean 命令说明
 
 - `clean 5 SW` — 清理构型 5 的 SW 步骤文件
-- `clean 5` — 清理构型 5 的所有步骤文件
-- `clean all` — 清理所有步骤的所有输出文件
+- `clean 5 all` — 清理构型 5 的所有步骤文件
+- `clean all SW` — 清理所有构型的 SW 步骤文件
+- `clean all all` — 清理所有构型的所有步骤文件
 
 ---
 

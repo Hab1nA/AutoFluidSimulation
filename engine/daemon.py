@@ -140,7 +140,13 @@ class PipelineDaemon:
                 pass  # Windows 不支持某些信号
 
     def _load_excel_data(self):
-        """从 Excel 加载构型数据并初始化状态库。"""
+        """从 Excel 加载构型数据并同步到状态库。
+
+        启动时自动与设计表同步：
+        - 新增设计表中的构型（状态置为 Waiting）
+        - 保留已有构型的状态（断点续传）
+        - 删除设计表中已不存在的构型
+        """
         excel_path = LOCAL_PATHS["excel"]
         try:
             configs = read_model_configs(excel_path)
@@ -148,7 +154,7 @@ class PipelineDaemon:
                 logger.error("Excel 中未读取到任何构型数据！")
                 return
             self.state.load_configs(configs)
-            logger.info(f"已从 Excel 加载 {len(configs)} 个构型")
+            logger.info(f"已从 Excel 同步 {len(configs)} 个构型到状态库")
         except (FileNotFoundError, ValueError, OSError, IOError) as e:
             logger.error(f"Excel 数据加载失败: {e}")
 
@@ -166,6 +172,9 @@ class PipelineDaemon:
             # 暂停状态下：恢复运行
             self.scheduler.resume()
             return True, None, "流水线已恢复运行"
+
+        # 先标记为 running（防止竞态：调度线程尚未设置状态时收到重复 start 命令）
+        self.state.set_engine_status("running")
 
         # 在独立线程中启动调度器（避免阻塞 IPC 响应）
         scheduler_thread = threading.Thread(
@@ -219,9 +228,9 @@ class PipelineDaemon:
 
     def handle_reset_step(self, params: dict) -> Tuple[bool, Any, str]:
         """
-        处理 reset <XX> <step_name> 命令。
+        处理 reset 命令，config_name 和 step_name 均支持 "all"。
 
-        params: {"config_name": int, "step_name": str}
+        params: {"config_name": int|str, "step_name": str|None}
         """
         config_name = params.get("config_name")
         step_name = params.get("step_name")
@@ -229,62 +238,64 @@ class PipelineDaemon:
         if config_name is None:
             return False, None, "请指定构型名称 (config_name)"
 
-        self.scheduler.reset_config(config_name, step_name)
-        msg = f"已重置构型{config_name}" + (f" 的 {step_name} 及后续步骤" if step_name else " 的所有步骤")
-        return True, None, msg
+        # 校验 step_name（空字符串视为无效）
+        if step_name is not None and step_name != "all" and step_name not in STEP_NAMES:
+            return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"
 
-    def handle_reset_all(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 reset all 命令。"""
-        self.scheduler.reset_all()
-        return True, None, "已重置所有构型的所有步骤（警告：此操作不可逆）"
+        self.scheduler.reset_config(config_name, step_name)
+
+        # 构建可读的消息
+        if config_name == "all":
+            cfg_desc = "所有构型"
+        else:
+            cfg_desc = f"构型{config_name}"
+
+        if step_name in (None, "all"):
+            step_desc = "所有步骤"
+        else:
+            step_desc = f"{step_name} 及后续步骤"
+
+        msg = f"已重置{cfg_desc}的{step_desc}"
+        return True, None, msg
 
     def handle_clean_step(self, params: dict) -> Tuple[bool, Any, str]:
         """
-        处理 clean <step_name> 命令。
+        处理 clean 命令，config_name 和 step_name 均支持 "all"。
 
-        params: {"step_name": str, "config_name": int | None}
+        params: {"step_name": str, "config_name": int|str|None}
         """
         step_name = params.get("step_name")
         config_name = params.get("config_name")
 
-        if step_name not in STEP_NAMES:
-            return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES}"
+        # 验证 step_name（"all" 是合法值，无需校验）
+        if step_name != "all" and step_name not in STEP_NAMES:
+            return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"
 
-        # 远程步骤（Meshing/Solver）且清理所有构型时，SSH 操作耗时长，
-        # 放到后台线程执行，避免 IPC 超时。
-        remote_steps = {"Meshing", "Solver"}
-        if step_name in remote_steps and config_name is None:
+        # 判断是否需要后台线程（远程步骤 + 清理范围大）
+        needs_background = (
+            config_name in (None, "all")
+            and (step_name == "all" or step_name in {"Meshing", "Solver"})
+        )
+
+        if needs_background:
             def _do_clean_step():
                 try:
                     self.runner.clean_step_files(step_name, config_name)
-                    logger.info(f"clean {step_name} (all) 后台任务完成")
+                    logger.info(f"clean {step_name} (config={config_name}) 后台任务完成")
                 except Exception as e:
-                    logger.error(f"clean {step_name} (all) 后台任务异常: {e}", exc_info=True)
+                    logger.error(f"clean {step_name} (config={config_name}) 后台任务异常: {e}", exc_info=True)
 
             threading.Thread(target=_do_clean_step, daemon=True,
-                           name=f"CleanStep-{step_name}-Bg").start()
-            msg = f"已启动后台清理 {step_name} 步骤的文件（所有构型）"
+                           name=f"Clean-{step_name}-Bg").start()
+            msg = f"已启动后台清理 {step_name} 步骤的文件"
+            if config_name is not None and config_name != "all":
+                msg += f" (构型{config_name})"
         else:
             self.runner.clean_step_files(step_name, config_name)
             msg = f"已清理 {step_name} 步骤的文件"
-            if config_name:
+            if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
         return True, None, msg
-
-    def handle_clean_all(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 clean all 命令（异步执行，避免阻塞 IPC 响应）。"""
-        # 清理操作可能涉及大量远程 SSH 文件删除，耗时远超 IPC 超时。
-        # 在后台线程中执行，立即返回确认，避免客户端超时和 socket 数据残留。
-        def _do_clean_all():
-            try:
-                for step in STEP_NAMES:
-                    self.runner.clean_step_files(step, None)
-                logger.info("clean all 后台任务完成")
-            except Exception as e:
-                logger.error(f"clean all 后台任务异常: {e}", exc_info=True)
-
-        threading.Thread(target=_do_clean_all, daemon=True, name="CleanAll-Bg").start()
-        return True, None, "已启动后台清理所有步骤的文件（警告：此操作不可逆）"
 
 
 # ============================================================================

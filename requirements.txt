@@ -12,6 +12,9 @@ rich>=13.0.0             # 终端美化（textual 依赖）
 # ---- 数据处理 ----
 openpyxl>=3.1.0          # Excel 读写（读取 model_gen4.xlsx）
 
+# ---- 环境变量管理 ----
+python-dotenv>=1.0.0       # .env 文件加载
+
 # ---- Windows COM 自动化 ----
 pywin32>=305             # SolidWorks COM 接口
 

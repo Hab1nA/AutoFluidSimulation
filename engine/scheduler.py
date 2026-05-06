@@ -23,7 +23,7 @@ from typing import Dict, Optional
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     ENGINE_CONFIG,
 )
 from engine.state_manager import StateManager
@@ -161,11 +161,19 @@ class PipelineScheduler:
             config_name: 构型名称
             filepath: STEP 文件完整路径
         """
-        # 检查该构型的 SW 状态是否为 Completed（避免 SW 还在运行就标记完成）
-        # 实际上文件已稳定存在，可以标记 SW 完成
+        # 检查该构型的 SW 状态是否为 Completed
         current_sw = self.state.get_step_status(config_name, "SW")
         if current_sw != STATUS_COMPLETED:
             self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+
+        # 断点续传防护：若 SC/Transfer/Meshing 已全部完成，跳过推入队列
+        downstream_completed = all(
+            self.state.get_step_status(config_name, s) == STATUS_COMPLETED
+            for s in ["SC", "Transfer", "Meshing"]
+        )
+        if downstream_completed:
+            logger.info(f"构型{config_name} 下游步骤已完成，跳过入队")
+            return
 
         # 推入 SC 处理队列
         self._sc_queue.put((config_name, filepath))
@@ -214,13 +222,16 @@ class PipelineScheduler:
 
             try:
                 self._process_single_config(config_name)
-            except (RuntimeError, ValueError, OSError, IOError) as e:
+            except Exception as e:
                 logger.error(f"处理构型{config_name} 时发生未预期异常: {e}", exc_info=True)
                 # 尝试标记当前未完成的步骤为 Error
                 for step in ["SC", "Transfer", "Meshing"]:
-                    s = self.state.get_step_status(config_name, step)
-                    if s not in (STATUS_COMPLETED, STATUS_ERROR):
-                        self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
+                    try:
+                        s = self.state.get_step_status(config_name, step)
+                        if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                            self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
+                    except Exception:
+                        pass  # 状态更新失败不阻止处理其他构型
 
             self._sc_queue.task_done()
 
@@ -237,21 +248,21 @@ class PipelineScheduler:
         """
         # ---- SC 阶段 ----
         sc_status = self.state.get_step_status(config_name, "SC")
-        if sc_status in (STATUS_WAITING, STATUS_ERROR, STATUS_RETRYING):
+        if sc_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "SC",
                                              self.runner.execute_spaceclaim):
                 return  # 失败则中止此构型的后续处理
 
         # ---- Transfer 阶段 ----
         transfer_status = self.state.get_step_status(config_name, "Transfer")
-        if transfer_status in (STATUS_WAITING, STATUS_ERROR, STATUS_RETRYING):
+        if transfer_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "Transfer",
                                              self.runner.execute_transfer):
                 return
 
         # ---- Meshing 阶段 ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
-        if meshing_status in (STATUS_WAITING, STATUS_ERROR, STATUS_RETRYING):
+        if meshing_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "Meshing",
                                              self.runner.execute_meshing):
                 return
@@ -336,6 +347,8 @@ class PipelineScheduler:
         logger.info("[BarrierMonitor] 全局屏障监控启动")
         logger.info("[BarrierMonitor] 等待所有构型的网格划分完成...")
 
+        _last_error_report: set = set()  # 已报告过的失败构型集合，避免重复日志
+
         while not self._stopped.is_set() and not self._barrier_passed.is_set():
             if self._paused.is_set():
                 time.sleep(1)
@@ -353,15 +366,16 @@ class PipelineScheduler:
                 self._dispatch_solver_tasks()
                 break
 
-            # 也检查是否有 Meshing 失败的（仅当状态有变化时记录）
+            # 检查是否有 Meshing 失败的（仅报告新增的失败）
             error_configs = self.state.get_error_configs()
-            meshing_errors = [(c, s, m) for c, s, m in error_configs if s == "Meshing"]
-            if meshing_errors:
+            meshing_errors = {(c, m) for c, s, m in error_configs if s == "Meshing"}
+            new_errors = meshing_errors - _last_error_report
+            if new_errors:
                 logger.warning(
-                    f"[BarrierMonitor] 有 {len(meshing_errors)} 个构型的网格划分失败，"
-                    f"全局屏障将无法通过。请使用 reset 命令重试失败的构型。"
+                    f"[BarrierMonitor] 检测到 {len(new_errors)} 个新的网格划分失败: "
+                    f"{sorted(c for c, _ in new_errors)}"
                 )
-                # 不自动停止，等待用户干预
+                _last_error_report = meshing_errors
 
             # 轮询间隔：网格划分通常耗时较长，不需要高频检查
             time.sleep(5.0)
@@ -388,7 +402,7 @@ class PipelineScheduler:
         dispatched_count = 0
         for cn in all_configs:
             solver_status = self.state.get_step_status(cn, "Solver")
-            if solver_status in (STATUS_WAITING, STATUS_ERROR, STATUS_RETRYING):
+            if solver_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
                 t = threading.Thread(
                     target=self._execute_solver_for_config,
                     args=(cn,),
@@ -427,13 +441,19 @@ class PipelineScheduler:
         """暂停流水线（当前运行步骤完成后不再取新任务）。"""
         logger.info("收到暂停指令")
         self._paused.set()
+        # 将所有 Running/Retrying 步骤批量切换为 Paused，让 TUI 正确反馈
+        self.state.set_all_running_to_paused()
         self.state.set_engine_status("paused")
+        logger.info("流水线已暂停，所有运行中/重试中步骤已标记为 Paused")
 
     def resume(self):
         """继续流水线。"""
         logger.info("收到继续指令")
+        # 将所有 Paused 步骤恢复为 Running
+        self.state.set_all_paused_to_running()
         self._paused.clear()
         self.state.set_engine_status("running")
+        logger.info("流水线已恢复运行")
 
     def stop(self):
         """停止流水线。"""
@@ -458,23 +478,42 @@ class PipelineScheduler:
         self.state.set_engine_status("stopped")
         logger.info("流水线已停止")
 
-    def reset_config(self, config_name: int, step_name: str = None):
+    def reset_config(self, config_name, step_name: str = None):
         """
         重置指定构型的指定步骤（及后续步骤）。
 
         Args:
-            config_name: 构型名称
-            step_name: 步骤名，若为 None 则重置所有步骤（自 SW 起）
+            config_name: 构型名称 (int) 或 "all" 表示全部构型
+            step_name: 步骤名，None 或 "all" 表示重置所有步骤（自 SW 起）
         """
-        self.state.reset_config_steps(config_name, step_name)
-        # 如果重置范围包含 Meshing，需要重新检查全局屏障
-        if step_name is None or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("Meshing", 99):
+        # 将 "all" 统一转为 None（表示全部步骤）
+        if step_name == "all":
+            step_name = None
+
+        # 判断是否需要清除全局屏障（重置范围触及 Meshing 即需重新同步）
+        need_barrier_clear = (
+            step_name is None
+            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("Meshing", 99)
+        )
+
+        # 全量重置（所有构型 + 所有步骤）需要额外清除引擎全局状态
+        if config_name == "all" and step_name is None:
+            self.state.reset_all()
             self._barrier_passed.clear()
-            self.state.set_global_barrier_met(False)
-        logger.info(f"已重置构型{config_name} 从 {step_name or 'SW'} 开始")
+        elif config_name == "all":
+            for cn in self.state.get_all_configs():
+                self.state.reset_config_steps(cn, step_name)
+            if need_barrier_clear:
+                self._barrier_passed.clear()
+                self.state.set_global_barrier_met(False)
+        else:
+            self.state.reset_config_steps(config_name, step_name)
+            if need_barrier_clear:
+                self._barrier_passed.clear()
+                self.state.set_global_barrier_met(False)
+
+        logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 
     def reset_all(self):
-        """重置所有构型的所有步骤。"""
-        self.state.reset_all()
-        self._barrier_passed.clear()
-        logger.warning("已重置所有构型的所有步骤")
+        """重置所有构型的所有步骤（兼容旧调用）。"""
+        self.reset_config("all", None)

@@ -7,10 +7,20 @@
 import os
 import sys
 
+# 加载 .env 文件中的环境变量（需 python-dotenv）
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    load_dotenv(_env_path)
+except ImportError:
+    pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
+
 # ============================================================================
 # 本地 PC 路径配置
 # ============================================================================
 LOCAL_PATHS = {
+    # SolidWorks 可执行文件路径（备选启动方案：COM Dispatch 失败时直接启动）
+    "sw_exe": r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe",
     # SolidWorks 初始模型文件
     "sw_model": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT",
     # 外部 Excel 参数表（唯一数据源）
@@ -47,6 +57,8 @@ REMOTE_CONFIG = {
     "result_dir": r"D:\xkz_1020\case",
     # Conda 环境名称
     "conda_env": "pyfluent",
+    # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
+    "conda_exe": r"C:\ProgramData\anaconda3\Scripts\conda.exe",
     # 远程网格划分脚本
     "meshing_script": r"D:\xkz_1020\batch_meshing_gen4.py",
     # 远程求解脚本
@@ -75,19 +87,20 @@ STEP_INDEX = {name: i for i, name in enumerate(STEP_NAMES)}
 # ============================================================================
 # 状态枚举
 # ============================================================================
-STATUS_WAITING = "Waiting"       # 等待中
-STATUS_RUNNING = "Running"       # 运行中
-STATUS_RETRYING = "Retrying"     # 重试中
-STATUS_COMPLETED = "Completed"   # 已完成
-STATUS_ERROR = "Error"           # 出错
+STATUS_WAITING   = "Waiting"       # 等待中
+STATUS_RUNNING   = "Running"       # 运行中
+STATUS_PAUSED    = "Paused"        # 已暂停（用户手动暂停）
+STATUS_RETRYING  = "Retrying"      # 重试中
+STATUS_COMPLETED = "Completed"     # 已完成
+STATUS_ERROR     = "Error"         # 出错
 
-ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]
+ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]
 
 # ============================================================================
 # 步骤对应的文件扩展名（用于 clean 命令）
 # ============================================================================
 STEP_FILE_PATTERNS = {
-    "SW": "model_gen4_{config}.step",
+    "SW": "model_gen4.SLDPRT_{config}.step",
     "SC": "model_gen4_{config}.scdoc",
     "Transfer": None,  # 传输不产生本地文件
     "Meshing": "model_gen4_{config}.msh.h5",
@@ -164,6 +177,9 @@ if not os.path.exists(LOCAL_PATHS["excel"]):
 
 if not os.path.exists(LOCAL_PATHS["sc_exe"]):
     _CONFIG_WARNINGS.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
+
+if not os.path.exists(LOCAL_PATHS["sw_exe"]):
+    _CONFIG_WARNINGS.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
 
 for warning in _CONFIG_WARNINGS:
     print(f"[CONFIG WARNING] {warning}", file=sys.stderr)
