@@ -170,17 +170,46 @@ class PipelineDaemon:
     # ------------------------------------------------------------------
 
     def handle_start(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 start 命令（启动或继续流水线）。"""
+        """处理 start 命令（启动或继续流水线）。
+
+        状态机：
+        - running → 已是运行中，若暂停标志不一致则修复
+        - paused  → 检查调度器状态后恢复或重启
+        - stopped / 其他 → 全新启动
+        """
         engine_status = self.state.get_engine_status()
+
         if engine_status == "running":
+            # 二次确认：检查调度器的暂停标志是否被意外置位
+            # （防止 start_pipeline 末尾覆盖 engine_status 导致的不一致）
+            if self.scheduler.is_paused:
+                logger.warning("检测到引擎状态为 running 但调度器暂停标志已置位，执行恢复")
+                self.scheduler.resume()
+                return True, None, "流水线已恢复运行（修正不一致状态）"
             return True, None, "流水线已在运行中"
 
         if engine_status == "paused":
-            # 暂停状态下：恢复运行
+            # 暂停状态下恢复运行
+            # 检查调度器主线程是否存活（SW 宏执行期间线程可能因异常退出）
+            if not self.scheduler.pipeline_alive and not self.scheduler.is_paused:
+                # 调度器线程已死亡且暂停标志未置位：
+                # 可能因 SW 失败等原因退出，但引擎状态未正确切换为 stopped
+                # 重新启动流水线（start_pipeline 会检查断点续传）
+                logger.info("检测到调度器线程已退出且未暂停，重新启动流水线...")
+                self.state.set_engine_status("running")
+                scheduler_thread = threading.Thread(
+                    target=self.scheduler.start_pipeline,
+                    daemon=True,
+                    name="SchedulerMain"
+                )
+                scheduler_thread.start()
+                self.scheduler._pipeline_thread = scheduler_thread
+                return True, None, "流水线已重新启动（从断点恢复）"
+            # 正常暂停恢复：pipeline 存活或暂停标志正常置位
             self.scheduler.resume()
             return True, None, "流水线已恢复运行"
 
-        # 先标记为 running（防止竞态：调度线程尚未设置状态时收到重复 start 命令）
+        # 全新启动（engine_status 为 stopped 或其他）
         self.state.set_engine_status("running")
 
         # 在独立线程中启动调度器（避免阻塞 IPC 响应）
@@ -190,11 +219,24 @@ class PipelineDaemon:
             name="SchedulerMain"
         )
         scheduler_thread.start()
+        self.scheduler._pipeline_thread = scheduler_thread
 
         return True, None, "流水线已启动"
 
     def handle_pause(self, params: dict = None) -> Tuple[bool, Any, str]:
-        """处理 pause 命令。"""
+        """处理 pause 命令。
+
+        暂停行为取决于当前所处阶段：
+        - SW 宏执行中：标志置位，宏继续运行但完成后立即暂停
+        - 下游步骤执行中：当前步骤完成后暂停
+        - 空闲状态：直接标记为暂停
+        """
+        engine_status = self.state.get_engine_status()
+        if engine_status == "paused":
+            return True, None, "流水线已在暂停状态"
+        if engine_status == "stopped":
+            return True, None, "流水线已停止，无需暂停"
+
         self.scheduler.pause()
         return True, None, "流水线已暂停（当前运行步骤完成后不再取新任务）"
 

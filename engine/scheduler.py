@@ -19,12 +19,13 @@ DAG 任务调度器 (Pipeline Scheduler)
 import threading
 import queue
 import time
+import os
 from typing import Dict, Optional
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG,
+    ENGINE_CONFIG, LOCAL_PATHS,
 )
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
@@ -71,6 +72,7 @@ class PipelineScheduler:
         self._barrier_thread: Optional[threading.Thread] = None
         self._solver_threads: list[threading.Thread] = []   # 求解线程（屏障通过后启动）
         self._file_monitor: Optional[StepFileMonitor] = None
+        self._pipeline_thread: Optional[threading.Thread] = None  # 主调度线程引用
 
         # ---- 工作线程数 ----
         self._num_workers = 3  # SC/Transfer/Meshing 并发工作线程数
@@ -99,7 +101,12 @@ class PipelineScheduler:
         logger.info("流水线调度器启动")
         logger.info("=" * 60)
 
+        # 记录当前执行线程为主调度线程（供外部查询存活状态）
+        self._pipeline_thread = threading.current_thread()
+
         self._stopped.clear()
+        # 启动（或重启）时清除暂停标志：此方法由全新启动或 resume()→重启路径调用，
+        # resume() 已在调用前清除了 _paused，此处为防御性编程
         self._paused.clear()
 
         # ---- 步骤 1: SW 阶段 ----
@@ -107,42 +114,128 @@ class PipelineScheduler:
             logger.info("SW 宏尚未启动，准备执行...")
             all_configs = self.state.get_all_configs()
 
-            # 将所有构型的 SW 状态设为 Running
+            # 将所有构型的 SW 状态设为 Running（仅限 Waiting/Paused/Error/Retrying 状态）
             for cn in all_configs:
                 current_status = self.state.get_step_status(cn, "SW")
-                if current_status == STATUS_WAITING:
+                if current_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
                     self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
-            # 启动 SW 宏（批量导出所有构型）
+            # ---- SW 宏前暂停检查 ----
+            if self._paused.is_set():
+                logger.info("SW 宏启动前检测到暂停标志，等待继续指令...")
+                self.state.set_engine_status("paused")
+                while self._paused.is_set() and not self._stopped.is_set():
+                    time.sleep(1)
+                if self._stopped.is_set():
+                    return
+                # 恢复后重新标记 SW 为 Running
+                for cn in all_configs:
+                    if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
+                        self.state.set_step_status(cn, "SW", STATUS_RUNNING)
+
+            # 启动 SW 宏（批量导出所有构型）—— RunMacro2 是同步阻塞 COM 调用，不可中断
             success = self.runner.execute_sw_macro()
             if not success:
-                for cn in all_configs:
-                    self.state.set_step_status(cn, "SW", STATUS_ERROR, "SW 宏启动失败")
-                logger.error("SW 宏启动失败，流水线中止")
+                # SW 宏失败时的状态处理
+                if self._paused.is_set():
+                    # 暂停期间 SW 失败：保留 Paused 状态，不覆盖为 Error
+                    logger.warning("SW 宏在暂停期间失败，保留 Paused 状态以供恢复后重试")
+                    for cn in all_configs:
+                        if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
+                            self.state.set_step_status(cn, "SW", STATUS_PAUSED)
+                    self.state.set_engine_status("paused")
+                else:
+                    # 非暂停的 SW 失败：标记 Error 并停止
+                    for cn in all_configs:
+                        self.state.set_step_status(cn, "SW", STATUS_ERROR, "SW 宏启动失败")
+                    self.state.set_engine_status("stopped")
+                    logger.error("SW 宏启动失败，流水线中止")
                 return
+            else:
+                # SW 宏成功执行，但 execute_sw_macro 内部可能已标记部分构型为 Error
+                # （例如某些构型的 STEP 文件缺失）
+                # 若此时暂停标志已置位，将这些 Error 步骤回退为 Paused
+                if self._paused.is_set():
+                    paused_count = 0
+                    for cn in all_configs:
+                        sw_status = self.state.get_step_status(cn, "SW")
+                        if sw_status == STATUS_ERROR:
+                            self.state.set_step_status(cn, "SW", STATUS_PAUSED,
+                                                       "暂停中——恢复后将重新校验 STEP")
+                            paused_count += 1
+                    if paused_count > 0:
+                        logger.info(
+                            f"暂停标志已置位，已将 {paused_count} 个 SW Error 构型回退为 Paused"
+                        )
         else:
             logger.info("SW 宏已执行过，跳过（断点续传模式）")
+            # 断点续传时，检查是否有 SW 步骤处于 Paused 或 Error 状态
+            # Paused：恢复后需重新校验 STEP 文件
+            # Error：清除 sw_macro_started 标志以允许重试 SW 宏
+            all_configs = self.state.get_all_configs()
+            has_paused_sw = False
+            has_error_sw = False
+            for cn in all_configs:
+                sw_status = self.state.get_step_status(cn, "SW")
+                if sw_status == STATUS_PAUSED:
+                    has_paused_sw = True
+                elif sw_status == STATUS_ERROR:
+                    has_error_sw = True
+
+            if has_paused_sw:
+                # 暂停恢复：重新校验 STEP 文件
+                logger.info("检测到 SW Paused 构型，重新校验 STEP 文件...")
+                step_dir = LOCAL_PATHS.get("step_dir", "")
+                for cn in all_configs:
+                    if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
+                        expected_file = os.path.join(
+                            step_dir, f"model_gen4.SLDPRT_{cn}.step"
+                        )
+                        if os.path.exists(expected_file):
+                            self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                            logger.info(f"  构型{cn} ✓ STEP 文件已存在，标记为完成")
+                        else:
+                            # STEP 仍缺失，保持 Error（需要重跑 SW 宏）
+                            self.state.set_step_status(cn, "SW", STATUS_ERROR,
+                                                       "暂停恢复后 STEP 文件仍缺失")
+                            has_error_sw = True
+                            logger.warning(f"  构型{cn} ✗ STEP 文件缺失")
+
+            if has_error_sw:
+                # 有 SW Error 构型，清除 sw_macro_started 标志以允许重新运行
+                logger.warning(
+                    "检测到 SW Error 构型，将清除 sw_macro_started 标志以允许重新执行 SW 宏"
+                )
+                self.state.set_sw_macro_started(False)
+                # 递归调用自身以重新进入 SW 阶段
+                self.start_pipeline()
+                return
 
         # ---- 步骤 2: 启动文件监控 ----
-        self._file_monitor = StepFileMonitor(
-            step_dir=None,
-            on_file_ready=self._on_step_file_ready
-        )
-        self._file_monitor.start()
+        if self._file_monitor is None or not self._file_monitor._running:
+            self._file_monitor = StepFileMonitor(
+                step_dir=None,
+                on_file_ready=self._on_step_file_ready
+            )
+            self._file_monitor.start()
 
-        # ---- 步骤 3: 启动工作线程池 ----
-        self._start_worker_pool()
+        # ---- 步骤 3: 启动工作线程池（仅在未启动时创建） ----
+        self._start_worker_pool_if_needed()
 
         # ---- 步骤 4: 启动全局屏障监控 ----
-        self._barrier_thread = threading.Thread(
-            target=self._barrier_monitor_loop,
-            daemon=True,
-            name="BarrierMonitor"
-        )
-        self._barrier_thread.start()
+        if self._barrier_thread is None or not self._barrier_thread.is_alive():
+            self._barrier_thread = threading.Thread(
+                target=self._barrier_monitor_loop,
+                daemon=True,
+                name="BarrierMonitor"
+            )
+            self._barrier_thread.start()
 
-        # 更新引擎状态
-        self.state.set_engine_status("running")
+        # 更新引擎状态：仅在未被暂停时设为 running（pause() 已将其设为 paused）
+        if not self._paused.is_set():
+            self.state.set_engine_status("running")
+        else:
+            logger.info("流水线组件已就绪，但暂停标志仍置位，等待继续指令...")
 
         logger.info("流水线调度器已启动，等待 STEP 文件...")
 
@@ -194,6 +287,15 @@ class PipelineScheduler:
             t.start()
             self._worker_threads.append(t)
         logger.info(f"已启动 {self._num_workers} 个工作线程")
+
+    def _start_worker_pool_if_needed(self):
+        """仅在工作线程未启动或全部死亡时创建新的工作线程池。"""
+        alive_workers = [t for t in self._worker_threads if t.is_alive()]
+        self._worker_threads = alive_workers
+        if not alive_workers:
+            self._start_worker_pool()
+        else:
+            logger.debug(f"工作线程池已存在 ({len(alive_workers)} 个活跃线程)，跳过创建")
 
     def _worker_loop(self):
         """
@@ -523,7 +625,16 @@ class PipelineScheduler:
     # ------------------------------------------------------------------
 
     def pause(self):
-        """暂停流水线（当前运行步骤完成后不再取新任务）。"""
+        """暂停流水线（当前运行步骤完成后不再取新任务）。
+
+        暂停行为：
+        1. 设置暂停事件标志（worker/barrier 线程检查后进入等待）
+        2. 批量将所有 Running/Retrying 步骤切换为 Paused
+        3. 设置引擎状态为 paused
+
+        注意：SW 宏（RunMacro2）是同步 COM 阻塞调用，无法被中断。
+        pause 调用后 SW 宏会继续运行直到完成，但后续步骤不会被取走。
+        """
         logger.info("收到暂停指令")
         self._paused.set()
         # 将所有 Running/Retrying 步骤批量切换为 Paused，让 TUI 正确反馈
@@ -531,13 +642,55 @@ class PipelineScheduler:
         self.state.set_engine_status("paused")
         logger.info("流水线已暂停，所有运行中/重试中步骤已标记为 Paused")
 
+    @property
+    def is_paused(self) -> bool:
+        """公共只读属性：是否处于暂停状态（供外部模块查询）。"""
+        return self._paused.is_set()
+
+    @property
+    def pipeline_alive(self) -> bool:
+        """公共只读属性：主调度线程是否存活（供外部模块查询）。"""
+        return self._pipeline_thread is not None and self._pipeline_thread.is_alive()
+
     def resume(self):
-        """继续流水线。"""
+        """继续流水线。
+
+        处理多种暂停恢复场景：
+        1. 正常暂停恢复：workers/barrier 线程均在运行，仅清除暂停标志
+        2. SW 阶段暂停后恢复：workers 尚未启动，需检查并初始化流水线组件
+        3. SW 失败后暂停恢复：需要重新执行 SW 宏
+        """
         logger.info("收到继续指令")
         # 将所有 Paused 步骤恢复为 Running
         self.state.set_all_paused_to_running()
         self._paused.clear()
         self.state.set_engine_status("running")
+
+        # 检查流水线组件是否需要初始化（SW 阶段暂停恢复场景）
+        pipeline_needs_init = False
+        if self._file_monitor is None or not self._file_monitor._running:
+            pipeline_needs_init = True
+        else:
+            alive_workers = [t for t in self._worker_threads if t.is_alive()]
+            if not alive_workers:
+                pipeline_needs_init = True
+
+        if pipeline_needs_init:
+            logger.info("检测到流水线组件未就绪，启动初始化...")
+            # SW 宏可能已完成（断点续传），检查并初始化下游组件
+            if self.state.is_sw_macro_started():
+                self._init_downstream_components()
+            else:
+                # SW 尚未完成，需要重新启动流水线
+                logger.info("SW 宏尚未完成，重新启动流水线...")
+                t = threading.Thread(
+                    target=self.start_pipeline,
+                    daemon=True,
+                    name="SchedulerMain-Resume"
+                )
+                t.start()
+                self._pipeline_thread = t
+                return
 
         # 重置文件监控器的已处理文件集合，确保暂停期间产生的
         # STEP 文件在恢复后被重新评估并入队
@@ -546,6 +699,41 @@ class PipelineScheduler:
             # 重新扫描已存在的 STEP 文件（断点续传/暂停恢复场景）
             self._file_monitor._scan_existing_files()
         logger.info("流水线已恢复运行")
+
+    def _init_downstream_components(self):
+        """初始化 SW 之后的下游流水线组件（文件监控、工作线程、屏障监控）。
+
+        在 resume() 恢复暂停时调用，处理 SW 已完成但 workers 尚未启动的场景。
+        所有组件启动前均检查 _stopped 标志，避免在引擎停止时创建新线程。
+        """
+        if self._stopped.is_set():
+            logger.info("引擎已停止，跳过下游组件初始化")
+            return
+
+        if self._file_monitor is None or not self._file_monitor._running:
+            self._file_monitor = StepFileMonitor(
+                step_dir=None,
+                on_file_ready=self._on_step_file_ready
+            )
+            self._file_monitor.start()
+            logger.info("文件监控已启动（延迟初始化）")
+
+        if self._stopped.is_set():
+            return
+
+        self._start_worker_pool_if_needed()
+
+        if self._stopped.is_set():
+            return
+
+        if self._barrier_thread is None or not self._barrier_thread.is_alive():
+            self._barrier_thread = threading.Thread(
+                target=self._barrier_monitor_loop,
+                daemon=True,
+                name="BarrierMonitor"
+            )
+            self._barrier_thread.start()
+            logger.info("屏障监控已启动（延迟初始化）")
 
     def stop(self):
         """停止流水线。"""

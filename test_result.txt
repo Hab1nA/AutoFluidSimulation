@@ -1,0 +1,480 @@
+﻿python : [2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\
+Users\XKZ\AppData\Local\Temp\autotest_39upo51k\test_state.db
+所在位置 行:1 字符: 133
++ ... coding]::UTF8 ; python -X utf8 tests\test_pause_start.py 2>&1 | Out-F ...
++                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2026-05-07 00:...k\test_state.db 
+   :String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:40:35] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:40:35] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:35] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:35] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:40:36] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:40:36] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:40:36] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:40:40] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:40:40] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest_iioqlin1\test_state.db
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控退出
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:40] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:40] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:41] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:41] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:41] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:41] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:42] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:40:42] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:40:42] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:40:42] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:40:42] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 流水线组件已就绪，但暂停标志仍置位，等待继续指令...
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:42] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:42] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:42] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:40:43] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:40:43] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:40:43] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:40:43] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控退出
+[2026-05-07 00:40:44] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:40:44] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:40:44] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:40:44] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest_uj2l3f2g\test_state.db
+[2026-05-07 00:40:44] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:44] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:44] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:45] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:45] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:45] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:45] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:45] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:45] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Error
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Error
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Error
+[2026-05-07 00:40:46] [WARNING ] [engine.scheduler] SW 宏在暂停期间失败，保留 Paused 状态以供恢
+复后重试
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] 检测到流水线组件未就绪，启动初始化...
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] SW 宏尚未完成，重新启动流水线...
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:46] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:46] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:48] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:40:48] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:40:48] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:40:48] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:40:48] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:40:48] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:40:48] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:40:49] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:40:49] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:40:49] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:40:53] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:40:53] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest_grt0gas1\test_state.db
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控退出
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Error
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:40:53] [ERROR   ] [engine.scheduler] SW 宏启动失败，流水线中止
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:40:53] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:40:53] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:40:53] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:40:53] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:40:54] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:40:54] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:40:54] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:40:58] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:40:58] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest_ay_hmsna\test_state.db
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控退出
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:40:58] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:40:58] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:58] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:58] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到暂停指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有运行中/重试中步骤切换为 Paused
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> paused
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已暂停，所有运行中/重试中步骤已标记为 Paus
+ed
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:40:59] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:40:59] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:41:03] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:41:03] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest_hgv5q0ot\test_state.db
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 流水线调度器启动
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] ===========================
+=================================
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] SW 宏尚未启动，准备执行...
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控退出
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Runni
+ng
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Runni
+ng
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Runni
+ng
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型1 [SW] -> Compl
+eted
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型2 [SW] -> Compl
+eted
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 状态更新: 构型3 [SW] -> Compl
+eted
+[2026-05-07 00:41:03] [INFO    ] [engine.file_monitor] 文件监控循环开始
+[2026-05-07 00:41:03] [INFO    ] [engine.file_monitor] STEP 文件监控已启动: C:\Users\X
+KZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程启动
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程启动
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程启动
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 已启动 3 个工作线程
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [BarrierMonitor] 全局屏障监控启动
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] [BarrierMonitor] 等待所有构型的网格划
+分完成...
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 流水线调度器已启动，等待 STEP 文件...
+[2026-05-07 00:41:03] [INFO    ] [engine.scheduler] 收到继续指令
+[2026-05-07 00:41:03] [INFO    ] [engine.state_manager] 已将所有 Paused 步骤恢复为 Runni
+ng
+[2026-05-07 00:41:04] [INFO    ] [engine.state_manager] 引擎状态变更: -> running
+[2026-05-07 00:41:04] [INFO    ] [engine.scheduler] 流水线已恢复运行
+[2026-05-07 00:41:04] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:41:04] [INFO    ] [engine.scheduler] [PipelineWorker-2] 工作线程退出
+[2026-05-07 00:41:04] [INFO    ] [engine.scheduler] [PipelineWorker-3] 工作线程退出
+[2026-05-07 00:41:04] [INFO    ] [engine.scheduler] [PipelineWorker-1] 工作线程退出
+[2026-05-07 00:41:08] [INFO    ] [engine.file_monitor] 文件监控循环结束
+[2026-05-07 00:41:08] [INFO    ] [engine.file_monitor] STEP 文件监控已停止
+[2026-05-07 00:41:08] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:41:08] [INFO    ] [engine.scheduler] 流水线已停止
+[2026-05-07 00:41:08] [INFO    ] [engine.state_manager] 状态数据库已初始化: C:\Users\XKZ
+\AppData\Local\Temp\autotest___fav3_x\test_state.db
+[2026-05-07 00:41:08] [INFO    ] [engine.state_manager] 已同步构型数据到状态库: 新增 3，更新 0，
+删除 0
+[2026-05-07 00:41:08] [INFO    ] [engine.scheduler] 流水线调度器初始化完成
+[2026-05-07 00:41:08] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:41:08] [INFO    ] [engine.scheduler] 收到停止指令
+[2026-05-07 00:41:08] [INFO    ] [engine.state_manager] 引擎状态变更: -> stopped
+[2026-05-07 00:41:08] [INFO    ] [engine.scheduler] 流水线已停止
+============================================================
+  Pause/Start 功能验证测试套件
+============================================================
+
+============================================================
+测试 1: 正常启动 → 暂停 → 恢复
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=0.0s, fail=False)
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+✅ 测试 1 通过
+
+============================================================
+测试 2: SW 宏执行中暂停 → SW 成功后恢复
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=2.0s, fail=False)
+  [Test] 触发暂停...
+  [Test] Paused 数量: 3/3
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+✅ 测试 2 通过
+
+============================================================
+测试 3: SW 宏执行中暂停 → SW 失败 → 恢复重试
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=1.5s, fail=True)
+  [Test] 触发暂停（SW 宏仍运行中）...
+  [MockTaskRunner] SW 宏模拟失败！
+  [Test] SW call count: 1
+  [MockTaskRunner] execute_sw_macro() 第2次调用 (delay=1.5s, fail=False)
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+  [Test] SW call count after resume: 2
+✅ 测试 3 通过
+
+============================================================
+测试 4: SW 直接失败 → 引擎停止 → 重新启动
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=0.1s, fail=True)
+  [MockTaskRunner] SW 宏模拟失败！
+  [MockTaskRunner] execute_sw_macro() 第2次调用 (delay=0.1s, fail=False)
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+✅ 测试 4 通过
+
+============================================================
+测试 5: 快速连续 pause/start
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=0.0s, fail=False)
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+✅ 测试 5 通过
+
+============================================================
+测试 6: Running 状态下重复 start
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+  [MockTaskRunner] execute_sw_macro() 第1次调用 (delay=0.0s, fail=False)
+  [MockTaskRunner] SW 宏模拟成功 (3 个构型)
+✅ 测试 6 通过
+
+============================================================
+测试 7: Stopped 状态下 pause
+============================================================
+  [Setup] 已加载 3 个测试构型
+  [Setup] 调度器已创建
+✅ 测试 7 通过
+
+============================================================
+  测试结果: 7 通过, 0 失败, 7 总计
+============================================================
