@@ -520,7 +520,7 @@ class TaskRunner:
                         self.state.set_step_status(
                             cn, "SW", STATUS_ERROR,
                             f"宏执行完毕但 STEP 缺失: "
-                            f"model_gen4.SLDPRT_{cn}.step"
+                            f"{filename}"
                         )
                         missing_configs.append(cn)
                         logger.warning(f"  构型{cn} ✗ STEP 缺失")
