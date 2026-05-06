@@ -507,7 +507,10 @@ class TaskRunner:
                 found_configs: List[int] = []
 
                 for cn in all_configs:
-                    filename = get_step_filename("SW", cn) or STEP_FILE_PATTERNS["SW"].format(config=cn)
+                    filename = get_step_filename("SW", cn)
+                    if not filename:
+                        logger.warning(f"  构型{cn}: 无法生成 STEP 文件名，跳过校验")
+                        continue
                     expected_file = os.path.join(
                         step_dir,
                         filename
@@ -600,14 +603,19 @@ class TaskRunner:
         Returns:
             True 表示 SC 脚本执行成功
         """
-        step_file = os.path.join(
-            LOCAL_PATHS["step_dir"],
-            f"model_gen4.SLDPRT_{config_name}.step"
-        )
-        scdoc_file = os.path.join(
-            LOCAL_PATHS["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
-        )
+        _sw_step_name = get_step_filename("SW", config_name)
+        if not _sw_step_name:
+            logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件名配置错误")
+            return False
+        _scdoc_name = get_step_filename("SC", config_name)
+        if not _scdoc_name:
+            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件名配置错误")
+            return False
+
+        step_file = os.path.join(LOCAL_PATHS["step_dir"], _sw_step_name)
+        scdoc_file = os.path.join(LOCAL_PATHS["scdoc_dir"], _scdoc_name)
 
         # 检查输入文件
         if not os.path.exists(step_file):
@@ -702,13 +710,18 @@ class TaskRunner:
         Returns:
             True 表示传输成功
         """
+        _scdoc_name = get_step_filename("SC", config_name)
+        if not _scdoc_name:
+            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
+            return False
         local_file = os.path.join(
             LOCAL_PATHS["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
+            _scdoc_name,
         )
         remote_file = os.path.join(
             REMOTE_CONFIG["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
+            _scdoc_name,
         ).replace("\\", "/")
 
         if not os.path.exists(local_file):
