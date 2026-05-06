@@ -187,7 +187,7 @@ class PipelineTUI(App):
     #title {
         text-style: bold;
         color: #e94560;
-        content-align: center;
+        content-align: center middle;
         width: 100%;
         text-align: center;
     }
