@@ -8,11 +8,17 @@ SSH 客户端模块 (SSH Client)
 - 文件上传 (SFTP)
 ===============================================================================
 """
+from __future__ import annotations
+
 import os
 import socket
 import time
-import paramiko
 from typing import Optional, Callable
+
+try:
+    import paramiko
+except ImportError:  # pragma: no cover
+    paramiko = None  # type: ignore[assignment]
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -55,6 +61,10 @@ class RemoteWorkstation:
         Returns:
             True 表示连接成功，False 表示失败
         """
+        if paramiko is None:
+            raise ModuleNotFoundError(
+                "未安装依赖 paramiko。请执行: pip install -r requirements.txt"
+            )
         try:
             self._ssh = paramiko.SSHClient()
             self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())

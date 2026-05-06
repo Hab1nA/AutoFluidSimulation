@@ -16,27 +16,64 @@ except ImportError:
     pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
 
 # ============================================================================
+# 环境变量覆盖（用于部署/迁移）
+# ============================================================================
+
+def _env_override(key: str, default: str) -> str:
+    """读取环境变量覆盖值；若未设置或为空则返回默认值。"""
+    val = os.environ.get(key)
+    return val if val else default
+
+
+# ============================================================================
 # 本地 PC 路径配置
 # ============================================================================
 LOCAL_PATHS = {
     # SolidWorks 可执行文件路径（备选启动方案：COM Dispatch 失败时直接启动）
-    "sw_exe": r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe",
+    "sw_exe": _env_override(
+        "AUTOFLUID_SW_EXE",
+        r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe",
+    ),
     # SolidWorks 初始模型文件
-    "sw_model": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT",
+    "sw_model": _env_override(
+        "AUTOFLUID_SW_MODEL",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT",
+    ),
     # 外部 Excel 参数表（唯一数据源）
-    "excel": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx",
+    "excel": _env_override(
+        "AUTOFLUID_SW_EXCEL",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx",
+    ),
     # SolidWorks 宏文件
-    "sw_macro": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\Macro1.swp",
+    "sw_macro": _env_override(
+        "AUTOFLUID_SW_MACRO",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\Macro1.swp",
+    ),
     # STEP 文件输出目录（SW 宏将 step 文件导出到此）
-    "step_dir": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step",
+    "step_dir": _env_override(
+        "AUTOFLUID_STEP_DIR",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step",
+    ),
     # SpaceClaim 可执行文件
-    "sc_exe": r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
+    "sc_exe": _env_override(
+        "AUTOFLUID_SC_EXE",
+        r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
+    ),
     # SpaceClaim 脚本文件
-    "sc_script": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\spaceclaim_transit.scscript",
+    "sc_script": _env_override(
+        "AUTOFLUID_SC_SCRIPT",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\spaceclaim_transit.scscript",
+    ),
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
-    "scdoc_dir": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc",
+    "scdoc_dir": _env_override(
+        "AUTOFLUID_SCDOC_DIR",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc",
+    ),
     # 日志目录
-    "log_dir": r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\logs",
+    "log_dir": _env_override(
+        "AUTOFLUID_LOG_DIR",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\logs",
+    ),
 }
 
 # ============================================================================
@@ -128,6 +165,13 @@ ENGINE_CONFIG = {
     "watchdog_interval": 1.0,
     # SW 宏执行超时（秒）—— 导出所有构型的总时间
     "sw_macro_timeout": 3600,
+    # SW 自动化行为控制
+    # - sw_close_doc_on_finish: 宏完成后关闭已打开的模型文档（减少资源占用）
+    # - sw_exit_on_finish: 宏完成后退出 SolidWorks（默认为 False，避免影响用户调试）
+    # - sw_visible: 是否显示 SolidWorks 主窗口
+    "sw_close_doc_on_finish": True,
+    "sw_exit_on_finish": False,
+    "sw_visible": True,
     # SC 脚本执行超时（秒）
     "sc_timeout": 300,
     # 文件传输超时（秒）
@@ -141,6 +185,17 @@ ENGINE_CONFIG = {
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": 0.5,
 }
+
+
+def get_step_filename(step_name: str, config_name: int):
+    """根据 STEP_FILE_PATTERNS 生成文件名。"""
+    pattern = STEP_FILE_PATTERNS.get(step_name)
+    if not pattern:
+        return None
+    try:
+        return pattern.format(config=config_name)
+    except (KeyError, ValueError):
+        return None
 
 # ============================================================================
 # 确保必要目录存在 & 配置验证（由 daemon 启动时调用）
