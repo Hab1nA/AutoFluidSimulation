@@ -21,7 +21,7 @@ from typing import Optional, Callable, List
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    STEP_NAMES,
+    STEP_NAMES, STEP_FILE_PATTERNS,
 )
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
@@ -854,12 +854,17 @@ class TaskRunner:
             self._clean_single_step(step_name, config_name)
 
     def _clean_single_step(self, step_name: str, config_name: int = None):
-        """清理单个步骤的文件（内部方法）。"""
+        """清理单个步骤的文件（内部方法）。
+
+        文件命名模式来源于 engine.config.STEP_FILE_PATTERNS，
+        由此处统一引用以确保清理与实际产生的文件匹配。
+        """
         # ---- 本地文件清理映射 ----
         # (目录key, 文件名模板, 额外清理的后缀对 (原后缀, 新后缀))
+        # 注意：SW 导出的 STEP 文件名为 model_gen4.SLDPRT_{N}.step（含 .SLDPRT 中缀）
         local_patterns = {
-            "SW":       ("step_dir",  "model_gen4_{config}.step",   None),
-            "SC":       ("scdoc_dir", "model_gen4_{config}.scdoc",  None),
+            "SW":       ("step_dir",  STEP_FILE_PATTERNS["SW"],       None),
+            "SC":       ("scdoc_dir", STEP_FILE_PATTERNS["SC"],       None),
             "Transfer": None,  # 传输无本地文件
             "Meshing":  None,  # MSH 文件仅在远程工作站上
             "Solver":   None,  # CAS/DAT 文件仅在远程工作站上
@@ -871,8 +876,8 @@ class TaskRunner:
             "SW":       None,  # SW 无远程文件
             "SC":       None,  # SC 无远程文件（SCDOC 由 transfer 上传，但源文件在本地）
             "Transfer": None,  # 传输无产出文件
-            "Meshing":  ("msh_dir",    "model_gen4_{config}.msh.h5", None),
-            "Solver":   ("result_dir", "model_gen4_{config}.cas.h5", (".cas.h5", ".dat.h5")),
+            "Meshing":  ("msh_dir",    STEP_FILE_PATTERNS["Meshing"], None),
+            "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  (".cas.h5", ".dat.h5")),
         }
 
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
@@ -914,12 +919,13 @@ class TaskRunner:
                 if ssh.is_connected():
                     for cn in configs:
                         filename = file_template.format(config=cn)
-                        remote_path = f"{target_dir}\\{filename}"
+                        # 统一使用 / 作为远程路径分隔符（SFTP 协议标准，Windows 兼容）
+                        remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
                         ssh.delete_remote_file(remote_path)
                         if extra_suffix_pair:
                             old_suffix, new_suffix = extra_suffix_pair
                             extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
-                            extra_remote_path = f"{target_dir}\\{extra_filename}"
+                            extra_remote_path = f"{target_dir.replace(chr(92), '/')}/{extra_filename}"
                             ssh.delete_remote_file(extra_remote_path)
                     logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:

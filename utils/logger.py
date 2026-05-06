@@ -7,7 +7,6 @@
 import logging
 import os
 from datetime import datetime
-from engine.config import LOCAL_PATHS
 
 
 def setup_logger(name: str, log_file: str = None) -> logging.Logger:
@@ -42,7 +41,12 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
 
     # 文件输出 handler
     if log_file is None:
-        log_dir = LOCAL_PATHS.get("log_dir", "")
+        # 延迟导入以避免循环依赖：logger 是底层工具，不应在模块顶层依赖 engine.config
+        try:
+            from engine.config import LOCAL_PATHS as _cfg_local_paths
+            log_dir = _cfg_local_paths.get("log_dir", "")
+        except (ImportError, AttributeError):
+            log_dir = ""
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
         else:

@@ -85,20 +85,30 @@ class FileStableDetector:
         # 检查在 stable_time 内文件大小是否保持不变
         sizes = [s for _, s in history]
         if all(s == sizes[0] for s in sizes):
-            # 清理历史记录
+            # 清理所有与此文件相关的追踪记录
             del self._history[filepath]
+            if hasattr(self, '_first_seen'):
+                self._first_seen.pop(filepath, None)
             return True
 
-        # 防止内存泄漏：如果文件超过 stable_time * 3 仍未稳定，清除记录
-        if now - history[0][0] > self.stable_time * 3:
-            logger.warning(f"文件 {filepath} 长时间未稳定 (>{self.stable_time*3}s)，放弃监控")
+        # 防止内存泄漏：追踪文件首次被发现的时间，而非截断后的首条记录
+        # （上面 cutoff 已删除 >stable_time 的条目，history[0] 始终 <=stable_time）
+        if not hasattr(self, '_first_seen'):
+            self._first_seen: dict[str, float] = {}
+        if filepath not in self._first_seen:
+            self._first_seen[filepath] = now
+        elif now - self._first_seen[filepath] > self.stable_time * 3:
+            logger.warning(f"文件 {filepath} 长时间未稳定 (>{self.stable_time*3:.0f}s)，放弃监控")
             del self._history[filepath]
+            del self._first_seen[filepath]
 
         return False
 
     def cleanup(self, filepath: str):
         """清理指定文件的检测记录。"""
         self._history.pop(filepath, None)
+        if hasattr(self, '_first_seen'):
+            self._first_seen.pop(filepath, None)
 
 
 # ============================================================================
@@ -199,6 +209,8 @@ class StepFileMonitor:
         # 清理检测器内部历史记录，防止内存泄漏
         if hasattr(self._detector, '_history'):
             self._detector._history.clear()
+        if hasattr(self._detector, '_first_seen'):
+            self._detector._first_seen.clear()
         logger.info("STEP 文件监控已停止")
 
     # ------------------------------------------------------------------

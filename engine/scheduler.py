@@ -230,10 +230,10 @@ class PipelineScheduler:
                         s = self.state.get_step_status(config_name, step)
                         if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
                             self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
-                    except Exception:
-                        pass  # 状态更新失败不阻止处理其他构型
-
-            self._sc_queue.task_done()
+                    except Exception as mark_err:
+                        logger.debug(f"标记构型{config_name}步骤{step}为Error时异常: {mark_err}")
+            finally:
+                self._sc_queue.task_done()
 
         logger.info(f"[{threading.current_thread().name}] 工作线程退出")
 
