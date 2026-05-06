@@ -15,9 +15,10 @@
 import os
 import time
 import threading
+import re
 from typing import Callable, Optional, Set
 
-from engine.config import LOCAL_PATHS, ENGINE_CONFIG
+from engine.config import LOCAL_PATHS, ENGINE_CONFIG, STEP_FILE_PATTERNS
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -124,9 +125,22 @@ class StepFileMonitor:
     同时也支持 watchdog 事件驱动的混合模式。
     """
 
-    # 文件名模式: model_gen4.SLDPRT_{构型名称}.step
-    FILE_PREFIX = "model_gen4.SLDPRT_"
-    FILE_SUFFIX = ".step"
+    _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+
+    @staticmethod
+    def _compile_config_regex(pattern: str) -> Optional[re.Pattern]:
+        """
+        将 STEP_FILE_PATTERNS["SW"] 形式的模板编译成正则表达式。
+
+        约束：模板中必须包含 `{config}` 占位符，否则无法解析构型号。
+        """
+        if "{config}" not in pattern:
+            return None
+        escaped = re.escape(pattern)
+        escaped = escaped.replace(re.escape("{config}"), r"(?P<config>\d+)")
+        return re.compile(rf"^{escaped}$", flags=re.IGNORECASE)
+
+    _FILENAME_REGEX = _compile_config_regex.__func__(_SW_STEP_PATTERN)
 
     def __init__(self, step_dir: str = None,
                  on_file_ready: Callable[[int, str], None] = None):
@@ -168,13 +182,14 @@ class StepFileMonitor:
         Returns:
             构型名称（整数），解析失败返回 None
         """
-        if not filename.startswith(cls.FILE_PREFIX) or not filename.endswith(cls.FILE_SUFFIX):
+        if cls._FILENAME_REGEX is None:
+            return None
+        match = cls._FILENAME_REGEX.match(filename)
+        if not match:
             return None
         try:
-            # 提取 "model_gen4.SLDPRT_" 和 ".step" 之间的部分
-            name_part = filename[len(cls.FILE_PREFIX):-len(cls.FILE_SUFFIX)]
-            return int(name_part)
-        except ValueError:
+            return int(match.group("config"))
+        except (TypeError, ValueError):
             return None
 
     # ------------------------------------------------------------------
@@ -247,7 +262,7 @@ class StepFileMonitor:
         new_files = current_files - self._known_files
         for filename in new_files:
             filepath = os.path.join(self.step_dir, filename)
-            if os.path.isfile(filepath) and filename.endswith(self.FILE_SUFFIX):
+            if os.path.isfile(filepath):
                 config_name = self.parse_config_name(filename)
                 if config_name is not None:
                     logger.info(f"发现新的 STEP 文件: {filename} (构型{config_name})")
@@ -285,7 +300,7 @@ class StepFileMonitor:
             existing = os.listdir(self.step_dir)
             for filename in existing:
                 filepath = os.path.join(self.step_dir, filename)
-                if os.path.isfile(filepath) and filename.endswith(self.FILE_SUFFIX):
+                if os.path.isfile(filepath):
                     config_name = self.parse_config_name(filename)
                     if config_name is not None:
                         # 加入已知文件列表，由后续轮询检测写入完成

@@ -16,12 +16,13 @@ import os
 import subprocess
 import time
 import threading
+import gc
 from typing import Optional, Callable, List
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    STEP_NAMES, STEP_FILE_PATTERNS,
+    STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
 )
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
@@ -143,6 +144,16 @@ class TaskRunner:
     _SW_RUN_MACRO_DEFAULT = 0
     _SW_RUN_MACRO_UNLOAD_AFTER = 1
 
+    @staticmethod
+    def _guess_sw_doc_type(path: str) -> int:
+        """
+        根据文件扩展名猜测 SW 文档类型，用于 OpenDoc6 / GetMacroMethods。
+        """
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".sldasm":
+            return TaskRunner._SW_DOC_ASSEMBLY
+        return TaskRunner._SW_DOC_PART
+
     def execute_sw_macro(self) -> bool:
         """
         执行 SolidWorks 宏 (Macro1.swp)。
@@ -170,6 +181,9 @@ class TaskRunner:
 
         sw_model = LOCAL_PATHS["sw_model"]
         sw_macro = LOCAL_PATHS["sw_macro"]
+        excel_path = LOCAL_PATHS.get("excel", "")
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        doc_type = self._guess_sw_doc_type(sw_model)
 
         # 检查必要文件
         if not os.path.exists(sw_model):
@@ -177,6 +191,17 @@ class TaskRunner:
             return False
         if not os.path.exists(sw_macro):
             logger.error(f"SW 宏文件不存在: {sw_macro}")
+            return False
+        if not excel_path or not os.path.exists(excel_path):
+            logger.error(f"Excel 参数表不存在: {excel_path}")
+            return False
+        if not step_dir:
+            logger.error("未配置 STEP 输出目录 (step_dir)")
+            return False
+        try:
+            os.makedirs(step_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"无法创建/访问 STEP 输出目录: {step_dir}: {e}")
             return False
 
         try:
@@ -187,6 +212,7 @@ class TaskRunner:
 
             try:
                 sw_app = None
+                doc = None
 
                 # ---- 第1层: 连接已运行的 SW ----
                 logger.info("正在连接 SolidWorks (第1层: GetActiveObject)...")
@@ -203,7 +229,14 @@ class TaskRunner:
                     logger.info("正在启动 SolidWorks (第2层: COM Dispatch)...")
                     try:
                         sw_app = win32com.client.Dispatch("SldWorks.Application")
-                        sw_app.Visible = True
+                        try:
+                            sw_app.UserControl = True
+                        except Exception:
+                            pass
+                        try:
+                            sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
+                        except Exception:
+                            pass
                         logger.info("SolidWorks 已通过 COM Dispatch 启动")
                         # 等待 SW 窗口完全加载
                         time.sleep(8)
@@ -219,12 +252,15 @@ class TaskRunner:
                             logger.error("所有启动方式均失败，无法连接 SolidWorks")
                             return False
                         sw_app = win32com.client.GetActiveObject("SldWorks.Application")
-                        sw_app.Visible = True
+                        try:
+                            sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
+                        except Exception:
+                            pass
                         logger.info("已通过 subprocess 启动并连接 SolidWorks")
 
                 # ---- 确保 SW 可见且就绪 ----
                 try:
-                    sw_app.Visible = True
+                    sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
                 except Exception:
                     pass
 
@@ -234,8 +270,8 @@ class TaskRunner:
                 macro_proc = "main"
                 try:
                     # GetMacroMethods(FilePath, DocumentType) → tuple of "Module.Proc" strings
-                    methods = sw_app.GetMacroMethods(sw_macro, self._SW_DOC_PART)
-                    logger.info(f"GetMacroMethods(PART): {methods}")
+                    methods = sw_app.GetMacroMethods(sw_macro, doc_type)
+                    logger.info(f"GetMacroMethods(docType={doc_type}): {methods}")
                     if methods and isinstance(methods, (tuple, list)) and len(methods) > 0:
                         first = methods[0]
                         if isinstance(first, str) and "." in first:
@@ -258,7 +294,7 @@ class TaskRunner:
                 try:
                     doc = sw_app.OpenDoc6(
                         sw_model,
-                        self._SW_DOC_PART,       # Type: 1=swDocPART
+                        doc_type,                # Type: 1=swDocPART, 2=swDocASSEMBLY
                         self._SW_OPEN_SILENT,    # Options: 1=Silent（抑制弹窗）
                         "",                       # Configuration: 空=上次保存的配置
                         open_errors,
@@ -292,72 +328,59 @@ class TaskRunner:
                 # 模型不再内嵌链接到设计表，改为每次打开后从 Excel 文件导入。
                 # IModelDoc2::InsertFamilyTableOpen(FileName) 会将指定 Excel
                 # 作为设计表插入模型，返回 True 表示导入成功。
-                excel_path = LOCAL_PATHS.get("excel", "")
-                if excel_path and os.path.exists(excel_path):
-                    logger.info(
-                        f"正在导入设计表: {os.path.basename(excel_path)}"
-                    )
-                    try:
-                        inserted = doc.InsertFamilyTableOpen(excel_path)
-                        if inserted:
-                            logger.info("✓ 设计表已导入")
-                            # 导入后获取设计表接口，确保更新方向正确
-                            try:
-                                design_table = doc.GetDesignTable()
-                                if design_table is not None:
-                                    # 禁止反向更新（模型 → 设计表）
-                                    try:
-                                        design_table.Updatable = False
-                                        logger.info("  已禁止'模型→设计表'反向更新")
-                                    except Exception as e_upd:
-                                        logger.debug(
-                                            f"  设置 Updatable=False 失败 "
-                                            f"({type(e_upd).__name__}: {e_upd})"
-                                        )
-                                    # 显式将设计表更改应用到模型
-                                    try:
-                                        design_table.UpdateModel()
-                                        logger.info("  ✓ 设计表更改已应用到模型")
-                                    except Exception as e_um:
-                                        logger.warning(
-                                            f"  UpdateModel 失败 "
-                                            f"({type(e_um).__name__}: {e_um})，"
-                                            f"模型可能已是最新状态"
-                                        )
-                                else:
-                                    logger.warning(
-                                        "InsertFamilyTableOpen 返回 True 但 "
-                                        "GetDesignTable 返回 None，"
-                                        "设计表更改可能未应用到模型"
-                                    )
-                            except Exception as e_dt2:
-                                logger.debug(
-                                    f"设计表后处理异常 "
-                                    f"({type(e_dt2).__name__}: {e_dt2})"
-                                )
-                        else:
-                            logger.error(
-                                f"设计表导入失败: InsertFamilyTableOpen 返回 False"
-                            )
-                            logger.error(f"  请检查 Excel 文件格式是否正确: {excel_path}")
-                            # 关闭文档，因为模型可能缺少必要参数
-                            try:
-                                sw_app.CloseDoc(os.path.basename(sw_model))
-                            except Exception:
-                                pass
-                            return False
-                    except Exception as e_insert:
-                        logger.error(
-                            f"InsertFamilyTableOpen 异常 "
-                            f"({type(e_insert).__name__}: {e_insert})"
-                        )
+                logger.info(
+                    f"正在导入设计表: {os.path.basename(excel_path)}"
+                )
+                try:
+                    inserted = doc.InsertFamilyTableOpen(excel_path)
+                    if inserted:
+                        logger.info("✓ 设计表已导入")
+                        # 导入后获取设计表接口，确保更新方向正确
                         try:
-                            sw_app.CloseDoc(os.path.basename(sw_model))
-                        except Exception:
-                            pass
+                            design_table = doc.GetDesignTable()
+                            if design_table is not None:
+                                # 禁止反向更新（模型 → 设计表）
+                                try:
+                                    design_table.Updatable = False
+                                    logger.info("  已禁止'模型→设计表'反向更新")
+                                except Exception as e_upd:
+                                    logger.debug(
+                                        f"  设置 Updatable=False 失败 "
+                                        f"({type(e_upd).__name__}: {e_upd})"
+                                    )
+                                # 显式将设计表更改应用到模型
+                                try:
+                                    design_table.UpdateModel()
+                                    logger.info("  ✓ 设计表更改已应用到模型")
+                                except Exception as e_um:
+                                    logger.warning(
+                                        f"  UpdateModel 失败 "
+                                        f"({type(e_um).__name__}: {e_um})，"
+                                        f"模型可能已是最新状态"
+                                    )
+                            else:
+                                logger.warning(
+                                    "InsertFamilyTableOpen 返回 True 但 "
+                                    "GetDesignTable 返回 None，"
+                                    "设计表更改可能未应用到模型"
+                                )
+                        except Exception as e_dt2:
+                            logger.debug(
+                                f"设计表后处理异常 "
+                                f"({type(e_dt2).__name__}: {e_dt2})"
+                            )
+                    else:
+                        logger.error(
+                            "设计表导入失败: InsertFamilyTableOpen 返回 False"
+                        )
+                        logger.error(f"  请检查 Excel 文件格式是否正确: {excel_path}")
                         return False
-                else:
-                    logger.info("未配置 Excel 设计表路径或文件不存在，跳过导入")
+                except Exception as e_insert:
+                    logger.error(
+                        f"InsertFamilyTableOpen 异常 "
+                        f"({type(e_insert).__name__}: {e_insert})"
+                    )
+                    return False
 
                 # ---- 步骤 B3: 重建所有构型 ----
                 # 导入设计表后，模型参数已更新但几何体未重建。
@@ -480,14 +503,17 @@ class TaskRunner:
                 #   存在 → SW 步骤 Completed
                 #   缺失 → SW 步骤 Error
                 all_configs = self.state.get_all_configs()
-                step_dir = LOCAL_PATHS.get("step_dir", "")
                 missing_configs: List[int] = []
                 found_configs: List[int] = []
 
                 for cn in all_configs:
+                    filename = get_step_filename("SW", cn)
+                    if not filename:
+                        logger.warning(f"  构型{cn}: 无法生成 STEP 文件名，跳过校验")
+                        continue
                     expected_file = os.path.join(
                         step_dir,
-                        f"model_gen4.SLDPRT_{cn}.step"
+                        filename
                     )
                     if os.path.exists(expected_file):
                         self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
@@ -497,7 +523,7 @@ class TaskRunner:
                         self.state.set_step_status(
                             cn, "SW", STATUS_ERROR,
                             f"宏执行完毕但 STEP 缺失: "
-                            f"model_gen4.SLDPRT_{cn}.step"
+                            f"{filename}"
                         )
                         missing_configs.append(cn)
                         logger.warning(f"  构型{cn} ✗ STEP 缺失")
@@ -515,6 +541,40 @@ class TaskRunner:
                 # 不关闭 SW（保留以供调试/断点续传检查）
                 return True
             finally:
+                # 可选：关闭已打开的模型，减少 COM 引用与内存占用
+                try:
+                    if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
+                        try:
+                            title = doc.GetTitle()
+                        except Exception:
+                            title = os.path.basename(sw_model)
+                        try:
+                            sw_app.CloseDoc(title)
+                            logger.info(f"已关闭模型文档: {title}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 可选：退出 SolidWorks（谨慎使用，默认关闭）
+                try:
+                    if sw_app is not None and ENGINE_CONFIG.get("sw_exit_on_finish", False):
+                        try:
+                            sw_app.ExitApp()
+                            logger.info("已请求退出 SolidWorks")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # 显式释放 COM 对象引用，帮助 pywin32 及时回收
+                doc = None
+                sw_app = None
+                gc.collect()
+                try:
+                    pythoncom.CoFreeUnusedLibraries()
+                except Exception:
+                    pass
                 pythoncom.CoUninitialize()
 
         except ImportError:
@@ -543,14 +603,19 @@ class TaskRunner:
         Returns:
             True 表示 SC 脚本执行成功
         """
-        step_file = os.path.join(
-            LOCAL_PATHS["step_dir"],
-            f"model_gen4.SLDPRT_{config_name}.step"
-        )
-        scdoc_file = os.path.join(
-            LOCAL_PATHS["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
-        )
+        _sw_step_name = get_step_filename("SW", config_name)
+        if not _sw_step_name:
+            logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件名配置错误")
+            return False
+        _scdoc_name = get_step_filename("SC", config_name)
+        if not _scdoc_name:
+            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件名配置错误")
+            return False
+
+        step_file = os.path.join(LOCAL_PATHS["step_dir"], _sw_step_name)
+        scdoc_file = os.path.join(LOCAL_PATHS["scdoc_dir"], _scdoc_name)
 
         # 检查输入文件
         if not os.path.exists(step_file):
@@ -645,13 +710,18 @@ class TaskRunner:
         Returns:
             True 表示传输成功
         """
+        _scdoc_name = get_step_filename("SC", config_name)
+        if not _scdoc_name:
+            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
+            return False
         local_file = os.path.join(
             LOCAL_PATHS["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
+            _scdoc_name,
         )
         remote_file = os.path.join(
             REMOTE_CONFIG["scdoc_dir"],
-            f"model_gen4_{config_name}.scdoc"
+            _scdoc_name,
         ).replace("\\", "/")
 
         if not os.path.exists(local_file):

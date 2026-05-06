@@ -409,7 +409,11 @@ python main.py --all
 
 ## 配置说明
 
-所有路径和参数在 `engine/config.py` 中集中管理，**使用前请务必修改**。
+所有路径和参数在 `engine/config.py` 中集中管理。
+
+本项目支持通过环境变量覆盖关键本地路径（便于部署/迁移），未设置时回退到 `engine/config.py` 内的默认值：
+- `AUTOFLUID_SW_EXE` / `AUTOFLUID_SW_MODEL` / `AUTOFLUID_SW_EXCEL` / `AUTOFLUID_SW_MACRO`
+- `AUTOFLUID_STEP_DIR` / `AUTOFLUID_SC_EXE` / `AUTOFLUID_SC_SCRIPT` / `AUTOFLUID_SCDOC_DIR` / `AUTOFLUID_LOG_DIR`
 
 ### 本地路径配置
 
@@ -451,6 +455,9 @@ REMOTE_CONFIG = {
 ENGINE_CONFIG = {
     "watchdog_interval": 1.0,       # 文件监控轮询间隔（秒）
     "sw_macro_timeout": 3600,       # SW 宏超时（秒）
+    "sw_close_doc_on_finish": True, # SW 宏完成后关闭模型文档
+    "sw_exit_on_finish": False,     # SW 宏完成后退出 SolidWorks（默认不退出）
+    "sw_visible": True,             # 是否显示 SolidWorks 主窗口
     "sc_timeout": 300,              # SC 脚本超时（秒）
     "transfer_timeout": 120,        # 文件传输超时（秒）
     "meshing_timeout": 600,         # 网格划分超时（秒）
