@@ -60,7 +60,7 @@ class StateManager:
         try:
             yield conn
             conn.commit()
-        except Exception:
+        except sqlite3.DatabaseError:
             conn.rollback()
             raise
         finally:
@@ -398,6 +398,46 @@ class StateManager:
             return [(row["config_name"], row["step_name"], row["error_message"]) for row in rows]
 
     def get_statistics(self) -> dict:
+        """
+        获取全局统计信息。
+
+        Returns:
+            dict: {
+                "total_configs": int,
+                "steps": {step_name: {status: count, ...}, ...},
+                "error_count": int,
+            }
+        """
+        stats: dict = {
+            "total_configs": 0,
+            "steps": {},
+            "error_count": 0,
+        }
+
+        with self._get_connection() as conn:
+            # 总构型数
+            row = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()
+            stats["total_configs"] = row["cnt"] if row else 0
+
+            # 每个步骤的状态分布
+            for step_name in STEP_NAMES:
+                step_counts: dict = {}
+                for status in ALL_STATUSES:
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status = ?",
+                        (step_name, status)
+                    ).fetchone()
+                    step_counts[status] = row["cnt"] if row else 0
+                stats["steps"][step_name] = step_counts
+
+            # 错误总数
+            row = conn.execute(
+                "SELECT COUNT(*) as cnt FROM steps WHERE status = ?",
+                (STATUS_ERROR,)
+            ).fetchone()
+            stats["error_count"] = row["cnt"] if row else 0
+
+        return stats
         """获取整体统计信息。"""
         with self._get_connection() as conn:
             total_configs = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()["cnt"]

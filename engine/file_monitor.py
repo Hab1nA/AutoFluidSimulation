@@ -62,7 +62,8 @@ class FileStableDetector:
 
         try:
             current_size = os.path.getsize(filepath)
-        except OSError:
+        except OSError as e:
+            logger.debug(f"无法获取文件大小 {filepath}: {e}")
             return False
 
         now = time.time()
@@ -87,6 +88,11 @@ class FileStableDetector:
             # 清理历史记录
             del self._history[filepath]
             return True
+
+        # 防止内存泄漏：如果文件超过 stable_time * 3 仍未稳定，清除记录
+        if now - history[0][0] > self.stable_time * 3:
+            logger.warning(f"文件 {filepath} 长时间未稳定 (>{self.stable_time*3}s)，放弃监控")
+            del self._history[filepath]
 
         return False
 
@@ -190,6 +196,9 @@ class StepFileMonitor:
         self._running = False
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
+        # 清理检测器内部历史记录，防止内存泄漏
+        if hasattr(self._detector, '_history'):
+            self._detector._history.clear()
         logger.info("STEP 文件监控已停止")
 
     # ------------------------------------------------------------------
@@ -207,7 +216,7 @@ class StepFileMonitor:
         while self._running:
             try:
                 self._scan_directory()
-            except Exception as e:
+            except OSError as e:
                 logger.error(f"文件扫描异常: {e}")
 
             time.sleep(ENGINE_CONFIG["watchdog_interval"])
@@ -254,7 +263,7 @@ class StepFileMonitor:
                 if self.on_file_ready:
                     try:
                         self.on_file_ready(config_name, filepath)
-                    except Exception as e:
+                    except (RuntimeError, ValueError, OSError) as e:
                         logger.error(f"文件就绪回调异常: {e}")
 
         self._known_files = current_files

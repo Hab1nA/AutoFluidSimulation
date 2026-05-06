@@ -9,6 +9,7 @@ SSH 客户端模块 (SSH Client)
 ===============================================================================
 """
 import os
+import socket
 import time
 import paramiko
 from typing import Optional, Callable
@@ -69,7 +70,7 @@ class RemoteWorkstation:
             self._sftp = self._ssh.open_sftp()
             logger.info(f"SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
-        except Exception as e:
+        except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"SSH 连接失败: {e}")
             self._ssh = None
             self._sftp = None
@@ -80,13 +81,13 @@ class RemoteWorkstation:
         if self._sftp:
             try:
                 self._sftp.close()
-            except Exception:
+            except (OSError, EOFError):
                 pass
             self._sftp = None
         if self._ssh:
             try:
                 self._ssh.close()
-            except Exception:
+            except (OSError, EOFError):
                 pass
             self._ssh = None
         logger.info("SSH 连接已断开")
@@ -128,26 +129,41 @@ class RemoteWorkstation:
             self._sftp.put(local_path, remote_path)
             logger.info(f"上传完成: {os.path.basename(local_path)}")
             return True
-        except Exception as e:
+        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
             logger.error(f"文件上传失败: {e}")
             return False
 
     def _ensure_remote_dir(self, remote_dir: str):
-        """递归创建远程目录（类似 mkdir -p）。"""
+        """
+        递归创建远程目录（类似 mkdir -p）。
+
+        Raises:
+            ConnectionError: SFTP 未连接
+            OSError: 远程目录创建失败（非"已存在"错误）
+        """
         if not self._sftp:
             raise ConnectionError("SFTP 未连接")
+        # 规范化远程路径（统一使用正斜杠，SFTP 要求）
+        remote_dir = remote_dir.replace("\\", "/")
         try:
             self._sftp.stat(remote_dir)
         except FileNotFoundError:
             # 递归创建父目录
-            parent = os.path.dirname(remote_dir)
+            parent = "/".join(remote_dir.rstrip("/").split("/")[:-1])
             if parent and parent != remote_dir:
                 self._ensure_remote_dir(parent)
             try:
                 self._sftp.mkdir(remote_dir)
                 logger.debug(f"创建远程目录: {remote_dir}")
-            except Exception:
-                pass  # 可能已被并发创建
+            except OSError as e:
+                # 检查是否因目录已存在而失败（并发创建场景）
+                try:
+                    self._sftp.stat(remote_dir)
+                    logger.debug(f"远程目录已存在（并发创建）: {remote_dir}")
+                except FileNotFoundError:
+                    # 目录确实不存在但创建失败 → 真实错误
+                    logger.error(f"无法创建远程目录 {remote_dir}: {e}")
+                    raise
 
     def check_remote_file(self, remote_path: str) -> bool:
         """检查远程文件是否存在。"""
@@ -157,6 +173,28 @@ class RemoteWorkstation:
             self._sftp.stat(remote_path)
             return True
         except FileNotFoundError:
+            return False
+
+    def delete_remote_file(self, remote_path: str) -> bool:
+        """
+        删除远程工作站上的单个文件。
+
+        Args:
+            remote_path: 远程文件完整路径
+
+        Returns:
+            True 表示删除成功或文件本就不存在
+        """
+        if not self.ensure_connected():
+            return False
+        try:
+            # 使用 if exist + del /f 安全删除（/f 强制只读文件删除）
+            escaped = remote_path.replace('"', '\\"')
+            self.exec_command(f'if exist "{escaped}" del /f "{escaped}"')
+            logger.info(f"远程文件已删除: {remote_path}")
+            return True
+        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
+            logger.error(f"远程文件删除失败: {remote_path}: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -180,12 +218,44 @@ class RemoteWorkstation:
             logger.debug(f"远程执行: {command}")
             stdin, stdout, stderr = self._ssh.exec_command(command, timeout=timeout)
             exit_code = stdout.channel.recv_exit_status()
-            out = stdout.read().decode("utf-8", errors="replace")
-            err = stderr.read().decode("utf-8", errors="replace")
+            out_raw = stdout.read()
+            err_raw = stderr.read()
+            # 远程为 Windows 中文系统，优先尝试 GBK 解码，回退到 UTF-8
+            out = self._decode_remote_output(out_raw)
+            err = self._decode_remote_output(err_raw)
             return (out, err, exit_code)
-        except Exception as e:
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.error(f"远程命令执行失败: {e}")
             return ("", str(e), -1)
+
+    @staticmethod
+    def _decode_remote_output(raw: bytes) -> str:
+        """解码远程 Windows 输出，优先 GBK（中文 Windows），回退 UTF-8。"""
+        for encoding in ("gbk", "utf-8"):
+            try:
+                return raw.decode(encoding)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _parse_disk_space(wmic_output: str) -> str:
+        """解析 wmic 磁盘空间输出，将字节值换算为 GB 并格式化。"""
+        lines = wmic_output.strip().splitlines()
+        # wmic 输出格式: 第一行是表头(FreeSpace  Size)，第二行是数值
+        for line in lines:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    free_bytes = int(parts[0])
+                    total_bytes = int(parts[1])
+                    free_gb = free_bytes / (1024 ** 3)
+                    total_gb = total_bytes / (1024 ** 3)
+                    return f"空闲 {free_gb:.2f} GB / 总计 {total_gb:.2f} GB"
+                except ValueError:
+                    continue
+        # 如果解析失败，返回原始输出（已去除多余空白）
+        return wmic_output.strip()
 
     def exec_background(self, command: str, flag_file: str) -> bool:
         """
@@ -205,16 +275,23 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
-        # 安全转义：防止命令注入，对路径中的双引号进行转义
-        escaped_command = command.replace('"', '\\"')
-        escaped_flag = flag_file.replace('"', '\\"')
+        # 安全转义：防止命令注入，转义所有 PowerShell 特殊字符
+        _PS_ESCAPE_TABLE = str.maketrans({
+            '"': '`"',   # 双引号
+            '$': '`$',    # 变量展开
+            '`': '``',    # 反引号（转义符本身）
+            '\n': ' ',   # 换行 → 空格
+            '\r': ' ',   # 回车 → 空格
+        })
+        escaped_command = command.translate(_PS_ESCAPE_TABLE)
+        escaped_flag = flag_file.translate(_PS_ESCAPE_TABLE)
 
         # 使用 Start-Process 启动独立 cmd.exe 后台进程
         # 进程不依附于 SSH 会话，SSH 断开后继续运行
         # 命令完成后写入标志文件表示任务结束
         ps_command = (
             f'Start-Process -FilePath "cmd.exe" '
-            f'-ArgumentList \'/c "{escaped_command} && echo done > \\"{escaped_flag}\\""\' '
+            f'-ArgumentList \'/c "{escaped_command} && echo done > "{escaped_flag}""\' '
             f'-WindowStyle Hidden'
         )
 
@@ -234,7 +311,7 @@ class RemoteWorkstation:
             else:
                 logger.error(f"远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
                 return False
-        except Exception as e:
+        except (paramiko.SSHException, OSError, IOError, EOFError) as e:
             logger.error(f"启动远程后台任务异常: {e}")
             return False
 
@@ -296,10 +373,10 @@ class RemoteWorkstation:
         if code == 0:
             results["python_version"] = out.strip()
 
-        # 检查磁盘空间
+        # 检查磁盘空间（转换为 GB 显示）
         out, err, code = self.exec_command("wmic logicaldisk where DeviceID='D:' get FreeSpace,Size")
         if code == 0:
-            results["disk_space"] = out.strip()
+            results["disk_space"] = self._parse_disk_space(out)
 
         # 查询后台 Python 进程
         out, err, code = self.exec_command(

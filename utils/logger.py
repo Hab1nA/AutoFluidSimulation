@@ -42,8 +42,12 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
 
     # 文件输出 handler
     if log_file is None:
-        log_dir = LOCAL_PATHS["log_dir"]
-        os.makedirs(log_dir, exist_ok=True)
+        log_dir = LOCAL_PATHS.get("log_dir", "")
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        else:
+            log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+            os.makedirs(log_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = os.path.join(log_dir, f"{name}_{timestamp}.log")
 
@@ -53,7 +57,3 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
     logger.addHandler(file_handler)
 
     return logger
-
-
-# 全局默认 logger
-default_logger = setup_logger("PipelineController")

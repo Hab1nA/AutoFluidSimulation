@@ -21,7 +21,10 @@ IPC 通信协议 (Inter-Process Communication Protocol)
 """
 import json
 import uuid
+import logging
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -99,11 +102,20 @@ def serialize(msg: Dict[str, Any]) -> bytes:
 
 
 def deserialize(data: bytes) -> Optional[Dict[str, Any]]:
-    """从字节串反序列化为消息字典。"""
+    """
+    从字节串反序列化为消息字典。
+
+    Args:
+        data: 原始字节数据
+
+    Returns:
+        消息字典，解析失败返回 None
+    """
     try:
         text = data.decode("utf-8").strip()
         if not text:
             return None
         return json.loads(text)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning(f"消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
         return None

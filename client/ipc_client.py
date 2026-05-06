@@ -7,7 +7,6 @@ TUI 客户端使用此模块与后台 Daemon 通信。
 ===============================================================================
 """
 import socket
-import time
 from typing import Any, Dict, Optional, Tuple
 
 from ipc.protocol import (
@@ -65,8 +64,8 @@ class IPCClient:
         if self._socket:
             try:
                 self._socket.close()
-            except Exception:
-                pass
+            except OSError as e:
+                logger.debug(f"关闭 socket 时出现异常: {e}")
             self._socket = None
 
     def is_connected(self) -> bool:
@@ -123,7 +122,7 @@ class IPCClient:
 
         except (ConnectionError, OSError) as e:
             logger.error(f"IPC 通信异常: {e}")
-            self._socket = None
+            self.disconnect()  # 确保关闭 socket，避免资源泄漏
             return False, None, f"通信异常: {e}"
 
     # ------------------------------------------------------------------

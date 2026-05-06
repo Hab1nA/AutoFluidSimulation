@@ -46,23 +46,33 @@ class TaskRunner:
         """
         self.state = state_manager
         self._ssh: Optional[RemoteWorkstation] = None
-        self._ssh_lock = threading.Lock()  # SSH 操作需要串行化
+        self._ssh_lock = threading.RLock()  # 可重入锁：SSH 操作需串行化，get_ssh() 内部也需加锁
 
     # ------------------------------------------------------------------
     # SSH 连接管理
     # ------------------------------------------------------------------
 
     def get_ssh(self) -> RemoteWorkstation:
-        """获取（或创建）SSH 客户端实例。"""
-        if self._ssh is None or not self._ssh.is_connected():
-            self._ssh = RemoteWorkstation(
-                host=REMOTE_CONFIG["host"],
-                port=REMOTE_CONFIG["port"],
-                username=REMOTE_CONFIG["username"],
-                password=REMOTE_CONFIG["password"],
-            )
-            self._ssh.connect()
-        return self._ssh
+        """
+        获取（或创建）SSH 客户端实例。
+
+        线程安全：使用 _ssh_lock 防止多线程同时创建连接。
+        始终返回 RemoteWorkstation 实例（即使连接失败），
+        调用者需通过 is_connected() 检查连接状态。
+        """
+        with self._ssh_lock:
+            if self._ssh is None:
+                self._ssh = RemoteWorkstation(
+                    host=REMOTE_CONFIG["host"],
+                    port=REMOTE_CONFIG["port"],
+                    username=REMOTE_CONFIG["username"],
+                    password=REMOTE_CONFIG["password"],
+                )
+            # 如果连接断开则尝试重连
+            if not self._ssh.is_connected():
+                if not self._ssh.connect():
+                    logger.error("SSH 重连失败")
+            return self._ssh
 
     def disconnect_ssh(self):
         """断开 SSH 连接。"""
@@ -118,7 +128,8 @@ class TaskRunner:
                 try:
                     sw_app = win32com.client.GetActiveObject("SldWorks.Application")
                     logger.info("已连接到运行中的 SolidWorks 实例")
-                except Exception:
+                except (OSError, AttributeError, RuntimeError):
+                    # COM 未注册或 SW 未运行，尝试启动新实例
                     logger.info("SolidWorks 未运行，正在启动...")
                     sw_app = win32com.client.Dispatch("SldWorks.Application")
                     sw_app.Visible = True  # 设为可见以便调试
@@ -147,8 +158,10 @@ class TaskRunner:
         except ImportError:
             logger.error("win32com 未安装，请执行: pip install pywin32")
             return False
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             logger.error(f"SW 宏执行失败: {e}", exc_info=True)
+            # COM 异常类型(pywintypes.com_error)在 pythoncom 导入失败时不可用，
+            # 但 pywin32 安装后 COM 错误通常是 OSError 的子类
             return False
 
     # ------------------------------------------------------------------
@@ -232,7 +245,12 @@ class TaskRunner:
                     process.kill()
                 except ProcessLookupError:
                     pass  # 进程已自行退出
-                process.communicate()  # 回收子进程资源
+                except OSError as e:
+                    logger.error(f"无法终止 SC 进程: {e}")
+                try:
+                    process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
+                except subprocess.TimeoutExpired:
+                    logger.warning("SC 进程在 kill 后未及时退出")
                 logger.error(f"SC 脚本执行超时 ({timeout}s)")
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 执行超时")
                 return False
@@ -246,7 +264,7 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
                 return False
 
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             logger.error(f"SC 执行异常: {e}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, str(e))
             return False
@@ -289,7 +307,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SFTP 上传失败")
                     return False
-            except Exception as e:
+            except (OSError, IOError, ConnectionError, EOFError) as e:
                 logger.error(f"文件传输异常: {e}")
                 self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
                 return False
@@ -332,7 +350,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "远程任务启动失败")
                     return False
-            except Exception as e:
+            except (OSError, IOError, ConnectionError, EOFError) as e:
                 logger.error(f"网格划分启动异常: {e}")
                 self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
                 return False
@@ -358,7 +376,7 @@ class TaskRunner:
                     poll_interval=10
                 )
                 return success
-            except Exception as e:
+            except (OSError, IOError, ConnectionError, EOFError) as e:
                 logger.error(f"等待网格划分异常: {e}")
                 return False
 
@@ -397,7 +415,7 @@ class TaskRunner:
                 else:
                     self.state.set_step_status(config_name, "Solver", STATUS_ERROR, "远程求解启动失败")
                     return False
-            except Exception as e:
+            except (OSError, IOError, ConnectionError, EOFError) as e:
                 logger.error(f"仿真求解启动异常: {e}")
                 self.state.set_step_status(config_name, "Solver", STATUS_ERROR, str(e))
                 return False
@@ -415,7 +433,7 @@ class TaskRunner:
                     poll_interval=30  # 求解时间较长，轮询间隔加大
                 )
                 return success
-            except Exception as e:
+            except (OSError, IOError, ConnectionError, EOFError) as e:
                 logger.error(f"等待仿真求解异常: {e}")
                 return False
 
@@ -462,7 +480,7 @@ class TaskRunner:
                 results["remote_checks"].update(remote_info)
             else:
                 results["remote_checks"]["ssh"] = "连接失败"
-        except Exception as e:
+        except (OSError, IOError, ConnectionError) as e:
             results["remote_checks"]["ssh"] = f"错误: {e}"
 
         return results
@@ -473,52 +491,74 @@ class TaskRunner:
 
     def clean_step_files(self, step_name: str, config_name: int = None):
         """
-        清理指定步骤产生的文件。
+        清理指定步骤产生的文件（包括本地和远程工作站上的文件）。
 
         Args:
             step_name: 步骤名
             config_name: 构型名称，若为 None 则清理所有构型
         """
-        patterns = {
-            "SW": ("step_dir", "model_gen4_{config}.step"),
-            "SC": ("scdoc_dir", "model_gen4_{config}.scdoc"),
-            "Transfer": None,
-            "Meshing": ("scdoc_dir", "model_gen4_{config}.msh.h5"),  # 本地可能不存在
-            "Solver": ("scdoc_dir", "model_gen4_{config}.cas.h5"),
+        # ---- 本地文件清理映射 ----
+        # (目录key, 文件名模板, 额外清理的后缀对 (原后缀, 新后缀))
+        local_patterns = {
+            "SW":       ("step_dir",  "model_gen4_{config}.step",   None),
+            "SC":       ("scdoc_dir", "model_gen4_{config}.scdoc",  None),
+            "Transfer": None,  # 传输无本地文件
+            "Meshing":  None,  # MSH 文件仅在远程工作站上
+            "Solver":   None,  # CAS/DAT 文件仅在远程工作站上
         }
 
-        pattern_info = patterns.get(step_name)
-        if pattern_info is None:
-            logger.info(f"步骤 {step_name} 无需清理本地文件")
-            return
+        # ---- 远程文件清理映射 ----
+        # (目录key, 文件名模板, 额外清理的后缀对 (原后缀, 新后缀))
+        remote_patterns = {
+            "SW":       None,  # SW 无远程文件
+            "SC":       None,  # SC 无远程文件（SCDOC 由 transfer 上传，但源文件在本地）
+            "Transfer": None,  # 传输无产出文件
+            "Meshing":  ("msh_dir",    "model_gen4_{config}.msh.h5", None),
+            "Solver":   ("result_dir", "model_gen4_{config}.cas.h5", (".cas.h5", ".dat.h5")),
+        }
 
-        dir_key, file_pattern = pattern_info
-        target_dir = LOCAL_PATHS.get(dir_key, "")
+        configs = [config_name] if config_name is not None else self.state.get_all_configs()
 
-        if config_name is not None:
-            # 清理指定构型
-            filename = file_pattern.format(config=config_name)
-            filepath = os.path.join(target_dir, filename)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-                logger.info(f"已删除: {filepath}")
-            # 对于 Solver，也清理 .dat.h5 文件
-            if step_name == "Solver":
-                dat_file = filepath.replace(".cas.h5", ".dat.h5")
-                if os.path.exists(dat_file):
-                    os.remove(dat_file)
-                    logger.info(f"已删除: {dat_file}")
-        else:
-            # 清理所有构型
-            configs = self.state.get_all_configs()
+        # ---- 清理本地文件 ----
+        local_info = local_patterns.get(step_name)
+        if local_info is not None:
+            dir_key, file_template, extra_suffix_pair = local_info
+            target_dir = LOCAL_PATHS.get(dir_key, "")
             for cn in configs:
-                filename = file_pattern.format(config=cn)
+                filename = file_template.format(config=cn)
                 filepath = os.path.join(target_dir, filename)
                 if os.path.exists(filepath):
                     os.remove(filepath)
-                    logger.info(f"已删除: {filepath}")
-                if step_name == "Solver":
-                    dat_file = filepath.replace(".cas.h5", ".dat.h5")
-                    if os.path.exists(dat_file):
-                        os.remove(dat_file)
+                    logger.info(f"已删除本地文件: {filepath}")
+                if extra_suffix_pair:
+                    old_suffix, new_suffix = extra_suffix_pair
+                    extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
+                    extra_path = os.path.join(target_dir, extra_filename)
+                    if os.path.exists(extra_path):
+                        os.remove(extra_path)
+                        logger.info(f"已删除本地文件: {extra_path}")
+
+        # ---- 清理远程文件 ----
+        remote_info = remote_patterns.get(step_name)
+        if remote_info is not None:
+            dir_key, file_template, extra_suffix_pair = remote_info
+            target_dir = REMOTE_CONFIG.get(dir_key, "")
+            try:
+                ssh = self.get_ssh()
+                if ssh.is_connected():
+                    for cn in configs:
+                        filename = file_template.format(config=cn)
+                        remote_path = f"{target_dir}\\{filename}"
+                        ssh.delete_remote_file(remote_path)
+                        if extra_suffix_pair:
+                            old_suffix, new_suffix = extra_suffix_pair
+                            extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
+                            extra_remote_path = f"{target_dir}\\{extra_filename}"
+                            ssh.delete_remote_file(extra_remote_path)
+                    logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
+                else:
+                    logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")
+            except (OSError, IOError, ConnectionError) as e:
+                logger.error(f"远程文件清理异常 ({step_name}): {e}")
+
         logger.info(f"步骤 {step_name} 文件清理完成")

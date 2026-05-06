@@ -29,8 +29,8 @@ TUI 客户端主界面 (Textual-based Terminal UI)
 import sys
 import os
 import asyncio
+import subprocess
 import threading
-import time
 from typing import Dict, Optional
 
 # 将项目根目录加入 Python 路径
@@ -44,7 +44,6 @@ from textual.widgets import (
 )
 from textual.binding import Binding
 from textual.screen import ModalScreen, Screen
-from textual.reactive import reactive
 from textual.message import Message
 from textual import events
 
@@ -86,7 +85,7 @@ ENGINE_STATUS_DISPLAY = {
 # ============================================================================
 
 class ConfirmDialog(ModalScreen):
-    """确认对话框（用于危险操作）。"""
+    """确认对话框（用于危险操作），支持多行详细警告信息。"""
 
     BINDINGS = [
         Binding("y", "confirm", "确认"),
@@ -100,9 +99,18 @@ class ConfirmDialog(ModalScreen):
         self.callback = callback
 
     def compose(self) -> ComposeResult:
+        # 将消息按行拆分，独立渲染以保证多行显示
+        lines = self.message_text.split("\n")
+        message_widgets = []
+        for line in lines:
+            if line.strip():
+                message_widgets.append(Static(line.strip(), classes="confirm-line"))
+            else:
+                message_widgets.append(Static(" ", classes="confirm-line"))
+
         yield Container(
-            Static(f"⚠️  {self.message_text}", id="confirm-message"),
-            Static("按 [Y] 确认  |  按 [N] 取消", id="confirm-hint"),
+            Vertical(*message_widgets, id="confirm-message-body"),
+            Static("按 [[Y]] 确认  |  按 [[N]] 取消", id="confirm-hint"),
             id="confirm-dialog",
         )
 
@@ -135,6 +143,16 @@ class CheckResultScreen(ModalScreen):
         results = self.check_data.get("local_checks", {})
         remote = self.check_data.get("remote_checks", {})
 
+        # 远程检查项的中文显示名映射
+        REMOTE_KEY_LABELS = {
+            "ssh_connected": "SSH 连接",
+            "ssh": "SSH 状态",
+            "conda_available": "Conda 可用",
+            "python_version": "Python 版本",
+            "disk_space": "磁盘空间 (D:)",
+            "background_processes": "后台进程",
+        }
+
         lines = ["[bold]系统自检结果[/bold]\n"]
         lines.append("[bold]━━ 本地检查 ━━[/bold]")
         for name, info in results.items():
@@ -145,14 +163,19 @@ class CheckResultScreen(ModalScreen):
 
         lines.append("\n[bold]━━ 远程检查 ━━[/bold]")
         for key, val in remote.items():
+            label = REMOTE_KEY_LABELS.get(key, key)
             if key == "background_processes":
-                lines.append(f"  后台进程: {val}")
+                if isinstance(val, list):
+                    proc_display = ", ".join(val) if val else "无"
+                else:
+                    proc_display = str(val)
+                lines.append(f"  {label}: {proc_display}")
             else:
-                lines.append(f"  {key}: {val}")
+                lines.append(f"  {label}: {val}")
 
         yield Container(
             Static("\n".join(lines), id="check-content"),
-            Static("\n按 [Q] 或 [Esc] 关闭", id="check-hint"),
+            Static("\n按 [[Q]] 或 [[Esc]] 关闭", id="check-hint"),
             id="check-dialog",
         )
 
@@ -271,19 +294,26 @@ class PipelineTUI(App):
     }
 
     #confirm-dialog {
-        width: 60;
+        width: 66;
         height: auto;
-        margin: 5 10;
+        max-height: 30;
+        margin: 3 8;
         padding: 2 3;
         background: #16213e;
         border: thick #e94560;
     }
 
-    #confirm-message {
+    #confirm-message-body {
+        width: 100%;
+        height: auto;
+        padding-bottom: 1;
+    }
+
+    .confirm-line {
         color: #ffaa00;
         text-style: bold;
         text-align: center;
-        padding-bottom: 1;
+        width: 100%;
     }
 
     #confirm-hint {
@@ -325,12 +355,15 @@ class PipelineTUI(App):
     def __init__(self):
         super().__init__()
         self.ipc = IPCClient()
-        self._refresh_timer: Optional[asyncio.Task] = None
+        self._refresh_timer = None  # Textual Timer object
         self._status_data: Dict[int, Dict[str, str]] = {}
         self._configs: list[int] = []
         self._engine_info: dict = {}
         self._refresh_counter: int = 0
         self._data_lock = threading.Lock()  # 保护共享状态数据
+        self._daemon_process: subprocess.Popen = None  # 由 TUI 启动的 daemon 子进程句柄
+        self._column_keys: Dict[str, str] = {}  # STEP_NAMES → DataTable column key 映射
+        self._table_row_keys: set[str] = set()  # 当前表格中已存在的行键（自维护，兼容 Textual 8.x）
 
     # ------------------------------------------------------------------
     # 界面布局
@@ -349,7 +382,7 @@ class PipelineTUI(App):
         yield DataTable(id="status-table", cursor_type="row")
 
         # 日志面板
-        yield RichLog(id="log-panel", highlight=True, markup=True, max_lines=50)
+        yield RichLog(id="log-panel", highlight=False, markup=True, max_lines=50)
 
         # 底部命令区域
         yield Container(
@@ -361,6 +394,8 @@ class PipelineTUI(App):
                 Button("🔄 Reset", id="btn-reset", variant="default"),
                 Button("🧹 Clean", id="btn-clean", variant="default"),
                 Button("🚪 Quit", id="btn-quit", variant="error"),
+                Button("⚡ Daemon", id="btn-daemon", variant="primary"),
+                Button("⏹ StopD", id="btn-dstop", variant="warning"),
                 Button("⏹ FullQuit", id="btn-fullquit", variant="error"),
                 id="quick-buttons",
             ),
@@ -393,20 +428,26 @@ class PipelineTUI(App):
     def on_unmount(self) -> None:
         """界面卸载时清理。"""
         if self._refresh_timer:
-            self._refresh_timer.cancel()
+            self._refresh_timer.stop()
         self.ipc.disconnect()
+        # 不终止 daemon 子进程——quit 时 daemon 继续运行
 
     # ------------------------------------------------------------------
     # 表格初始化
     # ------------------------------------------------------------------
 
     def _init_table(self):
-        """初始化状态表格的列。"""
+        """初始化状态表格的列，同时记录列 key 映射供增量更新使用。
+
+        Textual 8.x 中 add_column 若不指定 key 参数会自动生成唯一 ID，
+        必须显式传入 key=display 以确保后续 update_cell 可以通过字符串匹配。
+        """
         table = self.query_one("#status-table", DataTable)
-        table.add_column("构型", width=8)
+        table.add_column("构型", width=6, key="构型")
         for step in STEP_NAMES:
             display = STEP_DISPLAY.get(step, step)
-            table.add_column(f"{display[:4]}", width=8)
+            table.add_column(display, width=16, key=display)
+            self._column_keys[step] = display  # display 同时作为列 key
         table.show_header = True
         table.cursor_type = "row"
 
@@ -415,11 +456,12 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     async def _refresh_status(self) -> None:
-        """定时从 Daemon 刷新状态数据并更新表格。"""
+        """定时从 Daemon 刷新状态数据并更新表格（异步，不阻塞事件循环）。"""
         if not self.ipc.is_connected():
             return
 
-        ok, data, msg = self.ipc.get_all_status()
+        # 将阻塞 IPC 调用放到线程池，避免卡住 Textual 事件循环
+        ok, data, msg = await asyncio.to_thread(self.ipc.get_all_status)
         if not ok:
             return
 
@@ -436,54 +478,98 @@ class PipelineTUI(App):
                 self._refresh_counter = 0
 
         if should_refresh_engine:
-            ok2, eng_data, _ = self.ipc.get_engine_status()
+            ok2, eng_data, _ = await asyncio.to_thread(self.ipc.get_engine_status)
             if ok2 and eng_data:
                 with self._data_lock:
                     self._engine_info = eng_data
         self._update_info_bar()
 
     def _update_table(self):
-        """根据最新状态数据更新 DataTable。"""
+        """根据最新状态数据增量更新 DataTable（保留滚动位置）。
+
+        与旧版实现不同，此方法不再使用 table.clear() 全量重建，
+        而是通过 add_row / remove_row / update_cell 进行增量操作，
+        从而避免每次刷新都将滚动条重置到顶端。
+
+        使用自维护的 _table_row_keys 集合追踪行键，
+        兼容 Textual 8.x 中 ordered_rows 返回不可哈希 Row 对象的问题。
+        """
         table = self.query_one("#status-table", DataTable)
 
         with self._data_lock:
             if not self._status_data:
                 return
-            # 获取排序后的构型列表
-            configs = sorted(self._status_data.keys())
+            # 获取排序后的构型列表（按数值排序，避免字符串排序导致的 1→10→2 问题）
+            configs = sorted(self._status_data.keys(), key=lambda x: int(x))
             self._configs = configs
             # 复制数据以避免在锁外迭代
             status_data = dict(self._status_data)
 
-        # 清除旧行
-        table.clear()
+        # 新数据中的行键集合
+        new_keys = {str(cn) for cn in configs}
 
+        # 1) 移除已不存在的构型行
+        removed_keys = self._table_row_keys - new_keys
+        for key in removed_keys:
+            try:
+                table.remove_row(key)
+            except Exception:
+                pass  # 行可能已被移除（竞态窗口），忽略错误
+        self._table_row_keys -= removed_keys
+
+        # 2) 添加新的构型行
+        added_keys = new_keys - self._table_row_keys
         for cn in configs:
+            key = str(cn)
+            if key in added_keys:
+                steps = status_data[cn]
+                row = [key]
+                for step_name in STEP_NAMES:
+                    status = steps.get(step_name, STATUS_WAITING)
+                    icon = STATUS_ICONS.get(status, "?")
+                    row.append(f"{icon} {status}")
+                table.add_row(*row, key=key)
+                self._table_row_keys.add(key)
+
+        # 3) 更新已有行的单元格（仅更新变化的列）
+        for cn in configs:
+            key = str(cn)
+            if key not in self._table_row_keys or key in added_keys:
+                continue  # 新行已在步骤 2 中创建，无需再更新
             steps = status_data[cn]
-            row = [str(cn)]
             for step_name in STEP_NAMES:
                 status = steps.get(step_name, STATUS_WAITING)
                 icon = STATUS_ICONS.get(status, "?")
-                row.append(f"{icon} {status}")
-            table.add_row(*row)
+                new_value = f"{icon} {status}"
+                col_key = self._column_keys.get(step_name)
+                if col_key is None:
+                    continue
+                # 仅在值变化时更新，减少不必要的重绘
+                try:
+                    old_value = table.get_cell(key, col_key)
+                except Exception:
+                    old_value = None
+                if old_value != new_value:
+                    table.update_cell(key, col_key, new_value)
 
     def _update_info_bar(self):
         """更新顶部信息栏。"""
         info_bar = self.query_one("#info-bar", Static)
 
         if self.ipc.is_connected():
-            if self._engine_info:
-                engine_status = ENGINE_STATUS_DISPLAY.get(
-                    self._engine_info.get("engine_status", "stopped"), "未知"
-                )
-                barrier = "已通过" if self._engine_info.get("barrier_passed") else "未通过"
-                info_bar.update(
-                    f"引擎: {engine_status}  |  "
-                    f"构型数: {len(self._configs)}  |  "
-                    f"屏障: {barrier}"
-                )
-            else:
-                info_bar.update("引擎: 已连接  |  等待数据...")
+            with self._data_lock:
+                if self._engine_info:
+                    engine_status = ENGINE_STATUS_DISPLAY.get(
+                        self._engine_info.get("engine_status", "stopped"), "未知"
+                    )
+                    barrier = "已通过" if self._engine_info.get("barrier_passed") else "未通过"
+                    info_bar.update(
+                        f"引擎: {engine_status}  |  "
+                        f"构型数: {len(self._configs)}  |  "
+                        f"屏障: {barrier}"
+                    )
+                else:
+                    info_bar.update("引擎: 已连接  |  等待数据...")
         else:
             info_bar.update("引擎: 未连接  |  请先启动 Daemon")
 
@@ -498,7 +584,6 @@ class PipelineTUI(App):
             log.write(message)
         except Exception:
             # 界面可能还未初始化，降级输出到 stderr
-            import sys
             print(f"[TUI] {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -521,6 +606,10 @@ class PipelineTUI(App):
             self._show_clean_prompt()
         elif btn_id == "btn-quit":
             self._do_quit()
+        elif btn_id == "btn-daemon":
+            self._do_launch_daemon()
+        elif btn_id == "btn-dstop":
+            self._do_stop_daemon()
         elif btn_id == "btn-fullquit":
             self._do_full_quit()
 
@@ -555,6 +644,8 @@ class PipelineTUI(App):
             self._handle_clean_cmd(parts[1:])
         elif cmd == "quit":
             self._do_quit()
+        elif cmd == "daemon":
+            self._handle_daemon_cmd(parts[1:])
         elif cmd == "full_quit":
             self._do_full_quit()
         elif cmd == "status":
@@ -617,9 +708,21 @@ class PipelineTUI(App):
             return
 
         if args[0].lower() == "all":
+            # 查询 Daemon 获取构型总数，用于警告信息
+            config_count = len(self._configs)  # 已缓存的构型列表
+            if config_count == 0 and self._check_connection():
+                ok, data, _ = self.ipc.get_statistics()
+                if ok and data:
+                    config_count = data.get("total_configs", 0)
+
+            if config_count > 0:
+                detail = f"\n\n⚠ 将重置全部 {config_count} 个构型的所有步骤状态（含 SW 宏标志、全局屏障、错误计数）。"
+            else:
+                detail = "\n\n⚠ 将重置所有构型的所有步骤状态（含 SW 宏标志、全局屏障、错误计数）。"
+
             self.push_screen(
                 ConfirmDialog(
-                    "确定要重置【所有构型】的所有步骤吗？此操作不可逆！",
+                    f"确定要重置【所有构型】的所有步骤吗？此操作不可逆！{detail}",
                     callback=self._do_reset_all
                 )
             )
@@ -667,9 +770,39 @@ class PipelineTUI(App):
             return
 
         if args[0].lower() == "all":
+            # 构建受影响的目录列表（本地 + 远程）
+            from engine.config import LOCAL_PATHS, REMOTE_CONFIG
+
+            dir_lines = []
+
+            # 本地目录
+            local_step = LOCAL_PATHS.get("step_dir", "")
+            local_scdoc = LOCAL_PATHS.get("scdoc_dir", "")
+            dir_lines.append("[bold]━━ 本地 PC ━━[/bold]")
+            if local_step:
+                dir_lines.append(f"  • STEP 文件: {local_step}")
+            if local_scdoc:
+                dir_lines.append(f"  • SCDOC 文件: {local_scdoc}")
+
+            # 远程工作站目录
+            dir_lines.append("[bold]━━ 远程工作站 ({host}) ━━[/bold]".format(
+                host=REMOTE_CONFIG.get("host", "?")))
+            remote_msh = REMOTE_CONFIG.get("msh_dir", "")
+            remote_result = REMOTE_CONFIG.get("result_dir", "")
+            if remote_msh:
+                dir_lines.append(f"  • MSH 网格文件: {remote_msh}")
+            if remote_result:
+                dir_lines.append(f"  • CAS/DAT 求解结果: {remote_result}")
+
+            dirs_text = "\n".join(dir_lines)
+
+            detail = (
+                f"\n\n⚠ 将清空以下目录下的所有仿真中间文件：\n{dirs_text}"
+            )
+
             self.push_screen(
                 ConfirmDialog(
-                    "确定要清理【所有步骤】产生的文件吗？此操作不可逆！",
+                    f"确定要清理【所有步骤】产生的文件吗？此操作不可逆！{detail}",
                     callback=self._do_clean_all
                 )
             )
@@ -678,7 +811,11 @@ class PipelineTUI(App):
             if step_name not in STEP_NAMES:
                 self._log(f"[red]无效步骤名: {step_name}，有效值: {STEP_NAMES}[/red]")
                 return
-            config_name = int(args[1]) if len(args) > 1 else None
+            try:
+                config_name = int(args[1]) if len(args) > 1 else None
+            except ValueError:
+                self._log("[red]构型名称必须是整数[/red]")
+                return
             self._do_clean_step(step_name, config_name)
 
     def _do_clean_step(self, step_name: str, config_name: int = None):
@@ -705,11 +842,8 @@ class PipelineTUI(App):
         """执行 quit 命令（仅退出 TUI，后台继续运行）。"""
         self._log("[yellow]⚠ 界面已退出，后台引擎仍在运行[/yellow]")
         self._log("[yellow]  使用 start_client.py 可重新连接界面[/yellow]")
-        # 延迟退出以显示消息
-        def delayed_exit():
-            time.sleep(1)
-            self.exit()
-        threading.Thread(target=delayed_exit, daemon=True).start()
+        # Textual 的 exit() 会先将待显示消息刷新到屏幕后再退出
+        self.exit()
 
     def _do_full_quit(self):
         """执行 full_quit 命令。"""
@@ -729,11 +863,109 @@ class PipelineTUI(App):
             else:
                 self._log(f"[red]✗ {msg}[/red]")
         self.ipc.disconnect()
-        # 延迟退出
-        def delayed_exit():
-            time.sleep(1.5)
-            self.exit()
-        threading.Thread(target=delayed_exit, daemon=True).start()
+        self.exit()
+
+    def _handle_daemon_cmd(self, args: list):
+        """处理 daemon 子命令。"""
+        if not args:
+            self._do_launch_daemon()
+        elif args[0].lower() == "stop":
+            self._do_stop_daemon()
+        elif args[0].lower() == "start":
+            self._do_launch_daemon()
+        else:
+            self._log(f"[yellow]用法: daemon [start|stop]（不带参数默认启动）[/yellow]")
+
+    def _do_launch_daemon(self):
+        """启动后台守护进程并自动连接。"""
+        if self.ipc.is_connected():
+            self._log("[yellow]⚠ 已连接到后台引擎，无需重复启动[/yellow]")
+            return
+
+        try:
+            project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            daemon_script = os.path.join(project_dir, "start_daemon.py")
+
+            if not os.path.exists(daemon_script):
+                self._log(f"[red]✗ 未找到启动脚本: {daemon_script}[/red]")
+                return
+
+            # Windows 下隐藏控制台窗口
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            self._daemon_process = subprocess.Popen(
+                [sys.executable, daemon_script],
+                cwd=project_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            self._log("[cyan]⚡ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
+                self._daemon_process.pid))
+
+            # 启动异步轮询任务
+            asyncio.create_task(self._poll_daemon_startup())
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            self._log(f"[red]✗ 启动后台引擎失败: {e}[/red]")
+
+    def _do_stop_daemon(self):
+        """停止后台守护进程（先 IPC 优雅退出，再强制终止子进程）。"""
+        if not self.ipc.is_connected() and self._daemon_process is None:
+            self._log("[yellow]⚠ 后台引擎未运行或非本 TUI 启动[/yellow]")
+            return
+
+        self.push_screen(
+            ConfirmDialog(
+                "确定要【停止后台引擎】吗？\n所有正在运行的任务将被中止！\n\n"
+                "（TUI 界面将保持运行，可随时重新启动 daemon）",
+                callback=self._execute_stop_daemon
+            )
+        )
+
+    def _execute_stop_daemon(self):
+        """执行停止 daemon 操作。"""
+        # 1) 通过 IPC 优雅退出
+        if self.ipc.is_connected():
+            ok, msg = self.ipc.full_quit()
+            if ok:
+                self._log(f"[yellow]⏹ {msg}[/yellow]")
+            else:
+                self._log(f"[yellow]⚠ IPC 退出请求失败: {msg}，将强制终止进程[/yellow]")
+            self.ipc.disconnect()
+
+        # 2) 停止刷新定时器
+        if self._refresh_timer:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+
+        # 3) 终止 daemon 子进程（如果由本 TUI 启动）
+        if self._daemon_process is not None:
+            try:
+                self._daemon_process.terminate()
+                try:
+                    self._daemon_process.wait(timeout=5)
+                    self._log(f"[green]✓ 后台引擎进程已终止 (PID: {self._daemon_process.pid})[/green]")
+                except subprocess.TimeoutExpired:
+                    self._daemon_process.kill()
+                    self._daemon_process.wait()
+                    self._log(f"[yellow]⚠ 后台引擎进程被强制结束 (PID: {self._daemon_process.pid})[/yellow]")
+            except (OSError, subprocess.SubprocessError) as e:
+                self._log(f"[red]✗ 终止进程失败: {e}[/red]")
+            self._daemon_process = None
+
+        self._update_info_bar()
+
+    async def _poll_daemon_startup(self):
+        """异步轮询直到 Daemon IPC 就绪（最多等待 10 秒）。"""
+        for i in range(20):  # 20 × 0.5s = 10s
+            await asyncio.sleep(0.5)
+            connected = await asyncio.to_thread(self.ipc.connect)
+            if connected:
+                self._log("[green]✓ 后台引擎已就绪，连接成功！[/green]")
+                if not self._refresh_timer:
+                    self._refresh_timer = self.set_interval(1.0, self._refresh_status)
+                self._update_info_bar()
+                return
+        self._log("[red]✗ 后台引擎启动超时 (10s)，请手动检查 start_daemon.py 是否正常运行[/red]")
 
     def _show_reset_prompt(self):
         """提示用户输入 reset 参数。"""
@@ -749,15 +981,17 @@ class PipelineTUI(App):
         """显示帮助信息。"""
         help_text = """
 [bold]可用命令:[/bold]
-  [green]start[/green] / [green]continue[/green]  - 启动或继续流水线
-  [yellow]pause[/yellow]                  - 暂停流水线
+  [green]start[/green] / [green]continue[/green]        - 启动或继续流水线
+  [yellow]pause[/yellow]                   - 暂停流水线
   [blue]check[/blue]                   - 系统自检
   [cyan]reset <XX> <step>[/cyan]       - 重置指定构型的指定步骤
   [cyan]reset all[/cyan]               - 重置所有构型（警告！）
   [magenta]clean <step>[/magenta]            - 清理指定步骤文件
-  [magenta]clean all[/magenta]              - 清理所有文件（警告！）
+  [magenta]clean all[/magenta]               - 清理所有文件（警告！）
   [dim]quit[/dim]                    - 退出界面（后台继续运行）
-  [red]full_quit[/red]               - 完全退出（停止后台引擎）
+  [red]full_quit[/red]               - 完全退出（停止引擎 + 关闭 TUI）
+  [bold cyan]daemon[/bold cyan]                 - 启动后台引擎并自动连接
+  [bold cyan]daemon stop[/bold cyan]           - 停止后台引擎（TUI 保持运行）
   [dim]status[/dim]                  - 显示状态摘要
   [dim]help[/dim]                    - 显示此帮助
         """

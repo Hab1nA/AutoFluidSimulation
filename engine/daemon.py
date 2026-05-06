@@ -91,6 +91,8 @@ class PipelineDaemon:
         except OSError as e:
             logger.error(f"IPC 服务器启动失败: {e}")
             logger.error("可能已有另一个 Daemon 在运行？")
+            self._running = False
+            self.ipc_server.stop()  # 清理部分初始化的 socket
             return
 
         # 3. 注册信号处理（优雅退出）
@@ -147,7 +149,7 @@ class PipelineDaemon:
                 return
             self.state.load_configs(configs)
             logger.info(f"已从 Excel 加载 {len(configs)} 个构型")
-        except Exception as e:
+        except (FileNotFoundError, ValueError, OSError, IOError) as e:
             logger.error(f"Excel 数据加载失败: {e}")
 
     # ------------------------------------------------------------------

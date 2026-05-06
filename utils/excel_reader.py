@@ -34,8 +34,9 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
 
-    wb = openpyxl.load_workbook(excel_path, data_only=True)
+    wb = None
     try:
+        wb = openpyxl.load_workbook(excel_path, data_only=True)
         ws = wb.active
 
         configs: Dict[int, List[float]] = {}
@@ -55,7 +56,8 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
                 logger.warning(f"  跳过无效行: {row}, 错误: {e}")
                 continue
     finally:
-        wb.close()
+        if wb is not None:
+            wb.close()
     logger.info(f"成功读取 {len(configs)} 个构型配置")
     return configs
 

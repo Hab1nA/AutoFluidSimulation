@@ -5,6 +5,7 @@
 ===============================================================================
 """
 import os
+import sys
 
 # ============================================================================
 # 本地 PC 路径配置
@@ -35,11 +36,15 @@ REMOTE_CONFIG = {
     "host": os.environ.get("AUTOFLUID_SSH_HOST", "172.17.135.240"),
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
     "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
-    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", "abc@123"),
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
     # 远程工程根目录
     "root_dir": r"D:\xkz_1020",
     # 远程 SCDOC 接收目录
     "scdoc_dir": r"D:\xkz_1020\scdoc",
+    # 远程网格划分输出目录 (.msh.h5)
+    "msh_dir": r"D:\xkz_1020\msh",
+    # 远程仿真求解输出目录 (.cas.h5, .dat.h5)
+    "result_dir": r"D:\xkz_1020\case",
     # Conda 环境名称
     "conda_env": "pyfluent",
     # 远程网格划分脚本
@@ -133,11 +138,32 @@ for key in ["step_dir", "scdoc_dir", "log_dir"]:
         try:
             os.makedirs(path, exist_ok=True)
         except PermissionError:
-            import sys
             print(f"[WARNING] 权限不足，无法创建目录: {path}", file=sys.stderr)
         except OSError as e:
-            import sys
             print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
 
 # 远程标志目录（在首次 SSH 连接时创建）
 REMOTE_FLAG_DIR = REMOTE_CONFIG["flag_dir"]
+
+# ============================================================================
+# 配置验证
+# ============================================================================
+_CONFIG_WARNINGS = []
+
+if not REMOTE_CONFIG["password"]:
+    _CONFIG_WARNINGS.append(
+        "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
+        "或在 config.py 中配置 password 字段"
+    )
+
+if not os.path.exists(LOCAL_PATHS["sw_model"]):
+    _CONFIG_WARNINGS.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")
+
+if not os.path.exists(LOCAL_PATHS["excel"]):
+    _CONFIG_WARNINGS.append(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}")
+
+if not os.path.exists(LOCAL_PATHS["sc_exe"]):
+    _CONFIG_WARNINGS.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
+
+for warning in _CONFIG_WARNINGS:
+    print(f"[CONFIG WARNING] {warning}", file=sys.stderr)

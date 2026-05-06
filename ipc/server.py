@@ -70,23 +70,23 @@ class IPCServer:
             daemon: PipelineDaemon 实例
         """
         # 引擎控制
-        self.register_handler(CMD_START, lambda p: daemon.handle_start())
-        self.register_handler(CMD_PAUSE, lambda p: daemon.handle_pause())
-        self.register_handler(CMD_STOP, lambda p: daemon.handle_stop())
-        self.register_handler(CMD_CHECK, lambda p: daemon.handle_check())
+        self.register_handler(CMD_START, lambda p: daemon.handle_start(p))
+        self.register_handler(CMD_PAUSE, lambda p: daemon.handle_pause(p))
+        self.register_handler(CMD_STOP, lambda p: daemon.handle_stop(p))
+        self.register_handler(CMD_CHECK, lambda p: daemon.handle_check(p))
 
         # 查询
-        self.register_handler(CMD_GET_ALL_STATUS, lambda p: daemon.handle_get_all_status())
-        self.register_handler(CMD_GET_STATISTICS, lambda p: daemon.handle_get_statistics())
-        self.register_handler(CMD_GET_ENGINE_STATUS, lambda p: daemon.handle_get_engine_status())
+        self.register_handler(CMD_GET_ALL_STATUS, lambda p: daemon.handle_get_all_status(p))
+        self.register_handler(CMD_GET_STATISTICS, lambda p: daemon.handle_get_statistics(p))
+        self.register_handler(CMD_GET_ENGINE_STATUS, lambda p: daemon.handle_get_engine_status(p))
 
         # 重置
         self.register_handler(CMD_RESET_STEP, lambda p: daemon.handle_reset_step(p))
-        self.register_handler(CMD_RESET_ALL, lambda p: daemon.handle_reset_all())
+        self.register_handler(CMD_RESET_ALL, lambda p: daemon.handle_reset_all(p))
 
         # 清理
         self.register_handler(CMD_CLEAN_STEP, lambda p: daemon.handle_clean_step(p))
-        self.register_handler(CMD_CLEAN_ALL, lambda p: daemon.handle_clean_all())
+        self.register_handler(CMD_CLEAN_ALL, lambda p: daemon.handle_clean_all(p))
 
     # ------------------------------------------------------------------
     # 服务器生命周期
@@ -111,6 +111,7 @@ class IPCServer:
             logger.info(f"IPC 服务器已启动: {self.host}:{self.port}")
         except OSError as e:
             logger.error(f"IPC 服务器启动失败（端口可能被占用）: {e}")
+            self._running = False
             self._socket.close()
             self._socket = None
             raise
@@ -121,7 +122,7 @@ class IPCServer:
         if self._socket:
             try:
                 self._socket.close()
-            except Exception:
+            except OSError:
                 pass
             self._socket = None
         if self._server_thread and self._server_thread.is_alive():
@@ -184,7 +185,7 @@ class IPCServer:
         finally:
             try:
                 client_sock.close()
-            except Exception:
+            except OSError:
                 pass
             logger.info(f"IPC 客户端断开: {addr}")
 
