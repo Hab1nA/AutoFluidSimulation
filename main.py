@@ -167,7 +167,15 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
 
 def _stop_daemon_subprocess():
     pid = _read_pid(DAEMON_PID_FILE)
-    if pid is not None and _is_process_alive(pid):
+    if pid is None:
+        print("  后台引擎: 未运行")
+        _remove_pid(DAEMON_PID_FILE)
+        return
+    if pid < MIN_VALID_PID:
+        print(f"  [警告] 无效 PID (PID: {pid})，跳过终止操作")
+        _remove_pid(DAEMON_PID_FILE)
+        return
+    if _is_process_alive(pid):
         try:
             if sys.platform == "win32":
                 if _run_taskkill(pid):

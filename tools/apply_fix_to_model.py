@@ -55,17 +55,29 @@ try:
     time.sleep(2)
 
     # 3. Get DT interface and set external file link
-    dt = doc.GetDesignTable
-    dt.FileName = EXCEL
-    dt.LinkToFile = True
-
-    # 4. Detach and close
+    dt = None
     try:
-        detach = getattr(dt, "Detach", None)
-        if callable(detach):
-            detach()
+        dt_candidate = doc.GetDesignTable
+        dt = dt_candidate() if callable(dt_candidate) else dt_candidate
     except Exception as e:
-        print(f"Detach failed: {type(e).__name__}: {e}")
+        print(f"GetDesignTable failed: {type(e).__name__}: {e}")
+
+    if dt is None:
+        print("GetDesignTable unavailable; skip linking design table.")
+    else:
+        try:
+            dt.FileName = EXCEL
+            dt.LinkToFile = True
+        except Exception as e:
+            print(f"Set design table link failed: {type(e).__name__}: {e}")
+
+        # 4. Detach and close
+        try:
+            detach = getattr(dt, "Detach", None)
+            if callable(detach):
+                detach()
+        except Exception as e:
+            print(f"Detach failed: {type(e).__name__}: {e}")
     try:
         doc.CloseFamilyTable()
     except Exception as e:
