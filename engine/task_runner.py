@@ -520,11 +520,23 @@ class TaskRunner:
             )
         if not matched_params:
             logger.error("[COM设参] 没有任何 Excel 参数与模型匹配！无法设置参数。")
-            # 打印模型实际参数供参考
-            if model_param_names:
-                logger.info(
-                    f"[COM设参] 模型实际参数: {sorted(model_param_names)}"
-                )
+            # 尽力枚举模型实际参数供诊断参考
+            try:
+                all_params = doc.Extension.GetParameters()
+                if all_params:
+                    param_names = []
+                    try:
+                        for p in all_params:
+                            param_names.append(p.Name)
+                    except Exception:
+                        pass
+                    if param_names:
+                        logger.info(
+                            f"[COM设参] 模型实际参数 ({len(param_names)}个): "
+                            f"{sorted(param_names)[:20]}"
+                        )
+            except Exception:
+                pass
             return False
         logger.info(
             f"[COM设参] 匹配参数 ({len(matched_params)}个): {matched_params}"
@@ -652,25 +664,27 @@ class TaskRunner:
             logger.error(f"[COM验证] {label} 为 None")
             return False
 
+        failed_methods = []
         for method_name in ("GetTitle", "GetPathName", "GetType"):
             try:
-                _ = getattr(obj, method_name)()
+                method = getattr(obj, method_name, None)
+                if method is None:
+                    failed_methods.append(f"{method_name}(attr_missing)")
+                    continue
+                _ = method()
                 logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name})")
                 return True
             except AttributeError:
-                continue
+                failed_methods.append(f"{method_name}(attr_missing)")
             except Exception as e:
-                logger.debug(
-                    f"[COM验证] {label} {method_name} 失败: "
-                    f"{type(e).__name__}"
-                )
-                continue
+                err_name = type(e).__name__
+                failed_methods.append(f"{method_name}({err_name})")
 
         logger.warning(
-            f"[COM验证] {label} 所有验证方法均失败，"
-            f"对象可能为无效 COM 代理"
+            f"[COM验证] {label} 所有验证方法均失败: "
+            f"{', '.join(failed_methods)} — COM 代理可能已失效"
         )
-        return True  # 非 None 对象，降级认定有效（避免误杀）
+        return False
     # swDocumentTypes_e
     _SW_DOC_PART = 1
     _SW_DOC_ASSEMBLY = 2

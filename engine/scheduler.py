@@ -88,7 +88,7 @@ class PipelineScheduler:
     # 主调度入口
     # ------------------------------------------------------------------
 
-    def start_pipeline(self):
+    def start_pipeline(self, _recursion_depth: int = 0):
         """
         启动（或继续）流水线。
 
@@ -97,7 +97,18 @@ class PipelineScheduler:
         2. 启动文件监控器
         3. 启动 SC/Transfer/Meshing 工作线程
         4. 启动全局屏障监控线程
+
+        Args:
+            _recursion_depth: 内部递归深度计数器（外部调用方不应指定）
         """
+        if _recursion_depth >= 3:
+            logger.error(
+                "start_pipeline 递归深度超过上限 (3)，可能存在无法自动恢复的错误，"
+                "流水线中止。请手动检查并修复后使用 reset all 重新启动。"
+            )
+            self.state.set_engine_status("stopped")
+            return
+
         logger.info("=" * 60)
         logger.info("流水线调度器启动")
         logger.info("=" * 60)
@@ -276,7 +287,7 @@ class PipelineScheduler:
                 )
                 self.state.set_sw_macro_started(False)
                 # 递归调用自身以重新进入 SW 阶段
-                self.start_pipeline()
+                self.start_pipeline(_recursion_depth + 1)
                 return
 
         # ---- 步骤 2: 启动文件监控 ----

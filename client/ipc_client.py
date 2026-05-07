@@ -76,8 +76,16 @@ class IPCClient:
                 self._socket = None
 
     def is_connected(self) -> bool:
-        """检查是否已连接到 Daemon。"""
-        return self._socket is not None
+        """检查是否已连接到 Daemon（验证 socket 有效性）。"""
+        if self._socket is None:
+            return False
+        try:
+            # 使用 getsockopt 探测 socket 是否仍然有效
+            self._socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return True
+        except OSError:
+            self._socket = None
+            return False
 
     # ------------------------------------------------------------------
     # 请求发送

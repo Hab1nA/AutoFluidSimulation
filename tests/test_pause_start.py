@@ -30,6 +30,12 @@ from typing import Dict, List
 # 将项目根目录加入路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 必须在任何 engine.* 导入之前设置日志目录，避免模块级 logger 初始化失败
+_TEST_TMP_ROOT = tempfile.mkdtemp(prefix="sw_test_ps_")
+_TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
+os.makedirs(_TEST_LOG_DIR, exist_ok=True)
+os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
+
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,

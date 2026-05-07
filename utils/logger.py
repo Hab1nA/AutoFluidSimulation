@@ -38,12 +38,16 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
         else:
-            log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
             os.makedirs(log_dir, exist_ok=True)
         # 时间戳精确到微秒 + PID，避免多实例文件名碰撞
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         pid = os.getpid()
         log_file = os.path.join(log_dir, f"{name}_{timestamp}_{pid}.log")
+    else:
+        # 用户指定了日志文件路径，确保其父目录存在
+        log_parent = os.path.dirname(os.path.abspath(log_file))
+        os.makedirs(log_parent, exist_ok=True)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)

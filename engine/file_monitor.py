@@ -251,8 +251,8 @@ class StepFileMonitor:
         while self._running:
             try:
                 self._scan_directory()
-            except OSError as e:
-                logger.error(f"文件扫描异常: {e}")
+            except Exception as e:
+                logger.error(f"文件扫描异常 ({type(e).__name__}: {e})", exc_info=True)
 
             time.sleep(ENGINE_CONFIG["watchdog_interval"])
 
