@@ -125,8 +125,10 @@ try:
     result = doc.InsertFamilyTableOpen(tmp_in_model_dir)
     print(f"InsertFamilyTableOpen(copy in model dir): {result}")
 finally:
-    try: os.remove(tmp_in_model_dir)
-    except: pass
+    try:
+        os.remove(tmp_in_model_dir)
+    except OSError as e:
+        print(f"Cleanup failed for {tmp_in_model_dir}: {type(e).__name__}: {e}")
 
 # ============================================================
 print("\n" + "=" * 70)
@@ -140,8 +142,10 @@ try:
     result = doc.InsertFamilyTableOpen(tmp_ascii)
     print(f"InsertFamilyTableOpen(ASCII path): {result}")
 finally:
-    try: os.remove(tmp_ascii)
-    except: pass
+    try:
+        os.remove(tmp_ascii)
+    except OSError as e:
+        print(f"Cleanup failed for {tmp_ascii}: {type(e).__name__}: {e}")
 
 # ============================================================
 print("\n" + "=" * 70)
@@ -377,5 +381,7 @@ pythoncom.CoUninitialize()
 
 # Clean temp files
 for f in [gen_path, gen_path3, gen_path4]:
-    try: os.remove(f)
-    except: pass
+    try:
+        os.remove(f)
+    except OSError as e:
+        print(f"Cleanup failed for {f}: {type(e).__name__}: {e}")

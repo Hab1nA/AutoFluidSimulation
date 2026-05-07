@@ -27,7 +27,8 @@ for row in ws.iter_rows(min_row=3, values_only=True):
     if row[0] is None: break
     try:
         config_data[int(row[0])] = [float(row[i]) for i in range(1, len(excel_params)+1)]
-    except: pass
+    except (ValueError, TypeError, IndexError) as e:
+        print(f"Skipping invalid row {row}: {type(e).__name__}: {e}")
 wb.close()
 print(f"Configs from Excel: {sorted(config_data.keys())}")
 

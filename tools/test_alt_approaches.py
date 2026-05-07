@@ -91,8 +91,10 @@ try:
         wb_xls.save(tmp_xls)
         result2 = doc.InsertFamilyTableOpen(tmp_xls)
         print(f"InsertFamilyTableOpen(.xls): {result2}")
-        try: os.remove(tmp_xls)
-        except: pass
+        try:
+            os.remove(tmp_xls)
+        except OSError as e:
+            print(f"Cleanup failed for {tmp_xls}: {type(e).__name__}: {e}")
     except ImportError:
         print("xlwt not installed, skipping .xls test")
 

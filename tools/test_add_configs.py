@@ -73,5 +73,7 @@ try:
     sw.CloseDoc(os.path.basename(tmp_model))
 finally:
     pythoncom.CoUninitialize()
-    try: os.remove(tmp_model)
-    except: pass
+    try:
+        os.remove(tmp_model)
+    except OSError as e:
+        print(f"Cleanup failed for {tmp_model}: {type(e).__name__}: {e}")

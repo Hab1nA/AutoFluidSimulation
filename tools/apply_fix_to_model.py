@@ -45,8 +45,10 @@ try:
     print("\n--- Applying fix ---")
 
     # 1. Delete any existing design table
-    try: doc.DeleteDesignTable()
-    except: pass
+    try:
+        doc.DeleteDesignTable()
+    except Exception as e:
+        print(f"DeleteDesignTable failed: {type(e).__name__}: {e}")
 
     # 2. Create fresh empty design table
     doc.InsertFamilyTableEdit()
@@ -58,10 +60,14 @@ try:
     dt.LinkToFile = True
 
     # 4. Detach and close
-    try: dt.Detach
-    except: pass
-    try: doc.CloseFamilyTable()
-    except: pass
+    try:
+        _ = dt.Detach
+    except Exception as e:
+        print(f"Detach failed: {type(e).__name__}: {e}")
+    try:
+        doc.CloseFamilyTable()
+    except Exception as e:
+        print(f"CloseFamilyTable failed: {type(e).__name__}: {e}")
 
     print("Fix applied: InsertFamilyTableEdit + FileName + LinkToFile")
     # === END FIX ===

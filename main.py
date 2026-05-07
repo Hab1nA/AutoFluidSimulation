@@ -117,6 +117,22 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
     return logger
 
 
+def _run_taskkill(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        result = subprocess.run(
+            ["taskkill", "/pid", str(pid), "/f"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"  [警告] taskkill 失败 (PID: {pid}): {e}")
+        return False
+
+
 def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
     daemon_script = os.path.join(PROJECT_DIR, "start_daemon.py")
     if not os.path.exists(daemon_script):
@@ -153,14 +169,17 @@ def _stop_daemon_subprocess():
     if pid is not None and _is_process_alive(pid):
         try:
             if sys.platform == "win32":
-                os.system(f"taskkill /pid {pid} /f >nul 2>&1")
+                if _run_taskkill(pid):
+                    print(f"  后台引擎进程已终止 (PID: {pid})")
+                else:
+                    print(f"  [警告] 无法终止后台引擎进程 (PID: {pid})")
             else:
                 os.kill(pid, signal.SIGTERM)
                 try:
                     os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:
                     pass
-            print(f"  后台引擎进程已终止 (PID: {pid})")
+                print(f"  后台引擎进程已终止 (PID: {pid})")
         except (OSError, ProcessLookupError) as e:
             print(f"  [警告] 终止后台引擎进程失败: {e}")
     else:
@@ -199,8 +218,10 @@ def _stop_all_processes():
                         pids.append(int(parts[-1].strip()))
                 for p in pids:
                     try:
-                        os.system(f"taskkill /pid {p} /f >nul 2>&1")
-                        print(f"  {label}进程已终止 (PID: {p})")
+                        if _run_taskkill(p):
+                            print(f"  {label}进程已终止 (PID: {p})")
+                        else:
+                            print(f"  [警告] 无法终止 {label} 进程 (PID: {p})")
                     except OSError:
                         pass
             except (subprocess.SubprocessError, OSError):
