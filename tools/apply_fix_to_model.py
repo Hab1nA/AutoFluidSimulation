@@ -61,7 +61,11 @@ try:
 
     # 4. Detach and close
     try:
-        _ = dt.Detach
+        detach = getattr(dt, "Detach", None)
+        if callable(detach):
+            detach()
+        else:
+            _ = detach
     except Exception as e:
         print(f"Detach failed: {type(e).__name__}: {e}")
     try:

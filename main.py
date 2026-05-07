@@ -118,7 +118,7 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
 
 
 def _run_taskkill(pid: int) -> bool:
-    if pid <= 0:
+    if pid < 1:
         return False
     try:
         result = subprocess.run(
