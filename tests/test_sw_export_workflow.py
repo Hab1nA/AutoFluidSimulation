@@ -83,6 +83,8 @@ def create_mock_sw_app(config_names: List[str] = None,
         mock_app.OpenDoc6.return_value = None
 
     # 设计表
+    # InsertFamilyTableEdit 模拟"无设计表"场景（抛出异常使 _model_has_design_table 返回 False）
+    mock_doc.InsertFamilyTableEdit.side_effect = Exception("No design table")
     if insert_dt_succeeds:
         mock_doc.InsertFamilyTableOpen.return_value = True
     else:

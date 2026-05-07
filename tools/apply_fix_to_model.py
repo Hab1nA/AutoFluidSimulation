@@ -3,6 +3,11 @@ Verify the fix on the ORIGINAL model (with backup).
 The fix: InsertFamilyTableEdit + set FileName/LinkToFile properties.
 
 After this script succeeds, InsertFamilyTableOpen will return True.
+
+STATUS (2026-05-07): ✅ FIX CONFIRMED — InsertFamilyTableOpen returns True after
+InsertFamilyTableEdit + FileName/LinkToFile. Production code (engine/task_runner.py)
+now uses _model_has_design_table() detection instead — this script is retained as
+a reference/diagnostic tool only.
 """
 import os, sys, time, shutil
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

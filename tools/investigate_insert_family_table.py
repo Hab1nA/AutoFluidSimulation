@@ -356,16 +356,19 @@ print("\n" + "=" * 70)
 print("SUMMARY OF FINDINGS")
 print("=" * 70)
 print(f"""
-InsertFamilyTableOpen consistently returns False.
+InsertFamilyTableOpen consistently returns False when the model already has
+a linked/external design table. SolidWorks does not allow importing a new
+design table over an existing one.
 
-Likely root cause (from tests above):
-- Test 6: Parameter validity check
-- Test 5: Configuration name check
-- Test 8-9: Generated Excel format tests
+Root cause: model_gen4.SLDPRT has an externally linked design table
+(model_gen4.xlsx). SW opens it with parameters already synced.
 
-Solution: The COM direct parameter approach (doc.Parameter + ShowConfiguration2)
-is already verified working and is implemented in _apply_params_via_com().
-This bypasses the InsertFamilyTableOpen requirement entirely.
+Solution (implemented in engine/task_runner.py):
+  _model_has_design_table() detects existing DT via InsertFamilyTableEdit
+  → skip InsertFamilyTableOpen entirely → proceed to ForceRebuildAll
+
+The COM direct parameter approach (doc.Parameter + ShowConfiguration2)
+is the fallback for models without any design table.
 """)
 
 # Cleanup

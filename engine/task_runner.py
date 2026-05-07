@@ -265,6 +265,52 @@ class TaskRunner:
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[清理] 检查/终止 SW 进程时异常: {e}")
 
+    def _model_has_design_table(self, doc) -> bool:
+        """
+        检测模型是否已存在设计表（链接或内嵌）。
+
+        策略：
+        1. 尝试 InsertFamilyTableEdit → 若成功说明有设计表 → 立即 CloseFamilyTable
+        2. 若失败，尝试 GetDesignTable 属性访问
+
+        对已有链接设计表的模型，SolidWorks 打开模型时会自动读取设计表参数，
+        无需再次调用 InsertFamilyTableOpen。
+
+        Returns:
+            True 表示模型已有设计表（无需再导入）
+        """
+        # 方式1: InsertFamilyTableEdit（最可靠的检测手段）
+        try:
+            doc.InsertFamilyTableEdit()
+            logger.info("[设计表] 检测到模型已有设计表（InsertFamilyTableEdit 成功）")
+            try:
+                doc.CloseFamilyTable()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            pass
+
+        # 方式2: GetDesignTable 属性访问（pywin32 兼容写法）
+        try:
+            dt = doc.GetDesignTable
+            if dt is not None:
+                logger.info("[设计表] 检测到模型已有设计表（GetDesignTable 返回非空）")
+                return True
+        except Exception:
+            pass
+
+        try:
+            dt = doc.GetDesignTable()
+            if dt is not None:
+                logger.info("[设计表] 检测到模型已有设计表（GetDesignTable() 返回非空）")
+                return True
+        except Exception:
+            pass
+
+        logger.info("[设计表] 模型无设计表，将进行导入")
+        return False
+
     def _import_design_table_with_retry(
         self, doc, sw_app, excel_path: str, sw_model: str
     ) -> bool:
@@ -272,6 +318,7 @@ class TaskRunner:
         带容错与多策略降级的设计表导入。
 
         策略优先级：
+        0. 检测模型是否已有设计表 → 有则跳过导入（链接模型自动同步）
         1. InsertFamilyTableOpen → SW 原生导入（最快最可靠）
         2. 解析 Excel 参数名 → COM 直接设参（绕过设计表，兼容参数名不匹配）
         3. 详细诊断报告 → 帮助用户定位 Excel 与模型不匹配的具体原因
@@ -287,27 +334,13 @@ class TaskRunner:
         """
         basename_model = os.path.basename(sw_model)
 
-        # ---- 1) 尝试删除已有设计表 ----
-        try:
-            existing_dt = doc.GetDesignTable()
-            if existing_dt is not None:
-                logger.info("[设计表] 检测到模型已有内嵌设计表，正在删除...")
-                try:
-                    doc.DeleteDesignTable()
-                    logger.info("[设计表] ✓ 已有设计表已删除")
-                    time.sleep(1)
-                except Exception as e_del:
-                    logger.warning(
-                        f"[设计表] 删除已有设计表失败 "
-                        f"({type(e_del).__name__}: {e_del})，继续尝试导入"
-                    )
-        except Exception as e_check:
-            logger.debug(
-                f"[设计表] 检查已有设计表时异常 "
-                f"({type(e_check).__name__}: {e_check})，继续尝试导入"
-            )
+        # ---- 0) 检测模型是否已有设计表（链接或内嵌） ----
+        # 链接设计表的模型在 SW 打开时已自动同步参数，无需也无法再次导入
+        if self._model_has_design_table(doc):
+            logger.info("[设计表] 模型已有设计表，跳过导入（已自动同步参数）")
+            return True
 
-        # ---- 2) 策略A: InsertFamilyTableOpen（最多2次） ----
+        # ---- 1) 策略A: InsertFamilyTableOpen（最多2次） ----
         tmp_excel_path = None
         try:
             tmp_fd, tmp_excel_path = tempfile.mkstemp(
@@ -845,6 +878,7 @@ class TaskRunner:
 
         sw_model = LOCAL_PATHS["sw_model"]
         excel_path = LOCAL_PATHS.get("excel", "")
+        sw_macro = LOCAL_PATHS.get("sw_macro", "")
         step_dir = LOCAL_PATHS.get("step_dir", "")
         doc_type = self._guess_sw_doc_type(sw_model)
 
