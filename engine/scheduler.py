@@ -227,7 +227,23 @@ class PipelineScheduler:
                         )
                     except Exception:
                         pass
-                    time.sleep(3)
+                    # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
+                    logger.info("等待 SolidWorks 进程完全退出...")
+                    for _ in range(10):
+                        time.sleep(1)
+                        try:
+                            check = subprocess.run(
+                                ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
+                                 "/fo", "csv", "/nh"],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if "SLDWORKS.exe" not in check.stdout:
+                                logger.info("✓ SolidWorks 进程已退出")
+                                break
+                        except Exception:
+                            break
+                    # 额外冷却确保 COM 子系统完全释放
+                    time.sleep(5)
                     # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
                     #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
                     if self._file_monitor is not None:

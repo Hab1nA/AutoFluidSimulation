@@ -14,13 +14,17 @@
 import sys
 import os
 
-# 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from utils.logger import init_session
+
+session_log_dir = init_session("client")
 
 from client.tui import main
 
 if __name__ == "__main__":
     print("正在启动 TUI 客户端...")
+    print(f"  日志目录: {session_log_dir}")
     print("提示: 使用 quit 命令仅退出界面，后台引擎继续运行")
     print("      使用 quit full 命令彻底停止后台引擎")
     print()

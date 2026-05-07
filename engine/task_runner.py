@@ -508,12 +508,12 @@ class TaskRunner:
         # --- 获取模型配置列表 ---
         model_configs = []
         try:
-            # pywin32 延迟绑定：尝试无括号（属性）和有括号（方法）两种方式
             raw = None
             try:
-                raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
+                doc._FlagAsMethod('GetConfigurationNames')
+                raw = doc.GetConfigurationNames()
             except TypeError:
-                raw = doc.GetConfigurationNames     # pywin32 属性访问
+                raw = doc.GetConfigurationNames
             if isinstance(raw, (tuple, list)):
                 model_configs = [str(c) for c in raw]
             elif raw is not None:
@@ -553,10 +553,9 @@ class TaskRunner:
             )
         if not matched_params:
             logger.error("[COM设参] 没有任何 Excel 参数与模型匹配！无法设置参数。")
-            # 打印模型实际参数供参考
-            if model_param_names:
+            if unmatched_excel:
                 logger.info(
-                    f"[COM设参] 模型实际参数: {sorted(model_param_names)}"
+                    f"[COM设参] 未匹配的 Excel 参数: {sorted(unmatched_excel)}"
                 )
             return False
         logger.info(
@@ -687,7 +686,9 @@ class TaskRunner:
 
         for method_name in ("GetTitle", "GetPathName", "GetType"):
             try:
-                _ = getattr(obj, method_name)()
+                val = getattr(obj, method_name)
+                if callable(val):
+                    _ = val()
                 logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name})")
                 return True
             except AttributeError:
@@ -703,7 +704,7 @@ class TaskRunner:
             f"[COM验证] {label} 所有验证方法均失败，"
             f"对象可能为无效 COM 代理"
         )
-        return True  # 非 None 对象，降级认定有效（避免误杀）
+        return True
     # swDocumentTypes_e
     _SW_DOC_PART = 1
     _SW_DOC_ASSEMBLY = 2
@@ -750,9 +751,10 @@ class TaskRunner:
         # 获取所有配置名称（兼容 pywin32 属性/方法两种访问方式）
         conf_names = []
         try:
-            raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
+            doc._FlagAsMethod('GetConfigurationNames')
+            raw = doc.GetConfigurationNames()
         except TypeError:
-            raw = doc.GetConfigurationNames     # pywin32 属性访问
+            raw = doc.GetConfigurationNames
         if isinstance(raw, (tuple, list)):
             conf_names = [str(c) for c in raw]
         elif raw is not None:
@@ -806,12 +808,14 @@ class TaskRunner:
                 save_warnings = win32com.client.VARIANT(
                     pythoncom.VT_BYREF | pythoncom.VT_I4, 0
                 )
-                # SaveAs(FileName, Version, Options, ExportData, Errors, Warnings)
+                export_data = win32com.client.VARIANT(
+                    pythoncom.VT_DISPATCH, None
+                )
                 status = doc.Extension.SaveAs(
                     filepath,
-                    self._SW_SAVE_AS_CURRENT_VERSION,   # 0 = swSaveAsCurrentVersion
-                    self._SW_SAVE_AS_OPTIONS_SILENT,     # 1 = swSaveAsOptions_Silent
-                    None,                                 # ExportData
+                    self._SW_SAVE_AS_CURRENT_VERSION,
+                    self._SW_SAVE_AS_OPTIONS_SILENT,
+                    export_data,
                     save_errors,
                     save_warnings,
                 )
@@ -970,26 +974,8 @@ class TaskRunner:
                 except Exception:
                     pass
 
-                # ---- 步骤 A: 动态获取宏的模块名 ----
-                logger.info("正在解析宏结构...")
-                macro_module = None
-                macro_proc = "main"
-                try:
-                    # GetMacroMethods(FilePath, DocumentType) → tuple of "Module.Proc" strings
-                    methods = sw_app.GetMacroMethods(sw_macro, doc_type)
-                    logger.info(f"GetMacroMethods(docType={doc_type}): {methods}")
-                    if methods and isinstance(methods, (tuple, list)) and len(methods) > 0:
-                        first = methods[0]
-                        if isinstance(first, str) and "." in first:
-                            macro_module, macro_proc = first.split(".", 1)
-                            logger.info(
-                                f"发现宏入口: 模块='{macro_module}', 过程='{macro_proc}'"
-                            )
-                except Exception as e_methods:
-                    logger.warning(
-                        f"GetMacroMethods 失败 ({type(e_methods).__name__}: {e_methods})，"
-                        f"将使用启发式搜索"
-                    )
+                # ---- 步骤 A: 宏模块解析已跳过（直接 COM 导出模式） ----
+                logger.info("宏解析: 已跳过（使用直接 COM 导出，不依赖宏文件）")
 
                 # ---- 步骤 B: 打开模型文件 (OpenDoc6) ----
                 # OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
@@ -1050,124 +1036,78 @@ class TaskRunner:
 
                 # ---- 步骤 B3: 重建所有构型 ----
                 # 导入设计表后，模型参数已更新但几何体未重建。
-                # 若不重建，宏文件只会导出已激活过的构型。
                 # ForceRebuildAll 强制重建所有构型而不逐个激活。
+                # pywin32 延迟绑定可能导致 ForceRebuildAll 被误识别为属性，
+                # 使用 _FlagAsMethod 确保其作为方法调用。
                 logger.info("正在重建所有构型（ForceRebuildAll）...")
+                rebuild_ok = False
+                # 策略1: 显式标记 ForceRebuildAll 为方法 (pywin32 兼容)
                 try:
-                    doc.Extension.ForceRebuildAll()
-                    logger.info("✓ 所有构型重建完成")
+                    ext = doc.Extension
+                    ext._FlagAsMethod('ForceRebuildAll')
+                    ext.ForceRebuildAll()
+                    rebuild_ok = True
+                    logger.info("✓ 所有构型重建完成 (ForceRebuildAll)")
                 except Exception as e_rebuild:
-                    logger.error(
-                        f"ForceRebuildAll 失败 "
+                    logger.warning(
+                        f"ForceRebuildAll 策略1 失败 "
                         f"({type(e_rebuild).__name__}: {e_rebuild})"
                     )
-                    # 降级：尝试普通重建
+                # 策略2: 降级为逐个配置重建
+                if not rebuild_ok:
                     try:
-                        doc.EditRebuild3()
-                        logger.info("  已降级为当前构型重建")
+                        logger.info("降级为逐个配置 EditRebuild3...")
+                        doc._FlagAsMethod('GetConfigurationNames')
+                        raw = doc.GetConfigurationNames()
+                        if isinstance(raw, (tuple, list)):
+                            configs = [str(c) for c in raw]
+                        elif raw is not None:
+                            configs = [str(raw)]
+                        else:
+                            configs = []
+                        rebuilt_count = 0
+                        for cfg in configs:
+                            try:
+                                doc.ShowConfiguration2(cfg)
+                                doc.EditRebuild3()
+                                rebuilt_count += 1
+                            except Exception:
+                                pass
+                        if rebuilt_count > 0:
+                            rebuild_ok = True
+                            logger.info(f"✓ 逐个配置重建完成 ({rebuilt_count}/{len(configs)} 个)")
+                        else:
+                            logger.warning("逐个配置重建: 0 个成功")
                     except Exception as e_rebuild2:
                         logger.warning(
-                            f"降级重建也失败 "
+                            f"逐个配置重建失败 "
                             f"({type(e_rebuild2).__name__}: {e_rebuild2})"
                         )
 
-                # ---- 步骤 C: 执行宏 (RunMacro2) ----
-                # RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
-                # 注意：RunMacro2 是同步阻塞的 COM 调用，sw_macro_timeout 作为预期
-                # 最大时长记录但不由程序强制中断（COM STA 对象不支持跨线程超时控制）。
-                # 若宏卡死，需手动结束 SolidWorks 进程。
+                # ---- 步骤 C: 直接 COM 导出 STEP（替代已弃用的 Macro1.swp） ----
+                # 通过 COM API 遍历配置 → ShowConfiguration2 → SaveAs 导出 STEP。
+                # 不再依赖宏文件，消除 VBA 模块名/过程名匹配问题。
+                logger.info("正在通过 COM 直接导出各构型 STEP 文件...")
+                success_cnt, fail_cnt, failed_cfgs = self._export_configs_to_step(doc, step_dir)
                 logger.info(
-                    f"正在执行宏 (RunMacro2): {os.path.basename(sw_macro)} "
-                    f"(预期最大耗时 {ENGINE_CONFIG['sw_macro_timeout']}s)"
+                    f"COM 直接导出完成: {success_cnt} 成功, {fail_cnt} 失败"
+                    f"（{f'失败构型: {failed_cfgs}' if failed_cfgs else '无失败'}）"
                 )
-                macro_ok = False
-                last_error_detail = ""
-
-                # 构建模块名尝试列表（动态发现的模块名优先）
-                candidate_modules = []
-                if macro_module:
-                    candidate_modules.append(macro_module)
-                # 常见回退模块名
-                for name in ["Module1", "Macro1", "Macro11", "MainModule", "Module"]:
-                    if name not in candidate_modules:
-                        candidate_modules.append(name)
-
-                # 过程名候选列表
-                candidate_procs = [macro_proc] if macro_proc else ["main"]
-                for p in ["main", "Main", "MainProc"]:
-                    if p not in candidate_procs:
-                        candidate_procs.append(p)
-
-                for mod_name in candidate_modules:
-                    if macro_ok:
-                        break
-                    for proc_name in candidate_procs:
-                        if macro_ok:
-                            break
-                        try:
-                            run_error = win32com.client.VARIANT(
-                                pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                            )
-                            logger.info(
-                                f"  RunMacro2: module='{mod_name}', "
-                                f"proc='{proc_name}'"
-                            )
-                            result = sw_app.RunMacro2(
-                                sw_macro,
-                                mod_name,
-                                proc_name,
-                                self._SW_RUN_MACRO_DEFAULT,
-                                run_error,
-                            )
-                            logger.info(
-                                f"  RunMacro2 返回: {result}, Error={run_error.value}"
-                            )
-                            if result:
-                                logger.info(
-                                    f"✓ 宏已启动并完成 "
-                                    f"(模块: {mod_name}, 过程: {proc_name})"
-                                )
-                                macro_ok = True
-                            else:
-                                last_error_detail = (
-                                    f"module='{mod_name}', proc='{proc_name}', "
-                                    f"Error={run_error.value}"
-                                )
-                                logger.debug(f"  失败: {last_error_detail}")
-                        except Exception as e_macro:
-                            last_error_detail = (
-                                f"module='{mod_name}', proc='{proc_name}', "
-                                f"{type(e_macro).__name__}: {e_macro}"
-                            )
-                            logger.debug(f"  异常: {last_error_detail}")
-
-                if not macro_ok:
-                    logger.error("所有宏执行方式均失败。最后错误详情:")
-                    logger.error(f"  {last_error_detail}")
-                    logger.error("请检查:")
-                    logger.error(f"  1. 宏文件是否可正常运行: {sw_macro}")
-                    logger.error(
-                        f"  2. VBA 模块名（可用 GetMacroMethods 查询）"
-                    )
-                    logger.error(
-                        f"  3. VBA 过程是否为 Public Sub（无参数）"
-                    )
-                    # 关闭已打开的文档
+                if success_cnt == 0:
+                    logger.error("所有构型 STEP 导出均失败，无法继续")
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
                     except Exception:
                         pass
                     return False
 
-                logger.info("SW 宏执行完毕，正在校验各构型 STEP 文件...")
+                logger.info("STEP 导出完毕，正在校验各构型 STEP 文件...")
                 logger.info(f"  输出目录: {LOCAL_PATHS.get('step_dir', '?')}")
 
                 # ---- 步骤 D: 逐构型安全网校验 STEP 文件 ----
-                # RunMacro2 是同步调用，返回时宏已执行完毕。
-                # 注意：文件监控器已在宏执行期间并行运行，部分构型的 STEP
-                # 可能已被实时检测到并标记为 Completed。此处仅作为安全网——
-                # 对文件监控器遗漏的构型（宏末尾才写完、稳定性检测未赶上）
-                # 做补标记，同时检测因宏错误而缺失的 STEP 文件。
+                # _export_configs_to_step 已逐构型更新状态，此处作为安全网——
+                # 对文件监控器或导出方法可能遗漏的构型做补标记，
+                # 同时检测因错误而缺失的 STEP 文件。
                 all_configs = self.state.get_all_configs()
                 missing_configs: List[int] = []
                 found_configs: List[int] = []
@@ -1196,7 +1136,7 @@ class TaskRunner:
                     else:
                         self.state.set_step_status(
                             cn, "SW", STATUS_ERROR,
-                            f"宏执行完毕但 STEP 缺失: "
+                            f"STEP 导出完毕但文件缺失: "
                             f"{filename}"
                         )
                         missing_configs.append(cn)
@@ -1276,13 +1216,20 @@ class TaskRunner:
                             self._cleanup_sw_processes()
 
                 # 步骤 3: 显式释放 COM 对象引用，帮助 pywin32 及时回收
+                # 在 CoUninitialize 前用 del 确保 COM 代理的 __del__ 被调用，
+                # 防止下次 Dispatch 返回退化的 IDispatch 代理。
+                del doc
                 doc = None
+                del sw_app
                 sw_app = None
                 gc.collect()
-                try:
-                    pythoncom.CoFreeUnusedLibraries()
-                except Exception:
-                    pass
+                # 双重 CoFreeUnusedLibraries 确保 STA 消息泵排空
+                for _ in range(2):
+                    try:
+                        pythoncom.CoFreeUnusedLibraries()
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
                 pythoncom.CoUninitialize()
 
         except ImportError:
