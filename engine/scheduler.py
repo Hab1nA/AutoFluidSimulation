@@ -103,10 +103,54 @@ class PipelineScheduler:
         """
         if _recursion_depth >= 3:
             logger.error(
-                "start_pipeline 递归深度超过上限 (3)，可能存在无法自动恢复的错误，"
-                "流水线中止。请手动检查并修复后使用 reset all 重新启动。"
+                "start_pipeline 递归深度超过上限 (%d)，可能存在无法自动恢复的错误，"
+                "流水线中止。", _recursion_depth
             )
+
+            # 1) 停止所有并行的调度线程（worker / barrier / monitor）
+            self._stopped.set()
+
+            # 2) 将所有仍在非终态的构型 SW 步骤标记为 Error，附带详细诊断信息
+            all_configs = self.state.get_all_configs()
+            terminal_states = {STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED}
+            error_detail = (
+                f"SW 宏自动重试递归深度超过上限 ({_recursion_depth})，"
+                f"可能存在设计表参数不匹配、模型文件损坏或 COM 通信故障。"
+                f"请检查 SW 日志、Excel 参数表及模型文件后使用 reset all 重新启动。"
+            )
+            error_count = 0
+            for cn in all_configs:
+                sw_st = self.state.get_step_status(cn, "SW")
+                if sw_st not in terminal_states:
+                    self.state.set_step_status(cn, "SW", STATUS_ERROR, error_detail)
+                    error_count += 1
+                # 下游步骤若处于 Waiting，也标记为 Error（阻断链条）
+                for s in ["SC", "Transfer", "Meshing", "Solver"]:
+                    if self.state.get_step_status(cn, s) == STATUS_WAITING:
+                        self.state.set_step_status(
+                            cn, s, STATUS_ERROR,
+                            f"上游 SW 步骤失败（递归深度超限），{s} 无法执行"
+                        )
+
+            logger.error(
+                "已标记 %d/%d 个构型的 SW 步骤为 Error，"
+                "%d 个构型的下游步骤亦已阻断",
+                error_count, len(all_configs),
+                sum(1 for cn in all_configs
+                    if self.state.get_step_status(cn, "SC") == STATUS_ERROR)
+            )
+
+            # 3) 清除 sw_macro_started 标志 → 允许用户直接 start 重试
+            self.state.set_sw_macro_started(False)
+
+            # 4) 引擎状态切为 stopped，TUI 可显示 "已停止"
             self.state.set_engine_status("stopped")
+
+            # 5) 停止文件监控器（已在 _stopped 置位时由主循环感知）
+            #    但显式调用 stop() 避免监控线程无限等待
+            if self._file_monitor is not None:
+                self._file_monitor.stop()
+
             return
 
         logger.info("=" * 60)
