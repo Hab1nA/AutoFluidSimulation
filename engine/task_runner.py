@@ -696,7 +696,8 @@ class TaskRunner:
         直接通过 COM API 遍历所有配置并导出 STEP 文件。
 
         替代原 Macro1.swp 宏文件中的导出循环。
-        ForceRebuildAll 已在调用前完成，此处仅负责切换配置并导出。
+        每个构型执行：ShowConfiguration2 → EditRebuild3（同步等待点） → SaveAs。
+        ForceRebuildAll 已在调用前完成（批量重建），EditRebuild3 仅确保活动配置就绪。
         每个构型导出后立即更新状态数据库。
 
         Args:
@@ -713,14 +714,41 @@ class TaskRunner:
 
         # 获取所有配置名称（兼容 pywin32 属性/方法两种访问方式）
         conf_names = []
+        raw = None
         try:
             raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
         except TypeError:
-            raw = doc.GetConfigurationNames     # pywin32 属性访问
+            pass  # pywin32 下可能是属性而非方法，下面再试
+        if raw is None:
+            try:
+                raw = doc.GetConfigurationNames  # pywin32 属性访问
+            except Exception:
+                pass
+
+        # 解包返回值：可能是 tuple/list（正常），或 COM Dispatch 包装对象
         if isinstance(raw, (tuple, list)):
             conf_names = [str(c) for c in raw]
         elif raw is not None:
-            conf_names = [str(raw)]
+            # 尝试当作可迭代对象解包（COM VARIANT 数组可能不是原生 tuple/list）
+            try:
+                conf_names = [str(c) for c in raw]
+            except TypeError:
+                # 单一元素或 Dispatch 包装：尝试 IGetConfigurationNames 替代
+                logger.warning(
+                    f"GetConfigurationNames 返回不可迭代对象 "
+                    f"({type(raw).__name__})，尝试替代方法..."
+                )
+                try:
+                    raw2 = doc.IGetConfigurationNames()
+                except TypeError:
+                    raw2 = doc.IGetConfigurationNames
+                if isinstance(raw2, (tuple, list)):
+                    conf_names = [str(c) for c in raw2]
+                elif raw2 is not None:
+                    try:
+                        conf_names = [str(c) for c in raw2]
+                    except TypeError:
+                        logger.error("IGetConfigurationNames 也无法解析，无法获取配置列表")
 
         if not conf_names:
             logger.error("无法获取模型配置名称列表")
@@ -761,6 +789,18 @@ class TaskRunner:
                     )
                     fail_configs.append(cn_int)
                 continue
+
+            # ---- 重建当前配置 ----
+            # ShowConfiguration2 是异步操作（SW 发起配置切换后立即返回），
+            # EditRebuild3 作为同步等待点，确保活动配置的几何体已完全解析。
+            # 若不执行此步骤，SaveAs 可能导出上一个配置的几何体或失败。
+            try:
+                doc.EditRebuild3()
+            except Exception as e_rebuild:
+                logger.debug(
+                    f"  构型{cn_str}: EditRebuild3 返回异常 "
+                    f"({type(e_rebuild).__name__}: {e_rebuild})，继续导出..."
+                )
 
             # ---- 导出 STEP ----
             try:
@@ -1014,7 +1054,7 @@ class TaskRunner:
                         )
 
                 # ---- 步骤 D: 逐构型导出 STEP ----
-                # 直接通过 COM API 切换配置并调用 SaveAs 导出。
+                # 每个构型：ShowConfiguration2 → EditRebuild3（同步等待） → SaveAs。
                 # 替代原 Macro1.swp 宏文件功能，消除对第三方宏的依赖。
                 # 文件监控器仍在并行运行，作为双保险检测磁盘文件。
                 logger.info(
