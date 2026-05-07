@@ -61,7 +61,9 @@ try:
 
     # 4. Detach and close
     try:
-        getattr(dt, "Detach", None)
+        detach = getattr(dt, "Detach", None)
+        if callable(detach):
+            detach()
     except Exception as e:
         print(f"Detach failed: {type(e).__name__}: {e}")
     try:
