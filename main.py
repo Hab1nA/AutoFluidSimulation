@@ -35,6 +35,7 @@ DAEMON_PID_FILE = os.path.join(PID_DIR, "daemon.pid")
 IPC_HOST = "127.0.0.1"
 IPC_PORT = 9527
 IPC_READY_TIMEOUT = 20
+MIN_VALID_PID = 1
 
 
 def _ensure_dirs():
@@ -118,7 +119,7 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
 
 
 def _run_taskkill(pid: int) -> bool:
-    if pid < 1:
+    if pid < MIN_VALID_PID:
         return False
     try:
         result = subprocess.run(
