@@ -286,6 +286,37 @@ class PipelineScheduler:
                         logger.info(
                             f"暂停标志已置位，已将 {paused_count} 个 SW Error 构型回退为 Paused"
                         )
+
+            # ★ SW 阶段导出汇总（部分成功场景的诊断日志）
+            if not self._paused.is_set():
+                sw_completed = [cn for cn in all_configs
+                                if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED]
+                sw_errors = [cn for cn in all_configs
+                             if self.state.get_step_status(cn, "SW") == STATUS_ERROR]
+                sw_running = [cn for cn in all_configs
+                              if self.state.get_step_status(cn, "SW") == STATUS_RUNNING]
+                if sw_completed:
+                    logger.info(
+                        f"SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
+                    )
+                if sw_errors:
+                    logger.warning(
+                        f"SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败，"
+                        f"将跳过其下游步骤"
+                    )
+                    # 阻断失败构型的下游步骤（避免 worker 线程误处理）
+                    for cn in sw_errors:
+                        for s in ["SC", "Transfer", "Meshing", "Solver"]:
+                            if self.state.get_step_status(cn, s) == STATUS_WAITING:
+                                self.state.set_step_status(
+                                    cn, s, STATUS_ERROR,
+                                    f"上游 SW 导出失败，{s} 已阻断"
+                                )
+                if sw_running:
+                    logger.warning(
+                        f"SW 阶段: {len(sw_running)} 个构型仍为 Running 状态 "
+                        f"(可能导出中断): {sorted(sw_running)}"
+                    )
         else:
             logger.info("SW 宏已执行过，跳过（断点续传模式）")
             # 断点续传时，检查是否有 SW 步骤处于 Paused 或 Error 状态
@@ -431,6 +462,9 @@ class PipelineScheduler:
         """
         logger.info(f"[{threading.current_thread().name}] 工作线程启动")
 
+        _last_queue_report = time.time()
+        _queue_report_interval = 30.0  # 每 30 秒输出一次队列健康状态
+
         while not self._stopped.is_set():
             # 检查暂停
             if self._paused.is_set():
@@ -441,6 +475,28 @@ class PipelineScheduler:
                 # 从队列获取任务（1秒超时以便检查停止/暂停标志）
                 config_name, step_file = self._sc_queue.get(timeout=1)
             except queue.Empty:
+                # ---- 队列空闲时输出健康状态 ----
+                now = time.time()
+                if now - _last_queue_report >= _queue_report_interval:
+                    qsize = self._sc_queue.qsize()
+                    active_workers = sum(1 for t in self._worker_threads if t.is_alive())
+                    logger.debug(
+                        f"[队列健康] 深度={qsize}, 活跃Worker={active_workers}, "
+                        f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}"
+                    )
+                    _last_queue_report = now
+                    # 队列长时间为空且无活跃任务时记录 INFO
+                    if qsize == 0:
+                        waiting_configs = [
+                            cn for cn in self.state.get_all_configs()
+                            if self.state.get_step_status(cn, "SC") == STATUS_WAITING
+                            and self.state.get_step_status(cn, "SW") == STATUS_COMPLETED
+                        ]
+                        if waiting_configs:
+                            logger.warning(
+                                f"[队列异常] {len(waiting_configs)} 个构型 SW 已完成但未入队: "
+                                f"{waiting_configs[:5]}{'...' if len(waiting_configs)>5 else ''}"
+                            )
                 continue
 
             logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name}")

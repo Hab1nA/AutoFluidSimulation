@@ -72,7 +72,12 @@ LOCAL_PATHS = {
     # 日志目录
     "log_dir": _env_override(
         "AUTOFLUID_LOG_DIR",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\logs",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"),
+    ),
+    # 数据库/数据目录（独立于日志目录）
+    "data_dir": _env_override(
+        "AUTOFLUID_DATA_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
     ),
 }
 
@@ -152,7 +157,7 @@ IPC_CONFIG = {
     "host": "127.0.0.1",
     "port": 9527,
     # 共享状态数据库路径
-    "db_path": os.path.join(LOCAL_PATHS["log_dir"], "pipeline_state.db"),
+    "db_path": os.path.join(LOCAL_PATHS["data_dir"], "pipeline_state.db"),
     # Socket 超时（秒）
     "timeout": 5.0,
 }
@@ -205,7 +210,7 @@ def get_step_filename(step_name: str, config_name: int):
 
 def ensure_directories():
     """创建必要的本地目录。"""
-    for key in ["step_dir", "scdoc_dir", "log_dir"]:
+    for key in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]:
         path = LOCAL_PATHS.get(key, "")
         if path:
             try:

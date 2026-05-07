@@ -799,7 +799,9 @@ class TestErrorHandling(unittest.TestCase):
         self.assertEqual(success, 0)
         self.assertEqual(fail, 0)
 
-    def test_export_config_with_non_int_name(self):
+    @patch("os.path.exists", return_value=True)
+    @patch("os.path.getsize", return_value=2048)
+    def test_export_config_with_non_int_name(self, mock_size, mock_exists):
         mock_app, mock_doc = create_mock_sw_app(
             config_names=["Default", "0"],
         )
@@ -961,6 +963,195 @@ class TestStepFilenameGeneration(unittest.TestCase):
 
 
 # ============================================================================
+# 测试类 11: COM 绑定兼容性（_safe_com_call / _com_rebuild / _com_get_config_names）
+# ============================================================================
+
+class TestComBindingCompatibility(unittest.TestCase):
+    """测试 pywin32 动态 Dispatch 的 property/method 兼容性处理。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="sw_test_com_")
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from engine.state_manager import StateManager
+        self._db_path = os.path.join(self.tmpdir, "test_state.db")
+        self.state = StateManager(db_path=self._db_path)
+        from engine.task_runner import TaskRunner
+        self.runner = TaskRunner(self.state)
+
+    def tearDown(self):
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    # ---- _safe_com_call 测试 ----
+
+    def test_safe_com_call_callable_method(self):
+        """mode B: 可调用方法正常调用。"""
+        mock_obj = MagicMock()
+        mock_obj.SomeMethod.return_value = 42
+
+        result, error = self.runner._safe_com_call(mock_obj, "SomeMethod", 1, 2)
+        self.assertIsNone(error)
+        self.assertEqual(result, 42)
+        mock_obj.SomeMethod.assert_called_once_with(1, 2)
+
+    def test_safe_com_call_property_mode(self):
+        """mode A: 属性模式（不可调用的值）。"""
+        result, error = self.runner._safe_com_call(
+            type("Obj", (), {"Visible": True})(), "Visible"
+        )
+        self.assertIsNone(error)
+        self.assertTrue(result)
+
+    def test_safe_com_call_nonexistent_attr(self):
+        """COM 对象无此属性时返回 AttributeError。"""
+        mock_obj = MagicMock()
+        # 用 spec 限制无此属性
+        result, error = self.runner._safe_com_call(object(), "GhostMethod")
+        self.assertIsNotNone(error)
+        self.assertIsInstance(error, AttributeError)
+
+    def test_safe_com_call_property_with_args_rejected(self):
+        """属性模式传入参数时应报 TypeError。"""
+        result, error = self.runner._safe_com_call(
+            type("Obj", (), {"Count": 5})(), "Count", 1
+        )
+        self.assertIsNotNone(error)
+        self.assertIsInstance(error, TypeError)
+        self.assertIn("不是可调用方法", str(error))
+
+    def test_safe_com_call_method_raises_exception(self):
+        """可调用方法本身抛出异常时正确传递。"""
+        mock_obj = MagicMock()
+        mock_obj.FailMethod.side_effect = ValueError("BOOM")
+
+        result, error = self.runner._safe_com_call(mock_obj, "FailMethod")
+        self.assertIsNotNone(error)
+        self.assertIsInstance(error, ValueError)
+        self.assertIsNone(result)
+
+    # ---- _com_rebuild 测试 ----
+
+    def test_com_rebuild_force_rebuild_all_success(self):
+        """ForceRebuildAll 可调用成功。"""
+        mock_doc = MagicMock()
+        mock_doc.Extension.ForceRebuildAll.return_value = True
+
+        ok = self.runner._com_rebuild(mock_doc)
+        self.assertTrue(ok)
+
+    def test_com_rebuild_force_rebuild_all_property_mode(self):
+        """ForceRebuildAll 为 property 模式（返回 True，不可调用）。"""
+        # 模拟 pywin32 property 模式：访问即返回 True，调用则报 TypeError
+        ext = type("Ext", (), {"ForceRebuildAll": True})()
+        mock_doc = MagicMock()
+        mock_doc.Extension = ext
+
+        ok = self.runner._com_rebuild(mock_doc)
+        self.assertTrue(ok)
+
+    def test_com_rebuild_downgrade_to_edit_rebuild3(self):
+        """ForceRebuildAll 失败 → 降级到 EditRebuild3 成功。"""
+        ext = MagicMock()
+        ext.ForceRebuildAll.side_effect = Exception("COM error")
+        mock_doc = MagicMock()
+        mock_doc.Extension = ext
+        mock_doc.EditRebuild3.return_value = True
+
+        ok = self.runner._com_rebuild(mock_doc)
+        self.assertTrue(ok)
+        mock_doc.EditRebuild3.assert_called_once()
+
+    def test_com_rebuild_all_fail(self):
+        """所有重建方式均失败。"""
+        ext = MagicMock()
+        ext.ForceRebuildAll.side_effect = RuntimeError("dead")
+        mock_doc = MagicMock()
+        mock_doc.Extension = ext
+        mock_doc.EditRebuild3.side_effect = OSError("also dead")
+
+        ok = self.runner._com_rebuild(mock_doc)
+        self.assertFalse(ok)
+
+    # ---- _com_get_config_names 测试 ----
+
+    def test_com_get_config_names_tuple(self):
+        """GetConfigurationNames 返回正常 tuple。"""
+        mock_doc = MagicMock()
+        mock_doc.GetConfigurationNames.return_value = ("0", "1", "2")
+
+        names = self.runner._com_get_config_names(mock_doc)
+        self.assertEqual(names, ["0", "1", "2"])
+
+    def test_com_get_config_names_property_mode(self):
+        """GetConfigurationNames 为 property 模式（直接返回 tuple）。"""
+        # 模拟 property 模式：访问时返回 tuple（不可调用）
+        mock_doc = type("Doc", (), {"GetConfigurationNames": ("A", "B")})()
+
+        names = self.runner._com_get_config_names(mock_doc)
+        self.assertEqual(names, ["A", "B"])
+
+    def test_com_get_config_names_fallback_to_iget(self):
+        """GetConfigurationNames 失败 → IGetConfigurationNames 降级。"""
+        mock_doc = MagicMock()
+        mock_doc.GetConfigurationNames.side_effect = TypeError("not callable")
+        mock_doc.IGetConfigurationNames.return_value = ("X", "Y", "Z")
+
+        names = self.runner._com_get_config_names(mock_doc)
+        self.assertEqual(names, ["X", "Y", "Z"])
+
+    def test_com_get_config_names_both_fail(self):
+        """两个接口均失败，返回空列表。"""
+        mock_doc = MagicMock()
+        mock_doc.GetConfigurationNames.side_effect = Exception("dead")
+        mock_doc.IGetConfigurationNames.side_effect = Exception("also dead")
+
+        names = self.runner._com_get_config_names(mock_doc)
+        self.assertEqual(names, [])
+
+    def test_com_get_config_names_single_element(self):
+        """返回值非 tuple/list 时作为单元素解析。"""
+        mock_doc = MagicMock()
+        mock_doc.GetConfigurationNames.return_value = "OnlyConfig"
+
+        names = self.runner._com_get_config_names(mock_doc)
+        self.assertEqual(names, ["OnlyConfig"])
+
+    # ---- SaveAs 后置文件验证测试（_export_configs_to_step 行为） ----
+
+    @patch("os.path.exists", return_value=True)
+    @patch("os.path.getsize", return_value=2048)
+    def test_export_step_file_verification_success(self, mock_size, mock_exists):
+        """SaveAs 返回 True 且文件系统验证通过。"""
+        runner = self.runner
+        mock_app, mock_doc = create_mock_sw_app(
+            config_names=["0", "1"],
+            save_as_succeeds=True,
+        )
+
+        step_dir = self.tmpdir
+        success, fail, failed = runner._export_configs_to_step(mock_doc, step_dir)
+
+        self.assertGreater(success, 0)
+        self.assertEqual(fail, 0)
+
+    @patch("os.path.exists", return_value=False)
+    @patch("os.path.getsize", return_value=0)
+    def test_export_step_file_verification_fail_missing_file(self, mock_size, mock_exists):
+        """SaveAs 返回 True 但文件不存在 → 标记为失败。"""
+        runner = self.runner
+        mock_app, mock_doc = create_mock_sw_app(
+            config_names=["0", "1"],
+            save_as_succeeds=True,
+        )
+
+        step_dir = self.tmpdir
+        success, fail, failed = runner._export_configs_to_step(mock_doc, step_dir)
+
+        self.assertEqual(success, 0)
+        self.assertGreater(fail, 0)
+
+
+# ============================================================================
 # 主入口
 # ============================================================================
 
@@ -983,6 +1174,7 @@ def main():
         TestErrorHandling,
         TestEndToEndWorkflow,
         TestStepFilenameGeneration,
+        TestComBindingCompatibility,
     ]
 
     for tc in test_classes:

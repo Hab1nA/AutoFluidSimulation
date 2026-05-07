@@ -84,6 +84,142 @@ class TaskRunner:
             self._ssh = None
 
     # ------------------------------------------------------------------
+    # COM 调用工具方法
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_com_call(obj, method_name: str, *args, **kwargs):
+        """
+        安全调用 COM 方法，自动处理 pywin32 动态 Dispatch 的 property vs method 歧义。
+
+        pywin32 的动态 Dispatch 可能将 COM 方法暴露为：
+        - 可调用的 bound method（正常模式）
+        - Python property（访问即触发 COM 调用，返回结果值）
+
+        此方法自动检测两种模式并正确获取结果。
+
+        Args:
+            obj: COM 对象
+            method_name: 方法名
+            *args: 仅在 callable 模式下传递
+            **kwargs: 仅在 callable 模式下传递
+
+        Returns:
+            (result, error): 二元组。成功时 error=None，result 为 COM 返回值；
+                             失败时 result=None，error 为异常对象。
+        """
+        try:
+            attr = getattr(obj, method_name, None)
+            if attr is None:
+                return (None, AttributeError(
+                    f"COM 对象 ({type(obj).__name__}) 无属性 '{method_name}'"
+                ))
+            if callable(attr):
+                result = attr(*args, **kwargs)
+            else:
+                if args or kwargs:
+                    return (None, TypeError(
+                        f"COM 属性 '{method_name}' 不是可调用方法，但传入了参数"
+                    ))
+                result = attr
+            return (result, None)
+        except Exception as e:
+            return (None, e)
+
+    @staticmethod
+    def _com_rebuild(doc, config_name: str = None) -> bool:
+        """
+        尝试调用 ForceRebuildAll 重建所有构型；失败时自动降级到 EditRebuild3。
+
+        兼容 pywin32 的 property/method 双重 COM 绑定模式。
+        ForceRebuildAll 是批量重建所有构型的首选方案；
+        EditRebuild3 仅重建当前活动配置，作为降级备选。
+
+        Args:
+            doc: SW IModelDoc2 COM 对象
+            config_name: 可选，当前构型名（用于降级日志）
+
+        Returns:
+            True 表示重建成功（任一方式）
+        """
+        ctx = f" (构型{config_name})" if config_name else ""
+
+        # 策略1: ForceRebuildAll（批量重建所有构型）
+        result, error = TaskRunner._safe_com_call(doc.Extension, "ForceRebuildAll")
+        if error is None:
+            logger.info(f"✓ ForceRebuildAll 完成{ctx} (返回值={result})")
+            return True
+        # 检测 property 模式下的误报（getattr 已成功触发 COM 调用，
+        # 返回值是 bool/int 且 error 是调用 bool() 导致的 TypeError）
+        if isinstance(error, TypeError):
+            if "不是可调用方法" in str(error):
+                pass  # 真正的"不可调用"错误，继续降级
+            elif result is not None and isinstance(result, (bool, int)):
+                logger.info(f"✓ ForceRebuildAll property 模式成功{ctx} (返回值={result})")
+                return True
+
+        logger.warning(
+            f"ForceRebuildAll 失败{ctx} ({type(error).__name__}: {error})，"
+            f"尝试降级..."
+        )
+
+        # 策略2: EditRebuild3（仅当前活动配置，作为同步等待点）
+        result2, error2 = TaskRunner._safe_com_call(doc, "EditRebuild3")
+        if error2 is None:
+            logger.info(f"  已降级为当前构型重建{ctx}")
+            return True
+        if isinstance(error2, TypeError) and result2 is not None and isinstance(result2, (bool, int)):
+            logger.info(f"  已降级为当前构型重建{ctx} (property 模式)")
+            return True
+
+        logger.warning(f"降级重建也失败{ctx} ({type(error2).__name__}: {error2})")
+        return False
+
+    @staticmethod
+    def _com_get_config_names(doc) -> list:
+        """
+        通过 COM 获取模型的所有配置名称。
+
+        兼容 pywin32 动态 Dispatch 下 GetConfigurationNames 可能是属性或方法。
+        失败时自动尝试 IGetConfigurationNames 备选接口。
+
+        Args:
+            doc: SW IModelDoc2 COM 对象
+
+        Returns:
+            配置名称字符串列表（可能为空）
+        """
+        raw, error = TaskRunner._safe_com_call(doc, "GetConfigurationNames")
+        if error is not None and raw is None:
+            # 尝试备选接口 IGetConfigurationNames
+            raw, error2 = TaskRunner._safe_com_call(doc, "IGetConfigurationNames")
+            if error2 is not None:
+                logger.warning(
+                    f"GetConfigurationNames 和 IGetConfigurationNames 均失败: "
+                    f"({type(error).__name__}), ({type(error2).__name__})"
+                )
+                return []
+
+        conf_names = []
+        if isinstance(raw, (tuple, list)):
+            conf_names = [str(c) for c in raw]
+        elif raw is not None:
+            # 非 tuple/list 时，可能是单一配置名（字符串）或 COM 包装对象
+            # 注意：字符串是可迭代的，不能直接 for c in raw，需要特殊处理
+            if isinstance(raw, str):
+                conf_names = [raw]
+            else:
+                try:
+                    conf_names = [str(c) for c in raw]
+                except TypeError:
+                    logger.warning(
+                        f"GetConfigurationNames 返回不可迭代对象 "
+                        f"({type(raw).__name__})，尝试作为单元素解析"
+                    )
+                    conf_names = [str(raw)]
+        return conf_names
+
+    # ------------------------------------------------------------------
     # 阶段 2: SolidWorks 宏执行
     # ------------------------------------------------------------------
 
@@ -329,7 +465,7 @@ class TaskRunner:
                 break
             import_path = tmp_excel_path or excel_path
             logger.info(
-                f"[设计表] InsertFamilyTableOpen 尝试 {attempt}/2"
+                f"[设计表] InsertFamilyTableOpen 尝试 {attempt}/2（文件: {os.path.basename(import_path)}）"
             )
             try:
                 inserted = doc.InsertFamilyTableOpen(import_path)
@@ -346,6 +482,28 @@ class TaskRunner:
                 )
                 if attempt == 1:
                     time.sleep(3)
+
+        # 若 InsertFamilyTableOpen 失败，记录诊断信息
+        if not insert_ok:
+            logger.warning(
+                "[设计表] InsertFamilyTableOpen 均返回 False。可能原因:"
+            )
+            logger.warning(
+                "  1. SW API 安全设置阻止了程序化设计表导入"
+            )
+            logger.warning(
+                "  2. Excel 文件格式与 SW 设计表模板不完全兼容"
+            )
+            logger.warning(
+                "  3. 模型(.SLDPRT)不支持 InsertFamilyTableOpen 方式（某些 SW 版本限制）"
+            )
+            # 尝试检测 SW 版本以辅助诊断
+            try:
+                sw_ver = self._safe_com_call(doc, "GetModelerVersion")[0]
+                if sw_ver:
+                    logger.info(f"[设计表] 当前 SW 版本(GetModelerVersion): {sw_ver}")
+            except Exception:
+                pass
 
         if insert_ok:
             logger.info("[设计表] ✓ InsertFamilyTableOpen 成功")
@@ -473,20 +631,9 @@ class TaskRunner:
                 wb.close()
 
         # --- 获取模型配置列表 ---
-        model_configs = []
-        try:
-            # pywin32 延迟绑定：尝试无括号（属性）和有括号（方法）两种方式
-            raw = None
-            try:
-                raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
-            except TypeError:
-                raw = doc.GetConfigurationNames     # pywin32 属性访问
-            if isinstance(raw, (tuple, list)):
-                model_configs = [str(c) for c in raw]
-            elif raw is not None:
-                model_configs = [str(raw)]
-        except Exception as e:
-            logger.warning(f"[COM设参] 获取配置列表失败 ({type(e).__name__})，尝试替代方法...")
+        model_configs = self._com_get_config_names(doc)
+        if not model_configs:
+            logger.warning("[COM设参] 无法获取模型配置列表，将尝试所有 Excel 构型")
             # 备选：从 Excel 数据中推断配置名
             for cn in sorted(config_data.keys()):
                 cfg_str = str(cn)
@@ -495,10 +642,8 @@ class TaskRunner:
                     model_configs.append(cfg_str)
                 except Exception:
                     pass
-        if model_configs:
-            logger.info(f"[COM设参] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
         else:
-            logger.warning("[COM设参] 无法获取模型配置列表，将尝试所有 Excel 构型")
+            logger.info(f"[COM设参] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
 
         # --- 构建参数名映射：逐个验证 Excel 参数在模型中是否存在 ---
         matched_params = []
@@ -653,6 +798,12 @@ class TaskRunner:
         - COM 引用计数归零导致对象被释放
         - 跨线程封送失败
 
+        兼容 pywin32 的两种 COM 方法暴露模式：
+        - 模式A（property）：属性访问即触发 COM 调用并返回值，
+          此时 getattr(obj, 'GetTitle') 直接返回字符串，不可调用
+        - 模式B（method）：getattr 返回一个可调用的 bound method，
+          需通过 () 调用才能触发 COM 调用
+
         Args:
             obj: COM 对象
             label: 用于日志的对象描述
@@ -664,25 +815,39 @@ class TaskRunner:
             logger.error(f"[COM验证] {label} 为 None")
             return False
 
-        failed_methods = []
+        failed_info = []
         for method_name in ("GetTitle", "GetPathName", "GetType"):
             try:
-                method = getattr(obj, method_name, None)
-                if method is None:
-                    failed_methods.append(f"{method_name}(attr_missing)")
+                attr = getattr(obj, method_name, None)
+                if attr is None:
+                    failed_info.append(f"{method_name}(attr_missing)")
                     continue
-                _ = method()
-                logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name})")
+
+                # 模式A: pywin32 将 COM 属性暴露为 Python property，
+                # getattr 即触发 COM 调用并返回结果值（如字符串/整数）
+                if not callable(attr):
+                    logger.debug(
+                        f"[COM验证] ✓ {label} 有效 "
+                        f"(通过 {method_name} property, 值类型={type(attr).__name__})"
+                    )
+                    return True
+
+                # 模式B: 可调用方法，通过 () 触发 COM 调用
+                _ = attr()
+                logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name}())")
                 return True
+
             except AttributeError:
-                failed_methods.append(f"{method_name}(attr_missing)")
+                failed_info.append(f"{method_name}(attr_missing)")
+            except TypeError as e:
+                failed_info.append(f"{method_name}(TypeError:{e})")
             except Exception as e:
                 err_name = type(e).__name__
-                failed_methods.append(f"{method_name}({err_name})")
+                failed_info.append(f"{method_name}({err_name})")
 
         logger.warning(
             f"[COM验证] {label} 所有验证方法均失败: "
-            f"{', '.join(failed_methods)} — COM 代理可能已失效"
+            f"{', '.join(failed_info)} — COM 代理可能已失效"
         )
         return False
     # swDocumentTypes_e
@@ -723,46 +888,8 @@ class TaskRunner:
         """
         logger.info("正在通过 COM 直接导出各构型 STEP 文件...")
 
-        import pythoncom
-        import win32com.client
-
-        # 获取所有配置名称（兼容 pywin32 属性/方法两种访问方式）
-        conf_names = []
-        raw = None
-        try:
-            raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
-        except TypeError:
-            pass  # pywin32 下可能是属性而非方法，下面再试
-        if raw is None:
-            try:
-                raw = doc.GetConfigurationNames  # pywin32 属性访问
-            except Exception:
-                pass
-
-        # 解包返回值：可能是 tuple/list（正常），或 COM Dispatch 包装对象
-        if isinstance(raw, (tuple, list)):
-            conf_names = [str(c) for c in raw]
-        elif raw is not None:
-            # 尝试当作可迭代对象解包（COM VARIANT 数组可能不是原生 tuple/list）
-            try:
-                conf_names = [str(c) for c in raw]
-            except TypeError:
-                # 单一元素或 Dispatch 包装：尝试 IGetConfigurationNames 替代
-                logger.warning(
-                    f"GetConfigurationNames 返回不可迭代对象 "
-                    f"({type(raw).__name__})，尝试替代方法..."
-                )
-                try:
-                    raw2 = doc.IGetConfigurationNames()
-                except TypeError:
-                    raw2 = doc.IGetConfigurationNames
-                if isinstance(raw2, (tuple, list)):
-                    conf_names = [str(c) for c in raw2]
-                elif raw2 is not None:
-                    try:
-                        conf_names = [str(c) for c in raw2]
-                    except TypeError:
-                        logger.error("IGetConfigurationNames 也无法解析，无法获取配置列表")
+        # 获取所有配置名称（通过 _com_get_config_names 统一处理 pywin32 COM 绑定歧义）
+        conf_names = self._com_get_config_names(doc)
 
         if not conf_names:
             logger.error("无法获取模型配置名称列表")
@@ -808,49 +935,69 @@ class TaskRunner:
             # ShowConfiguration2 是异步操作（SW 发起配置切换后立即返回），
             # EditRebuild3 作为同步等待点，确保活动配置的几何体已完全解析。
             # 若不执行此步骤，SaveAs 可能导出上一个配置的几何体或失败。
-            try:
-                doc.EditRebuild3()
-            except Exception as e_rebuild:
+            # _safe_com_call 自动处理 pywin32 的 property/method COM 绑定歧义。
+            rebuild_ok, rebuild_err = self._safe_com_call(doc, "EditRebuild3")
+            if rebuild_err is not None:
+                if isinstance(rebuild_err, TypeError) and rebuild_ok is not None:
+                    # property 模式：EditRebuild3 已通过 getattr 触发，值在 rebuild_ok
+                    logger.debug(
+                        f"  构型{cn_str}: EditRebuild3 property 模式 (返回值={rebuild_ok})"
+                    )
+                else:
+                    logger.warning(
+                        f"  构型{cn_str}: EditRebuild3 失败 "
+                        f"({type(rebuild_err).__name__}: {rebuild_err})，"
+                        f"继续导出（几何体可能未更新）"
+                    )
+            else:
                 logger.debug(
-                    f"  构型{cn_str}: EditRebuild3 返回异常 "
-                    f"({type(e_rebuild).__name__}: {e_rebuild})，继续导出..."
+                    f"  构型{cn_str}: EditRebuild3 成功 (返回值={rebuild_ok})"
                 )
 
             # ---- 导出 STEP ----
+            # 注意：pywin32 动态 Dispatch 下不传 Errors/Warnings ByRef VARIANT 参数，
+            # 因 VARIANT(VT_BYREF|VT_I4) 与 SW 类型系统不兼容（导致 "类型不匹配" 错误）。
+            # 改用 ExportData=None 传参 + 文件系统验证替代 Errors/Warnings 检测。
             try:
-                save_errors = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                )
-                save_warnings = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                )
-                # SaveAs(FileName, Version, Options, ExportData, Errors, Warnings)
                 status = doc.Extension.SaveAs(
                     filepath,
                     self._SW_SAVE_AS_CURRENT_VERSION,   # 0 = swSaveAsCurrentVersion
                     self._SW_SAVE_AS_OPTIONS_SILENT,     # 1 = swSaveAsOptions_Silent
-                    None,                                 # ExportData
-                    save_errors,
-                    save_warnings,
+                    None,                                 # ExportData（可选）
                 )
 
+                # ---- 即时文件系统验证 ----
                 if status:
-                    logger.info(
-                        f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
-                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
-                    )
-                    if cn_int is not None:
-                        self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
-                        success_configs.append(cn_int)
+                    file_exists = os.path.exists(filepath)
+                    file_size = os.path.getsize(filepath) if file_exists else 0
+                    if file_exists and file_size > 0:
+                        logger.info(
+                            f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                            f"({file_size} bytes)"
+                        )
+                        if cn_int is not None:
+                            self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
+                            success_configs.append(cn_int)
+                    else:
+                        logger.warning(
+                            f"  ⚠ 构型{cn_str}: SaveAs 返回 True 但文件 "
+                            f"{'不存在' if not file_exists else '大小为 0'}，"
+                            f"标记为失败"
+                        )
+                        if cn_int is not None:
+                            self.state.set_step_status(
+                                cn_int, "SW", STATUS_ERROR,
+                                "SaveAs 返回 True 但文件未生成或为空"
+                            )
+                            fail_configs.append(cn_int)
                 else:
                     logger.warning(
-                        f"  ✗ 构型{cn_str}: SaveAs 返回 False "
-                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
+                        f"  ✗ 构型{cn_str}: SaveAs 返回 False"
                     )
                     if cn_int is not None:
                         self.state.set_step_status(
                             cn_int, "SW", STATUS_ERROR,
-                            f"SaveAs 返回 False (Errors={save_errors.value})"
+                            "SaveAs 返回 False"
                         )
                         fail_configs.append(cn_int)
             except Exception as e:
@@ -1025,17 +1172,58 @@ class TaskRunner:
                     )
                     return False
 
+                # ---- 诊断: 记录 doc 对象类型信息 ----
+                logger.info(
+                    f"[诊断] OpenDoc6 返回 doc 类型={type(doc).__name__}, "
+                    f"模块={type(doc).__module__}"
+                )
+
                 # ---- 验证 doc COM 对象有效性 ----
                 if not self._verify_com_object(doc, "IModelDoc2"):
-                    logger.error(
-                        f"OpenDoc6 返回了无效的文档 COM 代理，"
-                        f"模型可能未正确加载"
+                    logger.warning(
+                        f"OpenDoc6 返回的 COM 代理验证失败，"
+                        f"尝试通过 ActiveDoc 获取文档对象..."
                     )
+                    # ---- Fallback: 通过 sw_app.ActiveDoc 获取 ----
+                    # 当 pywin32 对 OpenDoc6 返回值的动态封装不兼容时，
+                    # sw_app.ActiveDoc 属性可能提供更好的 COM 接口封装
                     try:
-                        sw_app.CloseDoc(os.path.basename(sw_model))
-                    except Exception:
-                        pass
-                    return False
+                        active_doc = sw_app.ActiveDoc
+                    except Exception as e_active:
+                        logger.debug(
+                            f"ActiveDoc 属性访问异常 "
+                            f"({type(e_active).__name__}: {e_active})"
+                        )
+                        active_doc = None
+
+                    if active_doc is None:
+                        logger.error(
+                            f"OpenDoc6 返回了无效的文档 COM 代理，"
+                            f"且 ActiveDoc 也为 None，模型可能未正确加载"
+                        )
+                        try:
+                            sw_app.CloseDoc(os.path.basename(sw_model))
+                        except Exception:
+                            pass
+                        return False
+
+                    if not self._verify_com_object(active_doc, "ActiveDoc"):
+                        logger.error(
+                            f"ActiveDoc COM 代理也验证失败，"
+                            f"模型可能未正确加载"
+                        )
+                        try:
+                            sw_app.CloseDoc(os.path.basename(sw_model))
+                        except Exception:
+                            pass
+                        return False
+
+                    logger.info(
+                        f"[诊断] 已通过 ActiveDoc 获取有效文档对象 "
+                        f"(类型={type(active_doc).__name__})"
+                    )
+                    doc = active_doc
+
                 logger.info(f"✓ 模型已打开: {os.path.basename(sw_model)}")
 
                 # ---- 步骤 B: 从文件导入设计表（带容错与重试） ----
@@ -1047,25 +1235,13 @@ class TaskRunner:
                 # ---- 步骤 C: 重建所有构型 ----
                 # 导入设计表后，模型参数已更新但几何体未重建。
                 # 若不重建，后续只会导出已激活过的构型。
-                # ForceRebuildAll 强制重建所有构型而不逐个激活。
+                # ForceRebuildAll 强制重建所有构型；失败时自动降级到 EditRebuild3。
+                # _com_rebuild 内部处理 pywin32 的 property/method COM 绑定歧义。
                 logger.info("正在重建所有构型（ForceRebuildAll）...")
-                try:
-                    doc.Extension.ForceRebuildAll()
-                    logger.info("✓ 所有构型重建完成")
-                except Exception as e_rebuild:
+                if not self._com_rebuild(doc):
                     logger.error(
-                        f"ForceRebuildAll 失败 "
-                        f"({type(e_rebuild).__name__}: {e_rebuild})"
+                        "所有重建方式均失败，后续 STEP 导出可能使用过期几何体"
                     )
-                    # 降级：尝试普通重建
-                    try:
-                        doc.EditRebuild3()
-                        logger.info("  已降级为当前构型重建")
-                    except Exception as e_rebuild2:
-                        logger.warning(
-                            f"降级重建也失败 "
-                            f"({type(e_rebuild2).__name__}: {e_rebuild2})"
-                        )
 
                 # ---- 步骤 D: 逐构型导出 STEP ----
                 # 每个构型：ShowConfiguration2 → EditRebuild3（同步等待） → SaveAs。
@@ -1114,9 +1290,18 @@ class TaskRunner:
 
                 # 步骤 1: 关闭已打开的模型文档
                 if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
+                    title = None
                     try:
                         title = doc.GetTitle()
                     except Exception:
+                        try:
+                            # 兼容 pywin32 property 模式: GetTitle 可能是属性而非方法
+                            title = getattr(doc, "GetTitle", None)
+                            if callable(title):
+                                title = title()
+                        except Exception:
+                            pass
+                    if not title:
                         title = os.path.basename(sw_model)
                     try:
                         sw_app.CloseDoc(title)
