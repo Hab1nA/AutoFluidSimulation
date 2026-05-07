@@ -140,7 +140,15 @@ class StepFileMonitor:
         escaped = escaped.replace(re.escape("{config}"), r"(?P<config>\d+)")
         return re.compile(rf"^{escaped}$", flags=re.IGNORECASE)
 
-    _FILENAME_REGEX = _compile_config_regex.__func__(_SW_STEP_PATTERN)
+    _FILENAME_REGEX: Optional[re.Pattern] = None
+
+    @classmethod
+    def _get_filename_regex(cls) -> Optional[re.Pattern]:
+        """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
+        if cls._FILENAME_REGEX is None:
+            sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)
+        return cls._FILENAME_REGEX
 
     def __init__(self, step_dir: str = None,
                  on_file_ready: Callable[[int, str], None] = None):
@@ -164,6 +172,9 @@ class StepFileMonitor:
         # 已发现的文件集合
         self._known_files: Set[str] = set()
 
+        # 确保正则已编译（__init__ 时 _SW_STEP_PATTERN 已从 config 加载）
+        self._get_filename_regex()
+
     # ------------------------------------------------------------------
     # 文件名解析
     # ------------------------------------------------------------------
@@ -182,9 +193,10 @@ class StepFileMonitor:
         Returns:
             构型名称（整数），解析失败返回 None
         """
-        if cls._FILENAME_REGEX is None:
+        regex = cls._get_filename_regex()
+        if regex is None:
             return None
-        match = cls._FILENAME_REGEX.match(filename)
+        match = regex.match(filename)
         if not match:
             return None
         try:
@@ -327,10 +339,11 @@ class StepFileMonitor:
                 if filename in self._processed_files:
                     continue
                 filepath = os.path.join(self.step_dir, filename)
-                if os.path.isfile(filepath) and filename.endswith(self.FILE_SUFFIX):
-                    config_name = self.parse_config_name(filename)
-                    if config_name is not None:
-                        pending.append((config_name, filepath))
+                if not os.path.isfile(filepath):
+                    continue
+                config_name = self.parse_config_name(filename)
+                if config_name is not None:
+                    pending.append((config_name, filepath))
         except OSError as e:
             logger.warning(f"扫描待处理文件时出错: {e}")
         return pending

@@ -13,11 +13,13 @@
 ===============================================================================
 """
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 import threading
 import gc
-from typing import Optional, Callable, List
+from typing import Optional, Callable
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
@@ -131,56 +133,714 @@ class TaskRunner:
             logger.error(f"启动 SolidWorks 进程失败: {e}")
             return False
 
+    def _validate_design_table_excel(self, excel_path: str) -> list:
+        """
+        预验证 Excel 设计表格式，返回诊断警告列表。
+
+        检查项：
+        1. Excel 文件是否可读取（不被锁定）
+        2. 第1行是否包含 SW 设计表头特征 ("Design Table")
+        3. 第2行（参数行）是否包含有效的参数列头 ($PRP@... 或 $属性@... 等)
+
+        Args:
+            excel_path: Excel 文件完整路径
+
+        Returns:
+            警告信息字符串列表（空列表 = 格式正常）
+        """
+        warnings = []
+        logger.info(f"[诊断] 预验证 Excel 设计表格式: {os.path.basename(excel_path)}")
+
+        # 1) 文件可读性检查
+        if not os.path.exists(excel_path):
+            warnings.append(f"Excel 文件不存在: {excel_path}")
+            logger.warning(f"[诊断] {warnings[-1]}")
+            return warnings
+
+        file_size = os.path.getsize(excel_path)
+        logger.info(f"[诊断]   文件大小: {file_size} bytes")
+
+        try:
+            import openpyxl
+            wb = None
+            try:
+                wb = openpyxl.load_workbook(excel_path, data_only=True, read_only=True)
+                ws = wb.active
+
+                # 2) 检查行1是否为设计表头
+                try:
+                    row1_cells = list(ws.iter_rows(min_row=1, max_row=1))
+                    if not row1_cells:
+                        warnings.append("Excel 第1行缺失（空表格）")
+                        logger.warning(f"[诊断] {warnings[-1]}")
+                        return warnings
+                    row1 = [cell.value for cell in row1_cells[0]]
+                except (IndexError, StopIteration):
+                    warnings.append("Excel 第1行缺失（空表格）")
+                    logger.warning(f"[诊断] {warnings[-1]}")
+                    return warnings
+                row1_text = " ".join(str(v) for v in row1 if v is not None)
+                logger.info(f"[诊断]   第1行内容: {row1_text[:120]}")
+
+                has_design_table_header = "Design Table" in row1_text or "设计表" in row1_text
+                if not has_design_table_header:
+                    warnings.append(
+                        f"Excel 第1行缺少 SW 设计表头（应包含 'Design Table'），"
+                        f"实际内容: {row1_text[:80]}"
+                    )
+                    logger.warning(f"[诊断] {warnings[-1]}")
+
+                # 3) 检查行2是否包含参数列头
+                try:
+                    row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
+                    if row2_cells:
+                        row2 = [cell.value for cell in row2_cells[0]]
+                        row2_text = " | ".join(str(v) for v in row2 if v is not None)
+                        logger.info(f"[诊断]   第2行内容: {row2_text[:200]}")
+                        # SW 参数列头通常以 $ 开头，或包含 @
+                        has_param_headers = any(
+                            isinstance(v, str) and ("$" in v or "@" in v)
+                            for v in row2 if v is not None
+                        )
+                        if not has_param_headers:
+                            warnings.append(
+                                f"Excel 第2行似乎不含 SW 参数列头（期望格式如 '$PRP@Dimension1'），"
+                                f"实际内容: {row2_text[:100]}"
+                            )
+                            logger.warning(f"[诊断] {warnings[-1]}")
+                except (IndexError, StopIteration):
+                    warnings.append("Excel 第2行缺失（应为参数列头行）")
+                    logger.warning(f"[诊断] {warnings[-1]}")
+
+                # 4) 检查数据行数
+                data_rows = 0
+                for row in ws.iter_rows(min_row=3, values_only=True):
+                    if row[0] is not None:
+                        data_rows += 1
+                logger.info(f"[诊断]   数据行数 (第3行起): {data_rows}")
+
+            finally:
+                if wb is not None:
+                    wb.close()
+
+        except ImportError:
+            logger.warning("[诊断] openpyxl 未安装，跳过 Excel 格式预验证")
+        except Exception as e:
+            warnings.append(f"Excel 格式预验证异常: {type(e).__name__}: {e}")
+            logger.warning(f"[诊断] {warnings[-1]}", exc_info=True)
+
+        if not warnings:
+            logger.info("[诊断] ✓ Excel 设计表格式预验证通过")
+        return warnings
+
+    def _cleanup_sw_processes(self):
+        """
+        清理可能残留的 SolidWorks 进程。
+
+        在启动新 SW 实例前调用，避免多个 SW 实例冲突或 COM 路由错误。
+        仅在 Windows 平台生效。
+        """
+        if os.name != "nt":
+            return
+        try:
+            # 检查是否有正在运行的 SW 进程
+            result = subprocess.run(
+                ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "SLDWORKS.exe" in result.stdout:
+                logger.info("[清理] 检测到残留 SolidWorks 进程，正在终止...")
+                kill_result = subprocess.run(
+                    ["taskkill", "/f", "/im", "SLDWORKS.exe"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if kill_result.returncode == 0:
+                    logger.info("[清理] ✓ 残留 SolidWorks 进程已终止，等待 3 秒...")
+                    time.sleep(3)
+                else:
+                    logger.warning(
+                        f"[清理] taskkill 返回非零码 {kill_result.returncode}: "
+                        f"{kill_result.stderr.strip()}"
+                    )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning(f"[清理] 检查/终止 SW 进程时异常: {e}")
+
+    def _import_design_table_with_retry(
+        self, doc, sw_app, excel_path: str, sw_model: str
+    ) -> bool:
+        """
+        带容错与多策略降级的设计表导入。
+
+        策略优先级：
+        1. InsertFamilyTableOpen → SW 原生导入（最快最可靠）
+        2. 解析 Excel 参数名 → COM 直接设参（绕过设计表，兼容参数名不匹配）
+        3. 详细诊断报告 → 帮助用户定位 Excel 与模型不匹配的具体原因
+
+        Args:
+            doc: SW IModelDoc2 COM 对象
+            sw_app: SW ISldWorks COM 对象
+            excel_path: Excel 设计表文件路径
+            sw_model: SW 模型文件路径（用于 CloseDoc）
+
+        Returns:
+            True 表示参数已成功应用到模型
+        """
+        basename_model = os.path.basename(sw_model)
+
+        # ---- 1) 尝试删除已有设计表 ----
+        try:
+            existing_dt = doc.GetDesignTable()
+            if existing_dt is not None:
+                logger.info("[设计表] 检测到模型已有内嵌设计表，正在删除...")
+                try:
+                    doc.DeleteDesignTable()
+                    logger.info("[设计表] ✓ 已有设计表已删除")
+                    time.sleep(1)
+                except Exception as e_del:
+                    logger.warning(
+                        f"[设计表] 删除已有设计表失败 "
+                        f"({type(e_del).__name__}: {e_del})，继续尝试导入"
+                    )
+        except Exception as e_check:
+            logger.debug(
+                f"[设计表] 检查已有设计表时异常 "
+                f"({type(e_check).__name__}: {e_check})，继续尝试导入"
+            )
+
+        # ---- 2) 策略A: InsertFamilyTableOpen（最多2次） ----
+        tmp_excel_path = None
+        try:
+            tmp_fd, tmp_excel_path = tempfile.mkstemp(
+                suffix=".xlsx", prefix="sw_design_table_"
+            )
+            os.close(tmp_fd)
+            shutil.copy2(excel_path, tmp_excel_path)
+            logger.info(
+                f"[设计表] 已复制 Excel 到临时文件: "
+                f"{os.path.basename(tmp_excel_path)}"
+            )
+        except OSError as e_copy:
+            logger.warning(f"[设计表] 无法复制 Excel: {e_copy}，使用原始路径")
+            tmp_excel_path = excel_path
+
+        insert_ok = False
+        for attempt in (1, 2):
+            if insert_ok:
+                break
+            import_path = tmp_excel_path or excel_path
+            logger.info(
+                f"[设计表] InsertFamilyTableOpen 尝试 {attempt}/2"
+            )
+            try:
+                inserted = doc.InsertFamilyTableOpen(import_path)
+                logger.info(f"[设计表] InsertFamilyTableOpen 返回: {inserted}")
+                if inserted:
+                    insert_ok = True
+                elif attempt == 1:
+                    logger.info("[设计表] 等待 3 秒后重试...")
+                    time.sleep(3)
+            except Exception as e_insert:
+                logger.warning(
+                    f"[设计表] InsertFamilyTableOpen 异常 "
+                    f"({type(e_insert).__name__}: {e_insert})"
+                )
+                if attempt == 1:
+                    time.sleep(3)
+
+        if insert_ok:
+            logger.info("[设计表] ✓ InsertFamilyTableOpen 成功")
+            self._post_process_design_table(doc, excel_path)
+            self._cleanup_tmp_excel(tmp_excel_path, excel_path)
+            return True
+
+        # ---- 3) 策略B: 解析 Excel，COM 直接设参 ----
+        logger.info("[设计表] InsertFamilyTableOpen 失败，尝试 COM 直接设参...")
+        com_ok = self._apply_params_via_com(doc, excel_path)
+
+        # ---- 4) 清理 ----
+        self._cleanup_tmp_excel(tmp_excel_path, excel_path)
+
+        if com_ok:
+            return True
+
+        # ---- 5) 全部失败 → 详细诊断 ----
+        self._diagnose_param_mismatch(doc, excel_path)
+        logger.error("=" * 60)
+        logger.error("[设计表] 所有导入方式均失败！")
+        logger.error(f"  Excel: {excel_path}")
+        logger.error(f"  模型: {basename_model}")
+        logger.error("  请检查上述诊断信息中列出的参数名不匹配项。")
+        logger.error("=" * 60)
+        try:
+            sw_app.CloseDoc(basename_model)
+        except Exception:
+            pass
+        return False
+
     # ------------------------------------------------------------------
-    # SW 2025 API 常量（硬编码以避免 import 依赖）
+    # 设计表导入辅助方法
     # ------------------------------------------------------------------
+
+    def _post_process_design_table(self, doc, excel_path: str):
+        """InsertFamilyTableOpen 成功后的后处理。"""
+        try:
+            design_table = doc.GetDesignTable()
+            if design_table is not None:
+                try:
+                    design_table.Updatable = False
+                    logger.info("[设计表]   已禁止'模型→设计表'反向更新")
+                except Exception as e_upd:
+                    logger.debug(
+                        f"[设计表]   设置 Updatable=False 失败: {e_upd}"
+                    )
+                try:
+                    design_table.UpdateModel()
+                    logger.info("[设计表]   ✓ UpdateModel 完成")
+                except Exception as e_um:
+                    logger.debug(f"[设计表]   UpdateModel 异常: {e_um}")
+            else:
+                logger.info("[设计表] GetDesignTable 返回 None（可能已自动应用）")
+        except Exception as e_dt:
+            logger.debug(f"[设计表] 后处理异常: {e_dt}")
+
+    def _cleanup_tmp_excel(self, tmp_path: str, original_path: str):
+        """清理临时 Excel 文件。"""
+        if tmp_path and tmp_path != original_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _apply_params_via_com(self, doc, excel_path: str) -> bool:
+        """
+        策略B: 解析 Excel 参数表，直接通过 COM API 为每个构型设置参数值。
+
+        适用于：InsertFamilyTableOpen 失败时（参数名不匹配 / SW 版本差异等）。
+
+        工作流程：
+        1. 读取 Excel → 提取行2参数名列表 + 行3+构型数据
+        2. 枚举模型配置 → 逐个激活
+        3. 通过 doc.Parameter(name).SystemValue = value 设置参数
+        4. 仅设置 Excel 和模型都存在的参数（跳过不匹配的）
+
+        Returns:
+            True 表示至少有一个构型的参数被成功设置
+        """
+        logger.info("[COM设参] 正在读取 Excel 参数表...")
+        import openpyxl
+
+        wb = None
+        try:
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+            ws = wb.active
+
+            # --- 提取行2参数名 ---
+            row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
+            if not row2_cells:
+                logger.error("[COM设参] Excel 第2行缺失（应包含参数名）")
+                return False
+            row2 = [cell.value for cell in row2_cells[0]]
+            # 第1列（index 0）是构型名称列，参数从第2列开始
+            excel_param_names = [
+                str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
+            ]
+            if not excel_param_names:
+                logger.error("[COM设参] Excel 第2行无有效参数名")
+                return False
+            logger.info(
+                f"[COM设参] Excel 参数名 ({len(excel_param_names)}个): "
+                f"{excel_param_names}"
+            )
+
+            # --- 提取行3+构型数据 ---
+            config_data = {}  # {config_name: [param_values]}
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                if row[0] is None:
+                    break
+                try:
+                    cn = int(row[0])
+                    vals = [float(row[i]) for i in range(1, len(excel_param_names) + 1)]
+                    config_data[cn] = vals
+                except (ValueError, TypeError, IndexError):
+                    continue
+            logger.info(f"[COM设参] 读取到 {len(config_data)} 个构型数据")
+
+            if not config_data:
+                logger.error("[COM设参] Excel 无有效构型数据")
+                return False
+        finally:
+            if wb is not None:
+                wb.close()
+
+        # --- 获取模型配置列表 ---
+        model_configs = []
+        try:
+            # pywin32 延迟绑定：尝试无括号（属性）和有括号（方法）两种方式
+            raw = None
+            try:
+                raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
+            except TypeError:
+                raw = doc.GetConfigurationNames     # pywin32 属性访问
+            if isinstance(raw, (tuple, list)):
+                model_configs = [str(c) for c in raw]
+            elif raw is not None:
+                model_configs = [str(raw)]
+        except Exception as e:
+            logger.warning(f"[COM设参] 获取配置列表失败 ({type(e).__name__})，尝试替代方法...")
+            # 备选：从 Excel 数据中推断配置名
+            for cn in sorted(config_data.keys()):
+                cfg_str = str(cn)
+                try:
+                    doc.ShowConfiguration2(cfg_str)
+                    model_configs.append(cfg_str)
+                except Exception:
+                    pass
+        if model_configs:
+            logger.info(f"[COM设参] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
+        else:
+            logger.warning("[COM设参] 无法获取模型配置列表，将尝试所有 Excel 构型")
+
+        # --- 构建参数名映射：逐个验证 Excel 参数在模型中是否存在 ---
+        matched_params = []
+        unmatched_excel = []
+        for ep in excel_param_names:
+            try:
+                test_param = doc.Parameter(ep)
+                if test_param is not None:
+                    matched_params.append(ep)
+                else:
+                    unmatched_excel.append(ep)
+            except Exception:
+                unmatched_excel.append(ep)
+
+        if unmatched_excel:
+            logger.warning(
+                f"[COM设参] {len(unmatched_excel)} 个 Excel 参数在模型中未找到: "
+                f"{unmatched_excel}"
+            )
+        if not matched_params:
+            logger.error("[COM设参] 没有任何 Excel 参数与模型匹配！无法设置参数。")
+            # 打印模型实际参数供参考
+            if model_param_names:
+                logger.info(
+                    f"[COM设参] 模型实际参数: {sorted(model_param_names)}"
+                )
+            return False
+        logger.info(
+            f"[COM设参] 匹配参数 ({len(matched_params)}个): {matched_params}"
+        )
+
+        # --- 逐个构型设置参数 ---
+        # 若无法获取模型配置列表，直接尝试所有 Excel 构型
+        skip_config_check = not model_configs
+        success_count = 0
+        for config_name, param_values in config_data.items():
+            cfg_str = str(config_name)
+
+            # 仅在已知配置列表时才做存在性检查
+            if not skip_config_check and cfg_str not in model_configs:
+                logger.debug(f"[COM设参] 构型{config_name} 不在模型配置列表中，跳过")
+                continue
+
+            try:
+                doc.ShowConfiguration2(cfg_str)
+            except Exception as e:
+                logger.warning(f"[COM设参] 切换构型{cfg_str}失败: {e}")
+                continue
+
+            # 设置每个匹配的参数
+            config_ok = True
+            for pname, pvalue in zip(matched_params, param_values):
+                try:
+                    param = doc.Parameter(pname)
+                    if param is None:
+                        logger.warning(
+                            f"[COM设参] 构型{config_name}: 参数'{pname}'不存在"
+                        )
+                        config_ok = False
+                        continue
+                    # 使用 Value 属性（文档显示单位），设计表值已是正确单位
+                    # SystemValue 始终为 SI 单位（米），手动转换对非长度参数不可靠
+                    param.Value = pvalue
+                    logger.debug(
+                        f"[COM设参]   构型{config_name}: {pname} = {pvalue}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[COM设参] 构型{config_name} 设置 {pname}={pvalue} 失败: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    config_ok = False
+
+            if config_ok:
+                success_count += 1
+            else:
+                logger.warning(f"[COM设参] 构型{config_name} 部分参数设置失败")
+
+        logger.info(
+            f"[COM设参] ✓ 完成: {success_count}/{len(config_data)} 个构型参数已设置"
+        )
+        return success_count > 0
+
+    def _diagnose_param_mismatch(self, doc, excel_path: str):
+        """
+        详细诊断 Excel 参数表与模型参数的不匹配情况。
+        帮助用户快速定位问题。
+        """
+        logger.info("=" * 60)
+        logger.info("[诊断] 参数名不匹配分析")
+        logger.info("=" * 60)
+
+        # 读取 Excel 参数名
+        import openpyxl
+        excel_params = []
+        try:
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+            ws = wb.active
+            row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
+            if row2_cells:
+                row2 = [cell.value for cell in row2_cells[0]]
+                excel_params = [
+                    str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
+                ]
+            wb.close()
+        except Exception:
+            pass
+
+        # 获取模型参数 — 逐个测试 Excel 参数名
+        model_param_names = []
+        for ep in excel_params:
+            try:
+                p = doc.Parameter(ep)
+                if p is not None:
+                    model_param_names.append(ep)
+            except Exception:
+                pass
+
+        logger.info(f"  Excel 参数 ({len(excel_params)}): {excel_params}")
+        logger.info(f"  模型匹配参数 ({len(model_param_names)}): {model_param_names}")
+
+        matched = [p for p in excel_params if p in model_param_names]
+        unmatched = [p for p in excel_params if p not in model_param_names]
+
+        if unmatched:
+            logger.info("")
+            logger.info("  建议修复方式：")
+            logger.info("  1. 更新 Excel 第2行参数名，使其与模型一致")
+            logger.info("  2. 或在 SW 中重命名模型参数，使其与 Excel 一致")
+            logger.info("  3. 若参数名无误，检查 Excel 工作表和 SW 文档类型是否匹配")
+
+    @staticmethod
+    def _verify_com_object(obj, label: str = "COM对象") -> bool:
+        """
+        验证 COM 对象是否有效（非 None 且代理仍存活）。
+
+        通过调用一个无副作用的属性读取来检测代理是否仍连接到后端对象。
+        COM 代理可能在以下情况失效：
+        - 后端 SW 进程崩溃
+        - COM 引用计数归零导致对象被释放
+        - 跨线程封送失败
+
+        Args:
+            obj: COM 对象
+            label: 用于日志的对象描述
+
+        Returns:
+            True 表示 COM 对象有效
+        """
+        if obj is None:
+            logger.error(f"[COM验证] {label} 为 None")
+            return False
+
+        for method_name in ("GetTitle", "GetPathName", "GetType"):
+            try:
+                _ = getattr(obj, method_name)()
+                logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name})")
+                return True
+            except AttributeError:
+                continue
+            except Exception as e:
+                logger.debug(
+                    f"[COM验证] {label} {method_name} 失败: "
+                    f"{type(e).__name__}"
+                )
+                continue
+
+        logger.warning(
+            f"[COM验证] {label} 所有验证方法均失败，"
+            f"对象可能为无效 COM 代理"
+        )
+        return True  # 非 None 对象，降级认定有效（避免误杀）
     # swDocumentTypes_e
     _SW_DOC_PART = 1
     _SW_DOC_ASSEMBLY = 2
     # swOpenDocOptions_e (用于 OpenDoc6)
     _SW_OPEN_SILENT = 1       # 静默：抑制警告对话框
     _SW_OPEN_READONLY = 2     # 只读
-    # swRunMacroOption_e (用于 RunMacro2)
-    _SW_RUN_MACRO_DEFAULT = 0
-    _SW_RUN_MACRO_UNLOAD_AFTER = 1
+    # swSaveAsVersion_e / swSaveAsOptions_e (用于直接 COM 导出 STEP，替代宏文件)
+    _SW_SAVE_AS_CURRENT_VERSION = 0   # swSaveAsCurrentVersion
+    _SW_SAVE_AS_OPTIONS_SILENT = 1    # swSaveAsOptions_Silent
 
     @staticmethod
     def _guess_sw_doc_type(path: str) -> int:
         """
-        根据文件扩展名猜测 SW 文档类型，用于 OpenDoc6 / GetMacroMethods。
+        根据文件扩展名猜测 SW 文档类型，用于 OpenDoc6。
         """
         ext = os.path.splitext(path)[1].lower()
         if ext == ".sldasm":
             return TaskRunner._SW_DOC_ASSEMBLY
         return TaskRunner._SW_DOC_PART
 
-    def execute_sw_macro(self) -> bool:
+    def _export_configs_to_step(self, doc, step_dir: str):
         """
-        执行 SolidWorks 宏 (Macro1.swp)。
+        直接通过 COM API 遍历所有配置并导出 STEP 文件。
 
-        SW 宏会一次性批量导出所有构型的 STEP 文件到 step_dir。
-        整个流水线只需要调用一次此方法（RunMacro2 同步阻塞至宏完成）。
+        替代原 Macro1.swp 宏文件中的导出循环。
+        ForceRebuildAll 已在调用前完成，此处仅负责切换配置并导出。
+        每个构型导出后立即更新状态数据库。
 
-        执行策略（三层降级）：
-        1. GetActiveObject → 连接到已运行的 SW 实例
-        2. Dispatch → 通过 COM 注册表启动新 SW 实例
-        3. subprocess → 直接启动 SLDWORKS.exe，轮询 GetActiveObject
-
-        SW 2025 API 参考：
-        - OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
-          取代已废弃的 OpenDoc2，推荐使用 OpenDoc6
-        - RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
-          需通过 GetMacroMethods() 动态获取 VBA 模块名
+        Args:
+            doc: SW IModelDoc2 COM 对象（模型已打开）
+            step_dir: STEP 文件输出目录
 
         Returns:
-            True 表示宏已执行完毕（RunMacro2 同步等待完成）
+            (success_count, fail_count, failed_configs_list)
+        """
+        logger.info("正在通过 COM 直接导出各构型 STEP 文件...")
+
+        import pythoncom
+        import win32com.client
+
+        # 获取所有配置名称（兼容 pywin32 属性/方法两种访问方式）
+        conf_names = []
+        try:
+            raw = doc.GetConfigurationNames()  # 标准 COM 方法调用
+        except TypeError:
+            raw = doc.GetConfigurationNames     # pywin32 属性访问
+        if isinstance(raw, (tuple, list)):
+            conf_names = [str(c) for c in raw]
+        elif raw is not None:
+            conf_names = [str(raw)]
+
+        if not conf_names:
+            logger.error("无法获取模型配置名称列表")
+            return 0, 0, []
+
+        logger.info(f"发现 {len(conf_names)} 个配置，开始逐构型导出...")
+
+        success_configs = []
+        fail_configs = []
+
+        for cn_str in conf_names:
+            # 尝试解析为整数（匹配 configs 表中的构型名称）
+            try:
+                cn_int = int(cn_str)
+            except ValueError:
+                cn_int = None
+
+            filename = get_step_filename("SW", cn_int) if cn_int is not None else None
+            if not filename:
+                logger.warning(f"  构型{cn_str}: 无法生成 STEP 文件名，跳过")
+                fail_configs.append(cn_int if cn_int is not None else cn_str)
+                continue
+
+            filepath = os.path.join(step_dir, filename)
+
+            # ---- 切换配置 ----
+            try:
+                doc.ShowConfiguration2(cn_str)
+            except Exception as e:
+                logger.error(
+                    f"  构型{cn_str}: ShowConfiguration2 失败 "
+                    f"({type(e).__name__}: {e})"
+                )
+                if cn_int is not None:
+                    self.state.set_step_status(
+                        cn_int, "SW", STATUS_ERROR,
+                        f"ShowConfiguration2 失败: {type(e).__name__}: {e}"
+                    )
+                    fail_configs.append(cn_int)
+                continue
+
+            # ---- 导出 STEP ----
+            try:
+                save_errors = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+                )
+                save_warnings = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+                )
+                # SaveAs(FileName, Version, Options, ExportData, Errors, Warnings)
+                status = doc.Extension.SaveAs(
+                    filepath,
+                    self._SW_SAVE_AS_CURRENT_VERSION,   # 0 = swSaveAsCurrentVersion
+                    self._SW_SAVE_AS_OPTIONS_SILENT,     # 1 = swSaveAsOptions_Silent
+                    None,                                 # ExportData
+                    save_errors,
+                    save_warnings,
+                )
+
+                if status:
+                    logger.info(
+                        f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
+                    )
+                    if cn_int is not None:
+                        self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
+                        success_configs.append(cn_int)
+                else:
+                    logger.warning(
+                        f"  ✗ 构型{cn_str}: SaveAs 返回 False "
+                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
+                    )
+                    if cn_int is not None:
+                        self.state.set_step_status(
+                            cn_int, "SW", STATUS_ERROR,
+                            f"SaveAs 返回 False (Errors={save_errors.value})"
+                        )
+                        fail_configs.append(cn_int)
+            except Exception as e:
+                logger.error(
+                    f"  ✗ 构型{cn_str}: SaveAs 异常 ({type(e).__name__}: {e})"
+                )
+                if cn_int is not None:
+                    self.state.set_step_status(
+                        cn_int, "SW", STATUS_ERROR,
+                        f"SaveAs 异常: {type(e).__name__}: {e}"
+                    )
+                    fail_configs.append(cn_int)
+
+        total = len(success_configs) + len(fail_configs)
+        logger.info(
+            f"STEP 导出完成: {len(success_configs)}/{total} 成功"
+            f"（{len(fail_configs)} 失败）"
+        )
+        return len(success_configs), len(fail_configs), fail_configs
+
+    # ------------------------------------------------------------------
+    # 阶段 2: SolidWorks STEP 导出（入口）
+    # ------------------------------------------------------------------
+
+    def execute_sw_macro(self) -> bool:
+        """
+        SolidWorks STEP 批量导出（直接 COM 调用，不再依赖宏文件）。
+
+        执行流程：
+        1. 三层降级连接/启动 SolidWorks
+        2. OpenDoc6 打开模型文件
+        3. 导入 Excel 设计表（带容错重试）
+        4. ForceRebuildAll 重建所有构型
+        5. 逐构型 ShowConfiguration2 → SaveAs 导出 STEP
+        6. 校验并汇总导出结果
+
+        Returns:
+            True 表示至少有一个构型导出成功
         """
         logger.info("=" * 60)
-        logger.info("启动 SolidWorks 宏执行")
+        logger.info("启动 SolidWorks STEP 导出流程")
         logger.info("=" * 60)
 
         sw_model = LOCAL_PATHS["sw_model"]
-        sw_macro = LOCAL_PATHS["sw_macro"]
         excel_path = LOCAL_PATHS.get("excel", "")
         step_dir = LOCAL_PATHS.get("step_dir", "")
         doc_type = self._guess_sw_doc_type(sw_model)
@@ -188,9 +848,6 @@ class TaskRunner:
         # 检查必要文件
         if not os.path.exists(sw_model):
             logger.error(f"SW 模型文件不存在: {sw_model}")
-            return False
-        if not os.path.exists(sw_macro):
-            logger.error(f"SW 宏文件不存在: {sw_macro}")
             return False
         if not excel_path or not os.path.exists(excel_path):
             logger.error(f"Excel 参数表不存在: {excel_path}")
@@ -203,6 +860,16 @@ class TaskRunner:
         except OSError as e:
             logger.error(f"无法创建/访问 STEP 输出目录: {step_dir}: {e}")
             return False
+
+        # ---- 预验证 Excel 设计表格式 ----
+        excel_warnings = self._validate_design_table_excel(excel_path)
+        if excel_warnings:
+            for w in excel_warnings:
+                logger.warning(f"  ⚠ {w}")
+
+        # ---- 清理残留 SW 进程（仅在连接失败时作为备选方案的辅助） ----
+        # 注意：不在此处无条件清理，避免误杀用户正在运行的 SW 实例。
+        # _launch_solidworks_via_subprocess 会在启动新的 SW 进程前自行处理。
 
         try:
             import win32com.client
@@ -248,6 +915,8 @@ class TaskRunner:
 
                         # ---- 第3层: 直接启动 exe ----
                         logger.info("正在启动 SolidWorks (第3层: subprocess)...")
+                        # 在 subprocess 启动前清理可能残留的 SW 僵尸进程
+                        self._cleanup_sw_processes()
                         if not self._launch_solidworks_via_subprocess():
                             logger.error("所有启动方式均失败，无法连接 SolidWorks")
                             return False
@@ -264,28 +933,7 @@ class TaskRunner:
                 except Exception:
                     pass
 
-                # ---- 步骤 A: 动态获取宏的模块名 ----
-                logger.info("正在解析宏结构...")
-                macro_module = None
-                macro_proc = "main"
-                try:
-                    # GetMacroMethods(FilePath, DocumentType) → tuple of "Module.Proc" strings
-                    methods = sw_app.GetMacroMethods(sw_macro, doc_type)
-                    logger.info(f"GetMacroMethods(docType={doc_type}): {methods}")
-                    if methods and isinstance(methods, (tuple, list)) and len(methods) > 0:
-                        first = methods[0]
-                        if isinstance(first, str) and "." in first:
-                            macro_module, macro_proc = first.split(".", 1)
-                            logger.info(
-                                f"发现宏入口: 模块='{macro_module}', 过程='{macro_proc}'"
-                            )
-                except Exception as e_methods:
-                    logger.warning(
-                        f"GetMacroMethods 失败 ({type(e_methods).__name__}: {e_methods})，"
-                        f"将使用启发式搜索"
-                    )
-
-                # ---- 步骤 B: 打开模型文件 (OpenDoc6) ----
+                # ---- 步骤 A: 打开模型文件 (OpenDoc6) ----
                 # OpenDoc6(FileName, Type, Options, Configuration, Errors, Warnings)
                 logger.info(f"正在打开模型 (OpenDoc6): {os.path.basename(sw_model)}")
                 open_errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -308,7 +956,7 @@ class TaskRunner:
                         logger.warning(
                             f"OpenDoc6 返回错误码 {open_errors.value}，"
                             f"模型可能存在问题（缺失参考/重建错误），"
-                            f"后续宏执行可能异常"
+                            f"后续导出可能异常"
                         )
                 except Exception as open_err:
                     logger.error(
@@ -322,69 +970,29 @@ class TaskRunner:
                         f"（文件可能损坏、版本不兼容，或路径含特殊字符）"
                     )
                     return False
+
+                # ---- 验证 doc COM 对象有效性 ----
+                if not self._verify_com_object(doc, "IModelDoc2"):
+                    logger.error(
+                        f"OpenDoc6 返回了无效的文档 COM 代理，"
+                        f"模型可能未正确加载"
+                    )
+                    try:
+                        sw_app.CloseDoc(os.path.basename(sw_model))
+                    except Exception:
+                        pass
+                    return False
                 logger.info(f"✓ 模型已打开: {os.path.basename(sw_model)}")
 
-                # ---- 步骤 B2: 从文件导入设计表 ----
-                # 模型不再内嵌链接到设计表，改为每次打开后从 Excel 文件导入。
-                # IModelDoc2::InsertFamilyTableOpen(FileName) 会将指定 Excel
-                # 作为设计表插入模型，返回 True 表示导入成功。
-                logger.info(
-                    f"正在导入设计表: {os.path.basename(excel_path)}"
-                )
-                try:
-                    inserted = doc.InsertFamilyTableOpen(excel_path)
-                    if inserted:
-                        logger.info("✓ 设计表已导入")
-                        # 导入后获取设计表接口，确保更新方向正确
-                        try:
-                            design_table = doc.GetDesignTable()
-                            if design_table is not None:
-                                # 禁止反向更新（模型 → 设计表）
-                                try:
-                                    design_table.Updatable = False
-                                    logger.info("  已禁止'模型→设计表'反向更新")
-                                except Exception as e_upd:
-                                    logger.debug(
-                                        f"  设置 Updatable=False 失败 "
-                                        f"({type(e_upd).__name__}: {e_upd})"
-                                    )
-                                # 显式将设计表更改应用到模型
-                                try:
-                                    design_table.UpdateModel()
-                                    logger.info("  ✓ 设计表更改已应用到模型")
-                                except Exception as e_um:
-                                    logger.warning(
-                                        f"  UpdateModel 失败 "
-                                        f"({type(e_um).__name__}: {e_um})，"
-                                        f"模型可能已是最新状态"
-                                    )
-                            else:
-                                logger.warning(
-                                    "InsertFamilyTableOpen 返回 True 但 "
-                                    "GetDesignTable 返回 None，"
-                                    "设计表更改可能未应用到模型"
-                                )
-                        except Exception as e_dt2:
-                            logger.debug(
-                                f"设计表后处理异常 "
-                                f"({type(e_dt2).__name__}: {e_dt2})"
-                            )
-                    else:
-                        logger.error(
-                            "设计表导入失败: InsertFamilyTableOpen 返回 False"
-                        )
-                        logger.error(f"  请检查 Excel 文件格式是否正确: {excel_path}")
-                        return False
-                except Exception as e_insert:
-                    logger.error(
-                        f"InsertFamilyTableOpen 异常 "
-                        f"({type(e_insert).__name__}: {e_insert})"
-                    )
+                # ---- 步骤 B: 从文件导入设计表（带容错与重试） ----
+                if not self._import_design_table_with_retry(
+                    doc, sw_app, excel_path, sw_model
+                ):
                     return False
 
-                # ---- 步骤 B3: 重建所有构型 ----
+                # ---- 步骤 C: 重建所有构型 ----
                 # 导入设计表后，模型参数已更新但几何体未重建。
-                # 若不重建，宏文件只会导出已激活过的构型。
+                # 若不重建，后续只会导出已激活过的构型。
                 # ForceRebuildAll 强制重建所有构型而不逐个激活。
                 logger.info("正在重建所有构型（ForceRebuildAll）...")
                 try:
@@ -405,169 +1013,100 @@ class TaskRunner:
                             f"({type(e_rebuild2).__name__}: {e_rebuild2})"
                         )
 
-                # ---- 步骤 C: 执行宏 (RunMacro2) ----
-                # RunMacro2(FilePath, ModuleName, ProcedureName, Options, Error)
-                # 注意：RunMacro2 是同步阻塞的 COM 调用，sw_macro_timeout 作为预期
-                # 最大时长记录但不由程序强制中断（COM STA 对象不支持跨线程超时控制）。
-                # 若宏卡死，需手动结束 SolidWorks 进程。
+                # ---- 步骤 D: 逐构型导出 STEP ----
+                # 直接通过 COM API 切换配置并调用 SaveAs 导出。
+                # 替代原 Macro1.swp 宏文件功能，消除对第三方宏的依赖。
+                # 文件监控器仍在并行运行，作为双保险检测磁盘文件。
                 logger.info(
-                    f"正在执行宏 (RunMacro2): {os.path.basename(sw_macro)} "
-                    f"(预期最大耗时 {ENGINE_CONFIG['sw_macro_timeout']}s)"
+                    f"开始逐构型导出 STEP（预期总耗时 "
+                    f"<={ENGINE_CONFIG['sw_macro_timeout']}s）..."
                 )
-                macro_ok = False
-                last_error_detail = ""
+                success_cnt, fail_cnt, fail_list = self._export_configs_to_step(
+                    doc, step_dir
+                )
 
-                # 构建模块名尝试列表（动态发现的模块名优先）
-                candidate_modules = []
-                if macro_module:
-                    candidate_modules.append(macro_module)
-                # 常见回退模块名
-                for name in ["Module1", "Macro1", "Macro11", "MainModule", "Module"]:
-                    if name not in candidate_modules:
-                        candidate_modules.append(name)
-
-                # 过程名候选列表
-                candidate_procs = [macro_proc] if macro_proc else ["main"]
-                for p in ["main", "Main", "MainProc"]:
-                    if p not in candidate_procs:
-                        candidate_procs.append(p)
-
-                for mod_name in candidate_modules:
-                    if macro_ok:
-                        break
-                    for proc_name in candidate_procs:
-                        if macro_ok:
-                            break
-                        try:
-                            run_error = win32com.client.VARIANT(
-                                pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                            )
-                            logger.info(
-                                f"  RunMacro2: module='{mod_name}', "
-                                f"proc='{proc_name}'"
-                            )
-                            result = sw_app.RunMacro2(
-                                sw_macro,
-                                mod_name,
-                                proc_name,
-                                self._SW_RUN_MACRO_DEFAULT,
-                                run_error,
-                            )
-                            logger.info(
-                                f"  RunMacro2 返回: {result}, Error={run_error.value}"
-                            )
-                            if result:
-                                logger.info(
-                                    f"✓ 宏已启动并完成 "
-                                    f"(模块: {mod_name}, 过程: {proc_name})"
-                                )
-                                macro_ok = True
-                            else:
-                                last_error_detail = (
-                                    f"module='{mod_name}', proc='{proc_name}', "
-                                    f"Error={run_error.value}"
-                                )
-                                logger.debug(f"  失败: {last_error_detail}")
-                        except Exception as e_macro:
-                            last_error_detail = (
-                                f"module='{mod_name}', proc='{proc_name}', "
-                                f"{type(e_macro).__name__}: {e_macro}"
-                            )
-                            logger.debug(f"  异常: {last_error_detail}")
-
-                if not macro_ok:
-                    logger.error("所有宏执行方式均失败。最后错误详情:")
-                    logger.error(f"  {last_error_detail}")
-                    logger.error("请检查:")
-                    logger.error(f"  1. 宏文件是否可正常运行: {sw_macro}")
-                    logger.error(
-                        f"  2. VBA 模块名（可用 GetMacroMethods 查询）"
+                # ---- 步骤 E: 汇总导出结果 ----
+                all_configs = self.state.get_all_configs()
+                logger.info(f"  输出目录: {step_dir}")
+                logger.info(
+                    f"STEP 导出汇总: {success_cnt}/{len(all_configs)} 构型成功"
+                )
+                if fail_list:
+                    logger.warning(
+                        f"导出失败构型: {sorted(fail_list)} "
+                        f"— 可能原因: 构型重建失败 / 参数错误"
                     )
-                    logger.error(
-                        f"  3. VBA 过程是否为 Public Sub（无参数）"
+
+                # 只要至少有一个构型导出成功，就标记 SW 阶段完成
+                # （失败构型会在调度器的扫尾逻辑中处理）
+                if success_cnt > 0:
+                    self.state.set_sw_macro_started(True)
+                    logger.info(
+                        f"sw_macro_started=True "
+                        f"（{success_cnt}/{len(all_configs)} 构型 STEP 就绪）"
                     )
+                    return True
+                else:
+                    logger.error("所有构型导出均失败！")
                     # 关闭已打开的文档
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
                     except Exception:
                         pass
                     return False
-
-                logger.info("SW 宏执行完毕，正在校验各构型 STEP 文件...")
-                logger.info(f"  输出目录: {LOCAL_PATHS.get('step_dir', '?')}")
-                self.state.set_sw_macro_started(True)
-
-                # ---- 步骤 D: 逐构型校验 STEP 文件 ----
-                # RunMacro2 是同步调用，返回时宏已执行完毕。
-                # 逐个检查预期 STEP 文件是否存在：
-                #   存在 → SW 步骤 Completed
-                #   缺失 → SW 步骤 Error
-                all_configs = self.state.get_all_configs()
-                missing_configs: List[int] = []
-                found_configs: List[int] = []
-
-                for cn in all_configs:
-                    filename = get_step_filename("SW", cn)
-                    if not filename:
-                        logger.warning(f"  构型{cn}: 无法生成 STEP 文件名，跳过校验")
-                        continue
-                    expected_file = os.path.join(
-                        step_dir,
-                        filename
-                    )
-                    if os.path.exists(expected_file):
-                        self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
-                        found_configs.append(cn)
-                        logger.debug(f"  构型{cn} ✓")
-                    else:
-                        self.state.set_step_status(
-                            cn, "SW", STATUS_ERROR,
-                            f"宏执行完毕但 STEP 缺失: "
-                            f"{filename}"
-                        )
-                        missing_configs.append(cn)
-                        logger.warning(f"  构型{cn} ✗ STEP 缺失")
-
-                logger.info(
-                    f"STEP 校验完成: "
-                    f"{len(found_configs)}/{len(all_configs)} 成功"
-                )
-                if missing_configs:
-                    logger.warning(
-                        f"缺失构型: {sorted(missing_configs)} "
-                        f"— 可能原因: 构型重建失败 / 设计表参数错误"
-                    )
-
-                # 不关闭 SW（保留以供调试/断点续传检查）
-                return True
             finally:
-                # 可选：关闭已打开的模型，减少 COM 引用与内存占用
-                try:
-                    if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
-                        try:
-                            title = doc.GetTitle()
-                        except Exception:
-                            title = os.path.basename(sw_model)
-                        try:
-                            sw_app.CloseDoc(title)
-                            logger.info(f"已关闭模型文档: {title}")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                # ---- 清理：关闭模型文档 → 退出 SW → 释放 COM 资源 ----
+                doc_closed = False
 
-                # 可选：退出 SolidWorks（谨慎使用，默认关闭）
-                try:
-                    if sw_app is not None and ENGINE_CONFIG.get("sw_exit_on_finish", False):
-                        try:
-                            sw_app.ExitApp()
-                            logger.info("已请求退出 SolidWorks")
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                # 步骤 1: 关闭已打开的模型文档
+                if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
+                    try:
+                        title = doc.GetTitle()
+                    except Exception:
+                        title = os.path.basename(sw_model)
+                    try:
+                        sw_app.CloseDoc(title)
+                        doc_closed = True
+                        logger.info(f"已关闭模型文档: {title}")
+                    except Exception as e_doc:
+                        logger.debug(f"关闭模型文档异常: {e_doc}")
 
-                # 显式释放 COM 对象引用，帮助 pywin32 及时回收
+                # 步骤 2: 退出 SolidWorks 应用程序
+                if sw_app is not None and ENGINE_CONFIG.get("sw_exit_on_finish", True):
+                    try:
+                        sw_app.ExitApp()
+                        logger.info("已请求 SolidWorks 退出 (ExitApp)")
+                    except Exception as e_exit:
+                        logger.warning(
+                            f"ExitApp 调用异常 ({type(e_exit).__name__}): {e_exit}，"
+                            f"尝试强制终止..."
+                        )
+                        self._cleanup_sw_processes()
+                    else:
+                        # ExitApp 调用成功，等待 SW 进程实际退出
+                        logger.info("等待 SolidWorks 进程退出...")
+                        sw_exited = False
+                        for _ in range(15):  # 最多等待 15 秒
+                            time.sleep(1)
+                            try:
+                                result = subprocess.run(
+                                    ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
+                                     "/fo", "csv", "/nh"],
+                                    capture_output=True, text=True, timeout=5,
+                                )
+                                if "SLDWORKS.exe" not in result.stdout:
+                                    sw_exited = True
+                                    logger.info("✓ SolidWorks 进程已退出")
+                                    break
+                            except Exception:
+                                break
+                        if not sw_exited:
+                            logger.warning(
+                                "SolidWorks 未在 15 秒内退出，强制终止..."
+                            )
+                            self._cleanup_sw_processes()
+
+                # 步骤 3: 显式释放 COM 对象引用，帮助 pywin32 及时回收
                 doc = None
                 sw_app = None
                 gc.collect()
@@ -891,7 +1430,7 @@ class TaskRunner:
         checks = {
             "SW模型": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
-            "SW宏文件": LOCAL_PATHS["sw_macro"],
+            "SW宏文件(已弃用)": LOCAL_PATHS["sw_macro"],
             "STEP目录": LOCAL_PATHS["step_dir"],
             "SC程序": LOCAL_PATHS["sc_exe"],
             "SC脚本": LOCAL_PATHS["sc_script"],

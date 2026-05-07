@@ -57,6 +57,7 @@ class StateManager:
         conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
         try:
             yield conn
             conn.commit()

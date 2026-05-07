@@ -359,7 +359,8 @@ class PipelineTUI(App):
         super().__init__()
         self.ipc = IPCClient()
         self._refresh_timer = None  # Textual Timer object
-        self._status_data: Dict[int, Dict[str, str]] = {}
+        # 注意：IPC 通过 JSON 传输，整数键会被序列化为字符串
+        self._status_data: Dict[str, Dict[str, str]] = {}
         self._configs: list[int] = []
         self._engine_info: dict = {}
         self._refresh_counter: int = 0
@@ -503,10 +504,9 @@ class PipelineTUI(App):
         with self._data_lock:
             if not self._status_data:
                 return
-            # 获取排序后的构型列表（按数值排序，避免字符串排序导致的 1→10→2 问题）
-            # 防御：仅保留纯数字 key，过滤掉因 IPC 数据错乱混入的非构型字段（如 engine_status）
+            # 注意：IPC JSON 序列化后 config_name 为字符串类型，需按 int 排序
             configs = sorted(
-                [k for k in self._status_data.keys() if isinstance(k, str) and k.isdigit()],
+                [k for k in self._status_data.keys() if k.isdigit()],
                 key=lambda x: int(x)
             )
             self._configs = configs
@@ -975,16 +975,6 @@ class PipelineTUI(App):
                 self._update_info_bar()
                 return
         self._log("[red]✗ 后台引擎启动超时 (10s)，请手动检查 start_daemon.py 是否正常运行[/red]")
-
-    def _show_reset_prompt(self):
-        """提示用户输入 reset 参数。"""
-        self._log("[yellow]请在命令输入行使用: reset <构型名|all> <步骤名|all>[/yellow]")
-        self.query_one("#cmd-input", Input).focus()
-
-    def _show_clean_prompt(self):
-        """提示用户输入 clean 参数。"""
-        self._log("[yellow]请在命令输入行使用: clean <构型名|all> <步骤名|all>[/yellow]")
-        self.query_one("#cmd-input", Input).focus()
 
     def _show_help(self):
         """显示帮助信息。"""

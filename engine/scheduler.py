@@ -18,14 +18,15 @@ DAG 任务调度器 (Pipeline Scheduler)
 """
 import threading
 import queue
+import subprocess
 import time
 import os
-from typing import Dict, Optional
+from typing import Optional
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, LOCAL_PATHS,
+    ENGINE_CONFIG, LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
@@ -133,23 +134,86 @@ class PipelineScheduler:
                     if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
                         self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
+            # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
+            #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
+            #    实现边导出边处理的并行流水线）
+            if self._file_monitor is None or not self._file_monitor._running:
+                self._file_monitor = StepFileMonitor(
+                    step_dir=None,
+                    on_file_ready=self._on_step_file_ready
+                )
+                self._file_monitor.start()
+                logger.info("文件监控已提前启动（在 SW 宏执行前）")
+            self._start_worker_pool_if_needed()
+
             # 启动 SW 宏（批量导出所有构型）—— RunMacro2 是同步阻塞 COM 调用，不可中断
-            success = self.runner.execute_sw_macro()
+            # 增加重试机制：SW 启动/COM 调用可能因瞬时问题失败
+            sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
+            success = False
+            for sw_attempt in range(1, sw_max_retries + 1):
+                if sw_attempt > 1:
+                    # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
+                    for cn in all_configs:
+                        sw_st = self.state.get_step_status(cn, "SW")
+                        if sw_st not in (STATUS_COMPLETED, STATUS_PAUSED):
+                            self.state.set_step_status(
+                                cn, "SW", STATUS_RETRYING,
+                                f"SW 宏重试 {sw_attempt}/{sw_max_retries}"
+                            )
+                    logger.info(
+                        f"SW 宏重试 {sw_attempt}/{sw_max_retries}，"
+                        f"等待 10 秒并清理残留进程..."
+                    )
+                    time.sleep(10)
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/f", "/im", "SLDWORKS.exe"],
+                            capture_output=True, timeout=30,
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(3)
+                    # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
+                    #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
+                    if self._file_monitor is not None:
+                        self._file_monitor._processed_files.clear()
+                        self._file_monitor._known_files.clear()
+                        self._file_monitor._detector._history.clear()
+                        self._file_monitor._detector._first_seen.clear()
+                        logger.info("文件监控器状态已重置（准备 SW 宏重试）")
+                    # 恢复为 Running 后执行宏
+                    for cn in all_configs:
+                        if self.state.get_step_status(cn, "SW") == STATUS_RETRYING:
+                            self.state.set_step_status(cn, "SW", STATUS_RUNNING)
+
+                logger.info(
+                    f"SW 宏执行 (尝试 {sw_attempt}/{sw_max_retries})..."
+                )
+                success = self.runner.execute_sw_macro()
+                if success:
+                    break
+
+            # 若最终仍失败，将仍为 Running/Retrying 的构型标记为 Error
+            if not success and not self._paused.is_set():
+                for cn in all_configs:
+                    sw_st = self.state.get_step_status(cn, "SW")
+                    if sw_st not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                        self.state.set_step_status(
+                            cn, "SW", STATUS_ERROR,
+                            f"SW 宏失败（重试 {sw_max_retries} 次后）"
+                        )
+                self.state.set_engine_status("stopped")
+                logger.error("SW 宏启动失败，流水线中止")
+                return
+
             if not success:
-                # SW 宏失败时的状态处理
+                # SW 宏失败且处于暂停状态
                 if self._paused.is_set():
-                    # 暂停期间 SW 失败：保留 Paused 状态，不覆盖为 Error
                     logger.warning("SW 宏在暂停期间失败，保留 Paused 状态以供恢复后重试")
                     for cn in all_configs:
                         if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
                             self.state.set_step_status(cn, "SW", STATUS_PAUSED)
                     self.state.set_engine_status("paused")
-                else:
-                    # 非暂停的 SW 失败：标记 Error 并停止
-                    for cn in all_configs:
-                        self.state.set_step_status(cn, "SW", STATUS_ERROR, "SW 宏启动失败")
-                    self.state.set_engine_status("stopped")
-                    logger.error("SW 宏启动失败，流水线中止")
                 return
             else:
                 # SW 宏成功执行，但 execute_sw_macro 内部可能已标记部分构型为 Error
@@ -188,9 +252,13 @@ class PipelineScheduler:
                 step_dir = LOCAL_PATHS.get("step_dir", "")
                 for cn in all_configs:
                     if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
-                        expected_file = os.path.join(
-                            step_dir, f"model_gen4.SLDPRT_{cn}.step"
-                        )
+                        filename = get_step_filename("SW", cn)
+                        if not filename:
+                            self.state.set_step_status(cn, "SW", STATUS_ERROR,
+                                                       "无法生成 STEP 文件名")
+                            has_error_sw = True
+                            continue
+                        expected_file = os.path.join(step_dir, filename)
                         if os.path.exists(expected_file):
                             self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
                             logger.info(f"  构型{cn} ✓ STEP 文件已存在，标记为完成")
@@ -399,6 +467,11 @@ class PipelineScheduler:
         """
         带重试机制的任务执行包装器。
 
+        状态转换逻辑：
+        - 首次尝试: Running
+        - 失败后、等待重试期间: Retrying（TUI 显示 🔄）
+        - 到达最大重试次数的最终失败: Error
+
         Args:
             config_name: 构型名称
             step_name: 步骤名
@@ -420,11 +493,11 @@ class PipelineScheduler:
             if self._stopped.is_set():
                 return False
 
+            # 设置 Running 状态
+            self.state.set_step_status(config_name, step_name, STATUS_RUNNING)
+
             # 设置状态后立即再次检查暂停标志：
             # 防止 pause() 在 set_step_status 之后被调用导致的竞态窗口
-            status = STATUS_RETRYING if attempt > 1 else STATUS_RUNNING
-            self.state.set_step_status(config_name, step_name, status)
-
             if self._paused.is_set():
                 self.state.set_step_status(config_name, step_name, STATUS_PAUSED)
                 while self._paused.is_set() and not self._stopped.is_set():
@@ -432,8 +505,7 @@ class PipelineScheduler:
                 if self._stopped.is_set():
                     return False
                 # 恢复后重新设置运行状态
-                status = STATUS_RETRYING if attempt > 1 else STATUS_RUNNING
-                self.state.set_step_status(config_name, step_name, status)
+                self.state.set_step_status(config_name, step_name, STATUS_RUNNING)
 
             logger.info(f"执行 [{step_name}] 构型{config_name} (尝试 {attempt}/{max_retries})")
 
@@ -448,11 +520,20 @@ class PipelineScheduler:
                     logger.warning(f"[{step_name}] 构型{config_name} 执行失败 (尝试 {attempt}/{max_retries})")
                     if attempt < max_retries:
                         retry_count = self.state.increment_retry(config_name, step_name)
-                        logger.info(f"将在稍后重试 (已重试 {retry_count} 次)")
+                        # 失败后立即将状态切换为 Retrying，TUI 可显示 🔄
+                        self.state.set_step_status(
+                            config_name, step_name, STATUS_RETRYING,
+                            f"重试 {attempt + 1}/{max_retries}（已重试 {retry_count} 次）"
+                        )
+                        logger.info(f"将在 {5 * attempt}s 后重试 (已重试 {retry_count} 次)")
                         time.sleep(5 * attempt)  # 递增等待时间
             except (RuntimeError, ValueError, OSError) as e:
                 logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
                 if attempt < max_retries:
+                    self.state.set_step_status(
+                        config_name, step_name, STATUS_RETRYING,
+                        f"异常重试 {attempt + 1}/{max_retries}: {e}"
+                    )
                     time.sleep(5 * attempt)
 
         # 所有重试均失败
@@ -799,5 +880,5 @@ class PipelineScheduler:
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 
     def reset_all(self):
-        """重置所有构型的所有步骤（兼容旧调用）。"""
+        """重置所有构型的所有步骤（委托给 reset_config 处理全量逻辑）。"""
         self.reset_config("all", None)

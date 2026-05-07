@@ -9,7 +9,7 @@ Excel 读取工具 (Excel Reader)
 """
 import os
 import openpyxl
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -60,17 +60,3 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
             wb.close()
     logger.info(f"成功读取 {len(configs)} 个构型配置")
     return configs
-
-
-def get_config_list(excel_path: str) -> List[int]:
-    """
-    获取所有构型名称的列表（按 Excel 中的出现顺序）。
-
-    Args:
-        excel_path: Excel 文件路径
-
-    Returns:
-        构型名称（整数）列表
-    """
-    configs = read_model_configs(excel_path)
-    return list(configs.keys())

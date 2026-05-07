@@ -26,3 +26,6 @@ Thumbs.db
 
 # 日志文件
 *.log
+
+# 测试输出文件
+test_result*.txt

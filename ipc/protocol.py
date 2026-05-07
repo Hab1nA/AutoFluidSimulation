@@ -37,7 +37,6 @@ CMD_START = "start"             # 启动/继续流水线
 CMD_PAUSE = "pause"             # 暂停流水线
 CMD_STOP = "stop"               # 停止引擎（full_quit）
 CMD_CHECK = "check"             # 系统自检
-CMD_STATUS = "status"           # 获取当前状态快照
 
 # ---- 状态操作命令 ----
 CMD_RESET_STEP = "reset_step"   # 重置指定构型指定步骤

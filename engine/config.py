@@ -44,12 +44,12 @@ LOCAL_PATHS = {
         "AUTOFLUID_SW_EXCEL",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx",
     ),
-    # SolidWorks 宏文件
+    # SolidWorks 宏文件（已弃用 — STEP 导出改为直接 COM 调用，不再依赖宏文件）
     "sw_macro": _env_override(
         "AUTOFLUID_SW_MACRO",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\Macro1.swp",
     ),
-    # STEP 文件输出目录（SW 宏将 step 文件导出到此）
+    # STEP 文件输出目录（直接 COM 调用导出 STEP 到此）
     "step_dir": _env_override(
         "AUTOFLUID_STEP_DIR",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step",
@@ -167,11 +167,13 @@ ENGINE_CONFIG = {
     "sw_macro_timeout": 3600,
     # SW 自动化行为控制
     # - sw_close_doc_on_finish: 宏完成后关闭已打开的模型文档（减少资源占用）
-    # - sw_exit_on_finish: 宏完成后退出 SolidWorks（默认为 False，避免影响用户调试）
+    # - sw_exit_on_finish: 宏完成后退出 SolidWorks（默认为 True，确保程序运行整洁性）
     # - sw_visible: 是否显示 SolidWorks 主窗口
     "sw_close_doc_on_finish": True,
-    "sw_exit_on_finish": False,
+    "sw_exit_on_finish": True,
     "sw_visible": True,
+    # SW 宏执行最大重试次数（默认 1 = 不重试，SW 启动/执行开销大）
+    "sw_max_retries": 2,
     # SC 脚本执行超时（秒）
     "sc_timeout": 300,
     # 文件传输超时（秒）

@@ -18,7 +18,7 @@ import sys
 import signal
 import threading
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Tuple
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
