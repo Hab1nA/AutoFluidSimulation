@@ -39,4 +39,4 @@ test_result*.txt
 # Rust / Cargo 编译产物
 **/target/
 **/*.rs.bk
-Cargo.lock
+/Cargo.lock
