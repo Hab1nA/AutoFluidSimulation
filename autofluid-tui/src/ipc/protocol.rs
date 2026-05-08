@@ -47,10 +47,11 @@ impl IpcRequest {
         }
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut json = serde_json::to_string(self).unwrap_or_default();
+    pub fn serialize(&self) -> Result<Vec<u8>, String> {
+        let mut json = serde_json::to_string(self)
+            .map_err(|e| format!("请求序列化失败: {}", e))?;
         json.push('\n');
-        json.into_bytes()
+        Ok(json.into_bytes())
     }
 }
 

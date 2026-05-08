@@ -80,11 +80,6 @@ impl LogBuffer {
         self.info_messages.push_back(message);
     }
 
-    pub fn clear(&mut self) {
-        self.detail_buffer.clear();
-        self.info_messages.clear();
-    }
-
     pub fn filtered_entries<'a>(
         &'a self,
         level_filter: &'a Option<String>,
@@ -105,21 +100,32 @@ impl LogBuffer {
         })
     }
 
-    pub fn filtered_entries_count(
-        &self,
-        level_filter: &Option<String>,
-        source_filter: &Option<String>,
-    ) -> usize {
-        self.filtered_entries(level_filter, source_filter).count()
-    }
-
     pub fn export_lines(
         &self,
         level_filter: &Option<String>,
         source_filter: &Option<String>,
     ) -> Vec<String> {
         self.filtered_entries(level_filter, source_filter)
-            .map(|e| e.message.clone())
+            .map(|e| {
+                let logger = if e.logger_name.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", e.logger_name)
+                };
+                let timestamp = if e.timestamp.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}] ", e.timestamp)
+                };
+                format!(
+                    "{}[{}][{}]{} {}",
+                    timestamp,
+                    e.level,
+                    e.source,
+                    logger,
+                    e.message
+                )
+            })
             .collect()
     }
 }

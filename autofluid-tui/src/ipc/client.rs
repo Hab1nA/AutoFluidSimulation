@@ -46,13 +46,17 @@ impl IpcClient {
     }
 
     pub async fn send_request(&mut self, request: &IpcRequest) -> Result<IpcResponse, String> {
+        if self.stream.is_none() {
+            self.connect().await?;
+        }
+
         let stream = match self.stream.take() {
             Some(s) => s,
             None => return Err("未连接".to_string()),
         };
 
         let mut stream = stream;
-        let data = request.serialize();
+        let data = request.serialize()?;
         if let Err(e) = stream.write_all(&data).await {
             return Err(format!("发送失败: {}", e));
         }
