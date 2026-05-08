@@ -35,6 +35,7 @@ import asyncio
 import collections
 import subprocess
 import threading
+import time
 from datetime import datetime
 from typing import Dict
 
@@ -519,7 +520,6 @@ class PipelineTUI(App):
         self.query_one("#cmd-input", Input).focus()
 
     def on_resize(self, event) -> None:
-        import time
         current_time = time.time()
         if current_time - self._last_resize_time < 0.1:
             return
