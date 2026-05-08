@@ -45,23 +45,43 @@ try:
     print("\n--- Applying fix ---")
 
     # 1. Delete any existing design table
-    try: doc.DeleteDesignTable()
-    except: pass
+    try:
+        doc.DeleteDesignTable()
+    except Exception as e:
+        print(f"DeleteDesignTable failed: {type(e).__name__}: {e}")
 
     # 2. Create fresh empty design table
     doc.InsertFamilyTableEdit()
     time.sleep(2)
 
     # 3. Get DT interface and set external file link
-    dt = doc.GetDesignTable
-    dt.FileName = EXCEL
-    dt.LinkToFile = True
+    dt = None
+    try:
+        dt_candidate = doc.GetDesignTable
+        dt = dt_candidate() if callable(dt_candidate) else dt_candidate
+    except Exception as e:
+        print(f"GetDesignTable failed: {type(e).__name__}: {e}")
 
-    # 4. Detach and close
-    try: dt.Detach
-    except: pass
-    try: doc.CloseFamilyTable()
-    except: pass
+    if dt is None:
+        print("GetDesignTable unavailable; skip linking design table.")
+    else:
+        try:
+            dt.FileName = EXCEL
+            dt.LinkToFile = True
+        except Exception as e:
+            print(f"Set design table link failed: {type(e).__name__}: {e}")
+
+        # 4. Detach and close
+        try:
+            detach = getattr(dt, "Detach", None)
+            if callable(detach):
+                detach()
+        except Exception as e:
+            print(f"Detach failed: {type(e).__name__}: {e}")
+    try:
+        doc.CloseFamilyTable()
+    except Exception as e:
+        print(f"CloseFamilyTable failed: {type(e).__name__}: {e}")
 
     print("Fix applied: InsertFamilyTableEdit + FileName + LinkToFile")
     # === END FIX ===
