@@ -255,6 +255,9 @@ class PipelineTUI(App):
     DataTable {
         background: #1a1a2e;
         color: #e0e0e0;
+        scrollbar-size: 1 1;
+        scrollbar-background: #1a1a2e;
+        scrollbar-color: #0f3460;
     }
 
     DataTable > .datatable--header {
@@ -267,14 +270,19 @@ class PipelineTUI(App):
         background: #0f3460;
     }
 
+    DataTable:focus {
+        border: solid #e94560;
+    }
+
     #log-panels {
-        height: 14;
+        height: 1fr;
+        min-height: 10;
         layout: horizontal;
         margin: 0 2;
     }
 
     #info-panel-container {
-        width: 50%;
+        width: 1fr;
         height: 100%;
         border: solid #333;
         background: #0d0d0d;
@@ -294,10 +302,14 @@ class PipelineTUI(App):
         background: #0d0d0d;
         color: #00ff88;
         border: none;
+        height: 1fr;
+        scrollbar-size: 1 1;
+        scrollbar-background: #1a1a2e;
+        scrollbar-color: #0f3460;
     }
 
     #detail-panel-container {
-        width: 50%;
+        width: 1fr;
         height: 100%;
         border: solid #333;
         background: #0d0d0d;
@@ -317,6 +329,10 @@ class PipelineTUI(App):
         background: #0d0d0d;
         color: #e0e0e0;
         border: none;
+        height: 1fr;
+        scrollbar-size: 1 1;
+        scrollbar-background: #1a1a2e;
+        scrollbar-color: #0f3460;
     }
 
     #command-area {
@@ -434,6 +450,8 @@ class PipelineTUI(App):
         self._log_filter_level: str | None = None
         self._log_filter_source: str | None = None
         self._detail_log_buffer: collections.deque[dict] = collections.deque(maxlen=2000)
+        self._layout_refresh_pending = False
+        self._last_resize_time = 0.0
 
     # ------------------------------------------------------------------
     # 界面布局
@@ -451,12 +469,12 @@ class PipelineTUI(App):
         yield Horizontal(
             Vertical(
                 Static("📋 信息提示", id="info-panel-title"),
-                RichLog(id="log-panel", highlight=False, markup=True, max_lines=200),
+                RichLog(id="log-panel", highlight=False, markup=True, max_lines=200, auto_scroll=False),
                 id="info-panel-container",
             ),
             Vertical(
                 Static("📝 详细日志", id="detail-panel-title"),
-                RichLog(id="detail-log-panel", highlight=False, markup=True, max_lines=1000, auto_scroll=True),
+                RichLog(id="detail-log-panel", highlight=False, markup=True, max_lines=1000, auto_scroll=False),
                 id="detail-panel-container",
             ),
             id="log-panels",
@@ -499,6 +517,34 @@ class PipelineTUI(App):
             self._log("[yellow]提示: 界面将在无后台连接的情况下运行，部分功能不可用[/yellow]")
 
         self.query_one("#cmd-input", Input).focus()
+
+    def on_resize(self, event) -> None:
+        import time
+        current_time = time.time()
+        if current_time - self._last_resize_time < 0.1:
+            return
+        self._last_resize_time = current_time
+
+        if not self._layout_refresh_pending:
+            self._layout_refresh_pending = True
+            self.call_later(self._refresh_layout_after_resize)
+
+    def _refresh_layout_after_resize(self) -> None:
+        try:
+            self.screen.refresh(layout=True)
+            table = self.query_one("#status-table", DataTable)
+            table.refresh(layout=True)
+            log_panel = self.query_one("#log-panel", RichLog)
+            log_panel.refresh(layout=True)
+            detail_log = self.query_one("#detail-log-panel", RichLog)
+            detail_log.refresh(layout=True)
+        except Exception:
+            pass
+        finally:
+            self._layout_refresh_pending = False
+
+    def on_mouse_move(self, event) -> None:
+        pass
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
@@ -567,28 +613,31 @@ class PipelineTUI(App):
         new_keys = {str(cn) for cn in configs}
 
         removed_keys = self._table_row_keys - new_keys
-        for key in removed_keys:
-            try:
-                table.remove_row(key)
-            except KeyError:
-                pass
-        self._table_row_keys -= removed_keys
+        if removed_keys:
+            for key in removed_keys:
+                try:
+                    table.remove_row(key)
+                except KeyError:
+                    pass
+            self._table_row_keys -= removed_keys
 
         added_keys = new_keys - self._table_row_keys
-        for cn in configs:
-            key = str(cn)
-            if key in added_keys:
-                steps = status_data.get(cn)
-                if steps is None:
-                    continue
-                row = [key]
-                for step_name in STEP_NAMES:
-                    status = steps.get(step_name, STATUS_WAITING)
-                    icon = STATUS_ICONS.get(status, "?")
-                    row.append(f"{icon} {status}")
-                table.add_row(*row, key=key)
-                self._table_row_keys.add(key)
+        if added_keys:
+            for cn in configs:
+                key = str(cn)
+                if key in added_keys:
+                    steps = status_data.get(cn)
+                    if steps is None:
+                        continue
+                    row = [key]
+                    for step_name in STEP_NAMES:
+                        status = steps.get(step_name, STATUS_WAITING)
+                        icon = STATUS_ICONS.get(status, "?")
+                        row.append(f"{icon} {status}")
+                    table.add_row(*row, key=key)
+                    self._table_row_keys.add(key)
 
+        updates_needed = []
         for cn in configs:
             key = str(cn)
             if key not in self._table_row_keys or key in added_keys:
@@ -608,7 +657,14 @@ class PipelineTUI(App):
                 except Exception:
                     old_value = None
                 if old_value != new_value:
+                    updates_needed.append((key, col_key, new_value))
+
+        if updates_needed:
+            for key, col_key, new_value in updates_needed:
+                try:
                     table.update_cell(key, col_key, new_value)
+                except Exception:
+                    pass
 
     def _update_info_bar(self, eng_snapshot: dict = None):
         info_bar = self.query_one("#info-bar", Static)
@@ -658,11 +714,38 @@ class PipelineTUI(App):
         entries = data.get("entries", [])
         latest_id = data.get("latest_id", self._last_log_id)
 
+        if not entries:
+            return
+
         for entry in entries:
             self._detail_log_buffer.append(entry)
-            self._render_detail_entry(entry)
+
+        if len(entries) > 10:
+            self._batch_render_detail_entries(entries)
+        else:
+            for entry in entries:
+                self._render_detail_entry(entry)
 
         self._last_log_id = latest_id
+
+    def _batch_render_detail_entries(self, entries: list) -> None:
+        try:
+            log = self.query_one("#detail-log-panel", RichLog)
+            for entry in entries:
+                level = entry.get("level", "INFO")
+                source = entry.get("source", "system")
+                raw_message = entry.get("raw_message", entry.get("message", ""))
+
+                color = LOG_LEVEL_COLORS.get(level, "white")
+                icon = LOG_SOURCE_ICONS.get(source, "📌")
+
+                formatted = f"{icon} [{color}][{level}][/{color}] {raw_message}"
+                log.write(formatted)
+
+            if not self._layout_refresh_pending:
+                self.call_later(self._safe_scroll_detail_log)
+        except Exception:
+            pass
 
     def _render_detail_entry(self, entry: dict) -> None:
         level = entry.get("level", "INFO")
@@ -679,8 +762,17 @@ class PipelineTUI(App):
         try:
             log = self.query_one("#detail-log-panel", RichLog)
             log.write(message)
+            if not self._layout_refresh_pending:
+                self.call_later(self._safe_scroll_detail_log)
         except Exception:
             print(f"[DETAIL] {message}", file=sys.stderr)
+
+    def _safe_scroll_detail_log(self) -> None:
+        try:
+            log = self.query_one("#detail-log-panel", RichLog)
+            log.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def _update_detail_panel_title(self):
         try:
@@ -702,8 +794,17 @@ class PipelineTUI(App):
         try:
             log = self.query_one("#log-panel", RichLog)
             log.write(message)
+            if not self._layout_refresh_pending:
+                self.call_later(self._safe_scroll_info_log)
         except Exception:
             print(f"[TUI] {message}", file=sys.stderr)
+
+    def _safe_scroll_info_log(self) -> None:
+        try:
+            log = self.query_one("#log-panel", RichLog)
+            log.scroll_end(animate=False)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 按钮事件处理
