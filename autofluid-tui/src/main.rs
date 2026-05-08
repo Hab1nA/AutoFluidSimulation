@@ -310,8 +310,8 @@ fn do_redraw(
 
         state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-        let info_visual_count = ui::logs::compute_info_visual_lines(log_buffer, layout.info_panel.width.saturating_sub(2) as usize).len();
-        let detail_visual_count = ui::logs::compute_detail_visual_lines(log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(2) as usize).len();
+        let info_visual_count = ui::logs::compute_info_visual_lines(log_buffer, layout.info_panel.width.saturating_sub(3) as usize).len();
+        let detail_visual_count = ui::logs::compute_detail_visual_lines(log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(3) as usize).len();
 
         if state.detail_log_auto_scroll {
             let visible = layout.detail_panel.height.saturating_sub(2) as usize;
@@ -379,6 +379,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
     let in_info = point_in_rect(col, row, layout.info_panel);
     let in_detail = point_in_rect(col, row, layout.detail_panel);
     let in_buttons = point_in_rect(col, row, layout.quick_buttons);
+    let in_cmd_input = point_in_rect(col, row, layout.cmd_input);
 
     match mouse.kind {
         MouseEventKind::Moved => {
@@ -463,6 +464,9 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
                 state.needs_redraw = true;
             } else if in_detail {
                 state.focus_zone = FocusZone::DetailLog;
+                state.needs_redraw = true;
+            } else if in_cmd_input {
+                state.focus_zone = FocusZone::CommandInput;
                 state.needs_redraw = true;
             }
         }

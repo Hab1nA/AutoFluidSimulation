@@ -33,13 +33,30 @@ fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
+fn info_message_color(msg: &str) -> Color {
+    if msg.contains('✅') {
+        Color::Rgb(0, 204, 102)
+    } else if msg.contains('❌') {
+        Color::Rgb(255, 68, 68)
+    } else if msg.contains('⚠') {
+        Color::Rgb(255, 204, 0)
+    } else if msg.contains('💡') || msg.contains('📌') {
+        Color::Rgb(0, 188, 240)
+    } else if msg.contains('⏳') || msg.contains('⏸') {
+        Color::Rgb(255, 136, 0)
+    } else {
+        Color::Rgb(0, 255, 136)
+    }
+}
+
 pub fn compute_info_visual_lines(log_buffer: &LogBuffer, max_width: usize) -> Vec<Line<'static>> {
     let mut visual_lines: Vec<Line> = Vec::new();
     for msg in &log_buffer.info_messages {
+        let color = info_message_color(msg);
         for chunk in wrap_text_to_width(msg, max_width) {
             visual_lines.push(Line::from(Span::styled(
                 chunk,
-                Style::default().fg(Color::Rgb(0, 255, 136)),
+                Style::default().fg(color),
             )));
         }
     }
@@ -107,16 +124,30 @@ pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, 
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let visual_lines = compute_info_visual_lines(log_buffer, inner.width as usize);
+    let content_width = inner.width.saturating_sub(1) as usize;
+    let visual_lines = compute_info_visual_lines(log_buffer, content_width);
     let total = visual_lines.len();
     let visible = inner.height as usize;
     let scroll = scroll_offset as usize;
     let start = scroll.min(total);
     let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
 
+    let text_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width.saturating_sub(1),
+        height: inner.height,
+    };
+    let scrollbar_area = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+
     let paragraph = Paragraph::new(visible_lines)
         .style(Style::default().bg(Color::Rgb(13, 13, 13)));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, text_area);
 
     if total > visible {
         *scrollbar_state = ScrollbarState::new(total)
@@ -124,7 +155,7 @@ pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, 
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
     }
 }
 
@@ -166,16 +197,30 @@ pub fn render_detail_panel(
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let visual_lines = compute_detail_visual_lines(log_buffer, level_filter, source_filter, inner.width as usize);
+    let content_width = inner.width.saturating_sub(1) as usize;
+    let visual_lines = compute_detail_visual_lines(log_buffer, level_filter, source_filter, content_width);
     let total = visual_lines.len();
     let visible = inner.height as usize;
     let scroll = scroll_offset as usize;
     let start = scroll.min(total);
     let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
 
+    let text_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width.saturating_sub(1),
+        height: inner.height,
+    };
+    let scrollbar_area = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y,
+        width: 1,
+        height: inner.height,
+    };
+
     let paragraph = Paragraph::new(visible_lines)
         .style(Style::default().bg(Color::Rgb(13, 13, 13)));
-    frame.render_widget(paragraph, inner);
+    frame.render_widget(paragraph, text_area);
 
     if total > visible {
         *scrollbar_state = ScrollbarState::new(total)
@@ -183,6 +228,6 @@ pub fn render_detail_panel(
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
     }
 }

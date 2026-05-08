@@ -371,11 +371,21 @@ fn show_help(log_buffer: &mut LogBuffer) {
         "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
         "",
         "日志命令:",
+        "  filter debug               - 仅显示 DEBUG 级别日志",
+        "  filter info                - 仅显示 INFO 级别日志",
+        "  filter warning             - 仅显示 WARNING 级别日志",
         "  filter error               - 仅显示 ERROR 级别日志",
+        "  filter critical            - 仅显示 CRITICAL 级别日志",
         "  filter remote              - 仅显示远程命令日志",
+        "  filter local               - 仅显示本地命令日志",
+        "  filter com                 - 仅显示 COM 自动化日志",
+        "  filter scheduler           - 仅显示调度器日志",
+        "  filter system              - 仅显示系统日志",
+        "  filter ipc                 - 仅显示 IPC 通信日志",
         "  filter clear               - 清除过滤，显示全部",
         "  filter status              - 查看当前过滤状态",
         "  export                     - 导出当前日志到文件",
+        "  export <filename>          - 导出日志为指定文件名",
     ];
     for line in help_lines {
         log_buffer.push_info(line.to_string());

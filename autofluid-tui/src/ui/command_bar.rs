@@ -79,6 +79,12 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         Line::from(Span::styled(full_text, input_style))
     };
 
+    let cmd_border_style = if state.focus_zone == FocusZone::CommandInput {
+        Style::default().fg(Color::Rgb(233, 69, 96))
+    } else {
+        Style::default().fg(Color::Rgb(15, 52, 96))
+    };
+
     let paragraph = Paragraph::new(vec![input_line])
         .style(Style::default().bg(Color::Rgb(13, 13, 13)))
         .alignment(Alignment::Left)
@@ -86,7 +92,7 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(15, 52, 96))),
+                .border_style(cmd_border_style),
         );
     frame.render_widget(paragraph, input_area);
 
@@ -124,18 +130,18 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
 
     let focus_hint = match state.focus_zone {
         FocusZone::CommandInput => "命令输入",
-        FocusZone::Table => "状态表格 (↑↓滚动)",
-        FocusZone::InfoLog => "信息面板 (↑↓滚动)",
-        FocusZone::DetailLog => "详细日志 (↑↓滚动, End=自动)",
+        FocusZone::Table => "表格 ↑↓滚动",
+        FocusZone::InfoLog => "信息 ↑↓滚动",
+        FocusZone::DetailLog => "日志 ↑↓ End=自动",
     };
     let hint_style = Style::default().fg(Color::Rgb(80, 80, 80)).add_modifier(Modifier::ITALIC);
     let hint = Paragraph::new(format!(" Tab:{}", focus_hint))
         .style(hint_style)
         .alignment(Alignment::Right);
     let hint_area = ratatui::layout::Rect {
-        x: input_area.x + input_area.width.saturating_sub(28),
+        x: input_area.x + input_area.width.saturating_sub(46),
         y: input_area.y + 1,
-        width: 26.min(input_area.width.saturating_sub(4)),
+        width: 44.min(input_area.width.saturating_sub(4)),
         height: 1,
     };
     frame.render_widget(hint, hint_area);

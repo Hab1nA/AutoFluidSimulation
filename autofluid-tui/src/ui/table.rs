@@ -75,8 +75,14 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
         *scrollbar_state = ScrollbarState::new(total_rows)
             .viewport_content_length(visible_data_rows)
             .position(scroll);
+        let scrollbar_area = ratatui::layout::Rect {
+            x: inner.x + inner.width.saturating_sub(1),
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        };
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
     }
 }
