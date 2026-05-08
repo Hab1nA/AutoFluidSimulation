@@ -11,8 +11,8 @@ pub const BUTTON_DEFS: [(&str, &str); 8] = [
     ("⏸ Pause", "pause"),
     ("🔧 Check", "check"),
     ("📊 Status", "status"),
-    ("🔧 Daemon", "daemon start"),
-    ("⏹ Stop", "stop"),
+    ("▶ D.Start", "daemon start"),
+    ("⏹ D.Stop", "daemon stop"),
     ("🚪 Quit", "quit"),
     ("⏹ FullQuit", "quit full"),
 ];
@@ -32,20 +32,55 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         Style::default().fg(Color::Rgb(100, 160, 100)).bg(Color::Rgb(13, 13, 13))
     };
 
-    let cursor_indicator = if state.focus_zone == FocusZone::CommandInput { "▎" } else { " " };
-    let input_text = format!("> {}{}", state.command_input, cursor_indicator);
+    let before_cursor: String = state.command_input.chars().take(state.command_cursor).collect();
+    let cursor_char = state.command_input.chars().nth(state.command_cursor);
+    let after_cursor: String = state.command_input.chars().skip(state.command_cursor + 1).collect();
+
+    let prefix = "> ";
+    let before_text = format!("{}{}", prefix, before_cursor);
+    let before_width = unicode_width::UnicodeWidthStr::width(before_text.as_str()) as usize;
+    let cursor_display_w = cursor_char
+        .and_then(|c| unicode_width::UnicodeWidthChar::width(c))
+        .unwrap_or(0);
+    let after_width = unicode_width::UnicodeWidthStr::width(after_cursor.as_str()) as usize;
+    let total_width = before_width + cursor_display_w + after_width;
 
     let input_display_width = input_area.width.saturating_sub(2) as usize;
-    let input_text_width = unicode_width::UnicodeWidthStr::width(input_text.as_str()) as usize;
 
-    let scroll_x = if input_text_width > input_display_width {
-        (input_text_width - input_display_width) as u16
+    let scroll_x = if total_width > input_display_width {
+        if before_width + cursor_display_w > input_display_width {
+            (before_width + cursor_display_w - input_display_width + 3).min(total_width - input_display_width) as u16
+        } else {
+            0u16
+        }
     } else {
-        0
+        0u16
     };
 
-    let paragraph = Paragraph::new(input_text)
-        .style(input_style)
+    let cursor_highlight = Style::default()
+        .fg(Color::Rgb(0, 0, 0))
+        .bg(Color::Rgb(0, 255, 136))
+        .add_modifier(Modifier::BOLD);
+
+    let input_line = if state.focus_zone == FocusZone::CommandInput {
+        let mut spans = vec![
+            Span::styled(prefix, input_style),
+            Span::styled(before_cursor, input_style),
+        ];
+        if let Some(ch) = cursor_char {
+            spans.push(Span::styled(ch.to_string(), cursor_highlight));
+            spans.push(Span::styled(after_cursor, input_style));
+        } else {
+            spans.push(Span::styled("▎".to_string(), Style::default().fg(Color::Rgb(0, 255, 136))));
+        }
+        Line::from(spans)
+    } else {
+        let full_text = format!("{}{}{}", prefix, state.command_input, " ");
+        Line::from(Span::styled(full_text, input_style))
+    };
+
+    let paragraph = Paragraph::new(vec![input_line])
+        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
         .alignment(Alignment::Left)
         .scroll((0, scroll_x))
         .block(
@@ -73,8 +108,8 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         spans.push(Span::styled(" ", Style::default().bg(Color::Rgb(15, 52, 96))));
     }
 
-    let total_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| button_total_width(l) + 1).sum();
-    let padding = buttons_area.width.saturating_sub(total_width) / 2;
+    let total_btn_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| button_total_width(l) + 1).sum();
+    let padding = buttons_area.width.saturating_sub(total_btn_width) / 2;
 
     let mut padded_spans = vec![Span::styled(
         " ".repeat(padding as usize),
@@ -83,9 +118,8 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
     padded_spans.extend(spans);
 
     let buttons_line = Line::from(padded_spans);
-    let buttons = Paragraph::new(vec![buttons_line])
-        .style(Style::default().bg(Color::Rgb(15, 52, 96)))
-        .alignment(Alignment::Center);
+    let buttons = Paragraph::new(vec![Line::from(""), buttons_line])
+        .style(Style::default().bg(Color::Rgb(15, 52, 96)));
     frame.render_widget(buttons, buttons_area);
 
     let focus_hint = match state.focus_zone {

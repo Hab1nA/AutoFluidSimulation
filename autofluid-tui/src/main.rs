@@ -134,91 +134,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             }
         }
 
-        if crossterm_event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {
-            match crossterm_event::read().map_err(|e| e.to_string())? {
-                CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                    let action = key_handler::handle_key(key, &mut state);
-                    match action {
-                        key_handler::AppAction::Quit => {
-                            state.should_quit = true;
-                        }
-                        key_handler::AppAction::SubmitCommand(cmd) => {
-                            log_buffer.push_info(format!("> {}", cmd));
-                            let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
-                            match result {
-                                command::CommandResult::Quit => {
-                                    state.should_quit = true;
-                                }
-                                command::CommandResult::FullQuit => {
-                                    if ipc.is_connected() {
-                                        let _ = rt.block_on(ipc.full_quit());
-                                    }
-                                    rt.block_on(ipc.disconnect());
-                                    state.should_quit = true;
-                                }
-                                command::CommandResult::StartDaemon => {
-                                    if ipc.is_connected() {
-                                        log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
-                                    } else {
-                                        let project_dir = std::env::current_dir()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string();
-                                        match daemon.launch(&project_dir) {
-                                            Ok(pid) => {
-                                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                            }
-                                            Err(e) => {
-                                                log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
-                                            }
-                                        }
-                                    }
-                                }
-                                command::CommandResult::StopDaemon => {
-                                    if ipc.is_connected() {
-                                        let _ = rt.block_on(ipc.full_quit());
-                                        rt.block_on(ipc.disconnect());
-                                    }
-                                    let _ = daemon.stop();
-                                    state.connected = false;
-                                    log_buffer.push_info("✅ 后台引擎已停止".to_string());
-                                }
-                                _ => {}
-                            }
-                        }
-                        key_handler::AppAction::Confirm => {
-                            if let Some(callback) = state.confirm_callback.take() {
-                                let result = rt.block_on(command::execute_confirm_action(&callback, &mut ipc, &mut log_buffer));
-                                match result {
-                                    command::CommandResult::FullQuit => {
-                                        state.should_quit = true;
-                                    }
-                                    command::CommandResult::StopDaemon => {
-                                        if ipc.is_connected() {
-                                            let _ = rt.block_on(ipc.full_quit());
-                                            rt.block_on(ipc.disconnect());
-                                        }
-                                        let _ = daemon.stop();
-                                        state.connected = false;
-                                        log_buffer.push_info("✅ 后台引擎已停止".to_string());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
-                        key_handler::AppAction::None => {}
-                    }
-                }
-                CrosstermEvent::Mouse(mouse) => {
-                    handle_mouse(mouse, &mut state, &log_buffer);
-                }
-                CrosstermEvent::Resize(w, h) => {
-                    state.update_terminal_size(w, h);
-                    state.needs_redraw = true;
-                }
-                _ => {}
+        let first_poll_timeout = Duration::from_millis(50);
+        if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
+            let event = crossterm_event::read().map_err(|e| e.to_string())?;
+            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
+
+            while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
+                let event = crossterm_event::read().map_err(|e| e.to_string())?;
+                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
             }
+        }
+
+        if state.needs_redraw {
+            let _ = do_redraw(terminal, &mut state, &log_buffer);
+            state.needs_redraw = false;
         }
 
         if ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
@@ -264,63 +193,170 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             state.needs_redraw = true;
             last_clock_refresh = std::time::Instant::now();
         }
-
-        if state.needs_redraw {
-            terminal.draw(|frame| {
-                let area = frame.area();
-                let layout = AppLayout::new(area);
-
-                state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
-
-                let info_visual_count = ui::logs::compute_info_visual_lines(&log_buffer, layout.info_panel.width.saturating_sub(2) as usize).len();
-                let detail_visual_count = ui::logs::compute_detail_visual_lines(&log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(2) as usize).len();
-
-                if state.detail_log_auto_scroll {
-                    let visible = layout.detail_panel.height.saturating_sub(2) as usize;
-                    if detail_visual_count > visible {
-                        state.detail_log_scroll = (detail_visual_count - visible) as u16;
-                    }
-                }
-                state.clamp_detail_scroll(detail_visual_count as u16, layout.detail_panel.height.saturating_sub(2));
-                state.clamp_info_scroll(info_visual_count as u16, layout.info_panel.height.saturating_sub(2));
-
-                ui::header::render_header(frame, layout.header, &state);
-                ui::header::render_info_bar(frame, layout.info_bar, &state);
-                ui::table::render_table(frame, layout.status_table, &state);
-                ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone);
-                ui::logs::render_detail_panel(
-                    frame,
-                    layout.detail_panel,
-                    &log_buffer,
-                    &state.log_filter_level,
-                    &state.log_filter_source,
-                    state.detail_log_scroll,
-                    state.detail_log_auto_scroll,
-                    state.focus_zone,
-                );
-                ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, &state);
-
-                match state.ui_mode {
-                    UiMode::ConfirmDialog => {
-                        if let Some(ref msg) = state.confirm_message {
-                            ui::dialogs::render_confirm_dialog(frame, area, msg);
-                        }
-                    }
-                    UiMode::CheckResult => {
-                        if let Some(ref data) = state.check_data {
-                            ui::dialogs::render_check_result(frame, area, data);
-                        }
-                    }
-                    UiMode::Normal => {}
-                }
-            }).map_err(|e| e.to_string())?;
-
-            state.needs_redraw = false;
-        }
     }
 
     rt.block_on(ipc.disconnect());
     let _ = daemon.stop();
+
+    Ok(())
+}
+
+fn process_event(
+    event: CrosstermEvent,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    ipc: &mut IpcClient,
+    daemon: &mut daemon_mgr::DaemonManager,
+    rt: &tokio::runtime::Runtime,
+) {
+    match event {
+        CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+            let action = key_handler::handle_key(key, state);
+            match action {
+                key_handler::AppAction::Quit => {
+                    state.should_quit = true;
+                }
+                key_handler::AppAction::SubmitCommand(cmd) => {
+                    log_buffer.push_info(format!("> {}", cmd));
+                    let result = rt.block_on(command::dispatch_command(&cmd, ipc, state, log_buffer));
+                    match result {
+                        command::CommandResult::Quit => {
+                            state.should_quit = true;
+                        }
+                        command::CommandResult::FullQuit => {
+                            if ipc.is_connected() {
+                                let _ = rt.block_on(ipc.full_quit());
+                            }
+                            rt.block_on(ipc.disconnect());
+                            state.should_quit = true;
+                        }
+                        command::CommandResult::StartDaemon => {
+                            if ipc.is_connected() {
+                                log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+                            } else {
+                                let project_dir = std::env::current_dir()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                match daemon.launch(&project_dir) {
+                                    Ok(pid) => {
+                                        log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                    }
+                                    Err(e) => {
+                                        log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        command::CommandResult::StopDaemon => {
+                            if ipc.is_connected() {
+                                let _ = rt.block_on(ipc.full_quit());
+                                rt.block_on(ipc.disconnect());
+                            }
+                            let _ = daemon.stop();
+                            state.connected = false;
+                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                key_handler::AppAction::Confirm => {
+                    if let Some(callback) = state.confirm_callback.take() {
+                        let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
+                        match result {
+                            command::CommandResult::FullQuit => {
+                                state.should_quit = true;
+                            }
+                            command::CommandResult::StopDaemon => {
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.full_quit());
+                                    rt.block_on(ipc.disconnect());
+                                }
+                                let _ = daemon.stop();
+                                state.connected = false;
+                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
+                key_handler::AppAction::None => {}
+            }
+        }
+        CrosstermEvent::Mouse(mouse) => {
+            handle_mouse(mouse, state, log_buffer);
+        }
+        CrosstermEvent::Resize(w, h) => {
+            state.update_terminal_size(w, h);
+            state.needs_redraw = true;
+        }
+        _ => {}
+    }
+}
+
+fn do_redraw(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut AppState,
+    log_buffer: &LogBuffer,
+) -> Result<(), String> {
+    let mut table_sb = std::mem::take(&mut state.table_scrollbar_state);
+    let mut info_sb = std::mem::take(&mut state.info_scrollbar_state);
+    let mut detail_sb = std::mem::take(&mut state.detail_scrollbar_state);
+
+    terminal.draw(|frame| {
+        let area = frame.area();
+        let layout = AppLayout::new(area);
+
+        state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
+
+        let info_visual_count = ui::logs::compute_info_visual_lines(log_buffer, layout.info_panel.width.saturating_sub(2) as usize).len();
+        let detail_visual_count = ui::logs::compute_detail_visual_lines(log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(2) as usize).len();
+
+        if state.detail_log_auto_scroll {
+            let visible = layout.detail_panel.height.saturating_sub(2) as usize;
+            if detail_visual_count > visible {
+                state.detail_log_scroll = (detail_visual_count - visible) as u16;
+            }
+        }
+        state.clamp_detail_scroll(detail_visual_count as u16, layout.detail_panel.height.saturating_sub(2));
+        state.clamp_info_scroll(info_visual_count as u16, layout.info_panel.height.saturating_sub(2));
+
+        ui::header::render_header(frame, layout.header, &state);
+        ui::header::render_info_bar(frame, layout.info_bar, &state);
+        ui::table::render_table(frame, layout.status_table, &state, &mut table_sb);
+        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, &mut info_sb);
+        ui::logs::render_detail_panel(
+            frame,
+            layout.detail_panel,
+            &log_buffer,
+            &state.log_filter_level,
+            &state.log_filter_source,
+            state.detail_log_scroll,
+            state.detail_log_auto_scroll,
+            state.focus_zone,
+            &mut detail_sb,
+        );
+        ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, &state);
+
+        match state.ui_mode {
+            UiMode::ConfirmDialog => {
+                if let Some(ref msg) = state.confirm_message {
+                    ui::dialogs::render_confirm_dialog(frame, area, msg);
+                }
+            }
+            UiMode::CheckResult => {
+                if let Some(ref data) = state.check_data {
+                    ui::dialogs::render_check_result(frame, area, data);
+                }
+            }
+            UiMode::Normal => {}
+        }
+    }).map_err(|e| e.to_string())?;
+
+    state.table_scrollbar_state = table_sb;
+    state.info_scrollbar_state = info_sb;
+    state.detail_scrollbar_state = detail_sb;
 
     Ok(())
 }
@@ -452,6 +488,11 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
 fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
     let buttons_area = layout.quick_buttons;
     if !point_in_rect(col, row, buttons_area) {
+        return None;
+    }
+
+    let rel_row = row.saturating_sub(buttons_area.y);
+    if rel_row != 1 {
         return None;
     }
 

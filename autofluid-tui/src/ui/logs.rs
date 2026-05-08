@@ -90,7 +90,7 @@ pub fn compute_detail_visual_lines(
     visual_lines
 }
 
-pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, scroll_offset: u16, focus_zone: FocusZone) {
+pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, scroll_offset: u16, focus_zone: FocusZone, scrollbar_state: &mut ScrollbarState) {
     let border_style = if focus_zone == FocusZone::InfoLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
     } else {
@@ -119,12 +119,12 @@ pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, 
     frame.render_widget(paragraph, inner);
 
     if total > visible {
-        let mut scrollbar_state = ScrollbarState::new(total)
+        *scrollbar_state = ScrollbarState::new(total)
             .viewport_content_length(visible)
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
     }
 }
 
@@ -137,6 +137,7 @@ pub fn render_detail_panel(
     scroll_offset: u16,
     auto_scroll: bool,
     focus_zone: FocusZone,
+    scrollbar_state: &mut ScrollbarState,
 ) {
     let border_style = if focus_zone == FocusZone::DetailLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
@@ -177,11 +178,11 @@ pub fn render_detail_panel(
     frame.render_widget(paragraph, inner);
 
     if total > visible {
-        let mut scrollbar_state = ScrollbarState::new(total)
+        *scrollbar_state = ScrollbarState::new(total)
             .viewport_content_length(visible)
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
     }
 }

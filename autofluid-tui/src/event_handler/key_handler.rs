@@ -48,6 +48,13 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 }
 
+fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len())
+}
+
 fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
         KeyCode::Enter => {
@@ -61,22 +68,25 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         KeyCode::Char(c) => {
-            state.command_input.push(c);
-            state.command_cursor = state.command_input.len();
+            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+            state.command_input.insert(byte_pos, c);
+            state.command_cursor += 1;
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Backspace => {
             if state.command_cursor > 0 {
                 state.command_cursor -= 1;
-                state.command_input.remove(state.command_cursor);
+                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+                state.command_input.remove(byte_pos);
                 state.needs_redraw = true;
             }
             AppAction::None
         }
         KeyCode::Delete => {
             if state.command_cursor < state.command_input.len() {
-                state.command_input.remove(state.command_cursor);
+                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+                state.command_input.remove(byte_pos);
                 state.needs_redraw = true;
             }
             AppAction::None
@@ -158,8 +168,9 @@ fn handle_table_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         KeyCode::Char(c) => {
-            state.command_input.push(c);
-            state.command_cursor = state.command_input.len();
+            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+            state.command_input.insert(byte_pos, c);
+            state.command_cursor += 1;
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
             AppAction::None
@@ -167,7 +178,8 @@ fn handle_table_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         KeyCode::Backspace => {
             if state.command_cursor > 0 {
                 state.command_cursor -= 1;
-                state.command_input.remove(state.command_cursor);
+                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+                state.command_input.remove(byte_pos);
                 state.focus_zone = FocusZone::CommandInput;
                 state.needs_redraw = true;
             }
@@ -226,8 +238,9 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         KeyCode::Char(c) => {
-            state.command_input.push(c);
-            state.command_cursor = state.command_input.len();
+            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+            state.command_input.insert(byte_pos, c);
+            state.command_cursor += 1;
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
             AppAction::None
@@ -235,7 +248,8 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         KeyCode::Backspace => {
             if state.command_cursor > 0 {
                 state.command_cursor -= 1;
-                state.command_input.remove(state.command_cursor);
+                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+                state.command_input.remove(byte_pos);
                 state.focus_zone = FocusZone::CommandInput;
                 state.needs_redraw = true;
             }
@@ -302,8 +316,9 @@ fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         KeyCode::Char(c) => {
-            state.command_input.push(c);
-            state.command_cursor = state.command_input.len();
+            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+            state.command_input.insert(byte_pos, c);
+            state.command_cursor += 1;
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
             AppAction::None
@@ -311,7 +326,8 @@ fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         KeyCode::Backspace => {
             if state.command_cursor > 0 {
                 state.command_cursor -= 1;
-                state.command_input.remove(state.command_cursor);
+                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
+                state.command_input.remove(byte_pos);
                 state.focus_zone = FocusZone::CommandInput;
                 state.needs_redraw = true;
             }
