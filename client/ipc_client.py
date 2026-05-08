@@ -16,6 +16,7 @@ from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
+    CMD_GET_LOG_ENTRIES,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -212,3 +213,31 @@ class IPCClient:
             "config_name": config_name,
         })
         return ok, msg
+
+    def get_log_entries(
+        self,
+        since_id: int = 0,
+        limit: int = 50,
+        level_filter: str = None,
+        source_filter: str = None,
+    ) -> Tuple[bool, Any, str]:
+        """增量拉取日志条目。
+
+        Args:
+            since_id: 返回 ID 大于此值的条目
+            limit: 最大返回条数
+            level_filter: 按级别过滤（如 "ERROR", "WARNING"）
+            source_filter: 按来源过滤（如 "remote_ps", "local_ps"）
+
+        Returns:
+            (success, data, message) 其中 data 包含 entries, latest_id, total
+        """
+        params = {
+            "since_id": since_id,
+            "limit": limit,
+        }
+        if level_filter:
+            params["level_filter"] = level_filter
+        if source_filter:
+            params["source_filter"] = source_filter
+        return self.send_request(CMD_GET_LOG_ENTRIES, params)

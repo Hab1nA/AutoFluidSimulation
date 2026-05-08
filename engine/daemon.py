@@ -33,7 +33,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
-from utils.logger import setup_logger
+from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
 
 logger = setup_logger("PipelineDaemon")
@@ -52,6 +52,9 @@ class PipelineDaemon:
         logger.info("=" * 60)
         logger.info("PipelineDaemon 初始化中...")
         logger.info("=" * 60)
+
+        # 0. 安装日志广播处理器（供 TUI 增量拉取）
+        install_broadcast_handler(capacity=1000)
 
         # 1. 状态管理器
         self.state = StateManager()
@@ -345,6 +348,33 @@ class PipelineDaemon:
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
         return True, None, msg
+
+    def handle_get_log_entries(self, params: dict) -> Tuple[bool, Any, str]:
+        """处理 get_log_entries 命令（增量拉取日志条目）。
+
+        params: {
+            "since_id": int,       # 返回 ID 大于此值的条目
+            "limit": int,          # 最大返回条数（默认 50）
+            "level_filter": str,   # 按级别过滤（可选）
+            "source_filter": str,  # 按来源过滤（可选）
+        }
+        """
+        handler = get_broadcast_handler()
+        if handler is None:
+            return True, {"entries": [], "latest_id": 0, "total": 0}, "日志处理器未安装"
+
+        since_id = params.get("since_id", 0)
+        limit = params.get("limit", 50)
+        level_filter = params.get("level_filter")
+        source_filter = params.get("source_filter")
+
+        result = handler.get_entries(
+            since_id=since_id,
+            limit=limit,
+            level_filter=level_filter,
+            source_filter=source_filter,
+        )
+        return True, result, ""
 
 
 # ============================================================================

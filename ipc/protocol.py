@@ -48,6 +48,7 @@ CMD_CLEAN_STEP = "clean_step"   # 清理指定步骤文件
 CMD_GET_ALL_STATUS = "get_all_status"   # 获取所有构型状态
 CMD_GET_STATISTICS = "get_statistics"   # 获取统计信息
 CMD_GET_ENGINE_STATUS = "get_engine_status"  # 获取引擎状态
+CMD_GET_LOG_ENTRIES = "get_log_entries"  # 增量拉取日志条目
 
 
 # ============================================================================

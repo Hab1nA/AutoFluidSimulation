@@ -13,7 +13,10 @@ TUI 客户端主界面 (Textual-based Terminal UI)
 │    1   │  ✅  │  ✅  │  ✅  │  ⏳   │  ⏳        │
 │    2   │  ✅  │  ⏳   │  ⏳   │  ⏳   │  ⏳        │
 │   ...  │ ...  │ ...  │ ...  │ ...  │ ...         │
-├──────────────────────────────────────────────────┤
+├──────────────────┬───────────────────────────────┤
+│  📋 信息提示     │  📝 详细日志                    │
+│  (50%)           │  (50%)                         │
+├──────────────────┴───────────────────────────────┤
 │  > _                                              │
 │  [start] [pause] [check] [reset] [clean] [quit]  │
 └──────────────────────────────────────────────────┘
@@ -31,13 +34,13 @@ import os
 import asyncio
 import subprocess
 import threading
+from datetime import datetime
 from typing import Dict
 
-# 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Vertical
+from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import (
     Static, Button, Input, DataTable,
     RichLog,
@@ -56,12 +59,12 @@ from client.ipc_client import IPCClient
 # ============================================================================
 
 STATUS_ICONS = {
-    STATUS_WAITING:   "⏸️",   # 等待
-    STATUS_RUNNING:   "⏳",   # 运行中
-    STATUS_PAUSED:    "⏸️",   # 已暂停（用户手动暂停）
-    STATUS_RETRYING:  "🔄",   # 重试中
-    STATUS_COMPLETED: "✅",   # 已完成
-    STATUS_ERROR:     "❌",   # 出错
+    STATUS_WAITING:   "⏸️",
+    STATUS_RUNNING:   "⏳",
+    STATUS_PAUSED:    "⏸️",
+    STATUS_RETRYING:  "🔄",
+    STATUS_COMPLETED: "✅",
+    STATUS_ERROR:     "❌",
 }
 
 STATUS_COLORS = {
@@ -78,6 +81,26 @@ ENGINE_STATUS_DISPLAY = {
     "running": "运行中",
     "paused":  "已暂停",
 }
+
+LOG_LEVEL_COLORS = {
+    "DEBUG": "dim",
+    "INFO": "cyan",
+    "WARNING": "yellow",
+    "ERROR": "red",
+    "CRITICAL": "bold red",
+}
+
+LOG_SOURCE_ICONS = {
+    "local_ps": "💻",
+    "remote_ps": "🌐",
+    "com": "🔧",
+    "scheduler": "⚙️",
+    "system": "📡",
+    "ipc": "🔌",
+}
+
+VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+VALID_LOG_SOURCES = {"local_ps", "remote_ps", "com", "scheduler", "system", "ipc"}
 
 
 # ============================================================================
@@ -99,7 +122,6 @@ class ConfirmDialog(ModalScreen):
         self.callback = callback
 
     def compose(self) -> ComposeResult:
-        # 将消息按行拆分，独立渲染以保证多行显示
         lines = self.message_text.split("\n")
         message_widgets = []
         for line in lines:
@@ -143,7 +165,6 @@ class CheckResultScreen(ModalScreen):
         results = self.check_data.get("local_checks", {})
         remote = self.check_data.get("remote_checks", {})
 
-        # 远程检查项的中文显示名映射
         REMOTE_KEY_LABELS = {
             "ssh_connected": "SSH 连接",
             "ssh": "SSH 状态",
@@ -192,6 +213,7 @@ class PipelineTUI(App):
     流水线总控 TUI 应用程序。
 
     使用 Textual 框架构建交互式终端界面。
+    包含信息提示栏目和详细日志栏目的并排布局。
     """
 
     CSS = """
@@ -244,16 +266,56 @@ class PipelineTUI(App):
         background: #0f3460;
     }
 
-    #log-panel {
-        height: 10;
+    #log-panels {
+        height: 14;
+        layout: horizontal;
         margin: 0 2;
-        border: solid #333;
-        background: #0d0d0d;
     }
 
-    RichLog {
+    #info-panel-container {
+        width: 50%;
+        height: 100%;
+        border: solid #333;
+        background: #0d0d0d;
+        padding: 0;
+    }
+
+    #info-panel-title {
+        background: #16213e;
+        color: #e94560;
+        text-style: bold;
+        padding: 0 1;
+        height: 1;
+        width: 100%;
+    }
+
+    #log-panel {
         background: #0d0d0d;
         color: #00ff88;
+        border: none;
+    }
+
+    #detail-panel-container {
+        width: 50%;
+        height: 100%;
+        border: solid #333;
+        background: #0d0d0d;
+        padding: 0;
+    }
+
+    #detail-panel-title {
+        background: #16213e;
+        color: #0fbcf0;
+        text-style: bold;
+        padding: 0 1;
+        height: 1;
+        width: 100%;
+    }
+
+    #detail-log-panel {
+        background: #0d0d0d;
+        color: #e0e0e0;
+        border: none;
     }
 
     #command-area {
@@ -358,37 +420,47 @@ class PipelineTUI(App):
     def __init__(self):
         super().__init__()
         self.ipc = IPCClient()
-        self._refresh_timer = None  # Textual Timer object
-        # 注意：IPC 通过 JSON 传输，整数键会被序列化为字符串
+        self._refresh_timer = None
         self._status_data: Dict[str, Dict[str, str]] = {}
         self._configs: list[int] = []
         self._engine_info: dict = {}
         self._refresh_counter: int = 0
-        self._data_lock = threading.Lock()  # 保护共享状态数据
-        self._daemon_process: subprocess.Popen = None  # 由 TUI 启动的 daemon 子进程句柄
-        self._column_keys: Dict[str, str] = {}  # STEP_NAMES → DataTable column key 映射
-        self._table_row_keys: set[str] = set()  # 当前表格中已存在的行键（自维护，兼容 Textual 8.x）
+        self._data_lock = threading.Lock()
+        self._daemon_process: subprocess.Popen = None
+        self._column_keys: Dict[str, str] = {}
+        self._table_row_keys: set[str] = set()
+        self._last_log_id: int = 0
+        self._log_filter_level: str | None = None
+        self._log_filter_source: str | None = None
+        self._detail_log_buffer: list[dict] = []
 
     # ------------------------------------------------------------------
     # 界面布局
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        """构建界面组件。"""
-        # 顶部标题栏
         yield Container(
             Static("🚀 液氧甲烷火箭发动机仿真总控程序 v2.1.0", id="title"),
             Static("引擎: 未连接  |  构型数: 0  |  屏障: --", id="info-bar"),
             id="header-bar",
         )
 
-        # 主状态表格
         yield DataTable(id="status-table", cursor_type="row")
 
-        # 日志面板
-        yield RichLog(id="log-panel", highlight=False, markup=True, max_lines=50)
+        yield Horizontal(
+            Vertical(
+                Static("📋 信息提示", id="info-panel-title"),
+                RichLog(id="log-panel", highlight=False, markup=True, max_lines=200),
+                id="info-panel-container",
+            ),
+            Vertical(
+                Static("📝 详细日志", id="detail-panel-title"),
+                RichLog(id="detail-log-panel", highlight=False, markup=True, max_lines=1000, auto_scroll=True),
+                id="detail-panel-container",
+            ),
+            id="log-panels",
+        )
 
-        # 底部命令区域
         yield Container(
             Input(placeholder="输入命令 (help 查看帮助)...", id="cmd-input"),
             Container(
@@ -410,47 +482,39 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     def on_mount(self) -> None:
-        """界面挂载完成后初始化。"""
         self._init_table()
         self._log("欢迎使用仿真流水线总控程序！")
         self._log("正在连接后台引擎...")
+        self._detail_log("等待连接后台引擎，日志将在此实时展示...")
 
-        # 尝试连接 Daemon
         if self.ipc.connect():
             self._log("[green]✅ 已连接到后台引擎[/green]")
+            self._detail_log("[green]✅ 已连接到后台引擎，日志同步已启动[/green]")
             self._update_info_bar()
-            # 启动定时刷新
             self._refresh_timer = self.set_interval(1.0, self._refresh_status)
         else:
             self._log("[red]❌ 无法连接到后台引擎，请先启动 start_daemon.py[/red]")
+            self._detail_log("[red]❌ 无法连接到后台引擎，详细日志不可用[/red]")
             self._log("[yellow]提示: 界面将在无后台连接的情况下运行，部分功能不可用[/yellow]")
 
-        # 设置焦点到命令输入
         self.query_one("#cmd-input", Input).focus()
 
     def on_unmount(self) -> None:
-        """界面卸载时清理。"""
         if self._refresh_timer:
             self._refresh_timer.stop()
         self.ipc.disconnect()
-        # 不终止 daemon 子进程——quit 时 daemon 继续运行
 
     # ------------------------------------------------------------------
     # 表格初始化
     # ------------------------------------------------------------------
 
     def _init_table(self):
-        """初始化状态表格的列，同时记录列 key 映射供增量更新使用。
-
-        Textual 8.x 中 add_column 若不指定 key 参数会自动生成唯一 ID；
-        必须显式传入 key=display 以确保后续 update_cell 可以通过字符串匹配。
-        """
         table = self.query_one("#status-table", DataTable)
         table.add_column("构型", width=6, key="构型")
         for step in STEP_NAMES:
             display = STEP_DISPLAY.get(step, step)
             table.add_column(display, width=16, key=display)
-            self._column_keys[step] = display  # display 同时作为列 key
+            self._column_keys[step] = display
         table.show_header = True
         table.cursor_type = "row"
 
@@ -459,24 +523,19 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     async def _refresh_status(self) -> None:
-        """定时从 Daemon 刷新状态数据并更新表格（异步，不阻塞事件循环）。"""
         if not self.ipc.is_connected():
             return
 
-        # 将阻塞 IPC 调用放到线程池，避免卡住 Textual 事件循环
         ok, data, msg = await asyncio.to_thread(self.ipc.get_all_status)
         if not ok:
             return
 
-        # 在锁内完成所有数据快照复制，然后释放锁再进行 UI 更新
         with self._data_lock:
             self._status_data = data or {}
-            # 引擎状态变化较慢，每5次刷新（5秒）更新一次
             self._refresh_counter += 1
             should_refresh_engine = self._refresh_counter >= 5
             if should_refresh_engine:
                 self._refresh_counter = 0
-            # 快照引擎信息以避免在锁外访问
             eng_snapshot = dict(self._engine_info) if self._engine_info else {}
 
         self._update_table()
@@ -489,50 +548,38 @@ class PipelineTUI(App):
                     eng_snapshot = dict(eng_data)
         self._update_info_bar(eng_snapshot)
 
+        await self._poll_detail_logs()
+
     def _update_table(self):
-        """根据最新状态数据增量更新 DataTable（保留滚动位置）。
-
-        与旧版实现不同，此方法不再使用 table.clear() 全量重建，
-        而是通过 add_row / remove_row / update_cell 进行增量操作，
-        从而避免每次刷新都将滚动条重置到顶端。
-
-        使用自维护的 _table_row_keys 集合追踪行键，
-        兼容 Textual 8.x 中 ordered_rows 返回不可哈希 Row 对象的问题。
-        """
         table = self.query_one("#status-table", DataTable)
 
         with self._data_lock:
             if not self._status_data:
                 return
-            # 注意：IPC JSON 序列化后 config_name 为字符串类型，需按 int 排序
             configs = sorted(
                 [k for k in self._status_data.keys() if k.isdigit()],
                 key=lambda x: int(x)
             )
             self._configs = configs
-            # 复制数据以避免在锁外迭代
             status_data = dict(self._status_data)
 
-        # 新数据中的行键集合
         new_keys = {str(cn) for cn in configs}
 
-        # 1) 移除已不存在的构型行
         removed_keys = self._table_row_keys - new_keys
         for key in removed_keys:
             try:
                 table.remove_row(key)
             except KeyError:
-                pass  # 行可能已被移除（竞态窗口），忽略
+                pass
         self._table_row_keys -= removed_keys
 
-        # 2) 添加新的构型行
         added_keys = new_keys - self._table_row_keys
         for cn in configs:
             key = str(cn)
             if key in added_keys:
                 steps = status_data.get(cn)
                 if steps is None:
-                    continue  # 并发场景下该构型数据已消失
+                    continue
                 row = [key]
                 for step_name in STEP_NAMES:
                     status = steps.get(step_name, STATUS_WAITING)
@@ -541,14 +588,13 @@ class PipelineTUI(App):
                 table.add_row(*row, key=key)
                 self._table_row_keys.add(key)
 
-        # 3) 更新已有行的单元格（仅更新变化的列）
         for cn in configs:
             key = str(cn)
             if key not in self._table_row_keys or key in added_keys:
-                continue  # 新行已在步骤 2 中创建，无需再更新
+                continue
             steps = status_data.get(cn)
             if steps is None:
-                continue  # 并发场景下该构型数据已消失
+                continue
             for step_name in STEP_NAMES:
                 status = steps.get(step_name, STATUS_WAITING)
                 icon = STATUS_ICONS.get(status, "?")
@@ -556,7 +602,6 @@ class PipelineTUI(App):
                 col_key = self._column_keys.get(step_name)
                 if col_key is None:
                     continue
-                # 仅在值变化时更新，减少不必要的重绘
                 try:
                     old_value = table.get_cell(key, col_key)
                 except Exception:
@@ -565,7 +610,6 @@ class PipelineTUI(App):
                     table.update_cell(key, col_key, new_value)
 
     def _update_info_bar(self, eng_snapshot: dict = None):
-        """更新顶部信息栏。可选择性传入引擎状态快照以避免锁争用。"""
         info_bar = self.query_one("#info-bar", Static)
 
         if self.ipc.is_connected():
@@ -593,16 +637,71 @@ class PipelineTUI(App):
             info_bar.update("引擎: 未连接  |  请先启动 Daemon")
 
     # ------------------------------------------------------------------
-    # 日志
+    # 详细日志轮询与渲染
+    # ------------------------------------------------------------------
+
+    async def _poll_detail_logs(self) -> None:
+        if not self.ipc.is_connected():
+            return
+
+        ok, data, _ = await asyncio.to_thread(
+            self.ipc.get_log_entries,
+            self._last_log_id,
+            50,
+            self._log_filter_level,
+            self._log_filter_source,
+        )
+        if not ok or not data:
+            return
+
+        entries = data.get("entries", [])
+        latest_id = data.get("latest_id", self._last_log_id)
+
+        for entry in entries:
+            self._detail_log_buffer.append(entry)
+            self._render_detail_entry(entry)
+
+        self._last_log_id = latest_id
+
+    def _render_detail_entry(self, entry: dict) -> None:
+        level = entry.get("level", "INFO")
+        source = entry.get("source", "system")
+        raw_message = entry.get("raw_message", entry.get("message", ""))
+
+        color = LOG_LEVEL_COLORS.get(level, "white")
+        icon = LOG_SOURCE_ICONS.get(source, "📌")
+
+        formatted = f"{icon} [{color}][{level}][/{color}] {raw_message}"
+        self._detail_log(formatted)
+
+    def _detail_log(self, message: str):
+        try:
+            log = self.query_one("#detail-log-panel", RichLog)
+            log.write(message)
+        except Exception:
+            print(f"[DETAIL] {message}", file=sys.stderr)
+
+    def _update_detail_panel_title(self):
+        try:
+            title = self.query_one("#detail-panel-title", Static)
+            parts = ["📝 详细日志"]
+            if self._log_filter_level:
+                parts.append(f"[{self._log_filter_level}]")
+            if self._log_filter_source:
+                parts.append(f"[{self._log_filter_source}]")
+            title.update(" ".join(parts))
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 信息提示日志
     # ------------------------------------------------------------------
 
     def _log(self, message: str):
-        """向日志面板添加一条消息。"""
         try:
             log = self.query_one("#log-panel", RichLog)
             log.write(message)
         except Exception:
-            # 界面可能还未初始化，降级输出到 stderr
             print(f"[TUI] {message}", file=sys.stderr)
 
     # ------------------------------------------------------------------
@@ -610,7 +709,6 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """处理按钮点击事件。"""
         btn_id = event.button.id
 
         if btn_id == "btn-start":
@@ -635,9 +733,8 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """处理命令输入。"""
         cmd_line = event.value.strip()
-        event.input.value = ""  # 清空输入框
+        event.input.value = ""
 
         if not cmd_line:
             return
@@ -646,7 +743,6 @@ class PipelineTUI(App):
         parts = cmd_line.split()
         cmd = parts[0].lower()
 
-        # 路由命令
         if cmd == "help":
             self._show_help()
         elif cmd == "start":
@@ -667,15 +763,155 @@ class PipelineTUI(App):
             self._handle_daemon_cmd(parts[1:])
         elif cmd == "status":
             self._do_status()
+        elif cmd == "filter":
+            self._handle_filter_cmd(parts[1:])
+        elif cmd == "export":
+            self._handle_export_cmd(parts[1:])
         else:
             self._log(f"[red]未知命令: {cmd}，输入 help 查看帮助[/red]")
+
+    # ------------------------------------------------------------------
+    # 日志过滤命令
+    # ------------------------------------------------------------------
+
+    def _handle_filter_cmd(self, args: list):
+        """处理 filter 命令。
+
+        用法:
+          filter error          - 仅显示 ERROR 级别日志
+          filter remote         - 仅显示远程命令日志
+          filter local          - 仅显示本地命令日志
+          filter com            - 仅显示 COM 自动化日志
+          filter scheduler      - 仅显示调度器日志
+          filter system         - 仅显示系统日志
+          filter clear          - 清除过滤，显示全部
+          filter status         - 显示当前过滤状态
+        """
+        if not args:
+            self._log("[yellow]用法: filter <error|warning|info|debug|remote|local|com|scheduler|system|clear|status>[/yellow]")
+            return
+
+        sub = args[0].lower()
+
+        if sub == "clear":
+            self._log_filter_level = None
+            self._log_filter_source = None
+            self._log("[green]✅ 日志过滤已清除，显示全部日志[/green]")
+            self._detail_log("[green]✅ 日志过滤已清除[/green]")
+            self._refresh_detail_log_with_filter()
+            self._update_detail_panel_title()
+            return
+
+        if sub == "status":
+            level_str = self._log_filter_level or "全部"
+            source_str = self._log_filter_source or "全部"
+            self._log(f"当前过滤: 级别={level_str}, 来源={source_str}")
+            return
+
+        level_map = {
+            "debug": "DEBUG",
+            "info": "INFO",
+            "warning": "WARNING",
+            "error": "ERROR",
+            "critical": "CRITICAL",
+        }
+        source_map = {
+            "remote": "remote_ps",
+            "local": "local_ps",
+            "com": "com",
+            "scheduler": "scheduler",
+            "system": "system",
+            "ipc": "ipc",
+        }
+
+        if sub in level_map:
+            self._log_filter_level = level_map[sub]
+            self._log_filter_source = None
+            self._log(f"[cyan]日志过滤: 仅显示 {sub.upper()} 级别[/cyan]")
+            self._refresh_detail_log_with_filter()
+            self._update_detail_panel_title()
+            return
+
+        if sub in source_map:
+            self._log_filter_source = source_map[sub]
+            self._log_filter_level = None
+            self._log(f"[cyan]日志过滤: 仅显示 {sub} 来源[/cyan]")
+            self._refresh_detail_log_with_filter()
+            self._update_detail_panel_title()
+            return
+
+        self._log(f"[red]未知过滤条件: {sub}[/red]")
+        self._log("[yellow]可用: error|warning|info|debug|remote|local|com|scheduler|system|clear|status[/yellow]")
+
+    def _refresh_detail_log_with_filter(self):
+        try:
+            log = self.query_one("#detail-log-panel", RichLog)
+            log.clear()
+            for entry in self._detail_log_buffer:
+                level = entry.get("level", "INFO")
+                source = entry.get("source", "system")
+                if self._log_filter_level and level != self._log_filter_level:
+                    continue
+                if self._log_filter_source and source != self._log_filter_source:
+                    continue
+                self._render_detail_entry(entry)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 日志导出命令
+    # ------------------------------------------------------------------
+
+    def _handle_export_cmd(self, args: list):
+        """处理 export 命令，将当前日志导出为文件。
+
+        用法:
+          export              - 导出到 logs/ 目录
+          export <filename>   - 导出为指定文件名
+        """
+        if not self._detail_log_buffer:
+            self._log("[yellow]当前无日志可导出[/yellow]")
+            return
+
+        try:
+            log_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
+            )
+            os.makedirs(log_dir, exist_ok=True)
+
+            if args:
+                filename = args[0]
+                if not filename.endswith(".log"):
+                    filename += ".log"
+            else:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"export_{timestamp}.log"
+
+            filepath = os.path.join(log_dir, filename)
+
+            lines = []
+            for entry in self._detail_log_buffer:
+                level = entry.get("level", "INFO")
+                source = entry.get("source", "system")
+                message = entry.get("message", "")
+                if self._log_filter_level and level != self._log_filter_level:
+                    continue
+                if self._log_filter_source and source != self._log_filter_source:
+                    continue
+                lines.append(message)
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            self._log(f"[green]✅ 日志已导出: {filepath} ({len(lines)} 条)[/green]")
+        except OSError as e:
+            self._log(f"[red]❌ 日志导出失败: {e}[/red]")
 
     # ------------------------------------------------------------------
     # 命令实现
     # ------------------------------------------------------------------
 
     def _do_start(self):
-        """执行 start 命令。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.start_pipeline()
@@ -685,7 +921,6 @@ class PipelineTUI(App):
             self._log(f"[red]❌ {msg}[/red]")
 
     def _do_pause(self):
-        """执行 pause 命令。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.pause_pipeline()
@@ -695,7 +930,6 @@ class PipelineTUI(App):
             self._log(f"[red]❌ {msg}[/red]")
 
     def _do_check(self):
-        """执行 check 命令。"""
         if not self._check_connection():
             return
         ok, data, msg = self.ipc.check_system()
@@ -706,7 +940,6 @@ class PipelineTUI(App):
             self._log(f"[red]❌ 系统自检失败: {msg}[/red]")
 
     def _do_status(self):
-        """显示当前状态摘要。"""
         if not self._check_connection():
             return
         ok, data, msg = self.ipc.get_statistics()
@@ -719,12 +952,10 @@ class PipelineTUI(App):
             self._log(f"[red]❌ {msg}[/red]")
 
     def _handle_reset_cmd(self, args: list):
-        """处理 reset 命令。用法: reset <构型名|all> <步骤名|all>"""
         if len(args) < 2:
             self._log("[yellow]用法: reset <构型名|all> <步骤名|all>[/yellow]")
             return
 
-        # 解析构型名（支持整数或 "all"）
         config_name: int | str
         if args[0].lower() == "all":
             config_name = "all"
@@ -735,7 +966,6 @@ class PipelineTUI(App):
                 self._log(f"[red]构型名称必须是整数或 \"all\"，收到: {args[0]}[/red]")
                 return
 
-        # 解析步骤名（支持步骤名或 "all"，必须提供）
         raw_step = args[1]
         if raw_step.lower() == "all":
             step_name = "all"
@@ -745,7 +975,6 @@ class PipelineTUI(App):
             self._log(f"[red]无效步骤名: {args[1]}，有效值: {STEP_NAMES} 或 all[/red]")
             return
 
-        # 构建确认对话框文本
         cfg_desc = "所有构型" if config_name == "all" else f"构型{config_name}"
         if step_name == "all":
             step_desc = "所有步骤"
@@ -760,7 +989,6 @@ class PipelineTUI(App):
         )
 
     def _do_reset_step(self, config_name, step_name: str = None):
-        """执行重置步骤操作。config_name 支持 int 或 'all'，step_name 支持 str 或 'all'。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.reset_step(config_name, step_name)
@@ -770,12 +998,10 @@ class PipelineTUI(App):
             self._log(f"[red]❌ {msg}[/red]")
 
     def _handle_clean_cmd(self, args: list):
-        """处理 clean 命令。用法: clean <构型名|all> <步骤名|all>"""
         if len(args) < 2:
             self._log("[yellow]用法: clean <构型名|all> <步骤名|all>[/yellow]")
             return
 
-        # 解析构型名（支持整数或 "all"）
         config_name: int | str
         if args[0].lower() == "all":
             config_name = "all"
@@ -786,7 +1012,6 @@ class PipelineTUI(App):
                 self._log(f"[red]构型名称必须是整数或 \"all\"，收到: {args[0]}[/red]")
                 return
 
-        # 解析步骤名（支持步骤名或 "all"，必须提供）
         raw_step = args[1]
         if raw_step.lower() == "all":
             step_name = "all"
@@ -796,7 +1021,6 @@ class PipelineTUI(App):
             self._log(f"[red]无效步骤名: {args[1]}，有效值: {STEP_NAMES} 或 all[/red]")
             return
 
-        # 对于 clean all all（全量清理），显示受影响的目录列表
         if config_name == "all" and step_name == "all":
             from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
@@ -823,7 +1047,6 @@ class PipelineTUI(App):
         else:
             detail = ""
 
-        # 构建确认对话框文本
         cfg_desc = "所有构型" if config_name == "all" else f"构型{config_name}"
         if step_name == "all":
             step_desc = "所有步骤"
@@ -838,7 +1061,6 @@ class PipelineTUI(App):
         )
 
     def _do_clean_step(self, step_name, config_name=None):
-        """执行清理步骤操作。step_name 支持 str 或 'all'，config_name 支持 int、None 或 'all'。"""
         if not self._check_connection():
             return
         ok, msg = self.ipc.clean_step(step_name, config_name)
@@ -848,14 +1070,11 @@ class PipelineTUI(App):
             self._log(f"[red]❌ {msg}[/red]")
 
     def _do_quit(self):
-        """执行 quit 命令（仅退出 TUI，后台继续运行）。"""
         self._log("[yellow]⚠️ 界面已退出，后台引擎仍在运行[/yellow]")
         self._log("[yellow]  使用 start_client.py 可重新连接界面[/yellow]")
-        # Textual 的 exit() 会先将待显示消息刷新到屏幕后再退出
         self.exit()
 
     def _do_full_quit(self):
-        """执行 full_quit 命令。"""
         self.push_screen(
             ConfirmDialog(
                 "确定要【完全退出】后台引擎和界面吗？\n所有正在运行的任务将被中止！",
@@ -864,7 +1083,6 @@ class PipelineTUI(App):
         )
 
     def _execute_full_quit(self):
-        """执行完全退出。"""
         if self.ipc.is_connected():
             ok, msg = self.ipc.full_quit()
             if ok:
@@ -875,7 +1093,6 @@ class PipelineTUI(App):
         self.exit()
 
     def _handle_daemon_cmd(self, args: list):
-        """处理 daemon 子命令。"""
         if not args:
             self._log("[yellow]用法: daemon start  或 daemon stop[/yellow]")
         elif args[0].lower() == "stop":
@@ -883,10 +1100,9 @@ class PipelineTUI(App):
         elif args[0].lower() == "start":
             self._do_launch_daemon()
         else:
-            self._log(f"[yellow]用法: daemon start  或 daemon stop[/yellow]")
+            self._log("[yellow]用法: daemon start  或 daemon stop[/yellow]")
 
     def _do_launch_daemon(self):
-        """启动后台守护进程并自动连接。"""
         if self.ipc.is_connected():
             self._log("[yellow]⚠️ 已连接到后台引擎，无需重复启动[/yellow]")
             return
@@ -899,7 +1115,6 @@ class PipelineTUI(App):
                 self._log(f"[red]❌ 未找到启动脚本: {daemon_script}[/red]")
                 return
 
-            # Windows 下隐藏控制台窗口
             creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             self._daemon_process = subprocess.Popen(
                 [sys.executable, daemon_script],
@@ -911,13 +1126,11 @@ class PipelineTUI(App):
             self._log("[cyan]⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
                 self._daemon_process.pid))
 
-            # 启动异步轮询任务
             asyncio.create_task(self._poll_daemon_startup())
         except (OSError, subprocess.SubprocessError, ValueError) as e:
             self._log(f"[red]❌ 启动后台引擎失败: {e}[/red]")
 
     def _do_stop_daemon(self):
-        """停止后台守护进程（先 IPC 优雅退出，再强制终止子进程）。"""
         if not self.ipc.is_connected() and self._daemon_process is None:
             self._log("[yellow]⚠️ 后台引擎未运行或非本 TUI 启动[/yellow]")
             return
@@ -931,8 +1144,6 @@ class PipelineTUI(App):
         )
 
     def _execute_stop_daemon(self):
-        """执行停止 daemon 操作。"""
-        # 1) 通过 IPC 优雅退出
         if self.ipc.is_connected():
             ok, msg = self.ipc.full_quit()
             if ok:
@@ -941,12 +1152,10 @@ class PipelineTUI(App):
                 self._log(f"[yellow]⚠️ IPC 退出请求失败: {msg}，将强制终止进程[/yellow]")
             self.ipc.disconnect()
 
-        # 2) 停止刷新定时器
         if self._refresh_timer:
             self._refresh_timer.stop()
             self._refresh_timer = None
 
-        # 3) 终止 daemon 子进程（如果由本 TUI 启动）
         if self._daemon_process is not None:
             try:
                 self._daemon_process.terminate()
@@ -964,12 +1173,12 @@ class PipelineTUI(App):
         self._update_info_bar()
 
     async def _poll_daemon_startup(self):
-        """异步轮询直到 Daemon IPC 就绪（最多等待 10 秒）。"""
-        for i in range(20):  # 20 × 0.5s = 10s
+        for i in range(20):
             await asyncio.sleep(0.5)
             connected = await asyncio.to_thread(self.ipc.connect)
             if connected:
                 self._log("[green]✅ 后台引擎已就绪，连接成功！[/green]")
+                self._detail_log("[green]✅ 后台引擎已就绪，日志同步已启动[/green]")
                 if not self._refresh_timer:
                     self._refresh_timer = self.set_interval(1.0, self._refresh_status)
                 self._update_info_bar()
@@ -977,7 +1186,6 @@ class PipelineTUI(App):
         self._log("[red]❌ 后台引擎启动超时 (10s)，请手动检查 start_daemon.py 是否正常运行[/red]")
 
     def _show_help(self):
-        """显示帮助信息。"""
         help_text = """
 [bold]可用命令:[/bold]
   [dim]help[/dim]                       - 显示此帮助
@@ -991,6 +1199,17 @@ class PipelineTUI(App):
   [cyan]daemon stop[/cyan]                - 停止后台引擎（TUI 继续运行）
   [yellow]quit[/yellow]                       - 退出界面（引擎继续运行）
   [red]quit full[/red]                  - 完全退出（停止引擎 + 关闭 TUI）
+
+[bold]日志命令:[/bold]
+  [cyan]filter error[/cyan]              - 仅显示 ERROR 级别日志
+  [cyan]filter remote[/cyan]             - 仅显示远程命令日志
+  [cyan]filter local[/cyan]              - 仅显示本地命令日志
+  [cyan]filter com[/cyan]                - 仅显示 COM 自动化日志
+  [cyan]filter scheduler[/cyan]          - 仅显示调度器日志
+  [cyan]filter clear[/cyan]              - 清除过滤，显示全部
+  [cyan]filter status[/cyan]             - 查看当前过滤状态
+  [cyan]export[/cyan]                    - 导出当前日志到文件
+  [cyan]export <filename>[/cyan]         - 导出日志为指定文件名
         """
         self._log(help_text)
 
@@ -999,7 +1218,6 @@ class PipelineTUI(App):
     # ------------------------------------------------------------------
 
     def _check_connection(self) -> bool:
-        """检查 Daemon 连接，未连接时尝试重连。"""
         if not self.ipc.is_connected():
             self._log("[yellow]未连接到后台引擎，尝试重新连接...[/yellow]")
             if self.ipc.connect():
@@ -1013,7 +1231,6 @@ class PipelineTUI(App):
         return True
 
     def action_quit_app(self):
-        """快捷键退出。"""
         self._do_quit()
 
 
@@ -1022,7 +1239,6 @@ class PipelineTUI(App):
 # ============================================================================
 
 def main():
-    """启动 TUI 客户端。"""
     app = PipelineTUI()
     app.run()
 
