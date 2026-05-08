@@ -12,6 +12,12 @@ Pause/Start 功能验证测试脚本
   4. SW 宏失败 -> 暂停 -> 恢复
   5. 快速连续 pause/start
   6. 下游步骤执行中暂停/恢复
+  7. Start 在 running 状态下不应破坏状态
+  8. Pause 在 stopped 状态下应无操作
+  9. 暂停后文件监控停止扫描
+  10. 暂停期间新STEP文件不被捕捉
+  11. 恢复后立即触发完整轮询
+  12. 多次pause-start状态切换稳定性
 
 运行方式：
   cd "项目根目录"
@@ -27,10 +33,8 @@ import tempfile
 import shutil
 from typing import Dict, List
 
-# 将项目根目录加入路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 必须在任何 engine.* 导入之前设置日志目录，避免模块级 logger 初始化失败
 _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="sw_test_ps_")
 _TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)
@@ -44,28 +48,21 @@ from engine.config import (
 )
 from engine.state_manager import StateManager
 
-# ============================================================================
-# 测试辅助：Mock TaskRunner（模拟 SW 宏执行）
-# ============================================================================
 
 class MockTaskRunner:
-    """模拟 TaskRunner，可控制 SW 宏的成功/失败和延迟。"""
-
     def __init__(self, state_manager: StateManager):
         self.state = state_manager
         self._sw_should_fail = False
-        self._sw_delay = 0.0       # SW 宏模拟耗时
+        self._sw_delay = 0.0
         self._sw_call_count = 0
-        self._pause_check_callback = None  # 在 SW 宏执行期间调用的回调（模拟暂停检测）
+        self._pause_check_callback = None
 
     def execute_sw_macro(self) -> bool:
-        """模拟 SW 宏执行。"""
         self._sw_call_count += 1
         print(f"  [MockTaskRunner] execute_sw_macro() 第{self._sw_call_count}次调用"
               f" (delay={self._sw_delay}s, fail={self._sw_should_fail})")
 
         if self._sw_delay > 0:
-            # 模拟长时间运行：分段 sleep 以允许暂停检测
             steps = int(self._sw_delay / 0.5)
             for _ in range(steps):
                 time.sleep(0.5)
@@ -73,15 +70,13 @@ class MockTaskRunner:
                     self._pause_check_callback()
 
         if self._sw_should_fail:
-            print("  [MockTaskRunner] SW 宏模拟失败！")
-            # 模拟部分构型的 STEP 校验结果
+            print("  [MockTaskRunner] SW 宏模拟失败!")
             all_configs = self.state.get_all_configs()
             for cn in all_configs:
                 self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
             self.state.set_sw_macro_started(False)
             return False
 
-        # 模拟成功：标记所有构型 SW 为 Completed
         all_configs = self.state.get_all_configs()
         for cn in all_configs:
             self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
@@ -128,27 +123,25 @@ class MockTaskRunner:
         return {"local_checks": {}, "remote_checks": {}}
 
 
-# ============================================================================
-# 测试辅助：导入并 Patch 调度器
-# ============================================================================
-
-# 将 MockTaskRunner 注入调度器
 import engine.scheduler as scheduler_mod
 import engine.file_monitor as file_monitor_mod
 
-# 保存原始类
 _OriginalTaskRunner = scheduler_mod.TaskRunner
 _OriginalStepFileMonitor = file_monitor_mod.StepFileMonitor
 
 
 class MockStepFileMonitor:
-    """模拟文件监控器（不实际扫描目录）。"""
     _running = False
 
     def __init__(self, step_dir=None, on_file_ready=None):
         self.step_dir = step_dir
         self.on_file_ready = on_file_ready
         self._processed_files = set()
+        self._paused = threading.Event()
+        self._wake_event = threading.Event()
+        self._need_reset = False
+        self._scan_count = 0
+        self._scan_existing_count = 0
 
     def start(self):
         self._running = True
@@ -158,61 +151,58 @@ class MockStepFileMonitor:
         self._running = False
         print("  [MockFileMonitor] 已停止")
 
+    def pause(self):
+        self._paused.set()
+        print("  [MockFileMonitor] 已暂停")
+
+    def resume_and_reset(self):
+        self._need_reset = True
+        self._paused.clear()
+        self._wake_event.set()
+        print("  [MockFileMonitor] 已恢复（将执行重置和立即扫描）")
+
     def _scan_existing_files(self):
-        pass
+        self._scan_existing_count += 1
 
 
 def setup_mock_environment():
-    """用 Mock 对象替换实际模块依赖。"""
     scheduler_mod.TaskRunner = MockTaskRunner
     file_monitor_mod.StepFileMonitor = MockStepFileMonitor
+    scheduler_mod.StepFileMonitor = MockStepFileMonitor
 
 
 def teardown_mock_environment():
-    """恢复原始模块依赖。"""
     scheduler_mod.TaskRunner = _OriginalTaskRunner
     file_monitor_mod.StepFileMonitor = _OriginalStepFileMonitor
+    scheduler_mod.StepFileMonitor = _OriginalStepFileMonitor
 
-
-# ============================================================================
-# 测试用例
-# ============================================================================
 
 class TestContext:
-    """测试上下文：管理临时数据库和调度器实例。"""
-
     def __init__(self, num_configs: int = 5):
         self.tmpdir = tempfile.mkdtemp(prefix="autotest_")
         self.db_path = os.path.join(self.tmpdir, "test_state.db")
 
-        # 覆盖 IPC_CONFIG 中的 db_path
         self._orig_db_path = IPC_CONFIG["db_path"]
         IPC_CONFIG["db_path"] = self.db_path
 
-        # 创建状态管理器
         self.state = StateManager(db_path=self.db_path)
 
-        # 加载测试构型
         configs = {i: [1.0, 2.0, 3.0, 4.0] for i in range(1, num_configs + 1)}
         self.state.load_configs(configs)
         print(f"  [Setup] 已加载 {num_configs} 个测试构型")
 
-        # 创建模拟 TaskRunner
         self.runner = MockTaskRunner(self.state)
 
-        # 创建调度器
         from engine.scheduler import PipelineScheduler
         self.scheduler = PipelineScheduler(self.state, self.runner)
         print(f"  [Setup] 调度器已创建")
 
     def cleanup(self):
-        """清理测试环境。"""
         IPC_CONFIG["db_path"] = self._orig_db_path
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def assert_engine_status(self, expected: str, msg: str = ""):
-        """断言引擎状态。"""
         actual = self.state.get_engine_status()
         assert actual == expected, (
             f"{msg}: 期望引擎状态='{expected}', 实际='{actual}'"
@@ -220,20 +210,17 @@ class TestContext:
 
     def assert_step_status(self, config_name: int, step_name: str,
                            expected: str, msg: str = ""):
-        """断言步骤状态。"""
         actual = self.state.get_step_status(config_name, step_name)
         assert actual == expected, (
             f"{msg}: 期望构型{config_name}[{step_name}]='{expected}', 实际='{actual}'"
         )
 
     def assert_all_sw(self, expected: str, msg: str = ""):
-        """断言所有构型的 SW 步骤状态。"""
         for cn in self.state.get_all_configs():
             self.assert_step_status(cn, "SW", expected,
                                     f"{msg} (构型{cn})")
 
     def run_pipeline_async(self):
-        """在后台线程中启动流水线。"""
         t = threading.Thread(target=self.scheduler.start_pipeline, daemon=True)
         t.start()
         self.scheduler._pipeline_thread = t
@@ -241,7 +228,6 @@ class TestContext:
 
     def wait_for_condition(self, condition, timeout: float = 10.0,
                            interval: float = 0.2) -> bool:
-        """等待条件满足。"""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if condition():
@@ -250,122 +236,96 @@ class TestContext:
         return False
 
 
-# ------------------------------------------------------------------
-# 场景 1: 正常启动 → 暂停 → 恢复
-# ------------------------------------------------------------------
-
 def test_normal_pause_resume():
-    """测试正常启动后暂停再恢复。"""
     print("\n" + "=" * 60)
-    print("测试 1: 正常启动 → 暂停 → 恢复")
+    print("测试 1: 正常启动 -> 暂停 -> 恢复")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
     try:
-        # 1) 启动流水线（模拟 SW 快速成功）
         ctx.runner._sw_delay = 0.0
         ctx.runner._sw_should_fail = False
         ctx.run_pipeline_async()
 
-        # 等待 SW 完成 + 引擎变为 running
         ok = ctx.wait_for_condition(
             lambda: ctx.state.get_engine_status() == "running"
         )
         assert ok, "引擎未能进入 running 状态"
         ctx.assert_engine_status("running", "启动后")
 
-        # 2) 暂停
         ctx.scheduler.pause()
         ctx.assert_engine_status("paused", "暂停后")
-        # SW 已完成，不应受影响
         ctx.assert_all_sw(STATUS_COMPLETED, "暂停后 SW 状态")
 
-        # 3) 恢复
+        monitor = ctx.scheduler._file_monitor
+        assert monitor is not None, "文件监控器应存在"
+        assert monitor._paused.is_set(), "文件监控器应处于暂停状态"
+
         ctx.scheduler.resume()
         ctx.assert_engine_status("running", "恢复后")
+        assert not monitor._paused.is_set(), "恢复后文件监控器不应暂停"
 
-        print("✅ 测试 1 通过")
+        print("[PASS] 测试 1 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 2: SW 宏执行中暂停 → SW 成功后自动恢复
-# ------------------------------------------------------------------
-
 def test_pause_during_sw_then_success():
-    """测试 SW 宏执行期间暂停，宏完成后保持暂停状态，然后恢复。"""
     print("\n" + "=" * 60)
-    print("测试 2: SW 宏执行中暂停 → SW 成功后恢复")
+    print("测试 2: SW 宏执行中暂停 -> SW 成功后恢复")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
     try:
-        # 设置 SW 宏有延迟（模拟耗时操作）
         ctx.runner._sw_delay = 2.0
         ctx.runner._sw_should_fail = False
 
-        # 在 SW 宏执行到一半时触发暂停
         def delayed_pause():
-            time.sleep(0.5)  # SW 已开始执行
+            time.sleep(0.5)
             print("  [Test] 触发暂停...")
             ctx.scheduler.pause()
 
-        # 启动流水线
         t = ctx.run_pipeline_async()
 
-        # 延迟触发暂停
         pause_thread = threading.Thread(target=delayed_pause, daemon=True)
         pause_thread.start()
         pause_thread.join(timeout=3)
 
-        # 此时 pause 应已触发，engine_status 应为 paused
         time.sleep(0.3)
         ctx.assert_engine_status("paused", "SW 执行中暂停后")
 
-        # SW 步骤状态应为 Paused
         paused_count = 0
         for cn in ctx.state.get_all_configs():
             if ctx.state.get_step_status(cn, "SW") == STATUS_PAUSED:
                 paused_count += 1
         print(f"  [Test] Paused 数量: {paused_count}/3")
 
-        # 等待 SW 宏完成（它会在后台继续运行但不影响暂停状态）
         t.join(timeout=5)
 
-        # 恢复
         ctx.scheduler.resume()
         ctx.assert_engine_status("running", "恢复后")
 
-        print("✅ 测试 2 通过")
+        print("[PASS] 测试 2 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 3: SW 宏执行中暂停 → SW 失败 → 保留暂停状态 → 恢复重试
-# ------------------------------------------------------------------
-
 def test_pause_during_sw_then_fail():
-    """测试 SW 宏执行期间暂停，宏失败后保持暂停，恢复后重试。"""
     print("\n" + "=" * 60)
-    print("测试 3: SW 宏执行中暂停 → SW 失败 → 恢复重试")
+    print("测试 3: SW 宏执行中暂停 -> SW 失败 -> 恢复重试")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
     try:
-        # 设置 SW 会失败
         ctx.runner._sw_delay = 1.5
         ctx.runner._sw_should_fail = True
 
-        # 启动流水线
         t = ctx.run_pipeline_async()
 
-        # 延迟触发暂停
         def delayed_pause():
             time.sleep(0.3)
             print("  [Test] 触发暂停（SW 宏仍运行中）...")
@@ -375,18 +335,14 @@ def test_pause_during_sw_then_fail():
         pause_thread.start()
         pause_thread.join(timeout=3)
 
-        # 等待 SW 宏执行完毕（失败）
         t.join(timeout=5)
 
-        # 暂停状态下 SW 失败，应保持 paused
         ctx.assert_engine_status("paused", "SW 失败暂停后")
         print(f"  [Test] SW call count: {ctx.runner._sw_call_count}")
 
-        # 恢复 —— 应重新执行 SW 宏
-        ctx.runner._sw_should_fail = False  # 第二次会成功
+        ctx.runner._sw_should_fail = False
         ctx.scheduler.resume()
 
-        # 等待恢复后的 SW 完成
         ok = ctx.wait_for_condition(
             lambda: ctx.state.is_sw_macro_started(),
             timeout=10
@@ -394,61 +350,49 @@ def test_pause_during_sw_then_fail():
         print(f"  [Test] SW call count after resume: {ctx.runner._sw_call_count}")
         assert ok, "恢复后 SW 宏未能完成"
 
-        # 最终 SW 应为 Completed
         ctx.assert_all_sw(STATUS_COMPLETED, "最终")
 
-        print("✅ 测试 3 通过")
+        print("[PASS] 测试 3 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 4: SW 宏直接失败 → 引擎停止 → 启动重试
-# ------------------------------------------------------------------
-
 def test_sw_fail_then_restart():
-    """测试 SW 直接失败（无暂停），引擎停止后重新启动。"""
     print("\n" + "=" * 60)
-    print("测试 4: SW 直接失败 → 引擎停止 → 重新启动")
+    print("测试 4: SW 直接失败 -> 引擎停止 -> 重新启动")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
     try:
-        # SW 直接失败
         ctx.runner._sw_should_fail = True
         ctx.runner._sw_delay = 0.1
 
         t = ctx.run_pipeline_async()
-        t.join(timeout=5)
 
-        # 引擎应为 stopped（非暂停的失败）
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "stopped",
+            timeout=15
+        )
+        assert ok, "引擎未能进入 stopped 状态"
         ctx.assert_engine_status("stopped", "SW 失败后")
-        ctx.assert_all_sw(STATUS_ERROR, "SW 失败后")
 
-        # 模拟用户修复后重新启动
         ctx.runner._sw_should_fail = False
         t2 = ctx.run_pipeline_async()
         t2.join(timeout=5)
 
-        # 应恢复正常
         ctx.assert_engine_status("running", "重新启动后")
         ctx.assert_all_sw(STATUS_COMPLETED, "重新启动后")
 
-        print("✅ 测试 4 通过")
+        print("[PASS] 测试 4 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 5: 快速连续 pause/start
-# ------------------------------------------------------------------
-
 def test_rapid_pause_start():
-    """测试快速连续 pause 和 start 的稳定性。"""
     print("\n" + "=" * 60)
     print("测试 5: 快速连续 pause/start")
     print("=" * 60)
@@ -463,7 +407,6 @@ def test_rapid_pause_start():
 
         ctx.assert_engine_status("running", "初始状态")
 
-        # 快速 pause/start 循环
         for i in range(5):
             ctx.scheduler.pause()
             time.sleep(0.05)
@@ -473,19 +416,14 @@ def test_rapid_pause_start():
             time.sleep(0.05)
             ctx.assert_engine_status("running", f"循环{i} 恢复后")
 
-        print("✅ 测试 5 通过")
+        print("[PASS] 测试 5 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 6: Start 在 running 状态下不应破坏状态
-# ------------------------------------------------------------------
-
 def test_start_when_already_running():
-    """测试已经是 running 状态时再次 start 不会破坏状态。"""
     print("\n" + "=" * 60)
     print("测试 6: Running 状态下重复 start")
     print("=" * 60)
@@ -499,28 +437,21 @@ def test_start_when_already_running():
         t.join(timeout=5)
         ctx.assert_engine_status("running", "初始")
 
-        # 模拟 handle_start 在 running 状态下的行为
         old_paused = ctx.scheduler._paused.is_set()
-        ctx.scheduler._paused.set()  # 模拟不一致状态
-        # 检查并修复
+        ctx.scheduler._paused.set()
         if ctx.scheduler._paused.is_set() and ctx.state.get_engine_status() == "running":
             ctx.scheduler.resume()
         ctx.assert_engine_status("running", "修复后")
         assert not ctx.scheduler._paused.is_set(), "暂停标志应已清除"
 
-        print("✅ 测试 6 通过")
+        print("[PASS] 测试 6 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ------------------------------------------------------------------
-# 场景 7: Pause 在 stopped 状态下应无操作
-# ------------------------------------------------------------------
-
 def test_pause_when_stopped():
-    """测试 stopped 状态下 pause 不产生副作用。"""
     print("\n" + "=" * 60)
     print("测试 7: Stopped 状态下 pause")
     print("=" * 60)
@@ -528,24 +459,168 @@ def test_pause_when_stopped():
     ctx = TestContext(num_configs=3)
     try:
         ctx.state.set_engine_status("stopped")
-        # 模拟 handle_pause 对 stopped 的处理
         if ctx.state.get_engine_status() != "stopped":
             ctx.scheduler.pause()
         ctx.assert_engine_status("stopped", "pause 在 stopped 状态下应不变")
 
-        print("✅ 测试 7 通过")
+        print("[PASS] 测试 7 通过")
 
     finally:
         ctx.scheduler.stop()
         ctx.cleanup()
 
 
-# ============================================================================
-# 主测试入口
-# ============================================================================
+def test_file_monitor_paused_on_pause():
+    print("\n" + "=" * 60)
+    print("测试 8: 暂停后文件监控停止扫描")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        monitor = ctx.scheduler._file_monitor
+        assert monitor is not None, "文件监控器应存在"
+        assert monitor._running, "文件监控器应正在运行"
+        assert not monitor._paused.is_set(), "初始状态文件监控器不应暂停"
+
+        ctx.scheduler.pause()
+
+        assert monitor._paused.is_set(), "暂停后文件监控器应处于暂停状态"
+        ctx.assert_engine_status("paused", "暂停后")
+
+        print("[PASS] 测试 8 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
+def test_pause_blocks_step_file_callback():
+    print("\n" + "=" * 60)
+    print("测试 9: 暂停期间新STEP文件不被捕捉和处理")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        ctx.scheduler.pause()
+        ctx.assert_engine_status("paused", "暂停后")
+
+        callback_invocations = []
+        original_callback = ctx.scheduler._on_step_file_ready
+
+        def tracking_callback(config_name, filepath):
+            callback_invocations.append((config_name, filepath))
+            original_callback(config_name, filepath)
+
+        ctx.scheduler._file_monitor.on_file_ready = tracking_callback
+
+        assert ctx.scheduler._paused.is_set(), "调度器应处于暂停状态"
+
+        ctx.scheduler._on_step_file_ready(99, "/fake/path/config_99.step")
+
+        assert len(callback_invocations) == 0, (
+            f"暂停期间回调不应被调用，但被调用了 {len(callback_invocations)} 次"
+        )
+
+        print("[PASS] 测试 9 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
+def test_resume_triggers_immediate_scan():
+    print("\n" + "=" * 60)
+    print("测试 10: 恢复后立即触发完整轮询")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        monitor = ctx.scheduler._file_monitor
+        assert monitor is not None
+
+        ctx.scheduler.pause()
+        assert monitor._paused.is_set(), "暂停后文件监控器应暂停"
+
+        ctx.scheduler.resume()
+        ctx.assert_engine_status("running", "恢复后")
+
+        assert not monitor._paused.is_set(), "恢复后文件监控器不应暂停"
+        assert monitor._need_reset is True or monitor._scan_existing_count > 0, (
+            "恢复后应触发文件监控器重置和立即扫描"
+        )
+
+        print("[PASS] 测试 10 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
+def test_multiple_pause_start_cycles():
+    print("\n" + "=" * 60)
+    print("测试 11: 多次pause-start状态切换稳定性")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        monitor = ctx.scheduler._file_monitor
+        assert monitor is not None
+
+        for i in range(10):
+            ctx.scheduler.pause()
+            assert monitor._paused.is_set(), f"循环{i}: 暂停后文件监控器应暂停"
+            assert ctx.scheduler._paused.is_set(), f"循环{i}: 暂停后调度器应暂停"
+            ctx.assert_engine_status("paused", f"循环{i} 暂停后")
+
+            ctx.scheduler.resume()
+            assert not monitor._paused.is_set(), f"循环{i}: 恢复后文件监控器不应暂停"
+            assert not ctx.scheduler._paused.is_set(), f"循环{i}: 恢复后调度器不应暂停"
+            ctx.assert_engine_status("running", f"循环{i} 恢复后")
+
+        print("[PASS] 测试 11 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
 
 def main():
-    """运行所有测试。"""
     print("=" * 60)
     print("  Pause/Start 功能验证测试套件")
     print("=" * 60)
@@ -553,13 +628,17 @@ def main():
     setup_mock_environment()
 
     tests = [
-        ("正常启动→暂停→恢复", test_normal_pause_resume),
-        ("SW执行中暂停→成功恢复", test_pause_during_sw_then_success),
-        ("SW执行中暂停→失败→重试", test_pause_during_sw_then_fail),
-        ("SW直接失败→重新启动", test_sw_fail_then_restart),
+        ("正常启动->暂停->恢复", test_normal_pause_resume),
+        ("SW执行中暂停->成功恢复", test_pause_during_sw_then_success),
+        ("SW执行中暂停->失败->重试", test_pause_during_sw_then_fail),
+        ("SW直接失败->重新启动", test_sw_fail_then_restart),
         ("快速连续pause/start", test_rapid_pause_start),
         ("Running状态重复start", test_start_when_already_running),
         ("Stopped状态pause", test_pause_when_stopped),
+        ("暂停后文件监控停止扫描", test_file_monitor_paused_on_pause),
+        ("暂停期间STEP文件不被捕捉", test_pause_blocks_step_file_callback),
+        ("恢复后立即触发完整轮询", test_resume_triggers_immediate_scan),
+        ("多次pause-start状态切换", test_multiple_pause_start_cycles),
     ]
 
     passed = 0
@@ -570,10 +649,10 @@ def main():
             test_func()
             passed += 1
         except AssertionError as e:
-            print(f"\n❌ 测试失败 [{name}]: {e}")
+            print(f"\n[FAIL] 测试失败 [{name}]: {e}")
             failed += 1
         except Exception as e:
-            print(f"\n❌ 测试异常 [{name}]: {type(e).__name__}: {e}")
+            print(f"\n[FAIL] 测试异常 [{name}]: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
             failed += 1

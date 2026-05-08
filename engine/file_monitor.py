@@ -152,13 +152,6 @@ class StepFileMonitor:
 
     def __init__(self, step_dir: str = None,
                  on_file_ready: Callable[[int, str], None] = None):
-        """
-        初始化文件监控器。
-
-        Args:
-            step_dir: STEP 文件目录路径
-            on_file_ready: 文件就绪回调，参数为 (构型名称, 文件路径)
-        """
         self.step_dir = step_dir or LOCAL_PATHS["step_dir"]
         self.on_file_ready = on_file_ready
         self._running = False
@@ -167,12 +160,12 @@ class StepFileMonitor:
             stable_time=2.0,
             check_interval=ENGINE_CONFIG["watchdog_interval"]
         )
-        # 已处理的文件集合（避免重复处理）
         self._processed_files: Set[str] = set()
-        # 已发现的文件集合
         self._known_files: Set[str] = set()
+        self._paused = threading.Event()
+        self._wake_event = threading.Event()
+        self._need_reset = False
 
-        # 确保正则已编译（__init__ 时 _SW_STEP_PATTERN 已从 config 加载）
         self._get_filename_regex()
 
     # ------------------------------------------------------------------
@@ -227,11 +220,10 @@ class StepFileMonitor:
         logger.info(f"STEP 文件监控已启动: {self.step_dir}")
 
     def stop(self):
-        """停止文件监控。"""
         self._running = False
+        self._wake_event.set()
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
-        # 清理检测器内部历史记录，防止内存泄漏
         self._detector._history.clear()
         self._detector._first_seen.clear()
         logger.info("STEP 文件监控已停止")
@@ -241,22 +233,45 @@ class StepFileMonitor:
     # ------------------------------------------------------------------
 
     def _monitor_loop(self):
-        """
-        监控主循环。
-
-        定期扫描 STEP 目录，检测新文件和文件写入完成事件。
-        """
         logger.info("文件监控循环开始")
 
         while self._running:
+            if self._paused.is_set():
+                logger.info("文件监控已暂停，等待恢复指令...")
+                while self._paused.is_set() and self._running:
+                    self._wake_event.wait(timeout=1.0)
+                    self._wake_event.clear()
+                if not self._running:
+                    break
+                logger.info("文件监控已恢复")
+
+            if self._need_reset:
+                self._need_reset = False
+                self._processed_files.clear()
+                self._detector._history.clear()
+                self._detector._first_seen.clear()
+                self._scan_existing_files()
+                logger.info("文件监控状态已重置，执行立即扫描")
+
             try:
                 self._scan_directory()
             except Exception as e:
                 logger.error(f"文件扫描异常 ({type(e).__name__}: {e})", exc_info=True)
 
-            time.sleep(ENGINE_CONFIG["watchdog_interval"])
+            self._wake_event.wait(timeout=ENGINE_CONFIG["watchdog_interval"])
+            self._wake_event.clear()
 
         logger.info("文件监控循环结束")
+
+    def pause(self):
+        self._paused.set()
+        logger.info("STEP 文件监控已暂停")
+
+    def resume_and_reset(self):
+        self._need_reset = True
+        self._paused.clear()
+        self._wake_event.set()
+        logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
 
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""
