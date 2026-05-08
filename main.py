@@ -145,6 +145,7 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
         creationflags = subprocess.CREATE_NO_WINDOW
 
     env = os.environ.copy()
+    log_fo = None
 
     try:
         log_fo = open(daemon_log_file, "w", encoding="utf-8")
@@ -161,10 +162,8 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
         return proc
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[错误] 启动后台引擎失败: {e}", file=sys.stderr)
-        try:
+        if log_fo is not None:
             log_fo.close()
-        except UnboundLocalError:
-            pass
         return None
 
 
