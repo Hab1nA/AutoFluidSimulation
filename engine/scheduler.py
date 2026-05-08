@@ -219,7 +219,17 @@ class PipelineScheduler:
                         f"SW 宏重试 {sw_attempt}/{sw_max_retries}，"
                         f"等待 10 秒并清理残留进程..."
                     )
-                    time.sleep(10)
+                    wait_deadline = time.time() + 10
+                    while time.time() < wait_deadline and not self._stopped.is_set():
+                        if self._paused.is_set():
+                            self.state.set_engine_status("paused")
+                            while self._paused.is_set() and not self._stopped.is_set():
+                                time.sleep(0.2)
+                            if self._stopped.is_set():
+                                return
+                            self.state.set_engine_status("running")
+                            break
+                        time.sleep(0.2)
                     try:
                         subprocess.run(
                             ["taskkill", "/f", "/im", "SLDWORKS.exe"],
@@ -244,13 +254,14 @@ class PipelineScheduler:
                             break
                     # 额外冷却确保 COM 子系统完全释放
                     time.sleep(5)
-                    # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
-                    #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
                     if self._file_monitor is not None:
-                        self._file_monitor._processed_files.clear()
-                        self._file_monitor._known_files.clear()
-                        self._file_monitor._detector._history.clear()
-                        self._file_monitor._detector._first_seen.clear()
+                        reset_state = getattr(self._file_monitor, "reset_state", None)
+                        if callable(reset_state):
+                            reset_state(clear_known_files=True)
+                        else:
+                            self._file_monitor._processed_files.clear()
+                            if hasattr(self._file_monitor, "_known_files"):
+                                self._file_monitor._known_files.clear()
                         logger.info("文件监控器状态已重置（准备 SW 宏重试）")
                     # 恢复为 Running 后执行宏
                     for cn in all_configs:
@@ -851,7 +862,9 @@ class PipelineScheduler:
         self.state.set_engine_status("running")
 
         pipeline_needs_init = False
-        if self._file_monitor is None or not self._file_monitor._running:
+        if not self.pipeline_alive and not self.state.is_sw_macro_started():
+            pipeline_needs_init = True
+        elif self._file_monitor is None or not self._file_monitor._running:
             pipeline_needs_init = True
         else:
             alive_workers = [t for t in self._worker_threads if t.is_alive()]

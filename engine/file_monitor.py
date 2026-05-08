@@ -49,6 +49,7 @@ class FileStableDetector:
         self._history: dict[str, list] = {}
         # 记录每个文件首次被检测到的时间: {filepath: first_seen_timestamp}
         self._first_seen: dict[str, float] = {}
+        self._lock = threading.RLock()
 
     def is_file_ready(self, filepath: str) -> bool:
         """
@@ -71,43 +72,45 @@ class FileStableDetector:
 
         now = time.time()
 
-        if filepath not in self._history:
-            self._history[filepath] = []
+        with self._lock:
+            if filepath not in self._history:
+                self._history[filepath] = []
 
-        history = self._history[filepath]
-        history.append((now, current_size))
+            history = self._history[filepath]
+            history.append((now, current_size))
 
-        # 只保留最近 stable_time 秒内的记录
-        cutoff = now - self.stable_time
-        history[:] = [(t, s) for t, s in history if t >= cutoff]
+            cutoff = now - self.stable_time
+            history[:] = [(t, s) for t, s in history if t >= cutoff]
 
-        # 如果历史记录不足 stable_time，说明文件可能还在写入
-        if len(history) < 2:
-            return False
+            if len(history) < 2:
+                return False
 
-        # 检查在 stable_time 内文件大小是否保持不变
-        sizes = [s for _, s in history]
-        if all(s == sizes[0] for s in sizes):
-            # 清理所有与此文件相关的追踪记录
-            del self._history[filepath]
-            self._first_seen.pop(filepath, None)
-            return True
+            sizes = [s for _, s in history]
+            if all(s == sizes[0] for s in sizes):
+                del self._history[filepath]
+                self._first_seen.pop(filepath, None)
+                return True
 
-        # 防止内存泄漏：追踪文件首次被发现的时间
-        # （上面 cutoff 已删除 >stable_time 的条目，history[0] 始终 <=stable_time）
-        if filepath not in self._first_seen:
-            self._first_seen[filepath] = now
-        elif now - self._first_seen[filepath] > self.stable_time * 3:
-            logger.warning(f"文件 {filepath} 长时间未稳定 (>{self.stable_time*3:.0f}s)，放弃监控")
-            del self._history[filepath]
-            del self._first_seen[filepath]
+            if filepath not in self._first_seen:
+                self._first_seen[filepath] = now
+            elif now - self._first_seen[filepath] > self.stable_time * 3:
+                logger.warning(f"文件 {filepath} 长时间未稳定 (>{self.stable_time*3:.0f}s)，放弃监控")
+                del self._history[filepath]
+                del self._first_seen[filepath]
 
         return False
 
     def cleanup(self, filepath: str):
         """清理指定文件的检测记录。"""
-        self._history.pop(filepath, None)
-        self._first_seen.pop(filepath, None)
+        with self._lock:
+            self._history.pop(filepath, None)
+            self._first_seen.pop(filepath, None)
+
+    def reset(self):
+        """重置所有稳定性检测状态。"""
+        with self._lock:
+            self._history.clear()
+            self._first_seen.clear()
 
 
 # ============================================================================
@@ -162,6 +165,8 @@ class StepFileMonitor:
         )
         self._processed_files: Set[str] = set()
         self._known_files: Set[str] = set()
+        self._lock = threading.RLock()
+        self._scan_existing_count = 0
         # 暂停控制：_paused事件控制监控循环暂停，_wake_event用于唤醒等待，_need_reset标记恢复时需要重置状态
         self._paused = threading.Event()
         self._wake_event = threading.Event()
@@ -225,8 +230,7 @@ class StepFileMonitor:
         self._wake_event.set()
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
-        self._detector._history.clear()
-        self._detector._first_seen.clear()
+        self.reset_state(clear_known_files=False)
         logger.info("STEP 文件监控已停止")
 
     # ------------------------------------------------------------------
@@ -248,9 +252,7 @@ class StepFileMonitor:
 
             if self._need_reset:
                 self._need_reset = False
-                self._processed_files.clear()
-                self._detector._history.clear()
-                self._detector._first_seen.clear()
+                self.reset_state(clear_known_files=True)
                 self._scan_existing_files()
                 logger.info("文件监控状态已重置，执行立即扫描")
 
@@ -274,6 +276,14 @@ class StepFileMonitor:
         self._wake_event.set()
         logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
 
+    def reset_state(self, clear_known_files: bool = True):
+        """线程安全地重置监控内部状态。"""
+        with self._lock:
+            self._processed_files.clear()
+            if clear_known_files:
+                self._known_files.clear()
+        self._detector.reset()
+
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""
         if not os.path.isdir(self.step_dir):
@@ -287,7 +297,11 @@ class StepFileMonitor:
             return
 
         # 检测新文件
-        new_files = current_files - self._known_files
+        with self._lock:
+            known_files = set(self._known_files)
+            processed_files = set(self._processed_files)
+
+        new_files = current_files - known_files
         for filename in new_files:
             filepath = os.path.join(self.step_dir, filename)
             if os.path.isfile(filepath):
@@ -296,8 +310,9 @@ class StepFileMonitor:
                     logger.info(f"发现新的 STEP 文件: {filename} (构型{config_name})")
 
         # 检测已存在的文件是否写入完成
-        for filename in list(self._known_files):
-            if filename in self._processed_files:
+        ready_files: list[tuple[str, int, str]] = []
+        for filename in list(known_files):
+            if filename in processed_files:
                 continue
             filepath = os.path.join(self.step_dir, filename)
             if not os.path.isfile(filepath):
@@ -309,18 +324,24 @@ class StepFileMonitor:
 
             # 检查文件是否写入完成（大小稳定）
             if self._detector.is_file_ready(filepath):
-                logger.info(f"STEP 文件写入完成: {filename} (构型{config_name})")
-                self._processed_files.add(filename)
-                if self.on_file_ready:
-                    try:
-                        self.on_file_ready(config_name, filepath)
-                    except (RuntimeError, ValueError, OSError) as e:
-                        logger.error(f"文件就绪回调异常: {e}")
+                ready_files.append((filename, config_name, filepath))
 
-        self._known_files = current_files
+        with self._lock:
+            self._known_files = current_files
+            for filename, _, _ in ready_files:
+                self._processed_files.add(filename)
+
+        for filename, config_name, filepath in ready_files:
+            logger.info(f"STEP 文件写入完成: {filename} (构型{config_name})")
+            if self.on_file_ready:
+                try:
+                    self.on_file_ready(config_name, filepath)
+                except (RuntimeError, ValueError, OSError) as e:
+                    logger.error(f"文件就绪回调异常: {e}")
 
     def _scan_existing_files(self):
         """扫描目录中已存在的文件，将其加入 known_files 以便后续稳定性检测。"""
+        self._scan_existing_count += 1
         if not os.path.isdir(self.step_dir):
             return
 
@@ -332,7 +353,8 @@ class StepFileMonitor:
                     config_name = self.parse_config_name(filename)
                     if config_name is not None:
                         # 加入已知文件列表，由后续轮询检测写入完成
-                        self._known_files.add(filename)
+                        with self._lock:
+                            self._known_files.add(filename)
                         logger.info(f"发现已存在的 STEP 文件: {filename} (构型{config_name})")
         except OSError as e:
             logger.warning(f"扫描已存在文件时出错: {e}")
@@ -343,7 +365,8 @@ class StepFileMonitor:
 
     def is_processed(self, filename: str) -> bool:
         """检查文件是否已被处理。"""
-        return filename in self._processed_files
+        with self._lock:
+            return filename in self._processed_files
 
     def get_pending_configs(self) -> list:
         """获取所有未被处理的构型列表（扫描 STEP 目录）。"""
@@ -351,8 +374,10 @@ class StepFileMonitor:
         if not os.path.isdir(self.step_dir):
             return pending
         try:
+            with self._lock:
+                processed_files = set(self._processed_files)
             for filename in os.listdir(self.step_dir):
-                if filename in self._processed_files:
+                if filename in processed_files:
                     continue
                 filepath = os.path.join(self.step_dir, filename)
                 if not os.path.isfile(filepath):

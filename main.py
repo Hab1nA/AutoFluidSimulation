@@ -140,8 +140,6 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
         print(f"[错误] 未找到启动脚本: {daemon_script}", file=sys.stderr)
         return None
 
-    log_fo = open(daemon_log_file, "w", encoding="utf-8")
-
     creationflags = 0
     if sys.platform == "win32":
         creationflags = subprocess.CREATE_NO_WINDOW
@@ -149,6 +147,7 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
     env = os.environ.copy()
 
     try:
+        log_fo = open(daemon_log_file, "w", encoding="utf-8")
         proc = subprocess.Popen(
             [sys.executable, daemon_script],
             cwd=PROJECT_DIR,
@@ -158,10 +157,14 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
             env=env,
         )
         _write_pid(DAEMON_PID_FILE, proc.pid)
+        log_fo.close()
         return proc
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[错误] 启动后台引擎失败: {e}", file=sys.stderr)
-        log_fo.close()
+        try:
+            log_fo.close()
+        except UnboundLocalError:
+            pass
         return None
 
 
