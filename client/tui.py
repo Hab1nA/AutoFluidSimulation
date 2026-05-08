@@ -10,8 +10,8 @@ TUI 客户端主界面 (Textual-based Terminal UI)
 ├──────────────────────────────────────────────────┤
 │  构型  │  SW  │  SC  │ 传输 │ 网格 │ 求解        │
 │  ──────┼──────┼──────┼──────┼──────┼──────       │
-│    1   │  ✓   │  ✓   │  ✓   │  ⏳   │  ⏳        │
-│    2   │  ✓   │  ⏳   │  ⏳   │  ⏳   │  ⏳        │
+│    1   │  ✅  │  ✅  │  ✅  │  ⏳   │  ⏳        │
+│    2   │  ✅  │  ⏳   │  ⏳   │  ⏳   │  ⏳        │
 │   ...  │ ...  │ ...  │ ...  │ ...  │ ...         │
 ├──────────────────────────────────────────────────┤
 │  > _                                              │
@@ -19,11 +19,11 @@ TUI 客户端主界面 (Textual-based Terminal UI)
 └──────────────────────────────────────────────────┘
 
 状态图标：
-  ✓ = Completed (绿色)
+  ✅ = Completed (绿色)
   ⏳ = Running (黄色闪烁)
   🔄 = Retrying (橙色)
-  ⏸ = Waiting (灰色)
-  ✗ = Error (红色)
+  ⏸️ = Waiting (灰色)
+  ❌ = Error (红色)
 ===============================================================================
 """
 import sys
@@ -56,12 +56,12 @@ from client.ipc_client import IPCClient
 # ============================================================================
 
 STATUS_ICONS = {
-    STATUS_WAITING:   "⏸",   # 等待
+    STATUS_WAITING:   "⏸️",   # 等待
     STATUS_RUNNING:   "⏳",   # 运行中
-    STATUS_PAUSED:    "⏸",   # 已暂停（用户手动暂停）
+    STATUS_PAUSED:    "⏸️",   # 已暂停（用户手动暂停）
     STATUS_RETRYING:  "🔄",   # 重试中
-    STATUS_COMPLETED: "✓",   # 已完成
-    STATUS_ERROR:     "✗",   # 出错
+    STATUS_COMPLETED: "✅",   # 已完成
+    STATUS_ERROR:     "❌",   # 出错
 }
 
 STATUS_COLORS = {
@@ -156,7 +156,7 @@ class CheckResultScreen(ModalScreen):
         lines = ["[bold]系统自检结果[/bold]\n"]
         lines.append("[bold]─── 本地检查 ───[/bold]")
         for name, info in results.items():
-            icon = "✓" if info.get("exists") else "✗"
+            icon = "✅" if info.get("exists") else "❌"
             color = "green" if info.get("exists") else "red"
             path = info.get("path", "")
             lines.append(f"  [{color}]{icon} {name}[/{color}]: {path}")
@@ -393,13 +393,13 @@ class PipelineTUI(App):
             Input(placeholder="输入命令 (help 查看帮助)...", id="cmd-input"),
             Container(
                 Button("▶ Start", id="btn-start", variant="success"),
-                Button("⏸ Pause", id="btn-pause", variant="warning"),
+                Button("⏸️ Pause", id="btn-pause", variant="warning"),
                 Button("🔧 Check", id="btn-check", variant="primary"),
                 Button("📊 Status", id="btn-status", variant="primary"),
                 Button("🔧 Daemon Start", id="btn-daemon", variant="primary"),
-                Button("⏸ Daemon Stop", id="btn-dstop", variant="warning"),
+                Button("⏸️ Daemon Stop", id="btn-dstop", variant="warning"),
                 Button("🚪 Quit", id="btn-quit", variant="error"),
-                Button("⏹ Quit Full", id="btn-fullquit", variant="error"),
+                Button("⏹️ Quit Full", id="btn-fullquit", variant="error"),
                 id="quick-buttons",
             ),
             id="command-area",
@@ -417,12 +417,12 @@ class PipelineTUI(App):
 
         # 尝试连接 Daemon
         if self.ipc.connect():
-            self._log("[green]✓ 已连接到后台引擎[/green]")
+            self._log("[green]✅ 已连接到后台引擎[/green]")
             self._update_info_bar()
             # 启动定时刷新
             self._refresh_timer = self.set_interval(1.0, self._refresh_status)
         else:
-            self._log("[red]✗ 无法连接到后台引擎，请先启动 start_daemon.py[/red]")
+            self._log("[red]❌ 无法连接到后台引擎，请先启动 start_daemon.py[/red]")
             self._log("[yellow]提示: 界面将在无后台连接的情况下运行，部分功能不可用[/yellow]")
 
         # 设置焦点到命令输入
@@ -680,9 +680,9 @@ class PipelineTUI(App):
             return
         ok, msg = self.ipc.start_pipeline()
         if ok:
-            self._log(f"[green]✓ {msg}[/green]")
+            self._log(f"[green]✅ {msg}[/green]")
         else:
-            self._log(f"[red]✗ {msg}[/red]")
+            self._log(f"[red]❌ {msg}[/red]")
 
     def _do_pause(self):
         """执行 pause 命令。"""
@@ -690,9 +690,9 @@ class PipelineTUI(App):
             return
         ok, msg = self.ipc.pause_pipeline()
         if ok:
-            self._log(f"[yellow]⏸ {msg}[/yellow]")
+            self._log(f"[yellow]⏸️ {msg}[/yellow]")
         else:
-            self._log(f"[red]✗ {msg}[/red]")
+            self._log(f"[red]❌ {msg}[/red]")
 
     def _do_check(self):
         """执行 check 命令。"""
@@ -700,10 +700,10 @@ class PipelineTUI(App):
             return
         ok, data, msg = self.ipc.check_system()
         if ok and data:
-            self._log("[green]✓ 系统自检完成[/green]")
+            self._log("[green]✅ 系统自检完成[/green]")
             self.push_screen(CheckResultScreen(data))
         else:
-            self._log(f"[red]✗ 系统自检失败: {msg}[/red]")
+            self._log(f"[red]❌ 系统自检失败: {msg}[/red]")
 
     def _do_status(self):
         """显示当前状态摘要。"""
@@ -716,7 +716,7 @@ class PipelineTUI(App):
             for step, counts in data.get("steps", {}).items():
                 self._log(f"  {step}: {counts}")
         else:
-            self._log(f"[red]✗ {msg}[/red]")
+            self._log(f"[red]❌ {msg}[/red]")
 
     def _handle_reset_cmd(self, args: list):
         """处理 reset 命令。用法: reset <构型名|all> <步骤名|all>"""
@@ -765,9 +765,9 @@ class PipelineTUI(App):
             return
         ok, msg = self.ipc.reset_step(config_name, step_name)
         if ok:
-            self._log(f"[green]✓ {msg}[/green]")
+            self._log(f"[green]✅ {msg}[/green]")
         else:
-            self._log(f"[red]✗ {msg}[/red]")
+            self._log(f"[red]❌ {msg}[/red]")
 
     def _handle_clean_cmd(self, args: list):
         """处理 clean 命令。用法: clean <构型名|all> <步骤名|all>"""
@@ -819,7 +819,7 @@ class PipelineTUI(App):
                 dir_lines.append(f"  • CAS/DAT 求解结果: {remote_result}")
 
             dirs_text = "\n".join(dir_lines)
-            detail = f"\n\n⚠ 将清空以下目录下的所有仿真中间文件：\n{dirs_text}"
+            detail = f"\n\n⚠️ 将清空以下目录下的所有仿真中间文件：\n{dirs_text}"
         else:
             detail = ""
 
@@ -843,13 +843,13 @@ class PipelineTUI(App):
             return
         ok, msg = self.ipc.clean_step(step_name, config_name)
         if ok:
-            self._log(f"[green]✓ {msg}[/green]")
+            self._log(f"[green]✅ {msg}[/green]")
         else:
-            self._log(f"[red]✗ {msg}[/red]")
+            self._log(f"[red]❌ {msg}[/red]")
 
     def _do_quit(self):
         """执行 quit 命令（仅退出 TUI，后台继续运行）。"""
-        self._log("[yellow]⚠ 界面已退出，后台引擎仍在运行[/yellow]")
+        self._log("[yellow]⚠️ 界面已退出，后台引擎仍在运行[/yellow]")
         self._log("[yellow]  使用 start_client.py 可重新连接界面[/yellow]")
         # Textual 的 exit() 会先将待显示消息刷新到屏幕后再退出
         self.exit()
@@ -868,9 +868,9 @@ class PipelineTUI(App):
         if self.ipc.is_connected():
             ok, msg = self.ipc.full_quit()
             if ok:
-                self._log(f"[red]⏹ {msg}[/red]")
+                self._log(f"[red]⏹️ {msg}[/red]")
             else:
-                self._log(f"[red]✗ {msg}[/red]")
+                self._log(f"[red]❌ {msg}[/red]")
         self.ipc.disconnect()
         self.exit()
 
@@ -888,7 +888,7 @@ class PipelineTUI(App):
     def _do_launch_daemon(self):
         """启动后台守护进程并自动连接。"""
         if self.ipc.is_connected():
-            self._log("[yellow]⚠ 已连接到后台引擎，无需重复启动[/yellow]")
+            self._log("[yellow]⚠️ 已连接到后台引擎，无需重复启动[/yellow]")
             return
 
         try:
@@ -896,7 +896,7 @@ class PipelineTUI(App):
             daemon_script = os.path.join(project_dir, "start_daemon.py")
 
             if not os.path.exists(daemon_script):
-                self._log(f"[red]✗ 未找到启动脚本: {daemon_script}[/red]")
+                self._log(f"[red]❌ 未找到启动脚本: {daemon_script}[/red]")
                 return
 
             # Windows 下隐藏控制台窗口
@@ -908,18 +908,18 @@ class PipelineTUI(App):
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            self._log("[cyan]⚠ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
+            self._log("[cyan]⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...[/cyan]".format(
                 self._daemon_process.pid))
 
             # 启动异步轮询任务
             asyncio.create_task(self._poll_daemon_startup())
         except (OSError, subprocess.SubprocessError, ValueError) as e:
-            self._log(f"[red]✗ 启动后台引擎失败: {e}[/red]")
+            self._log(f"[red]❌ 启动后台引擎失败: {e}[/red]")
 
     def _do_stop_daemon(self):
         """停止后台守护进程（先 IPC 优雅退出，再强制终止子进程）。"""
         if not self.ipc.is_connected() and self._daemon_process is None:
-            self._log("[yellow]⚠ 后台引擎未运行或非本 TUI 启动[/yellow]")
+            self._log("[yellow]⚠️ 后台引擎未运行或非本 TUI 启动[/yellow]")
             return
 
         self.push_screen(
@@ -936,9 +936,9 @@ class PipelineTUI(App):
         if self.ipc.is_connected():
             ok, msg = self.ipc.full_quit()
             if ok:
-                self._log(f"[yellow]⏹ {msg}[/yellow]")
+                self._log(f"[yellow]⏹️ {msg}[/yellow]")
             else:
-                self._log(f"[yellow]⚠ IPC 退出请求失败: {msg}，将强制终止进程[/yellow]")
+                self._log(f"[yellow]⚠️ IPC 退出请求失败: {msg}，将强制终止进程[/yellow]")
             self.ipc.disconnect()
 
         # 2) 停止刷新定时器
@@ -952,13 +952,13 @@ class PipelineTUI(App):
                 self._daemon_process.terminate()
                 try:
                     self._daemon_process.wait(timeout=5)
-                    self._log(f"[green]✓ 后台引擎进程已终止 (PID: {self._daemon_process.pid})[/green]")
+                    self._log(f"[green]✅ 后台引擎进程已终止 (PID: {self._daemon_process.pid})[/green]")
                 except subprocess.TimeoutExpired:
                     self._daemon_process.kill()
                     self._daemon_process.wait()
-                    self._log(f"[yellow]⚠ 后台引擎进程被强制结束 (PID: {self._daemon_process.pid})[/yellow]")
+                    self._log(f"[yellow]⚠️ 后台引擎进程被强制结束 (PID: {self._daemon_process.pid})[/yellow]")
             except (OSError, subprocess.SubprocessError) as e:
-                self._log(f"[red]✗ 终止进程失败: {e}[/red]")
+                self._log(f"[red]❌ 终止进程失败: {e}[/red]")
             self._daemon_process = None
 
         self._update_info_bar()
@@ -969,28 +969,28 @@ class PipelineTUI(App):
             await asyncio.sleep(0.5)
             connected = await asyncio.to_thread(self.ipc.connect)
             if connected:
-                self._log("[green]✓ 后台引擎已就绪，连接成功！[/green]")
+                self._log("[green]✅ 后台引擎已就绪，连接成功！[/green]")
                 if not self._refresh_timer:
                     self._refresh_timer = self.set_interval(1.0, self._refresh_status)
                 self._update_info_bar()
                 return
-        self._log("[red]✗ 后台引擎启动超时 (10s)，请手动检查 start_daemon.py 是否正常运行[/red]")
+        self._log("[red]❌ 后台引擎启动超时 (10s)，请手动检查 start_daemon.py 是否正常运行[/red]")
 
     def _show_help(self):
         """显示帮助信息。"""
         help_text = """
 [bold]可用命令:[/bold]
-  [dim]help[/dim]                        - 显示此帮助
-  [green]start[/green]                       - 启动或继续流水线
-  [yellow]pause[/yellow]                       - 暂停流水线
-  [dim]check[/dim]                       - 系统自检
-  [dim]status[/dim]                      - 显示状态摘要
-  [red]reset <XX|all> <step|all>[/red]   - 重置构型步骤状态
-  [red]clean <XX|all> <step|all>[/red]   - 清理构型步骤文件
-  [cyan]daemon start[/cyan]                - 启动后台引擎并自动连接
-  [cyan]daemon stop[/cyan]                 - 停止后台引擎（TUI 继续运行）
-  [yellow]quit[/yellow]                        - 退出界面（引擎继续运行）
-  [red]quit full[/red]                   - 完全退出（停止引擎 + 关闭 TUI）
+  [dim]help[/dim]                       - 显示此帮助
+  [green]start[/green]                      - 启动或继续流水线
+  [yellow]pause[/yellow]                      - 暂停流水线
+  [dim]check[/dim]                      - 系统自检
+  [dim]status[/dim]                     - 显示状态摘要
+  [red]reset <XX|all> <step|all>[/red] - 重置构型步骤状态
+  [red]clean <XX|all> <step|all>[/red] - 清理构型步骤文件
+  [cyan]daemon start[/cyan]               - 启动后台引擎并自动连接
+  [cyan]daemon stop[/cyan]                - 停止后台引擎（TUI 继续运行）
+  [yellow]quit[/yellow]                       - 退出界面（引擎继续运行）
+  [red]quit full[/red]                  - 完全退出（停止引擎 + 关闭 TUI）
         """
         self._log(help_text)
 
@@ -1003,12 +1003,12 @@ class PipelineTUI(App):
         if not self.ipc.is_connected():
             self._log("[yellow]未连接到后台引擎，尝试重新连接...[/yellow]")
             if self.ipc.connect():
-                self._log("[green]✓ 已重新连接！[/green]")
+                self._log("[green]✅ 已重新连接！[/green]")
                 if not self._refresh_timer:
                     self._refresh_timer = self.set_interval(1.0, self._refresh_status)
                 return True
             else:
-                self._log("[red]✗ 连接失败，请确保 Daemon 正在运行[/red]")
+                self._log("[red]❌ 连接失败，请确保 Daemon 正在运行[/red]")
                 return False
         return True
 
