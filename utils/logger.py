@@ -365,6 +365,8 @@ _broadcast_handler_lock = threading.Lock()
 
 def get_broadcast_handler() -> LogBroadcastHandler | None:
     """获取全局 LogBroadcastHandler 实例（若已创建）。"""
+    if _broadcast_handler is not None:
+        return _broadcast_handler
     with _broadcast_handler_lock:
         return _broadcast_handler
 
