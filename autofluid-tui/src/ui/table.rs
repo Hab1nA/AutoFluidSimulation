@@ -1,0 +1,75 @@
+use ratatui::Frame;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table, Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+use crate::state::app_state::{AppState, FocusZone, STEP_NAMES, status_icon, status_color, step_display_name};
+
+pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let total_rows = state.configs.len();
+    let scroll = state.table_scroll_offset as usize;
+
+    let header_cells: Vec<Cell> = std::iter::once(Cell::new("构型").style(Style::default().add_modifier(Modifier::BOLD)))
+        .chain(STEP_NAMES.iter().map(|step| {
+            Cell::new(step_display_name(step)).style(Style::default().add_modifier(Modifier::BOLD))
+        }))
+        .collect();
+
+    let border_style = if state.focus_zone == FocusZone::Table {
+        Style::default().fg(Color::Rgb(233, 69, 96))
+    } else {
+        Style::default().fg(Color::Rgb(51, 51, 51))
+    };
+
+    let header = Row::new(header_cells)
+        .style(Style::default().fg(Color::Rgb(233, 69, 96)).bg(Color::Rgb(22, 33, 62)))
+        .height(1)
+        .bottom_margin(0);
+
+    let visible_configs: Vec<u64> = state.configs.iter()
+        .skip(scroll)
+        .take(visible_height)
+        .copied()
+        .collect();
+
+    let rows: Vec<Row> = visible_configs.iter().map(|cn| {
+        let cn_str = cn.to_string();
+        let cells: Vec<Cell> = std::iter::once(Cell::new(cn_str.clone()))
+            .chain(STEP_NAMES.iter().map(|step| {
+                let status = state.get_step_status(&cn_str, step);
+                let icon = status_icon(status);
+                let color = status_color(status);
+                let text = format!("{} {}", icon, status);
+                Cell::new(text).style(Style::default().fg(color))
+            }))
+            .collect();
+        Row::new(cells).height(1)
+    }).collect();
+
+    let widths = {
+        let config_width = ratatui::layout::Constraint::Length(6);
+        let step_widths = STEP_NAMES.iter().map(|_| ratatui::layout::Constraint::Length(18));
+        std::iter::once(config_width).chain(step_widths).collect::<Vec<_>>()
+    };
+
+    let table = Table::new(rows, &widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .style(Style::default().bg(Color::Rgb(26, 26, 46))),
+        )
+        .style(Style::default().fg(Color::Rgb(224, 224, 224)))
+        .row_highlight_style(Style::default().bg(Color::Rgb(15, 52, 96)));
+
+    frame.render_widget(table, area);
+
+    if total_rows > visible_height {
+        let mut scrollbar_state = ScrollbarState::new(total_rows)
+            .position(scroll);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+}

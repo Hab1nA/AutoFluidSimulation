@@ -1,0 +1,5 @@
+C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\autofluid-tui\target\release\deps\pin_project_lite-69e95d2d1680b74a.d: C:\Users\XKZ\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pin-project-lite-0.2.17\src\lib.rs
+
+C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\autofluid-tui\target\release\deps\libpin_project_lite-69e95d2d1680b74a.rmeta: C:\Users\XKZ\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pin-project-lite-0.2.17\src\lib.rs
+
+C:\Users\XKZ\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\pin-project-lite-0.2.17\src\lib.rs:
