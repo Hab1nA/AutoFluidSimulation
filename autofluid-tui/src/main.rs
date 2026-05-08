@@ -17,6 +17,7 @@ use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::{FocusZone, UiMode};
 use ui::layout::AppLayout;
+use ui::command_bar::BUTTON_DEFS;
 use event_handler::key_handler;
 use event_handler::command;
 
@@ -50,9 +51,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut log_buffer = LogBuffer::new();
     let mut daemon = daemon_mgr::DaemonManager::new();
 
-    log_buffer.push_info("欢迎使用仿真流水线总控程序！".to_string());
+    log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
-    log_buffer.push_info("Tab 切换焦点区域 | ↑↓ 滚动 | PageUp/PageDown 翻页 | Home/End 跳转".to_string());
+    log_buffer.push_info("Tab 切换焦点 | ↑↓ 滚动 | PageUp/PageDown 翻页 | Home/End 跳转".to_string());
 
     if let Ok(size) = terminal.size() {
         state.update_terminal_size(size.width, size.height);
@@ -71,7 +72,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     let ipc_poll_interval = Duration::from_secs(1);
-    let clock_interval = Duration::from_secs(1);
+    let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = std::time::Instant::now();
     let mut last_clock_refresh = std::time::Instant::now();
     let mut poll_counter: u64 = 0;
@@ -79,6 +80,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     loop {
         if state.should_quit {
             break;
+        }
+
+        if let Some(ct) = state.click_time {
+            if state.clicked_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
+                state.clicked_button = None;
+                state.click_time = None;
+                state.needs_redraw = true;
+            }
         }
 
         if let Some(cmd) = state.pending_command.take() {
@@ -130,40 +139,59 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
                     let action = key_handler::handle_key(key, &mut state);
                     match action {
-                            key_handler::AppAction::Quit => {
-                                state.should_quit = true;
-                            }
-                            key_handler::AppAction::SubmitCommand(cmd) => {
-                                log_buffer.push_info(format!("> {}", cmd));
-                                let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
-                                match result {
-                                    command::CommandResult::Quit => {
-                                        state.should_quit = true;
+                        key_handler::AppAction::Quit => {
+                            state.should_quit = true;
+                        }
+                        key_handler::AppAction::SubmitCommand(cmd) => {
+                            log_buffer.push_info(format!("> {}", cmd));
+                            let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
+                            match result {
+                                command::CommandResult::Quit => {
+                                    state.should_quit = true;
+                                }
+                                command::CommandResult::FullQuit => {
+                                    if ipc.is_connected() {
+                                        let _ = rt.block_on(ipc.full_quit());
                                     }
-                                    command::CommandResult::FullQuit => {
-                                        if ipc.is_connected() {
-                                            let _ = rt.block_on(ipc.full_quit());
-                                        }
-                                        rt.block_on(ipc.disconnect());
-                                        state.should_quit = true;
-                                    }
-                                    command::CommandResult::StartDaemon => {
-                                        if ipc.is_connected() {
-                                            log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
-                                        } else {
-                                            let project_dir = std::env::current_dir()
-                                                .unwrap_or_default()
-                                                .to_string_lossy()
-                                                .to_string();
-                                            match daemon.launch(&project_dir) {
-                                                Ok(pid) => {
-                                                    log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                                }
-                                                Err(e) => {
-                                                    log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
-                                                }
+                                    rt.block_on(ipc.disconnect());
+                                    state.should_quit = true;
+                                }
+                                command::CommandResult::StartDaemon => {
+                                    if ipc.is_connected() {
+                                        log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+                                    } else {
+                                        let project_dir = std::env::current_dir()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        match daemon.launch(&project_dir) {
+                                            Ok(pid) => {
+                                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                            }
+                                            Err(e) => {
+                                                log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
                                             }
                                         }
+                                    }
+                                }
+                                command::CommandResult::StopDaemon => {
+                                    if ipc.is_connected() {
+                                        let _ = rt.block_on(ipc.full_quit());
+                                        rt.block_on(ipc.disconnect());
+                                    }
+                                    let _ = daemon.stop();
+                                    state.connected = false;
+                                    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                        key_handler::AppAction::Confirm => {
+                            if let Some(callback) = state.confirm_callback.take() {
+                                let result = rt.block_on(command::execute_confirm_action(&callback, &mut ipc, &mut log_buffer));
+                                match result {
+                                    command::CommandResult::FullQuit => {
+                                        state.should_quit = true;
                                     }
                                     command::CommandResult::StopDaemon => {
                                         if ipc.is_connected() {
@@ -177,29 +205,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                                     _ => {}
                                 }
                             }
-                            key_handler::AppAction::Confirm => {
-                                if let Some(callback) = state.confirm_callback.take() {
-                                    let result = rt.block_on(command::execute_confirm_action(&callback, &mut ipc, &mut log_buffer));
-                                    match result {
-                                        command::CommandResult::FullQuit => {
-                                            state.should_quit = true;
-                                        }
-                                        command::CommandResult::StopDaemon => {
-                                            if ipc.is_connected() {
-                                                let _ = rt.block_on(ipc.full_quit());
-                                                rt.block_on(ipc.disconnect());
-                                            }
-                                            let _ = daemon.stop();
-                                            state.connected = false;
-                                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
-                            key_handler::AppAction::None => {}
                         }
+                        key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
+                        key_handler::AppAction::None => {}
+                    }
                 }
                 CrosstermEvent::Mouse(mouse) => {
                     handle_mouse(mouse, &mut state, &log_buffer);
@@ -261,17 +270,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 let area = frame.area();
                 let layout = AppLayout::new(area);
 
-                state.clamp_table_scroll(layout.status_table.height.saturating_sub(2));
+                state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-                let detail_count = log_buffer.filtered_entries_count(&state.log_filter_level, &state.log_filter_source);
+                let info_visual_count = ui::logs::compute_info_visual_lines(&log_buffer, layout.info_panel.width.saturating_sub(2) as usize).len();
+                let detail_visual_count = ui::logs::compute_detail_visual_lines(&log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(2) as usize).len();
+
                 if state.detail_log_auto_scroll {
-                    let visible = layout.detail_panel_body.height;
-                    if detail_count > visible as usize {
-                        state.detail_log_scroll = (detail_count - visible as usize) as u16;
+                    let visible = layout.detail_panel.height.saturating_sub(2) as usize;
+                    if detail_visual_count > visible {
+                        state.detail_log_scroll = (detail_visual_count - visible) as u16;
                     }
                 }
-                state.clamp_detail_scroll(detail_count as u16, layout.detail_panel_body.height);
-                state.clamp_info_scroll(log_buffer.info_messages.len() as u16, layout.info_panel_body.height.saturating_sub(2));
+                state.clamp_detail_scroll(detail_visual_count as u16, layout.detail_panel.height.saturating_sub(2));
+                state.clamp_info_scroll(info_visual_count as u16, layout.info_panel.height.saturating_sub(2));
 
                 ui::header::render_header(frame, layout.header, &state);
                 ui::header::render_info_bar(frame, layout.info_bar, &state);
@@ -279,8 +290,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone);
                 ui::logs::render_detail_panel(
                     frame,
-                    layout.detail_panel_title,
-                    layout.detail_panel_body,
+                    layout.detail_panel,
                     &log_buffer,
                     &state.log_filter_level,
                     &state.log_filter_source,
@@ -315,6 +325,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     Ok(())
 }
 
+fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
 fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
@@ -331,6 +345,36 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
     let in_buttons = point_in_rect(col, row, layout.quick_buttons);
 
     match mouse.kind {
+        MouseEventKind::Moved => {
+            let prev_hover_row = state.hovered_table_row;
+            let prev_hover_btn = state.hovered_button;
+
+            if in_table {
+                let inner_y = row.saturating_sub(layout.status_table.y + 1);
+                if inner_y > 0 {
+                    let data_row = state.table_scroll_offset + inner_y - 1;
+                    if (data_row as usize) < state.configs.len() {
+                        state.hovered_table_row = Some(data_row);
+                    } else {
+                        state.hovered_table_row = None;
+                    }
+                } else {
+                    state.hovered_table_row = None;
+                }
+            } else {
+                state.hovered_table_row = None;
+            }
+
+            if in_buttons {
+                state.hovered_button = detect_button(col, row, &layout);
+            } else {
+                state.hovered_button = None;
+            }
+
+            if state.hovered_table_row != prev_hover_row || state.hovered_button != prev_hover_btn {
+                state.needs_redraw = true;
+            }
+        }
         MouseEventKind::ScrollUp => {
             if in_table {
                 if state.table_scroll_offset > 0 {
@@ -340,15 +384,17 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
                 }
             } else if in_info {
                 if state.info_log_scroll > 0 {
-                    state.info_log_scroll -= 3;
+                    state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
                     state.focus_zone = FocusZone::InfoLog;
                     state.needs_redraw = true;
                 }
-            } else if in_detail && state.detail_log_scroll > 0 {
-                state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
-                state.detail_log_auto_scroll = false;
-                state.focus_zone = FocusZone::DetailLog;
-                state.needs_redraw = true;
+            } else if in_detail {
+                if state.detail_log_scroll > 0 {
+                    state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
+                    state.detail_log_auto_scroll = false;
+                    state.focus_zone = FocusZone::DetailLog;
+                    state.needs_redraw = true;
+                }
             }
         }
         MouseEventKind::ScrollDown => {
@@ -368,7 +414,11 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
         }
         MouseEventKind::Down(_button) => {
             if in_buttons {
-                handle_button_click(col, row, &layout.quick_buttons, state);
+                if let Some(btn_idx) = detect_button(col, row, &layout) {
+                    state.clicked_button = Some(btn_idx);
+                    state.click_time = Some(std::time::Instant::now());
+                    state.needs_redraw = true;
+                }
             } else if in_table {
                 state.focus_zone = FocusZone::Table;
                 state.needs_redraw = true;
@@ -380,37 +430,42 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
                 state.needs_redraw = true;
             }
         }
+        MouseEventKind::Up(_button) => {
+            if let Some(btn_idx) = state.clicked_button {
+                if in_buttons {
+                    if let Some(hover_idx) = detect_button(col, row, &layout) {
+                        if hover_idx == btn_idx {
+                            let cmd = BUTTON_DEFS[btn_idx as usize].1;
+                            state.pending_command = Some(cmd.to_string());
+                            state.focus_zone = FocusZone::CommandInput;
+                        }
+                    }
+                }
+                state.clicked_button = None;
+                state.needs_redraw = true;
+            }
+        }
         _ => {}
     }
 }
 
-fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
-    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
-}
-
-fn handle_button_click(col: u16, row: u16, buttons_area: &ratatui::layout::Rect, state: &mut AppState) {
-    if !point_in_rect(col, row, *buttons_area) {
-        return;
+fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
+    let buttons_area = layout.quick_buttons;
+    if !point_in_rect(col, row, buttons_area) {
+        return None;
     }
 
-    let rel_col = col - buttons_area.x;
-    let button_specs: [(u16, u16, &str); 8] = [
-        (1, 10, "start"),
-        (12, 11, "pause"),
-        (24, 11, "check"),
-        (36, 11, "status"),
-        (48, 13, "daemon start"),
-        (62, 10, "stop"),
-        (73, 10, "quit"),
-        (84, 13, "quit full"),
-    ];
+    let rel_col = col.saturating_sub(buttons_area.x);
+    let total_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| ui::command_bar::button_total_width(l) + 1).sum();
+    let padding = buttons_area.width.saturating_sub(total_width) / 2;
 
-    for (start, width, cmd) in button_specs {
-        if rel_col >= start && rel_col < start + width {
-            state.pending_command = Some(cmd.to_string());
-            state.focus_zone = FocusZone::CommandInput;
-            state.needs_redraw = true;
-            return;
+    let mut offset = padding;
+    for (i, (label, _cmd)) in BUTTON_DEFS.iter().enumerate() {
+        let bw = ui::command_bar::button_total_width(label) + 1;
+        if rel_col >= offset && rel_col < offset + bw {
+            return Some(i as u8);
         }
+        offset += bw;
     }
+    None
 }

@@ -58,13 +58,6 @@ pub fn engine_status_display(status: &str) -> &str {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct EngineInfo {
-    pub engine_status: String,
-    pub sw_macro_started: bool,
-    pub barrier_passed: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusZone {
     #[default]
@@ -95,6 +88,13 @@ impl FocusZone {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct EngineInfo {
+    pub engine_status: String,
+    pub sw_macro_started: bool,
+    pub barrier_passed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub connected: bool,
     pub status_data: HashMap<String, HashMap<String, String>>,
@@ -118,6 +118,10 @@ pub struct AppState {
     pub detail_log_auto_scroll: bool,
     pub terminal_size: ratatui::layout::Rect,
     pub pending_command: Option<String>,
+    pub hovered_table_row: Option<u16>,
+    pub hovered_button: Option<u8>,
+    pub clicked_button: Option<u8>,
+    pub click_time: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -206,12 +210,12 @@ impl AppState {
         let now = chrono::Local::now();
         let time_str = now.format("%H:%M:%S").to_string();
         if !self.connected {
-            return format!("引擎: 未连接  |  请先启动 Daemon  |  {}", time_str);
+            return format!("  引擎: 未连接  │  请先启动 Daemon  │  {}", time_str);
         }
         let engine_status = engine_status_display(&self.engine_info.engine_status);
         let barrier = if self.engine_info.barrier_passed { "已通过" } else { "未通过" };
         format!(
-            "引擎: {}  |  构型数: {}  |  屏障: {}  |  {}",
+            "  引擎: {}  │  构型数: {}  │  屏障: {}  │  {}",
             engine_status,
             self.configs.len(),
             barrier,
@@ -235,7 +239,7 @@ impl AppState {
         if total_lines <= visible_height {
             self.detail_log_scroll = 0;
         } else {
-            let max_scroll = total_lines - visible_height;
+            let max_scroll = total_lines.saturating_sub(visible_height);
             if self.detail_log_scroll > max_scroll {
                 self.detail_log_scroll = max_scroll;
             }
@@ -246,7 +250,7 @@ impl AppState {
         if total_lines <= visible_height {
             self.info_log_scroll = 0;
         } else {
-            let max_scroll = total_lines - visible_height;
+            let max_scroll = total_lines.saturating_sub(visible_height);
             if self.info_log_scroll > max_scroll {
                 self.info_log_scroll = max_scroll;
             }

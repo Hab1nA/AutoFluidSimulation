@@ -1,53 +1,136 @@
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
 
-pub fn render_info_panel(frame: &mut Frame, area: ratatui::layout::Rect, log_buffer: &LogBuffer, scroll_offset: u16, focus_zone: FocusZone) {
+fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_w + cw > max_width && !current.is_empty() {
+            result.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        current.push(ch);
+        current_w += cw;
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+pub fn compute_info_visual_lines(log_buffer: &LogBuffer, max_width: usize) -> Vec<Line<'static>> {
+    let mut visual_lines: Vec<Line> = Vec::new();
+    for msg in &log_buffer.info_messages {
+        for chunk in wrap_text_to_width(msg, max_width) {
+            visual_lines.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::Rgb(0, 255, 136)),
+            )));
+        }
+    }
+    visual_lines
+}
+
+pub fn compute_detail_visual_lines(
+    log_buffer: &LogBuffer,
+    level_filter: &Option<String>,
+    source_filter: &Option<String>,
+    max_width: usize,
+) -> Vec<Line<'static>> {
+    let mut visual_lines: Vec<Line> = Vec::new();
+    for entry in log_buffer.filtered_entries(level_filter, source_filter) {
+        let icon = entry.source_icon();
+        let color = entry.level_color();
+        let level = entry.level.clone();
+        let msg = entry.raw_message.clone();
+        let full = format!("{} [{}] {}", icon, level, msg);
+
+        let wrapped = wrap_text_to_width(&full, max_width);
+        for (i, chunk) in wrapped.into_iter().enumerate() {
+            if i == 0 {
+                let prefix = format!("{} [{}] ", icon, level);
+                let prefix_display_w = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+                let chunk_display_w = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+
+                if chunk_display_w > prefix_display_w {
+                    let msg_text = chunk.chars().skip(prefix.chars().count()).collect::<String>();
+                    visual_lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(color)),
+                        Span::raw(msg_text),
+                    ]));
+                } else {
+                    visual_lines.push(Line::from(Span::styled(
+                        chunk,
+                        Style::default().fg(color),
+                    )));
+                }
+            } else {
+                visual_lines.push(Line::from(Span::styled(
+                    format!("  {}", chunk),
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                )));
+            }
+        }
+    }
+    visual_lines
+}
+
+pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, scroll_offset: u16, focus_zone: FocusZone) {
     let border_style = if focus_zone == FocusZone::InfoLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
     } else {
         Style::default().fg(Color::Rgb(51, 51, 51))
     };
 
-    let title = Paragraph::new("📋 信息提示")
-        .style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).border_style(border_style).style(Style::default().bg(Color::Rgb(22, 33, 62))));
-    frame.render_widget(title, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(" 📋 信息提示 ")
+        .title_style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(&block, area);
 
-    let inner_area = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
+    let visual_lines = compute_info_visual_lines(log_buffer, inner.width as usize);
+    let total = visual_lines.len();
+    let visible = inner.height as usize;
+    let scroll = scroll_offset as usize;
+    let start = scroll.min(total);
+    let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
 
-    let messages: String = log_buffer.info_messages.iter().cloned().collect::<Vec<_>>().join("\n");
-    let line_count = log_buffer.info_messages.len() as u16;
-    let visible_height = inner_area.height;
+    let paragraph = Paragraph::new(visible_lines)
+        .style(Style::default().bg(Color::Rgb(13, 13, 13)));
+    frame.render_widget(paragraph, inner);
 
-    let paragraph = Paragraph::new(messages)
-        .style(Style::default().fg(Color::Rgb(0, 255, 136)).bg(Color::Rgb(13, 13, 13)))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0))
-        .block(Block::default().style(Style::default().bg(Color::Rgb(13, 13, 13))));
-    frame.render_widget(paragraph, inner_area);
-
-    if line_count > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(line_count as usize)
-            .position(scroll_offset as usize);
+    if total > visible {
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .viewport_content_length(visible)
+            .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner_area, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
 }
 
 pub fn render_detail_panel(
     frame: &mut Frame,
-    title_area: ratatui::layout::Rect,
-    body_area: ratatui::layout::Rect,
+    area: Rect,
     log_buffer: &LogBuffer,
     level_filter: &Option<String>,
     source_filter: &Option<String>,
@@ -61,65 +144,44 @@ pub fn render_detail_panel(
         Style::default().fg(Color::Rgb(51, 51, 51))
     };
 
-    let mut title_text = "📝 详细日志".to_string();
+    let mut title_text = " 📝 详细日志 ".to_string();
     if let Some(lf) = level_filter {
-        title_text.push_str(&format!(" [{}]", lf));
+        title_text.push_str(&format!("[{}] ", lf));
     }
     if let Some(sf) = source_filter {
-        title_text.push_str(&format!(" [{}]", sf));
+        title_text.push_str(&format!("[{}] ", sf));
     }
     if auto_scroll {
-        title_text.push_str(" [自动]");
+        title_text.push_str("[自动▼] ");
     }
 
-    let title = Paragraph::new(title_text)
-        .style(Style::default().fg(Color::Rgb(11, 188, 240)).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL).border_style(border_style).style(Style::default().bg(Color::Rgb(22, 33, 62))));
-    frame.render_widget(title, title_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title_text)
+        .title_style(Style::default().fg(Color::Rgb(11, 188, 240)).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+    frame.render_widget(Clear, area);
+    let inner = block.inner(area);
+    frame.render_widget(&block, area);
 
-    let inner_body = Rect {
-        x: body_area.x,
-        y: body_area.y,
-        width: body_area.width,
-        height: body_area.height,
-    };
+    let visual_lines = compute_detail_visual_lines(log_buffer, level_filter, source_filter, inner.width as usize);
+    let total = visual_lines.len();
+    let visible = inner.height as usize;
+    let scroll = scroll_offset as usize;
+    let start = scroll.min(total);
+    let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
 
-    let mut lines: Vec<ratatui::text::Line> = Vec::new();
-    for entry in log_buffer.filtered_entries(level_filter, source_filter) {
-        let icon = entry.source_icon();
-        let color = entry.level_color();
-        let level = &entry.level;
-        let msg = &entry.raw_message;
-        lines.push(ratatui::text::Line::from(vec![
-            ratatui::text::Span::styled(
-                format!("{} ", icon),
-                Style::default(),
-            ),
-            ratatui::text::Span::styled(
-                format!("[{}]", level),
-                Style::default().fg(color),
-            ),
-            ratatui::text::Span::raw(format!(" {}", msg)),
-        ]));
-    }
+    let paragraph = Paragraph::new(visible_lines)
+        .style(Style::default().bg(Color::Rgb(13, 13, 13)));
+    frame.render_widget(paragraph, inner);
 
-    let line_count = lines.len() as u16;
-    let visible_height = inner_body.height;
-
-    let paragraph = Paragraph::new(lines)
-        .style(Style::default().fg(Color::Rgb(224, 224, 224)).bg(Color::Rgb(13, 13, 13)))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0))
-        .block(Block::default().style(Style::default().bg(Color::Rgb(13, 13, 13))));
-    frame.render_widget(paragraph, inner_body);
-
-    if line_count > visible_height {
-        let mut scrollbar_state = ScrollbarState::new(line_count as usize)
-            .position(scroll_offset as usize);
+    if total > visible {
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .viewport_content_length(visible)
+            .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, inner_body, &mut scrollbar_state);
+        frame.render_stateful_widget(scrollbar, inner, &mut scrollbar_state);
     }
 }
-
-use ratatui::layout::Rect;
