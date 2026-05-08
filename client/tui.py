@@ -35,7 +35,6 @@ import asyncio
 import collections
 import subprocess
 import threading
-import time
 from datetime import datetime
 from typing import Dict
 
@@ -244,10 +243,16 @@ class PipelineTUI(App):
         background: #0f3460;
         padding: 0 2;
         color: #a0a0a0;
+        overflow: hidden;
+    }
+
+    #main-content {
+        height: 1fr;
+        overflow: hidden;
     }
 
     #status-table {
-        height: 1fr;
+        height: 2fr;
         margin: 1 2;
         background: #1a1a2e;
         border: solid #333;
@@ -277,9 +282,10 @@ class PipelineTUI(App):
 
     #log-panels {
         height: 1fr;
-        min-height: 10;
+        min-height: 8;
         layout: horizontal;
         margin: 0 2;
+        overflow: hidden;
     }
 
     #info-panel-container {
@@ -288,6 +294,7 @@ class PipelineTUI(App):
         border: solid #333;
         background: #0d0d0d;
         padding: 0;
+        overflow: hidden;
     }
 
     #info-panel-title {
@@ -315,6 +322,7 @@ class PipelineTUI(App):
         border: solid #333;
         background: #0d0d0d;
         padding: 0;
+        overflow: hidden;
     }
 
     #detail-panel-title {
@@ -342,6 +350,7 @@ class PipelineTUI(App):
         background: #16213e;
         padding: 1 2;
         border-top: solid #0f3460;
+        overflow: hidden;
     }
 
     #cmd-input {
@@ -376,7 +385,8 @@ class PipelineTUI(App):
     }
 
     #confirm-dialog {
-        width: 66;
+        width: 80%;
+        max-width: 66;
         height: auto;
         max-height: 30;
         margin: 3 8;
@@ -404,7 +414,8 @@ class PipelineTUI(App):
     }
 
     #check-dialog {
-        width: 70;
+        width: 80%;
+        max-width: 70;
         height: auto;
         margin: 2 5;
         padding: 1 2;
@@ -452,7 +463,6 @@ class PipelineTUI(App):
         self._log_filter_source: str | None = None
         self._detail_log_buffer: collections.deque[dict] = collections.deque(maxlen=2000)
         self._resize_repaint_timer = None
-        self._last_resize_time = 0.0
 
     # ------------------------------------------------------------------
     # 界面布局
@@ -465,20 +475,22 @@ class PipelineTUI(App):
             id="header-bar",
         )
 
-        yield DataTable(id="status-table", cursor_type="row")
-
-        yield Horizontal(
-            Vertical(
-                Static("📋 信息提示", id="info-panel-title"),
-                RichLog(id="log-panel", highlight=False, markup=True, max_lines=200, auto_scroll=False),
-                id="info-panel-container",
+        yield Vertical(
+            DataTable(id="status-table", cursor_type="row"),
+            Horizontal(
+                Vertical(
+                    Static("📋 信息提示", id="info-panel-title"),
+                    RichLog(id="log-panel", highlight=False, markup=True, max_lines=200, auto_scroll=False),
+                    id="info-panel-container",
+                ),
+                Vertical(
+                    Static("📝 详细日志", id="detail-panel-title"),
+                    RichLog(id="detail-log-panel", highlight=False, markup=True, max_lines=1000, auto_scroll=False),
+                    id="detail-panel-container",
+                ),
+                id="log-panels",
             ),
-            Vertical(
-                Static("📝 详细日志", id="detail-panel-title"),
-                RichLog(id="detail-log-panel", highlight=False, markup=True, max_lines=1000, auto_scroll=False),
-                id="detail-panel-container",
-            ),
-            id="log-panels",
+            id="main-content",
         )
 
         yield Container(
@@ -520,23 +532,15 @@ class PipelineTUI(App):
         self.query_one("#cmd-input", Input).focus()
 
     def on_resize(self, event) -> None:
-        current_time = time.time()
-        if current_time - self._last_resize_time < 0.15:
-            return
-        self._last_resize_time = current_time
-
         if self._resize_repaint_timer is not None:
             self._resize_repaint_timer.stop()
         self._resize_repaint_timer = self.set_timer(
-            0.15, self._force_full_repaint_after_resize
+            0.1, self._force_full_repaint_after_resize
         )
 
     def _force_full_repaint_after_resize(self) -> None:
         self._resize_repaint_timer = None
-        try:
-            self.screen.refresh()
-        except Exception:
-            pass
+        self.refresh(layout=True)
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
@@ -549,10 +553,10 @@ class PipelineTUI(App):
 
     def _init_table(self):
         table = self.query_one("#status-table", DataTable)
-        table.add_column("构型", width=6, key="构型")
+        table.add_column("构型", key="构型")
         for step in STEP_NAMES:
             display = STEP_DISPLAY.get(step, step)
-            table.add_column(display, width=16, key=display)
+            table.add_column(display, key=display)
             self._column_keys[step] = display
         table.show_header = True
         table.cursor_type = "row"
@@ -656,9 +660,9 @@ class PipelineTUI(App):
                 try:
                     table.update_cell(key, col_key, new_value)
                 except Exception:
-                    pass
+                    print(f"[TUI] update_cell failed: {key}/{col_key}", file=sys.stderr)
 
-    def _update_info_bar(self, eng_snapshot: dict = None):
+    def _update_info_bar(self, eng_snapshot: dict | None = None):
         info_bar = self.query_one("#info-bar", Static)
 
         if self.ipc.is_connected():
@@ -735,8 +739,8 @@ class PipelineTUI(App):
                 log.write(formatted)
 
             self.call_later(self._safe_scroll_detail_log)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[TUI] batch render failed: {e}", file=sys.stderr)
 
     def _render_detail_entry(self, entry: dict) -> None:
         level = entry.get("level", "INFO")
@@ -773,8 +777,8 @@ class PipelineTUI(App):
             if self._log_filter_source:
                 parts.append(f"[{self._log_filter_source}]")
             title.update(" ".join(parts))
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[TUI] update title failed: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 信息提示日志
@@ -799,25 +803,21 @@ class PipelineTUI(App):
     # 按钮事件处理
     # ------------------------------------------------------------------
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        btn_id = event.button.id
+    _BUTTON_DISPATCH = {
+        "btn-start": "_do_start",
+        "btn-pause": "_do_pause",
+        "btn-check": "_do_check",
+        "btn-status": "_do_status",
+        "btn-quit": "_do_quit",
+        "btn-daemon": "_do_launch_daemon",
+        "btn-dstop": "_do_stop_daemon",
+        "btn-fullquit": "_do_full_quit",
+    }
 
-        if btn_id == "btn-start":
-            self._do_start()
-        elif btn_id == "btn-pause":
-            self._do_pause()
-        elif btn_id == "btn-check":
-            self._do_check()
-        elif btn_id == "btn-status":
-            self._do_status()
-        elif btn_id == "btn-quit":
-            self._do_quit()
-        elif btn_id == "btn-daemon":
-            self._do_launch_daemon()
-        elif btn_id == "btn-dstop":
-            self._do_stop_daemon()
-        elif btn_id == "btn-fullquit":
-            self._do_full_quit()
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        handler_name = self._BUTTON_DISPATCH.get(event.button.id)
+        if handler_name:
+            getattr(self, handler_name)()
 
     # ------------------------------------------------------------------
     # 命令输入处理
@@ -946,8 +946,8 @@ class PipelineTUI(App):
                 if self._log_filter_source and source != self._log_filter_source:
                     continue
                 self._render_detail_entry(entry)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[TUI] refresh log filter failed: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 日志导出命令
