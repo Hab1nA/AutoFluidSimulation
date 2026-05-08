@@ -451,7 +451,7 @@ class PipelineTUI(App):
         self._log_filter_level: str | None = None
         self._log_filter_source: str | None = None
         self._detail_log_buffer: collections.deque[dict] = collections.deque(maxlen=2000)
-        self._layout_refresh_pending = False
+        self._resize_repaint_timer = None
         self._last_resize_time = 0.0
 
     # ------------------------------------------------------------------
@@ -521,30 +521,22 @@ class PipelineTUI(App):
 
     def on_resize(self, event) -> None:
         current_time = time.time()
-        if current_time - self._last_resize_time < 0.1:
+        if current_time - self._last_resize_time < 0.15:
             return
         self._last_resize_time = current_time
 
-        if not self._layout_refresh_pending:
-            self._layout_refresh_pending = True
-            self.call_later(self._refresh_layout_after_resize)
+        if self._resize_repaint_timer is not None:
+            self._resize_repaint_timer.stop()
+        self._resize_repaint_timer = self.set_timer(
+            0.15, self._force_full_repaint_after_resize
+        )
 
-    def _refresh_layout_after_resize(self) -> None:
+    def _force_full_repaint_after_resize(self) -> None:
+        self._resize_repaint_timer = None
         try:
-            self.screen.refresh(layout=True)
-            table = self.query_one("#status-table", DataTable)
-            table.refresh(layout=True)
-            log_panel = self.query_one("#log-panel", RichLog)
-            log_panel.refresh(layout=True)
-            detail_log = self.query_one("#detail-log-panel", RichLog)
-            detail_log.refresh(layout=True)
+            self.screen.refresh()
         except Exception:
             pass
-        finally:
-            self._layout_refresh_pending = False
-
-    def on_mouse_move(self, event) -> None:
-        pass
 
     def on_unmount(self) -> None:
         if self._refresh_timer:
@@ -742,8 +734,7 @@ class PipelineTUI(App):
                 formatted = f"{icon} [{color}][{level}][/{color}] {raw_message}"
                 log.write(formatted)
 
-            if not self._layout_refresh_pending:
-                self.call_later(self._safe_scroll_detail_log)
+            self.call_later(self._safe_scroll_detail_log)
         except Exception:
             pass
 
@@ -762,8 +753,7 @@ class PipelineTUI(App):
         try:
             log = self.query_one("#detail-log-panel", RichLog)
             log.write(message)
-            if not self._layout_refresh_pending:
-                self.call_later(self._safe_scroll_detail_log)
+            self.call_later(self._safe_scroll_detail_log)
         except Exception:
             print(f"[DETAIL] {message}", file=sys.stderr)
 
@@ -794,8 +784,7 @@ class PipelineTUI(App):
         try:
             log = self.query_one("#log-panel", RichLog)
             log.write(message)
-            if not self._layout_refresh_pending:
-                self.call_later(self._safe_scroll_info_log)
+            self.call_later(self._safe_scroll_info_log)
         except Exception:
             print(f"[TUI] {message}", file=sys.stderr)
 
