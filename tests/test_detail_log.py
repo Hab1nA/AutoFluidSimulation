@@ -925,6 +925,170 @@ def test_from_dict_backward_compatible():
 
 
 # ============================================================================
+# 测试 11: Issue1 - _broadcast_handler 线程安全
+# ============================================================================
+
+def test_install_broadcast_handler_thread_safe():
+    """测试多线程并发调用 install_broadcast_handler 只创建一个实例。"""
+    import utils.logger as logger_mod
+
+    original_handler = logger_mod._broadcast_handler
+    logger_mod._broadcast_handler = None
+
+    results = []
+    errors = []
+
+    def install():
+        try:
+            h = install_broadcast_handler(capacity=50)
+            results.append(id(h))
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=install) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(errors) == 0, f"多线程安装出错: {errors}"
+    assert len(set(results)) == 1, f"多线程安装应返回同一实例，实际返回 {len(set(results))} 个不同实例"
+
+    root_logger = logging.getLogger()
+    handler_count = sum(1 for h in root_logger.handlers if isinstance(h, LogBroadcastHandler))
+    assert handler_count == 1, f"root logger 应只有1个 broadcast handler，实际 {handler_count} 个"
+
+    root_logger.removeHandler(logger_mod._broadcast_handler)
+    logger_mod._broadcast_handler = original_handler
+    print("  ✅ 多线程并发安装 broadcast handler 线程安全")
+
+
+def test_get_broadcast_handler_thread_safe():
+    """测试多线程并发读取 get_broadcast_handler 不崩溃。"""
+    import utils.logger as logger_mod
+
+    original_handler = logger_mod._broadcast_handler
+    logger_mod._broadcast_handler = None
+
+    handler = install_broadcast_handler(capacity=50)
+    results = []
+    errors = []
+
+    def read_handler():
+        try:
+            h = get_broadcast_handler()
+            results.append(h is not None)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=read_handler) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(errors) == 0, f"多线程读取出错: {errors}"
+    assert all(results), "所有线程应读到非 None handler"
+
+    logging.getLogger().removeHandler(handler)
+    logger_mod._broadcast_handler = original_handler
+    print("  ✅ 多线程并发读取 broadcast handler 线程安全")
+
+
+# ============================================================================
+# 测试 12: Issue2 - _detail_log_buffer 容量限制
+# ============================================================================
+
+def test_detail_log_buffer_is_deque():
+    """测试 TUI _detail_log_buffer 使用 deque 类型。"""
+    import collections
+    from client.tui import PipelineTUI
+
+    app = PipelineTUI()
+    assert isinstance(app._detail_log_buffer, collections.deque), \
+        f"_detail_log_buffer 应为 deque，实际为 {type(app._detail_log_buffer)}"
+    print("  ✅ _detail_log_buffer 使用 deque 类型")
+
+
+def test_detail_log_buffer_has_maxlen():
+    """测试 TUI _detail_log_buffer 有容量限制。"""
+    from client.tui import PipelineTUI
+
+    app = PipelineTUI()
+    assert app._detail_log_buffer.maxlen is not None, \
+        "_detail_log_buffer 应设置 maxlen"
+    assert app._detail_log_buffer.maxlen > 0, \
+        f"maxlen 应大于0，实际为 {app._detail_log_buffer.maxlen}"
+    print(f"  ✅ _detail_log_buffer 有容量限制 (maxlen={app._detail_log_buffer.maxlen})")
+
+
+def test_detail_log_buffer_capacity_enforced():
+    """测试 _detail_log_buffer 超出容量后自动淘汰旧条目。"""
+    from client.tui import PipelineTUI
+
+    app = PipelineTUI()
+    maxlen = app._detail_log_buffer.maxlen
+
+    for i in range(maxlen + 500):
+        app._detail_log_buffer.append({"id": i, "message": f"msg{i}"})
+
+    assert len(app._detail_log_buffer) == maxlen, \
+        f"超出容量后应保持 maxlen={maxlen}，实际 {len(app._detail_log_buffer)}"
+
+    first = app._detail_log_buffer[0]
+    assert first["id"] == 500, f"最旧条目应被淘汰，最早的 id 应为500，实际为 {first['id']}"
+    print("  ✅ _detail_log_buffer 超出容量后自动淘汰旧条目")
+
+
+def test_detail_log_buffer_export_compatible():
+    """测试 deque 类型的 _detail_log_buffer 与导出功能兼容。"""
+    from client.tui import PipelineTUI
+
+    app = PipelineTUI()
+    app._detail_log_buffer.append({
+        "level": "INFO", "source": "system",
+        "message": "test message", "raw_message": "test raw",
+    })
+    app._detail_log_buffer.append({
+        "level": "ERROR", "source": "remote_ps",
+        "message": "error message", "raw_message": "error raw",
+    })
+
+    lines = []
+    for entry in app._detail_log_buffer:
+        lines.append(entry["message"])
+
+    assert len(lines) == 2
+    assert "test message" in lines[0]
+    assert "error message" in lines[1]
+    print("  ✅ deque 类型的 _detail_log_buffer 与导出功能兼容")
+
+
+def test_detail_log_buffer_filter_compatible():
+    """测试 deque 类型的 _detail_log_buffer 与过滤刷新功能兼容。"""
+    from client.tui import PipelineTUI
+
+    app = PipelineTUI()
+    app._detail_log_buffer.append({
+        "level": "INFO", "source": "system",
+        "message": "info msg", "raw_message": "info raw",
+    })
+    app._detail_log_buffer.append({
+        "level": "ERROR", "source": "remote_ps",
+        "message": "error msg", "raw_message": "error raw",
+    })
+
+    filtered = []
+    for entry in app._detail_log_buffer:
+        if entry.get("level") == "ERROR":
+            filtered.append(entry)
+
+    assert len(filtered) == 1
+    assert filtered[0]["level"] == "ERROR"
+    print("  ✅ deque 类型的 _detail_log_buffer 与过滤功能兼容")
+
+
+# ============================================================================
 # 主测试入口
 # ============================================================================
 
@@ -980,6 +1144,13 @@ def main():
         ("导出: 使用完整message格式", test_export_uses_full_message),
         ("TUI渲染: 使用raw_message", test_tui_render_uses_raw_message),
         ("向后兼容: from_dict缺raw_message", test_from_dict_backward_compatible),
+        ("Issue1: 并发安装handler线程安全", test_install_broadcast_handler_thread_safe),
+        ("Issue1: 并发读取handler线程安全", test_get_broadcast_handler_thread_safe),
+        ("Issue2: buffer使用deque类型", test_detail_log_buffer_is_deque),
+        ("Issue2: buffer有容量限制", test_detail_log_buffer_has_maxlen),
+        ("Issue2: buffer超出容量自动淘汰", test_detail_log_buffer_capacity_enforced),
+        ("Issue2: buffer与导出兼容", test_detail_log_buffer_export_compatible),
+        ("Issue2: buffer与过滤兼容", test_detail_log_buffer_filter_compatible),
     ]
 
     passed = 0

@@ -360,17 +360,20 @@ class LogBroadcastHandler(logging.Handler):
 
 
 _broadcast_handler: LogBroadcastHandler | None = None
+_broadcast_handler_lock = threading.Lock()
 
 
 def get_broadcast_handler() -> LogBroadcastHandler | None:
     """获取全局 LogBroadcastHandler 实例（若已创建）。"""
-    return _broadcast_handler
+    with _broadcast_handler_lock:
+        return _broadcast_handler
 
 
 def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     """创建并安装全局 LogBroadcastHandler 到 root logger。
 
     仅应被 Daemon 进程调用。TUI 进程无需安装。
+    使用线程锁保护，防止多线程并发安装导致重复 handler。
 
     Args:
         capacity: 环形缓冲区容量
@@ -380,12 +383,13 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     """
     global _broadcast_handler
 
-    if _broadcast_handler is not None:
+    with _broadcast_handler_lock:
+        if _broadcast_handler is not None:
+            return _broadcast_handler
+
+        _broadcast_handler = LogBroadcastHandler(capacity=capacity)
+
+        root_logger = logging.getLogger()
+        root_logger.addHandler(_broadcast_handler)
+
         return _broadcast_handler
-
-    _broadcast_handler = LogBroadcastHandler(capacity=capacity)
-
-    root_logger = logging.getLogger()
-    root_logger.addHandler(_broadcast_handler)
-
-    return _broadcast_handler

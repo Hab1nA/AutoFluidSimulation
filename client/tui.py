@@ -32,6 +32,7 @@ TUI 客户端主界面 (Textual-based Terminal UI)
 import sys
 import os
 import asyncio
+import collections
 import subprocess
 import threading
 from datetime import datetime
@@ -432,7 +433,7 @@ class PipelineTUI(App):
         self._last_log_id: int = 0
         self._log_filter_level: str | None = None
         self._log_filter_source: str | None = None
-        self._detail_log_buffer: list[dict] = []
+        self._detail_log_buffer: collections.deque[dict] = collections.deque(maxlen=2000)
 
     # ------------------------------------------------------------------
     # 界面布局
