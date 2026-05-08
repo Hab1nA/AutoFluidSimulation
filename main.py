@@ -108,7 +108,7 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
     if logger.handlers:
         return logger
     formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)-8s] %(message)s",
+        "[%(asctime)s] [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     fh = logging.FileHandler(log_file, encoding="utf-8")
