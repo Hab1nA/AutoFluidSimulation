@@ -162,6 +162,7 @@ class StepFileMonitor:
         )
         self._processed_files: Set[str] = set()
         self._known_files: Set[str] = set()
+        # 暂停控制：_paused事件控制监控循环暂停，_wake_event用于唤醒等待，_need_reset标记恢复时需要重置状态
         self._paused = threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
