@@ -38,18 +38,6 @@ impl LogEntry {
             _ => ratatui::style::Color::White,
         }
     }
-
-    pub fn source_icon(&self) -> &str {
-        match self.source.as_str() {
-            "local_ps" => "💻",
-            "remote_ps" => "🌐",
-            "com" => "🔧",
-            "scheduler" => "⚙️",
-            "system" => "📡",
-            "ipc" => "🔌",
-            _ => "📌",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

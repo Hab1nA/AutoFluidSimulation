@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOri
 use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
 
-fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
+pub fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
@@ -54,16 +54,15 @@ pub fn compute_detail_visual_lines(
 ) -> Vec<Line<'static>> {
     let mut visual_lines: Vec<Line> = Vec::new();
     for entry in log_buffer.filtered_entries(level_filter, source_filter) {
-        let icon = entry.source_icon();
         let color = entry.level_color();
         let level = entry.level.clone();
         let msg = entry.raw_message.clone();
-        let full = format!("{} [{}] {}", icon, level, msg);
+        let full = format!("[{}] {}", level, msg);
 
         let wrapped = wrap_text_to_width(&full, max_width);
         for (i, chunk) in wrapped.into_iter().enumerate() {
             if i == 0 {
-                let prefix = format!("{} [{}] ", icon, level);
+                let prefix = format!("[{}] ", level);
                 let prefix_display_w = unicode_width::UnicodeWidthStr::width(prefix.as_str());
                 let chunk_display_w = unicode_width::UnicodeWidthStr::width(chunk.as_str());
 
@@ -126,6 +125,26 @@ pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, 
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
         frame.render_stateful_widget(scrollbar, inner, scrollbar_state);
     }
+}
+
+pub fn get_raw_message_at_visual_line(
+    log_buffer: &LogBuffer,
+    level_filter: &Option<String>,
+    source_filter: &Option<String>,
+    max_width: usize,
+    visual_line: usize,
+) -> Option<String> {
+    let mut line_cursor = 0usize;
+    for entry in log_buffer.filtered_entries(level_filter, source_filter) {
+        let full = format!("[{}] {}", entry.level, entry.raw_message);
+        let wrapped = wrap_text_to_width(&full, max_width);
+        let line_count = wrapped.len().max(1);
+        if visual_line < line_cursor + line_count {
+            return Some(entry.raw_message.clone());
+        }
+        line_cursor += line_count;
+    }
+    None
 }
 
 pub fn render_detail_panel(

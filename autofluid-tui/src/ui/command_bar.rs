@@ -11,10 +11,10 @@ pub const BUTTON_DEFS: [(&str, &str); 8] = [
     ("⏸ Pause", "pause"),
     ("🔧 Check", "check"),
     ("📊 Status", "status"),
-    ("▶ D.Start", "daemon start"),
-    ("⏹ D.Stop", "daemon stop"),
+    ("▶ Daemon Start", "daemon start"),
+    ("⏹ Daemon Stop", "daemon stop"),
     ("🚪 Quit", "quit"),
-    ("⏹ FullQuit", "quit full"),
+    ("⏹ Quit Full", "quit full"),
 ];
 
 pub fn button_display_width(label: &str) -> u16 {
@@ -118,7 +118,7 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
     padded_spans.extend(spans);
 
     let buttons_line = Line::from(padded_spans);
-    let buttons = Paragraph::new(vec![Line::from(""), buttons_line])
+    let buttons = Paragraph::new(vec![Line::from(""), buttons_line, Line::from("")])
         .style(Style::default().bg(Color::Rgb(15, 52, 96)));
     frame.render_widget(buttons, buttons_area);
 

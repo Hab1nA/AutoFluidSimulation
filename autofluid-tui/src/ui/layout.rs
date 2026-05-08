@@ -18,7 +18,7 @@ impl AppLayout {
                 Constraint::Length(3),
                 Constraint::Length(1),
                 Constraint::Min(8),
-                Constraint::Length(5),
+                Constraint::Length(6),
             ])
             .split(area);
 
@@ -53,7 +53,7 @@ impl AppLayout {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Length(2),
+                Constraint::Length(3),
             ])
             .split(command_area);
 
