@@ -89,6 +89,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 state.needs_redraw = true;
             }
         }
+        if let Some(ct) = state.dialog_click_time {
+            if state.clicked_dialog_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
+                state.clicked_dialog_button = None;
+                state.dialog_click_time = None;
+                state.needs_redraw = true;
+            }
+        }
+        if let Some(ct) = state.detail_click_time {
+            if state.clicked_detail_row.is_some() && ct.elapsed() > Duration::from_millis(120) {
+                state.clicked_detail_row = None;
+                state.detail_click_time = None;
+                state.needs_redraw = true;
+            }
+        }
 
         if let Some(cmd) = state.pending_command.take() {
             let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
@@ -285,7 +299,7 @@ fn process_event(
             }
         }
         CrosstermEvent::Mouse(mouse) => {
-            handle_mouse(mouse, state, log_buffer);
+            handle_mouse(mouse, state, log_buffer, ipc, rt);
         }
         CrosstermEvent::Resize(w, h) => {
             state.update_terminal_size(w, h);
@@ -303,6 +317,8 @@ fn do_redraw(
     let mut table_sb = std::mem::take(&mut state.table_scrollbar_state);
     let mut info_sb = std::mem::take(&mut state.info_scrollbar_state);
     let mut detail_sb = std::mem::take(&mut state.detail_scrollbar_state);
+    let mut info_hsb = std::mem::take(&mut state.info_hscrollbar_state);
+    let mut detail_hsb = std::mem::take(&mut state.detail_hscrollbar_state);
 
     terminal.draw(|frame| {
         let area = frame.area();
@@ -310,22 +326,32 @@ fn do_redraw(
 
         state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-        let info_visual_count = ui::logs::compute_info_visual_lines(log_buffer, layout.info_panel.width.saturating_sub(3) as usize).len();
-        let detail_visual_count = ui::logs::compute_detail_visual_lines(log_buffer, &state.log_filter_level, &state.log_filter_source, layout.detail_panel.width.saturating_sub(3) as usize).len();
+        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer);
+        let info_visual_count = info_lines.0.len();
+        let info_max_width = info_lines.1;
+        let detail_lines = ui::logs::compute_detail_lines_no_wrap(log_buffer, &state.log_filter_level, &state.log_filter_source);
+        let detail_visual_count = detail_lines.0.len();
+        let detail_max_width = detail_lines.1;
+
+        let info_inner_height = layout.info_panel.height.saturating_sub(2) as usize;
+        let detail_inner_height = layout.detail_panel.height.saturating_sub(2) as usize;
+        let info_has_hscroll = info_max_width > layout.info_panel.width.saturating_sub(2) as usize;
+        let detail_has_hscroll = detail_max_width > layout.detail_panel.width.saturating_sub(2) as usize;
+        let info_content_height = if info_has_hscroll { info_inner_height.saturating_sub(1) } else { info_inner_height };
+        let detail_content_height = if detail_has_hscroll { detail_inner_height.saturating_sub(1) } else { detail_inner_height };
 
         if state.detail_log_auto_scroll {
-            let visible = layout.detail_panel.height.saturating_sub(2) as usize;
-            if detail_visual_count > visible {
-                state.detail_log_scroll = (detail_visual_count - visible) as u16;
+            if detail_visual_count > detail_content_height {
+                state.detail_log_scroll = (detail_visual_count - detail_content_height) as u16;
             }
         }
-        state.clamp_detail_scroll(detail_visual_count as u16, layout.detail_panel.height.saturating_sub(2));
-        state.clamp_info_scroll(info_visual_count as u16, layout.info_panel.height.saturating_sub(2));
+        state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
+        state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
 
         ui::header::render_header(frame, layout.header, &state);
         ui::header::render_info_bar(frame, layout.info_bar, &state);
         ui::table::render_table(frame, layout.status_table, &state, &mut table_sb);
-        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, &mut info_sb);
+        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, &mut info_sb, state.info_log_hscroll, &mut info_hsb);
         ui::logs::render_detail_panel(
             frame,
             layout.detail_panel,
@@ -336,18 +362,22 @@ fn do_redraw(
             state.detail_log_auto_scroll,
             state.focus_zone,
             &mut detail_sb,
+            state.hovered_detail_row,
+            state.clicked_detail_row,
+            state.detail_log_hscroll,
+            &mut detail_hsb,
         );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, &state);
 
         match state.ui_mode {
             UiMode::ConfirmDialog => {
                 if let Some(ref msg) = state.confirm_message {
-                    ui::dialogs::render_confirm_dialog(frame, area, msg);
+                    ui::dialogs::render_confirm_dialog(frame, area, msg, state.hovered_dialog_button, state.clicked_dialog_button);
                 }
             }
             UiMode::CheckResult => {
                 if let Some(ref data) = state.check_data {
-                    ui::dialogs::render_check_result(frame, area, data);
+                    ui::dialogs::render_check_result(frame, area, data, state.hovered_dialog_button, state.clicked_dialog_button);
                 }
             }
             UiMode::Normal => {}
@@ -357,6 +387,8 @@ fn do_redraw(
     state.table_scrollbar_state = table_sb;
     state.info_scrollbar_state = info_sb;
     state.detail_scrollbar_state = detail_sb;
+    state.info_hscrollbar_state = info_hsb;
+    state.detail_hscrollbar_state = detail_hsb;
 
     Ok(())
 }
@@ -365,7 +397,7 @@ fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer) {
+fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
         return;
@@ -385,6 +417,8 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
         MouseEventKind::Moved => {
             let prev_hover_row = state.hovered_table_row;
             let prev_hover_btn = state.hovered_button;
+            let prev_hover_detail = state.hovered_detail_row;
+            let prev_hover_dialog_btn = state.hovered_dialog_button;
 
             if in_table {
                 let inner_y = row.saturating_sub(layout.status_table.y + 1);
@@ -402,54 +436,106 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.hovered_table_row = None;
             }
 
+            if in_detail {
+                let inner_top = layout.detail_panel.y + 1;
+                let inner_bottom = layout.detail_panel.y + layout.detail_panel.height.saturating_sub(1);
+                if row >= inner_top && row < inner_bottom {
+                    let inner_y = row - inner_top;
+                    let visual_line = state.detail_log_scroll + inner_y;
+                    state.hovered_detail_row = Some(visual_line);
+                } else {
+                    state.hovered_detail_row = None;
+                }
+            } else {
+                state.hovered_detail_row = None;
+            }
+
             if in_buttons {
                 state.hovered_button = detect_button(col, row, &layout);
             } else {
                 state.hovered_button = None;
             }
 
-            if state.hovered_table_row != prev_hover_row || state.hovered_button != prev_hover_btn {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+                state.hovered_dialog_button = detect_dialog_button(col, row, area, &state);
+            } else {
+                state.hovered_dialog_button = None;
+            }
+
+            if state.hovered_table_row != prev_hover_row
+                || state.hovered_button != prev_hover_btn
+                || state.hovered_detail_row != prev_hover_detail
+                || state.hovered_dialog_button != prev_hover_dialog_btn
+            {
                 state.needs_redraw = true;
             }
         }
         MouseEventKind::ScrollUp => {
-            if in_table {
-                if state.table_scroll_offset > 0 {
-                    state.table_scroll_offset -= 1;
+            if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                if in_info {
+                    state.info_log_hscroll = state.info_log_hscroll.saturating_sub(5);
+                    state.needs_redraw = true;
+                } else if in_detail {
+                    state.detail_log_hscroll = state.detail_log_hscroll.saturating_sub(5);
+                    state.needs_redraw = true;
+                }
+            } else {
+                if in_table {
+                    if state.table_scroll_offset > 0 {
+                        state.table_scroll_offset -= 1;
+                        state.focus_zone = FocusZone::Table;
+                        state.needs_redraw = true;
+                    }
+                } else if in_info {
+                    if state.info_log_scroll > 0 {
+                        state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
+                        state.focus_zone = FocusZone::InfoLog;
+                        state.needs_redraw = true;
+                    }
+                } else if in_detail {
+                    if state.detail_log_scroll > 0 {
+                        state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
+                        state.detail_log_auto_scroll = false;
+                        state.focus_zone = FocusZone::DetailLog;
+                        state.needs_redraw = true;
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                if in_info {
+                    state.info_log_hscroll = state.info_log_hscroll.saturating_add(5);
+                    state.needs_redraw = true;
+                } else if in_detail {
+                    state.detail_log_hscroll = state.detail_log_hscroll.saturating_add(5);
+                    state.needs_redraw = true;
+                }
+            } else {
+                if in_table {
+                    state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
                     state.focus_zone = FocusZone::Table;
                     state.needs_redraw = true;
-                }
-            } else if in_info {
-                if state.info_log_scroll > 0 {
-                    state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
+                } else if in_info {
+                    state.info_log_scroll = state.info_log_scroll.saturating_add(3);
                     state.focus_zone = FocusZone::InfoLog;
                     state.needs_redraw = true;
-                }
-            } else if in_detail {
-                if state.detail_log_scroll > 0 {
-                    state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
-                    state.detail_log_auto_scroll = false;
+                } else if in_detail {
+                    state.detail_log_scroll = state.detail_log_scroll.saturating_add(3);
                     state.focus_zone = FocusZone::DetailLog;
                     state.needs_redraw = true;
                 }
             }
         }
-        MouseEventKind::ScrollDown => {
-            if in_table {
-                state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
-                state.focus_zone = FocusZone::Table;
-                state.needs_redraw = true;
-            } else if in_info {
-                state.info_log_scroll = state.info_log_scroll.saturating_add(3);
-                state.focus_zone = FocusZone::InfoLog;
-                state.needs_redraw = true;
-            } else if in_detail {
-                state.detail_log_scroll = state.detail_log_scroll.saturating_add(3);
-                state.focus_zone = FocusZone::DetailLog;
-                state.needs_redraw = true;
-            }
-        }
         MouseEventKind::Down(_button) => {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+                if let Some(btn_idx) = detect_dialog_button(col, row, area, state) {
+                    state.clicked_dialog_button = Some(btn_idx);
+                    state.dialog_click_time = Some(std::time::Instant::now());
+                    state.needs_redraw = true;
+                    return;
+                }
+            }
             if in_buttons {
                 if let Some(btn_idx) = detect_button(col, row, &layout) {
                     state.clicked_button = Some(btn_idx);
@@ -468,7 +554,8 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 let is_double_click = state.last_detail_click_row == Some(row)
                     && state.last_detail_click_time.map_or(false, |t| now.duration_since(t).as_millis() < 400);
                 if is_double_click {
-                    let inner_y = row.saturating_sub(layout.detail_panel.y + 1);
+                    let inner_top = layout.detail_panel.y + 1;
+                    let inner_y = row - inner_top;
                     let visual_line = state.detail_log_scroll as usize + inner_y as usize;
                     let max_width = layout.detail_panel.width.saturating_sub(2) as usize;
                     if let Some(msg) = ui::logs::get_raw_message_at_visual_line(
@@ -484,6 +571,8 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                             }
                         }
                     }
+                    state.clicked_detail_row = Some(state.detail_log_scroll + inner_y);
+                    state.detail_click_time = Some(now);
                     state.last_detail_click_time = None;
                     state.last_detail_click_row = None;
                 } else {
@@ -497,6 +586,16 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
         }
         MouseEventKind::Up(_button) => {
+            if let Some(btn_idx) = state.clicked_dialog_button {
+                if let Some(hover_idx) = detect_dialog_button(col, row, area, state) {
+                    if hover_idx == btn_idx {
+                        handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt);
+                    }
+                }
+                state.clicked_dialog_button = None;
+                state.needs_redraw = true;
+                return;
+            }
             if let Some(btn_idx) = state.clicked_button {
                 if in_buttons {
                     if let Some(hover_idx) = detect_button(col, row, &layout) {
@@ -539,4 +638,157 @@ fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
         offset += bw;
     }
     None
+}
+
+fn dialog_centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let popup_layout = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
+            ratatui::layout::Constraint::Percentage(percent_y),
+            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .constraints([
+            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
+            ratatui::layout::Constraint::Percentage(percent_x),
+            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: &AppState) -> Option<u8> {
+    let dialog_area = match state.ui_mode {
+        UiMode::ConfirmDialog => dialog_centered_rect(80, 30, area),
+        UiMode::CheckResult => dialog_centered_rect(80, 50, area),
+        UiMode::Normal => return None,
+    };
+
+    if !point_in_rect(col, row, dialog_area) {
+        return None;
+    }
+
+    let inner = ratatui::layout::Rect {
+        x: dialog_area.x + 1,
+        y: dialog_area.y + 1,
+        width: dialog_area.width.saturating_sub(2),
+        height: dialog_area.height.saturating_sub(2),
+    };
+
+    match state.ui_mode {
+        UiMode::ConfirmDialog => {
+            let msg_line_count = state.confirm_message
+                .as_ref()
+                .map(|m| m.lines().count())
+                .unwrap_or(0);
+            let btn_row_count: usize = 2;
+            let available_height = inner.height as usize;
+            let top_pad = if available_height > msg_line_count + btn_row_count {
+                (available_height - msg_line_count - btn_row_count) / 2
+            } else {
+                0
+            };
+            let btn_y = inner.y + (top_pad + msg_line_count + 2) as u16;
+            if row != btn_y {
+                return None;
+            }
+
+            let confirm_label = " 确认 [Y] ";
+            let cancel_label = " 取消 [N] ";
+            let confirm_w = unicode_width::UnicodeWidthStr::width(confirm_label) as u16;
+            let cancel_w = unicode_width::UnicodeWidthStr::width(cancel_label) as u16;
+            let gap: u16 = 3;
+            let total_w = confirm_w + cancel_w + gap;
+            let start_x = inner.x + (inner.width.saturating_sub(total_w)) / 2;
+
+            let confirm_start = start_x;
+            let confirm_end = confirm_start + confirm_w;
+            let cancel_start = confirm_end + gap;
+            let cancel_end = cancel_start + cancel_w;
+
+            if col >= confirm_start && col < confirm_end {
+                return Some(0);
+            }
+            if col >= cancel_start && col < cancel_end {
+                return Some(1);
+            }
+            None
+        }
+        UiMode::CheckResult => {
+            let content_lines = if let Some(data) = &state.check_data {
+                ui::dialogs::count_check_result_lines(data)
+            } else {
+                0
+            };
+
+            let close_label = " 关闭 [Q] ";
+            let close_w = unicode_width::UnicodeWidthStr::width(close_label) as u16;
+            let btn_y = inner.y + content_lines.min(inner.height as usize).saturating_sub(1) as u16;
+            if row != btn_y {
+                return None;
+            }
+            let start_x = inner.x + (inner.width.saturating_sub(close_w)) / 2;
+
+            if col >= start_x && col < start_x + close_w {
+                return Some(0);
+            }
+            None
+        }
+        UiMode::Normal => None,
+    }
+}
+
+fn handle_dialog_button_click(
+    btn_idx: u8,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+) {
+    match state.ui_mode {
+        UiMode::ConfirmDialog => {
+            match btn_idx {
+                0 => {
+                    if let Some(callback) = state.confirm_callback.take() {
+                        let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
+                        match result {
+                            command::CommandResult::FullQuit => {
+                                state.should_quit = true;
+                            }
+                            command::CommandResult::StopDaemon => {
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.full_quit());
+                                    rt.block_on(ipc.disconnect());
+                                }
+                                state.connected = false;
+                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    state.ui_mode = UiMode::Normal;
+                    state.confirm_message = None;
+                }
+                1 => {
+                    state.ui_mode = UiMode::Normal;
+                    state.confirm_message = None;
+                    state.confirm_callback = None;
+                }
+                _ => {}
+            }
+        }
+        UiMode::CheckResult => {
+            match btn_idx {
+                0 => {
+                    state.ui_mode = UiMode::Normal;
+                    state.check_data = None;
+                }
+                _ => {}
+            }
+        }
+        UiMode::Normal => {}
+    }
 }
