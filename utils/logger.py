@@ -284,14 +284,11 @@ class LogBroadcastHandler(logging.Handler):
         """判断日志记录是否来自轮询命令，需在 emit 阶段过滤。
 
         识别规则：
-        1. logger 名称包含 "ipc"（来自 IPC 子系统）
-        2. 日志消息中包含轮询命令名称（get_all_status / get_log_entries / get_engine_status）
+        1. 日志消息中包含轮询命令名称（get_all_status / get_log_entries / get_engine_status）
+        2. 或 logger 名称包含 "ipc" 且消息中包含这些命令
 
-        同时满足两个条件才判定为轮询日志，避免误过滤其他模块中
-        偶然包含这些命令名的日志。
+        轮询日志会被过滤，避免 TUI 详细日志界面被频繁的状态查询刷屏。
         """
-        if "ipc" not in record.name.lower():
-            return False
         msg = record.getMessage()
         for cmd in POLLING_COMMANDS:
             if cmd in msg:

@@ -7,32 +7,6 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOri
 use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
 
-pub fn wrap_text_to_width(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut result = Vec::new();
-    let mut current = String::new();
-    let mut current_w = 0usize;
-
-    for ch in text.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_w + cw > max_width && !current.is_empty() {
-            result.push(std::mem::take(&mut current));
-            current_w = 0;
-        }
-        current.push(ch);
-        current_w += cw;
-    }
-    if !current.is_empty() {
-        result.push(current);
-    }
-    if result.is_empty() {
-        result.push(String::new());
-    }
-    result
-}
-
 fn info_message_color(msg: &str) -> Color {
     if msg.contains('✅') {
         Color::Rgb(0, 204, 102)
@@ -49,64 +23,86 @@ fn info_message_color(msg: &str) -> Color {
     }
 }
 
-pub fn compute_info_visual_lines(log_buffer: &LogBuffer, max_width: usize) -> Vec<Line<'static>> {
-    let mut visual_lines: Vec<Line> = Vec::new();
+const HOVER_HIGHLIGHT_STYLE: Style = Style::new()
+    .bg(Color::Rgb(15, 52, 96))
+    .add_modifier(Modifier::BOLD);
+
+const CLICK_HIGHLIGHT_STYLE: Style = Style::new()
+    .fg(Color::Rgb(0, 0, 0))
+    .bg(Color::Rgb(255, 255, 255))
+    .add_modifier(Modifier::BOLD);
+
+pub fn compute_info_lines_no_wrap(log_buffer: &LogBuffer) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut max_width: usize = 0;
     for msg in &log_buffer.info_messages {
         let color = info_message_color(msg);
-        for chunk in wrap_text_to_width(msg, max_width) {
-            visual_lines.push(Line::from(Span::styled(
-                chunk,
-                Style::default().fg(color),
-            )));
+        let w = unicode_width::UnicodeWidthStr::width(msg.as_str());
+        if w > max_width {
+            max_width = w;
         }
+        lines.push(Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(color),
+        )));
     }
-    visual_lines
+    (lines, max_width)
 }
 
-pub fn compute_detail_visual_lines(
+pub fn compute_detail_lines_no_wrap(
     log_buffer: &LogBuffer,
     level_filter: &Option<String>,
     source_filter: &Option<String>,
-    max_width: usize,
-) -> Vec<Line<'static>> {
-    let mut visual_lines: Vec<Line> = Vec::new();
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut max_width: usize = 0;
     for entry in log_buffer.filtered_entries(level_filter, source_filter) {
         let color = entry.level_color();
         let level = entry.level.clone();
+        let prefix = format!("[{}] ", level);
         let msg = entry.raw_message.clone();
-        let full = format!("[{}] {}", level, msg);
-
-        let wrapped = wrap_text_to_width(&full, max_width);
-        for (i, chunk) in wrapped.into_iter().enumerate() {
-            if i == 0 {
-                let prefix = format!("[{}] ", level);
-                let prefix_display_w = unicode_width::UnicodeWidthStr::width(prefix.as_str());
-                let chunk_display_w = unicode_width::UnicodeWidthStr::width(chunk.as_str());
-
-                if chunk_display_w > prefix_display_w {
-                    let msg_text = chunk.chars().skip(prefix.chars().count()).collect::<String>();
-                    visual_lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(color)),
-                        Span::raw(msg_text),
-                    ]));
-                } else {
-                    visual_lines.push(Line::from(Span::styled(
-                        chunk,
-                        Style::default().fg(color),
-                    )));
-                }
-            } else {
-                visual_lines.push(Line::from(Span::styled(
-                    format!("  {}", chunk),
-                    Style::default().fg(Color::Rgb(180, 180, 180)),
-                )));
-            }
+        let full = format!("{}{}", prefix, msg);
+        let w = unicode_width::UnicodeWidthStr::width(full.as_str());
+        if w > max_width {
+            max_width = w;
         }
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(color)),
+            Span::raw(msg),
+        ]));
     }
-    visual_lines
+    (lines, max_width)
 }
 
-pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, scroll_offset: u16, focus_zone: FocusZone, scrollbar_state: &mut ScrollbarState) {
+fn compute_layout(inner: Rect, total: usize, max_content_width: usize) -> (usize, usize, bool, bool) {
+    let visible_height = inner.height as usize;
+    let has_vscroll = total > visible_height;
+    let has_hscroll = max_content_width > inner.width as usize;
+
+    let content_height = if has_hscroll {
+        inner.height.saturating_sub(1) as usize
+    } else {
+        inner.height as usize
+    };
+    let content_width = if has_vscroll {
+        inner.width.saturating_sub(1) as usize
+    } else {
+        inner.width as usize
+    };
+
+    (content_height, content_width, has_vscroll, has_hscroll)
+}
+
+pub fn render_info_panel(
+    frame: &mut Frame,
+    area: Rect,
+    log_buffer: &LogBuffer,
+    scroll_offset: u16,
+    focus_zone: FocusZone,
+    scrollbar_state: &mut ScrollbarState,
+    hscroll: u16,
+    hscrollbar_state: &mut ScrollbarState,
+) {
     let border_style = if focus_zone == FocusZone::InfoLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
     } else {
@@ -123,38 +119,54 @@ pub fn render_info_panel(frame: &mut Frame, area: Rect, log_buffer: &LogBuffer, 
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let content_width = inner.width.saturating_sub(1) as usize;
-    let visual_lines = compute_info_visual_lines(log_buffer, content_width);
-    let total = visual_lines.len();
-    let visible = inner.height as usize;
+    let (lines, max_content_width) = compute_info_lines_no_wrap(log_buffer);
+    let total = lines.len();
+    let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
+
     let scroll = scroll_offset as usize;
     let start = scroll.min(total);
-    let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
+    let visible_lines: Vec<Line> = lines.into_iter().skip(start).take(content_height).collect();
 
     let text_area = Rect {
         x: inner.x,
         y: inner.y,
-        width: inner.width.saturating_sub(1),
-        height: inner.height,
-    };
-    let scrollbar_area = Rect {
-        x: inner.x + inner.width.saturating_sub(1),
-        y: inner.y,
-        width: 1,
-        height: inner.height,
+        width: content_width as u16,
+        height: content_height as u16,
     };
 
     let paragraph = Paragraph::new(visible_lines)
-        .style(Style::default().bg(Color::Rgb(13, 13, 13)));
+        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
+        .scroll((0, hscroll));
     frame.render_widget(paragraph, text_area);
 
-    if total > visible {
+    if has_vscroll {
+        let scrollbar_area = Rect {
+            x: inner.x + inner.width.saturating_sub(1),
+            y: inner.y,
+            width: 1,
+            height: content_height as u16,
+        };
         *scrollbar_state = ScrollbarState::new(total)
-            .viewport_content_length(visible)
+            .viewport_content_length(content_height)
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
         frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
+    }
+
+    if has_hscroll {
+        let hscrollbar_area = Rect {
+            x: inner.x,
+            y: inner.y + content_height as u16,
+            width: content_width as u16,
+            height: 1,
+        };
+        *hscrollbar_state = ScrollbarState::new(max_content_width)
+            .viewport_content_length(content_width)
+            .position(hscroll as usize);
+        let hscrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
+        frame.render_stateful_widget(hscrollbar, hscrollbar_area, hscrollbar_state);
     }
 }
 
@@ -162,20 +174,15 @@ pub fn get_raw_message_at_visual_line(
     log_buffer: &LogBuffer,
     level_filter: &Option<String>,
     source_filter: &Option<String>,
-    max_width: usize,
+    _max_width: usize,
     visual_line: usize,
 ) -> Option<String> {
-    let mut line_cursor = 0usize;
-    for entry in log_buffer.filtered_entries(level_filter, source_filter) {
-        let full = format!("[{}] {}", entry.level, entry.raw_message);
-        let wrapped = wrap_text_to_width(&full, max_width);
-        let line_count = wrapped.len().max(1);
-        if visual_line < line_cursor + line_count {
-            return Some(entry.raw_message.clone());
-        }
-        line_cursor += line_count;
+    let entries: Vec<_> = log_buffer.filtered_entries(level_filter, source_filter).collect();
+    if visual_line < entries.len() {
+        Some(entries[visual_line].raw_message.clone())
+    } else {
+        None
     }
-    None
 }
 
 pub fn render_detail_panel(
@@ -188,6 +195,10 @@ pub fn render_detail_panel(
     auto_scroll: bool,
     focus_zone: FocusZone,
     scrollbar_state: &mut ScrollbarState,
+    hovered_detail_row: Option<u16>,
+    clicked_detail_row: Option<u16>,
+    hscroll: u16,
+    hscrollbar_state: &mut ScrollbarState,
 ) {
     let border_style = if focus_zone == FocusZone::DetailLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
@@ -216,37 +227,76 @@ pub fn render_detail_panel(
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let content_width = inner.width.saturating_sub(1) as usize;
-    let visual_lines = compute_detail_visual_lines(log_buffer, level_filter, source_filter, content_width);
-    let total = visual_lines.len();
-    let visible = inner.height as usize;
+    let (lines, max_content_width) = compute_detail_lines_no_wrap(log_buffer, level_filter, source_filter);
+    let total = lines.len();
+    let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
+
     let scroll = scroll_offset as usize;
     let start = scroll.min(total);
-    let visible_lines: Vec<Line> = visual_lines.into_iter().skip(start).take(visible).collect();
+
+    let visible_lines: Vec<Line> = lines
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .take(content_height)
+        .map(|(idx, mut line)| {
+            let is_clicked = clicked_detail_row == Some(idx as u16);
+            let is_hovered = !is_clicked && hovered_detail_row == Some(idx as u16);
+            let highlight_style = if is_clicked {
+                CLICK_HIGHLIGHT_STYLE
+            } else if is_hovered {
+                HOVER_HIGHLIGHT_STYLE
+            } else {
+                Style::default()
+            };
+            if is_clicked || is_hovered {
+                for span in &mut line.spans {
+                    span.style = span.style.patch(highlight_style);
+                }
+            }
+            line
+        })
+        .collect();
 
     let text_area = Rect {
         x: inner.x,
         y: inner.y,
-        width: inner.width.saturating_sub(1),
-        height: inner.height,
-    };
-    let scrollbar_area = Rect {
-        x: inner.x + inner.width.saturating_sub(1),
-        y: inner.y,
-        width: 1,
-        height: inner.height,
+        width: content_width as u16,
+        height: content_height as u16,
     };
 
     let paragraph = Paragraph::new(visible_lines)
-        .style(Style::default().bg(Color::Rgb(13, 13, 13)));
+        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
+        .scroll((0, hscroll));
     frame.render_widget(paragraph, text_area);
 
-    if total > visible {
+    if has_vscroll {
+        let scrollbar_area = Rect {
+            x: inner.x + inner.width.saturating_sub(1),
+            y: inner.y,
+            width: 1,
+            height: content_height as u16,
+        };
         *scrollbar_state = ScrollbarState::new(total)
-            .viewport_content_length(visible)
+            .viewport_content_length(content_height)
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .style(Style::default().fg(Color::Rgb(100, 100, 100)));
         frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
+    }
+
+    if has_hscroll {
+        let hscrollbar_area = Rect {
+            x: inner.x,
+            y: inner.y + content_height as u16,
+            width: content_width as u16,
+            height: 1,
+        };
+        *hscrollbar_state = ScrollbarState::new(max_content_width)
+            .viewport_content_length(content_width)
+            .position(hscroll as usize);
+        let hscrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
+        frame.render_stateful_widget(hscrollbar, hscrollbar_area, hscrollbar_state);
     }
 }
