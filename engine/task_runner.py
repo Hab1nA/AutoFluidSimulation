@@ -1554,11 +1554,9 @@ class TaskRunner:
             "remote_checks": {},
         }
 
-        # ---- 本地检查 ----
         checks = {
             "SW模型": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
-            "SW宏文件": LOCAL_PATHS["sw_macro"],
             "STEP目录": LOCAL_PATHS["step_dir"],
             "SC程序": LOCAL_PATHS["sc_exe"],
             "SC脚本": LOCAL_PATHS["sc_script"],
