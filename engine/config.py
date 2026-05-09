@@ -44,11 +44,6 @@ LOCAL_PATHS = {
         "AUTOFLUID_SW_EXCEL",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx",
     ),
-    # SolidWorks 宏文件（已弃用 — STEP 导出改为直接 COM 调用，不再依赖宏文件）
-    "sw_macro": _env_override(
-        "AUTOFLUID_SW_MACRO",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\Macro1.swp",
-    ),
     # STEP 文件输出目录（直接 COM 调用导出 STEP 到此）
     "step_dir": _env_override(
         "AUTOFLUID_STEP_DIR",

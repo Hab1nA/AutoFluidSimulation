@@ -882,7 +882,6 @@ class TaskRunner:
 
         sw_model = LOCAL_PATHS["sw_model"]
         excel_path = LOCAL_PATHS.get("excel", "")
-        sw_macro = LOCAL_PATHS.get("sw_macro", "")
         step_dir = LOCAL_PATHS.get("step_dir", "")
         doc_type = self._guess_sw_doc_type(sw_model)
 
