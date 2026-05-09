@@ -1346,9 +1346,21 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
                 return False
 
-        except (OSError, ValueError, RuntimeError) as e:
-            logger.error(f"SC 执行异常: {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, str(e))
+        except OSError as e:
+            logger.error(f"SC 执行失败 (IO错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"IO错误: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"SC 执行失败 (配置错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"配置错误: {e}")
+            return False
+        except RuntimeError as e:
+            logger.error(f"SC 执行失败 (运行时错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"运行时错误: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"SC 执行失败 (未知错误): {e}", exc_info=True)
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"未知错误: {e}")
             return False
 
     # ------------------------------------------------------------------

@@ -129,7 +129,10 @@ def _run_taskkill(pid: int) -> bool:
             check=False,
         )
         return result.returncode == 0
-    except (OSError, subprocess.SubprocessError) as e:
+    except OSError as e:
+        print(f"  [警告] taskkill 失败 (PID: {pid}): {e}")
+        return False
+    except subprocess.SubprocessError as e:
         print(f"  [警告] taskkill 失败 (PID: {pid}): {e}")
         return False
 

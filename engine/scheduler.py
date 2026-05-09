@@ -225,7 +225,7 @@ class PipelineScheduler:
                             ["taskkill", "/f", "/im", "SLDWORKS.exe"],
                             capture_output=True, timeout=30,
                         )
-                    except Exception:
+                    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                         pass
                     # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
                     logger.info("等待 SolidWorks 进程完全退出...")
@@ -240,7 +240,7 @@ class PipelineScheduler:
                             if "SLDWORKS.exe" not in check.stdout:
                                 logger.info("✓ SolidWorks 进程已退出")
                                 break
-                        except Exception:
+                        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                             break
                     # 额外冷却确保 COM 子系统完全释放
                     time.sleep(5)

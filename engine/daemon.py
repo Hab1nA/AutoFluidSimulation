@@ -150,13 +150,7 @@ class PipelineDaemon:
                 pass  # Windows 不支持某些信号
 
     def _load_excel_data(self):
-        """从 Excel 加载构型数据并同步到状态库。
-
-        启动时自动与设计表同步：
-        - 新增设计表中的构型（状态置为 Waiting）
-        - 保留已有构型的状态（断点续传）
-        - 删除设计表中已不存在的构型
-        """
+        """从 Excel 加载构型数据并同步到状态库。"""
         excel_path = LOCAL_PATHS["excel"]
         try:
             configs = read_model_configs(excel_path)
@@ -165,8 +159,14 @@ class PipelineDaemon:
                 return
             self.state.load_configs(configs)
             logger.info(f"已从 Excel 同步 {len(configs)} 个构型到状态库")
-        except (ValueError, OSError) as e:
-            logger.error(f"Excel 数据加载失败: {e}")
+        except FileNotFoundError as e:
+            logger.error(f"Excel 文件未找到: {e}")
+        except ValueError as e:
+            logger.error(f"Excel 数据格式错误: {e}")
+        except OSError as e:
+            logger.error(f"Excel 读取失败: {e}")
+        except Exception as e:
+            logger.error(f"Excel 数据加载失败: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # IPC 命令处理器

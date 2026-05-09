@@ -215,8 +215,8 @@ def ensure_directories():
         if path:
             try:
                 os.makedirs(path, exist_ok=True)
-            except PermissionError:
-                print(f"[WARNING] 权限不足，无法创建目录: {path}", file=sys.stderr)
+            except PermissionError as e:
+                print(f"[WARNING] 权限不足，无法创建目录: {path}: {e}", file=sys.stderr)
             except OSError as e:
                 print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
 
@@ -246,5 +246,4 @@ def validate_config() -> list:
     return warnings
 
 
-# 远程标志目录（在首次 SSH 连接时创建）
-REMOTE_FLAG_DIR = REMOTE_CONFIG["flag_dir"]
+

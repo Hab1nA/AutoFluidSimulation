@@ -55,12 +55,7 @@ class RemoteWorkstation:
     # ------------------------------------------------------------------
 
     def connect(self) -> bool:
-        """
-        建立 SSH 连接。
-
-        Returns:
-            True 表示连接成功，False 表示失败
-        """
+        """建立 SSH 连接。"""
         if paramiko is None:
             raise ModuleNotFoundError(
                 "未安装依赖 paramiko。请执行: pip install -r requirements.txt"
@@ -77,6 +72,9 @@ class RemoteWorkstation:
                 look_for_keys=False,
                 allow_agent=False,
             )
+            transport = self._ssh.get_transport()
+            if transport:
+                transport.set_keepalive(30)
             self._sftp = self._ssh.open_sftp()
             logger.info(f"SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
@@ -118,20 +116,10 @@ class RemoteWorkstation:
     # ------------------------------------------------------------------
 
     def upload_file(self, local_path: str, remote_path: str) -> bool:
-        """
-        通过 SFTP 上传文件到远程工作站。
-
-        Args:
-            local_path: 本地文件路径
-            remote_path: 远程目标路径
-
-        Returns:
-            True 表示上传成功
-        """
+        """通过 SFTP 上传文件到远程工作站。"""
         if not self.ensure_connected():
             return False
         try:
-            # 确保远程目录存在
             remote_dir = os.path.dirname(remote_path)
             self._ensure_remote_dir(remote_dir)
 
@@ -141,6 +129,7 @@ class RemoteWorkstation:
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"文件上传失败: {e}")
+            self.disconnect()
             return False
 
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
@@ -219,16 +208,7 @@ class RemoteWorkstation:
     # ------------------------------------------------------------------
 
     def exec_command(self, command: str, timeout: int = 30) -> tuple:
-        """
-        在远程工作站执行命令（同步等待完成）。
-
-        Args:
-            command: 要执行的命令
-            timeout: 超时时间（秒）
-
-        Returns:
-            (stdout, stderr, exit_code) 元组
-        """
+        """在远程工作站执行命令（同步等待完成）。"""
         if not self.ensure_connected():
             return ("", "SSH 未连接", -1)
         try:
@@ -237,12 +217,26 @@ class RemoteWorkstation:
             exit_code = stdout.channel.recv_exit_status()
             out_raw = stdout.read()
             err_raw = stderr.read()
-            # 远程为 Windows 中文系统，优先尝试 GBK 解码，回退到 UTF-8
             out = self._decode_remote_output(out_raw)
             err = self._decode_remote_output(err_raw)
             return (out, err, exit_code)
-        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+        except (paramiko.SSHException, paramiko.AuthenticationException) as e:
+            logger.error(f"SSH 认证或协议异常: {e}")
+            self.disconnect()
+            return ("", str(e), -1)
+        except socket.timeout:
+            logger.error("远程命令执行超时")
+            return ("", "命令执行超时", -1)
+        except OSError as e:
             logger.error(f"远程命令执行失败: {e}")
+            self.disconnect()
+            return ("", str(e), -1)
+        except EOFError as e:
+            logger.error(f"SSH 连接已断开: {e}")
+            self.disconnect()
+            return ("", str(e), -1)
+        except Exception as e:
+            logger.error(f"远程命令执行未知异常: {e}")
             return ("", str(e), -1)
 
     @staticmethod
