@@ -127,6 +127,8 @@ pub struct AppState {
     pub table_scrollbar_state: ScrollbarState,
     pub info_scrollbar_state: ScrollbarState,
     pub detail_scrollbar_state: ScrollbarState,
+    pub last_detail_click_time: Option<std::time::Instant>,
+    pub last_detail_click_row: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

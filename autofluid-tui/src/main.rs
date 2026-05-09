@@ -365,7 +365,7 @@ fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
-fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer) {
+fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
         return;
@@ -464,6 +464,32 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, _log_buffer: &LogBuffer
                 state.needs_redraw = true;
             } else if in_detail {
                 state.focus_zone = FocusZone::DetailLog;
+                let now = std::time::Instant::now();
+                let is_double_click = state.last_detail_click_row == Some(row)
+                    && state.last_detail_click_time.map_or(false, |t| now.duration_since(t).as_millis() < 400);
+                if is_double_click {
+                    let inner_y = row.saturating_sub(layout.detail_panel.y + 1);
+                    let visual_line = state.detail_log_scroll as usize + inner_y as usize;
+                    let max_width = layout.detail_panel.width.saturating_sub(2) as usize;
+                    if let Some(msg) = ui::logs::get_raw_message_at_visual_line(
+                        log_buffer,
+                        &state.log_filter_level,
+                        &state.log_filter_source,
+                        max_width,
+                        visual_line,
+                    ) {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if clipboard.set_text(&msg).is_ok() {
+                                log_buffer.push_info(format!("已复制到剪贴板: {}", if msg.chars().count() > 60 { let s: String = msg.chars().take(60).collect(); format!("{}...", s) } else { msg.clone() }));
+                            }
+                        }
+                    }
+                    state.last_detail_click_time = None;
+                    state.last_detail_click_row = None;
+                } else {
+                    state.last_detail_click_time = Some(now);
+                    state.last_detail_click_row = Some(row);
+                }
                 state.needs_redraw = true;
             } else if in_cmd_input {
                 state.focus_zone = FocusZone::CommandInput;
