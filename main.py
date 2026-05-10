@@ -49,6 +49,27 @@ def _find_rust_tui_binary():
     return None
 
 
+def _check_rust_tui_source():
+    tui_dir = os.path.join(PROJECT_DIR, "autofluid-tui")
+    cargo_toml = os.path.join(tui_dir, "Cargo.toml")
+    return os.path.isdir(tui_dir) and os.path.isfile(cargo_toml)
+
+
+def _print_rust_tui_not_found_help():
+    print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
+    if _check_rust_tui_source():
+        print(file=sys.stderr)
+        print("检测到 autofluid-tui/Cargo.toml 存在，源码完整但尚未编译。", file=sys.stderr)
+        print("请执行以下任一命令进行编译：", file=sys.stderr)
+        print("  1. cd autofluid-tui && cargo build --release", file=sys.stderr)
+        print("  2. 运行 rebuild_tui.bat（Windows 一键构建脚本）", file=sys.stderr)
+    else:
+        print(file=sys.stderr)
+        print("未检测到 autofluid-tui/Cargo.toml，Rust TUI 源码可能缺失。", file=sys.stderr)
+        print("请确认 autofluid-tui/ 目录存在且包含完整的 Rust 项目文件。", file=sys.stderr)
+        print("可通过 git 恢复: git checkout -- autofluid-tui/", file=sys.stderr)
+
+
 def _ensure_dirs():
     os.makedirs(PID_DIR, exist_ok=True)
 
@@ -407,8 +428,7 @@ def _run_all_mode():
             tui_proc.wait()
         else:
             sp_logger.error("未找到 Rust TUI 二进制文件")
-            print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
-            print("请先编译: 在 autofluid-tui/ 目录下运行 cargo build --release", file=sys.stderr)
+            _print_rust_tui_not_found_help()
     except Exception as e:
         sp_logger.error(f"TUI Client 异常退出: {e}", exc_info=True)
         print(f"\n[错误] TUI 客户端异常退出: {e}", file=sys.stderr)
@@ -469,8 +489,7 @@ def main():
             except KeyboardInterrupt:
                 sys.exit(0)
         else:
-            print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
-            print("请先编译: 在 autofluid-tui/ 目录下运行 cargo build --release", file=sys.stderr)
+            _print_rust_tui_not_found_help()
             sys.exit(1)
     elif args.all:
         _run_all_mode()
