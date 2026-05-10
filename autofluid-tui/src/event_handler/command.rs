@@ -123,17 +123,10 @@ pub async fn dispatch_command(
             let config_arg = parts[1];
             let step_arg = parts[2];
 
-            let _config_value = if config_arg.eq_ignore_ascii_case("all") {
-                serde_json::Value::String("all".to_string())
-            } else {
-                match config_arg.parse::<u64>() {
-                    Ok(n) => serde_json::Value::Number(n.into()),
-                    Err(_) => {
-                        log_buffer.push_info("❌ 构型名称必须是整数或 \"all\"".to_string());
-                        return CommandResult::None;
-                    }
-                }
-            };
+            if !config_arg.eq_ignore_ascii_case("all") && config_arg.parse::<u64>().is_err() {
+                log_buffer.push_info("❌ 构型名称必须是整数或 \"all\"".to_string());
+                return CommandResult::None;
+            }
 
             let step_name = if step_arg.eq_ignore_ascii_case("all") {
                 None

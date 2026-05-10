@@ -1,6 +1,3 @@
-pub const VALID_LOG_LEVELS: [&str; 5] = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
-pub const VALID_LOG_SOURCES: [&str; 6] = ["local_ps", "remote_ps", "com", "scheduler", "system", "ipc"];
-
 #[derive(Debug, Clone)]
 pub enum FilterType {
     Level(String),
