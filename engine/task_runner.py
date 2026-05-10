@@ -704,7 +704,7 @@ class TaskRunner:
             f"[COM验证] {label} 所有验证方法均失败，"
             f"对象可能为无效 COM 代理"
         )
-        return True
+        return False
     # swDocumentTypes_e
     _SW_DOC_PART = 1
     _SW_DOC_ASSEMBLY = 2

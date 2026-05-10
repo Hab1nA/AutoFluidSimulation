@@ -6,9 +6,11 @@ const MAX_INFO_BUFFER: usize = 200;
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub id: u64,
+    #[allow(dead_code)]
     pub timestamp: String,
     pub level: String,
     pub source: String,
+    #[allow(dead_code)]
     pub logger_name: String,
     pub message: String,
     pub raw_message: String,
@@ -68,6 +70,7 @@ impl LogBuffer {
         self.info_messages.push_back(message);
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.detail_buffer.clear();
         self.info_messages.clear();
@@ -93,6 +96,7 @@ impl LogBuffer {
         })
     }
 
+    #[allow(dead_code)]
     pub fn filtered_entries_count(
         &self,
         level_filter: &Option<String>,

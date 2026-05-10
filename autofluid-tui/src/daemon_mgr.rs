@@ -56,16 +56,4 @@ impl DaemonManager {
         }
         Ok(())
     }
-
-    pub fn is_running(&mut self) -> bool {
-        if let Some(ref mut child) = self.process {
-            match child.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) => true,
-                Err(_) => false,
-            }
-        } else {
-            false
-        }
-    }
 }
