@@ -1,6 +1,6 @@
 # 🚀 液氧甲烷火箭发动机仿真总控程序
 
-> **Pipeline Daemon Engine v2.1.0** — 全自动流水线式 CFD 仿真调度系统
+> **Pipeline Daemon Engine v2.2.0** — 全自动流水线式 CFD 仿真调度系统
 
 ---
 
@@ -51,6 +51,7 @@
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.2.0** | 2026-05 | 移除 Python Textual TUI，统一使用 Rust ratatui TUI；新增滚动条拖拽（垂直/水平）；信息面板和详细日志面板支持水平滚动；对话框支持内容滚动和鼠标按钮交互；双击详细日志行复制到剪贴板；Rust TUI 编译状态检查与友好错误提示；新增分布式架构改造路线图（ROADMAP.md） |
 | **v2.1.0** | 2026-05 | 新增设计表自动检测与多策略导入（InsertFamilyTableOpen → COM 直接设参降级）；递归深度安全限制与优雅降级；Excel 设计表格式预验证；文件监控增强（SW 宏重试前重置监控状态）；TUI 新增 Daemon 启停控制按钮与增量表格更新；命令日志 IPC 通道 |
 | **v2.0.0** | 2025-05 | 架构重写：SW 导出从宏文件驱动改为直接 COM API 调用；C/S 分离 IPC 架构；Rust TUI 界面（ratatui）；DAG 调度器与全局屏障；SQLite WAL 状态持久化；远程 SSH 后台任务编排 |
 | **v1.0.0** | 2025-04 | 初始原型：基于 SolidWorks 宏文件 (`Macro1.swp`) 的 STEP 批量导出；基础流水线控制 |
@@ -114,7 +115,7 @@ graph TB
 | **TaskRunner** | 执行各阶段具体操作，三层 SW 启动降级 | win32com / subprocess / paramiko |
 | **StepFileMonitor** | 检测 SW 导出的 STEP 文件，文件大小稳定判定 | 轮询 + 历史采样 |
 | **IPC Server/Client** | Daemon 与 TUI 间通信 | TCP Socket + JSON |
-| **PipelineTUI** | 交互式终端界面，增量表格更新 | Rust ratatui 框架 |
+| **PipelineTUI** | 交互式终端界面，增量表格更新，滚动条拖拽，鼠标交互，剪贴板复制 | Rust ratatui 框架 |
 
 ---
 
@@ -176,8 +177,11 @@ AutoFluidSimulation/
 ├── main.py                  # 总控程序入口（支持 --daemon / --client / --all）
 ├── start_daemon.py          # 后台 Daemon 启动脚本（推荐）
 ├── start_client.py          # TUI 客户端启动脚本（推荐）
+├── rebuild_tui.bat          # Rust TUI 一键构建脚本（含选择性清理）
 ├── requirements.txt         # Python 依赖清单
 ├── README.md                # 本文件
+├── CODE_WIKI.md             # 项目代码 Wiki 文档
+├── ROADMAP.md               # 分布式架构改造路线图
 ├── .gitignore               # Git 忽略规则
 │
 ├── engine/                  # 后台引擎模块
@@ -197,10 +201,21 @@ AutoFluidSimulation/
 │   ├── ssh_client.py        # RemoteWorkstation：SSH/SFTP 远程操作封装
 │   └── logger.py            # 统一日志工具
 │
+├── autofluid-tui/           # Rust TUI 客户端（唯一前端界面）
+│   ├── Cargo.toml           # Rust 项目配置 & 依赖
+│   └── src/
+│       ├── main.rs          # 异步主循环 + 鼠标事件处理
+│       ├── daemon_mgr.rs    # Daemon 进程管理器
+│       ├── ipc/             # IPC 通信模块
+│       ├── state/           # 应用状态模块
+│       ├── event_handler/   # 事件处理模块
+│       └── ui/              # UI 渲染模块（含 scrollbar.rs 滚动条组件）
+│
 ├── tests/                   # 测试模块
 │   ├── test_pause_start.py          # 暂停/启动功能测试
 │   ├── test_sw_export_workflow.py   # SW 导出工作流测试
-│   └── test_sw_step_naming.py       # SW 步骤命名测试
+│   ├── test_sw_step_naming.py       # SW 步骤命名测试
+│   └── test_detail_log.py          # 详细日志功能测试
 │
 └── tools/                   # 开发/诊断工具
     ├── test_direct_step_export.py   # 直接 COM 导出测试
@@ -486,7 +501,7 @@ python start_daemon.py
 ```
 ============================================================
   液氧甲烷火箭发动机仿真 - 后台调度引擎
-  Pipeline Daemon Engine v2.1.0
+  Pipeline Daemon Engine v2.2.0
 ============================================================
 
 启动后将监听 IPC 连接，等待 TUI 客户端...
@@ -591,7 +606,7 @@ ENGINE_CONFIG = {
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.1.0         │  ← 标题栏
+│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.2.0         │  ← 标题栏
 │  引擎: 运行中  |  构型数: 12  |  屏障: 未通过      │  ← 信息栏
 ├──────────────────────────────────────────────────┤
 │  构型  │ SW导出  │ SC转换  │ 文件传输│ 网格划分│ 仿真求解│  ← 状态表格
@@ -838,6 +853,6 @@ AUTOFLUID_SSH_PASSWORD=your_password
 
 ---
 
-> **当前版本**: v2.1.0
+> **当前版本**: v2.2.0
 > **开发周期**: 2025-04 — 2026-05
 > **适用场景**: 液氧甲烷火箭发动机喷注器构型批量 CFD 仿真

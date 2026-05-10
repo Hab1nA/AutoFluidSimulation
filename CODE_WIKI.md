@@ -1,7 +1,7 @@
 # AutoFluid 仿真流水线总控系统 — Code Wiki
 
 > **项目全称**：液氧甲烷火箭发动机仿真自动化流水线总控程序
-> **版本**：v2.1.0
+> **版本**：v2.2.0
 > **语言栈**：Python（后端引擎） + Rust（TUI 客户端）
 > **目标平台**：本地 Windows PC + 远程 Windows 工作站
 
@@ -127,16 +127,16 @@ autofluid/
 │   ├── ssh_client.py        # SSH/SFTP 客户端（paramiko 封装）
 │   └── excel_reader.py      # Excel 参数表读取器
 │
-├── autofluid-tui/           # 🦀 Rust TUI 客户端（高性能替代方案）
+├── autofluid-tui/           # 🦀 Rust TUI 客户端（唯一前端界面）
 │   ├── Cargo.toml           # Rust 项目配置 & 依赖
 │   └── src/
-│       ├── main.rs          # 异步主循环（tokio + ratatui）
+│       ├── main.rs          # 异步主循环（tokio + ratatui + 鼠标事件处理）
 │       ├── daemon_mgr.rs    # Daemon 进程管理器
 │       ├── ipc.rs           # IPC 模块入口
 │       │   ├── protocol.rs  # IPC 协议（serde 序列化）
 │       │   └── client.rs    # 异步 IPC 客户端（tokio TcpStream）
 │       ├── state.rs         # 状态模块入口
-│       │   ├── app_state.rs # 应用全局状态（AppState）
+│       │   ├── app_state.rs # 应用全局状态（AppState + 滚动条拖拽状态）
 │       │   ├── log_buffer.rs# 日志环形缓冲区（LogBuffer）
 │       │   └── filter.rs    # 日志过滤器
 │       ├── event_handler.rs # 事件处理模块入口
@@ -146,14 +146,20 @@ autofluid/
 │           ├── layout.rs    # 布局管理（AppLayout）
 │           ├── header.rs    # 标题栏 & 信息栏渲染
 │           ├── table.rs     # 状态表格渲染
-│           ├── logs.rs      # 信息面板 & 详细日志渲染
+│           ├── logs.rs      # 信息面板 & 详细日志渲染（含水平滚动）
 │           ├── command_bar.rs # 命令输入栏 & 快捷按钮
-│           └── dialogs.rs   # 确认对话框 & 自检结果弹窗
+│           ├── dialogs.rs   # 确认对话框 & 自检结果弹窗（含内容滚动）
+│           └── scrollbar.rs # 通用滚动条组件（垂直/水平，支持拖拽）
 │
 ├── tests/                   # 🧪 测试
 │   ├── test_pause_start.py  # Pause/Start 功能验证（11 个场景）
-│   └── test_sw_step_naming.py # STEP 文件命名 & 环境变量覆盖测试
+│   ├── test_sw_step_naming.py # STEP 文件命名 & 环境变量覆盖测试
+│   ├── test_detail_log.py   # 详细日志功能测试
+│   └── test_sw_export_workflow.py # SW 导出工作流测试
 │
+├── ROADMAP.md               # 📋 分布式架构改造路线图
+├── rebuild_tui.bat          # Rust TUI 一键构建脚本（含选择性清理）
+├── analyze_code.py          # 代码分析工具
 ├── logs/                    # 运行时日志输出目录
 └── data/                    # SQLite 状态数据库目录
 ```
@@ -441,32 +447,50 @@ engine_state (key TEXT PK, value TEXT)
 
 ### 4.4 autofluid-tui — Rust TUI 客户端
 
-高性能 Rust 实现的 TUI 客户端，使用 `ratatui` 渲染 + `tokio` 异步运行时 + `crossterm` 终端事件。
+Rust 实现的 TUI 客户端（项目唯一前端界面），使用 `ratatui` 渲染 + `tokio` 异步运行时 + `crossterm` 终端事件。v2.2.0 起移除了旧版 Python Textual TUI，统一使用此 Rust TUI。
 
 #### 4.4.1 main.rs — 异步主循环
 
 ```rust
-tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonManager
-    → 主循环：
-        ├─ tokio::spawn: IPC 轮询任务（1秒间隔获取状态 + 增量日志）
-        ├─ crossterm 事件监听
-        │   ├─ 键盘事件 → key_handler::handle_key()
-        │   └─ 鼠标事件 → 按钮点击检测
-        ├─ 命令分发 → command::dispatch_command()
-        └─ ratatui 渲染 → ui 模块各组件
+main() → 初始化终端（raw mode + alternate screen + mouse capture）
+    → run_app():
+        ├─ 创建 AppState / LogBuffer / IpcClient / DaemonManager
+        ├─ 主循环：
+        │   ├─ 点击动画超时检测（按钮/对话框/详细日志行 120ms 后清除）
+        │   ├─ pending_command 处理（StartDaemon / StopDaemon / FullQuit 等）
+        │   ├─ crossterm 事件轮询（50ms 首次 + 0ms 批量排空）
+        │   │   ├─ 键盘事件 → key_handler::handle_key()
+        │   │   ├─ 鼠标事件 → handle_mouse()（悬停/点击/拖拽/滚轮）
+        │   │   └─ 终端大小变化 → update_terminal_size()
+        │   ├─ 条件重绘（needs_redraw 时执行 do_redraw）
+        │   ├─ IPC 定时轮询（1 秒间隔：状态 + 增量日志；5 秒间隔：引擎状态）
+        │   └─ 时钟刷新（500ms 间隔触发重绘更新标题栏时间）
+        └─ 退出清理：disconnect IPC + stop Daemon
 ```
+
+**鼠标事件处理**（`handle_mouse`）：
+
+| 事件类型 | 处理逻辑 |
+|----------|----------|
+| `Moved` | 悬停检测：表格行、快捷按钮、对话框按钮、详细日志行 |
+| `ScrollUp/Down` | 按区域滚动：表格/信息面板/详细日志；Ctrl+滚轮水平滚动 |
+| `Down` | 滚动条点击/拖拽开始、按钮点击、对话框按钮点击、表格/面板焦点切换、详细日志双击复制 |
+| `Drag` | 滚动条拖拽（6 种区域：表格垂直、信息垂直/水平、详细垂直/水平、对话框垂直） |
+| `Up` | 滚动条拖拽结束、按钮/对话框按钮释放触发动作 |
 
 #### 4.4.2 state/ — 应用状态
 
 | 结构体 | 说明 |
 |--------|------|
-| `AppState` | 全局状态（连接状态、构型数据、引擎信息、UI 状态、滚动位置等） |
+| `AppState` | 全局状态（连接、构型数据、引擎信息、UI 模式、焦点、滚动位置、悬停/点击状态、滚动条拖拽状态等） |
 | `EngineInfo` | 引擎状态信息（engine_status / sw_macro_started / barrier_passed） |
 | `LogBuffer` | 日志环形缓冲区（detail_buffer: 2000 条 / info_messages: 200 条） |
 | `LogEntry` | 结构化日志条目（id / timestamp / level / source / message） |
 | `FocusZone` | 焦点区域枚举（CommandInput / Table / InfoLog / DetailLog） |
 | `UiMode` | UI 模式枚举（Normal / ConfirmDialog / CheckResult） |
 | `ConfirmAction` | 确认操作枚举（ResetStep / CleanStep / FullQuit / StopDaemon） |
+| `ScrollbarDragZone` | 滚动条拖拽区域枚举（TableVertical / InfoVertical / InfoHorizontal / DetailVertical / DetailHorizontal / DialogVertical） |
+| `ScrollbarRenderedInfo` | 渲染后的滚动条位置信息（6 个可选的 (area, total, visible, scroll) 元组） |
 | `FilterType` | 过滤类型枚举（Level / Source） |
 
 #### 4.4.3 ipc/ — IPC 通信
@@ -490,10 +514,11 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 |------|------|
 | `layout` | 布局管理（`AppLayout`：header / info_bar / status_table / info_panel / detail_panel / cmd_input / quick_buttons） |
 | `header` | 标题栏 + 信息栏渲染 |
-| `table` | 构型状态表格渲染（含滚动条、悬停高亮） |
-| `logs` | 信息面板 + 详细日志面板渲染（含 Unicode 宽度感知换行） |
+| `table` | 构型状态表格渲染（含垂直滚动条、悬停高亮） |
+| `logs` | 信息面板 + 详细日志面板渲染（含 Unicode 宽度感知换行、水平滚动偏移） |
 | `command_bar` | 命令输入栏 + 8 个快捷按钮 |
-| `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层） |
+| `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层，支持内容滚动和按钮鼠标交互） |
+| `scrollbar` | 通用滚动条组件（`VerticalScrollbar` / `HorizontalScrollbar`），支持 thumb 计算和拖拽定位 |
 
 #### 4.4.6 daemon_mgr.rs — Daemon 进程管理
 
@@ -525,12 +550,16 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 
 | 结构体 | 文件 | 职责 |
 |--------|------|------|
-| `AppState` | state/app_state.rs | 全局应用状态 |
+| `AppState` | state/app_state.rs | 全局应用状态（含滚动条拖拽、悬停/点击动画状态） |
 | `LogBuffer` | state/log_buffer.rs | 日志环形缓冲区 |
 | `IpcClient` | ipc/client.rs | 异步 IPC 客户端 |
 | `IpcRequest` / `IpcResponse` | ipc/protocol.rs | IPC 消息结构 |
 | `DaemonManager` | daemon_mgr.rs | Daemon 进程管理 |
 | `AppLayout` | ui/layout.rs | UI 布局定义 |
+| `VerticalScrollbar` | ui/scrollbar.rs | 垂直滚动条（渲染 + thumb 计算 + 拖拽定位） |
+| `HorizontalScrollbar` | ui/scrollbar.rs | 水平滚动条（渲染 + thumb 计算 + 拖拽定位） |
+| `ScrollbarThumbInfo` | ui/scrollbar.rs | 滚动条 thumb 位置/尺寸信息 |
+| `ScrollbarRenderedInfo` | state/app_state.rs | 渲染后各区域滚动条位置缓存 |
 
 ### 关键函数
 
@@ -672,8 +701,10 @@ main.rs ──► state/app_state.rs
         ──► ui/header.rs ──► state/app_state.rs
         ──► ui/table.rs ──► state/app_state.rs
         ──► ui/logs.rs ──► state/log_buffer.rs
+        │              ──► state/filter.rs
         ──► ui/command_bar.rs ──► state/app_state.rs
-        ──► ui/dialogs.rs
+        ──► ui/dialogs.rs ──► state/app_state.rs
+        ──► ui/scrollbar.rs（独立组件，无外部依赖）
 ```
 
 ### 外部依赖
@@ -692,12 +723,13 @@ main.rs ──► state/app_state.rs
 | crate | 用途 |
 |-------|------|
 | `ratatui` | 终端 UI 渲染框架 |
-| `crossterm` | 跨平台终端事件处理 |
+| `crossterm` | 跨平台终端事件处理（含鼠标捕获） |
 | `tokio` | 异步运行时 |
 | `serde` + `serde_json` | JSON 序列化/反序列化 |
 | `uuid` | 请求 ID 生成 |
 | `chrono` | 时间格式化 |
 | `unicode-width` | Unicode 字符宽度计算（中日韩文字对齐） |
+| `arboard` | 剪贴板操作（双击日志行复制消息） |
 
 ---
 
