@@ -15,9 +15,10 @@ use ratatui::Terminal;
 
 use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
-use state::app_state::{FocusZone, UiMode};
+use state::app_state::{FocusZone, UiMode, ScrollbarDragZone};
 use ui::layout::AppLayout;
 use ui::command_bar::BUTTON_DEFS;
+use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
 use event_handler::key_handler;
 use event_handler::command;
 
@@ -352,6 +353,95 @@ fn do_redraw(
         let detail_content_width = if detail_has_vscroll { detail_inner_width.saturating_sub(1) } else { detail_inner_width };
         state.clamp_detail_hscroll(detail_max_width, detail_content_width);
 
+        state.scrollbar_info.table_v = {
+            let visible_data_rows = layout.status_table.height.saturating_sub(3) as usize;
+            if state.configs.len() > visible_data_rows {
+                let table_inner = ratatui::layout::Rect {
+                    x: layout.status_table.x + 1,
+                    y: layout.status_table.y + 1,
+                    width: layout.status_table.width.saturating_sub(2),
+                    height: layout.status_table.height.saturating_sub(2),
+                };
+                let sb_area = ratatui::layout::Rect {
+                    x: table_inner.x + table_inner.width.saturating_sub(1),
+                    y: table_inner.y + 1,
+                    width: 1,
+                    height: table_inner.height.saturating_sub(1),
+                };
+                Some((sb_area, state.configs.len(), visible_data_rows, state.table_scroll_offset as usize))
+            } else {
+                None
+            }
+        };
+        state.scrollbar_info.info_v = if info_has_vscroll {
+            let info_inner = ratatui::layout::Rect {
+                x: layout.info_panel.x + 1,
+                y: layout.info_panel.y + 1,
+                width: layout.info_panel.width.saturating_sub(2),
+                height: layout.info_panel.height.saturating_sub(2),
+            };
+            let sb_area = ratatui::layout::Rect {
+                x: info_inner.x + info_inner.width.saturating_sub(1),
+                y: info_inner.y,
+                width: 1,
+                height: info_content_height as u16,
+            };
+            Some((sb_area, info_visual_count, info_content_height, state.info_log_scroll as usize))
+        } else {
+            None
+        };
+        state.scrollbar_info.info_h = if info_has_hscroll {
+            let info_inner = ratatui::layout::Rect {
+                x: layout.info_panel.x + 1,
+                y: layout.info_panel.y + 1,
+                width: layout.info_panel.width.saturating_sub(2),
+                height: layout.info_panel.height.saturating_sub(2),
+            };
+            let sb_area = ratatui::layout::Rect {
+                x: info_inner.x,
+                y: info_inner.y + info_content_height as u16,
+                width: info_content_width as u16,
+                height: 1,
+            };
+            Some((sb_area, info_max_width, info_content_width, state.info_log_hscroll as usize))
+        } else {
+            None
+        };
+        state.scrollbar_info.detail_v = if detail_has_vscroll {
+            let detail_inner = ratatui::layout::Rect {
+                x: layout.detail_panel.x + 1,
+                y: layout.detail_panel.y + 1,
+                width: layout.detail_panel.width.saturating_sub(2),
+                height: layout.detail_panel.height.saturating_sub(2),
+            };
+            let sb_area = ratatui::layout::Rect {
+                x: detail_inner.x + detail_inner.width.saturating_sub(1),
+                y: detail_inner.y,
+                width: 1,
+                height: detail_content_height as u16,
+            };
+            Some((sb_area, detail_visual_count, detail_content_height, state.detail_log_scroll as usize))
+        } else {
+            None
+        };
+        state.scrollbar_info.detail_h = if detail_has_hscroll {
+            let detail_inner = ratatui::layout::Rect {
+                x: layout.detail_panel.x + 1,
+                y: layout.detail_panel.y + 1,
+                width: layout.detail_panel.width.saturating_sub(2),
+                height: layout.detail_panel.height.saturating_sub(2),
+            };
+            let sb_area = ratatui::layout::Rect {
+                x: detail_inner.x,
+                y: detail_inner.y + detail_content_height as u16,
+                width: detail_content_width as u16,
+                height: 1,
+            };
+            Some((sb_area, detail_max_width, detail_content_width, state.detail_log_hscroll as usize))
+        } else {
+            None
+        };
+
         ui::header::render_header(frame, layout.header, &state);
         ui::header::render_info_bar(frame, layout.info_bar, &state);
         ui::table::render_table(frame, layout.status_table, &state);
@@ -391,6 +481,88 @@ fn do_redraw(
 
 fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+}
+
+fn sb_vertical_hit(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16, row: u16) -> Option<usize> {
+    if col != area.x || row < area.y || row >= area.y + area.height {
+        return None;
+    }
+    let sb = VerticalScrollbar { total, visible, scroll };
+    let ti = sb.thumb_info(area.height as usize)?;
+    let rel = (row - area.y) as usize;
+    if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
+        Some(rel)
+    } else {
+        None
+    }
+}
+
+fn sb_horizontal_hit(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16, row: u16) -> Option<usize> {
+    if row != area.y || col < area.x || col >= area.x + area.width {
+        return None;
+    }
+    let sb = HorizontalScrollbar { total, visible, scroll };
+    let ti = sb.thumb_info(area.width as usize)?;
+    let rel = (col - area.x) as usize;
+    if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
+        Some(rel)
+    } else {
+        None
+    }
+}
+
+fn sb_vertical_track_hit(area: &ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col == area.x && row >= area.y && row < area.y + area.height
+}
+
+fn sb_horizontal_track_hit(area: &ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    row == area.y && col >= area.x && col < area.x + area.width
+}
+
+fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, _scroll: usize, row: u16) -> u16 {
+    let sb = VerticalScrollbar { total, visible, scroll: 0 };
+    let rel = (row.saturating_sub(area.y)) as usize;
+    let track_length = area.height as usize;
+    let thumb_size = ((visible as f64 / total as f64) * track_length as f64).round() as usize;
+    let thumb_size = thumb_size.max(1).min(track_length);
+    let half_thumb = (thumb_size / 2).min(track_length.saturating_sub(1));
+    let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+    sb.scroll_from_thumb_position(center_pos, track_length) as u16
+}
+
+fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, _scroll: usize, col: u16) -> u16 {
+    let sb = HorizontalScrollbar { total, visible, scroll: 0 };
+    let rel = (col.saturating_sub(area.x)) as usize;
+    let track_length = area.width as usize;
+    let thumb_size = ((visible as f64 / total as f64) * track_length as f64).round() as usize;
+    let thumb_size = thumb_size.max(1).min(track_length);
+    let half_thumb = (thumb_size / 2).min(track_length.saturating_sub(1));
+    let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+    sb.scroll_from_thumb_position(center_pos, track_length) as u16
+}
+
+fn sb_vertical_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
+    let sb = VerticalScrollbar { total, visible, scroll: start_scroll as usize };
+    let track_length = area.height as usize;
+    if let Some(ti) = sb.thumb_info(track_length) {
+        let delta = current_pos as i32 - start_pos as i32;
+        let new_thumb_start = (ti.thumb_start as i32 + delta).max(0).min(ti.track_space as i32) as usize;
+        sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
+    } else {
+        start_scroll
+    }
+}
+
+fn sb_horizontal_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
+    let sb = HorizontalScrollbar { total, visible, scroll: start_scroll as usize };
+    let track_length = area.width as usize;
+    if let Some(ti) = sb.thumb_info(track_length) {
+        let delta = current_pos as i32 - start_pos as i32;
+        let new_thumb_start = (ti.thumb_start as i32 + delta).max(0).min(ti.track_space as i32) as usize;
+        sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
+    } else {
+        start_scroll
+    }
 }
 
 fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime) {
@@ -523,6 +695,49 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 }
             }
         }
+        MouseEventKind::Drag(_button) => {
+            if let Some((zone, start_pos, start_scroll)) = state.scrollbar_drag {
+                use ScrollbarDragZone::*;
+                let result: Option<(u16, FocusZone)> = match zone {
+                    TableVertical => {
+                        state.scrollbar_info.table_v.as_ref().map(|(area, total, visible, _)| {
+                            (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::Table)
+                        })
+                    }
+                    InfoVertical => {
+                        state.scrollbar_info.info_v.as_ref().map(|(area, total, visible, _)| {
+                            (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::InfoLog)
+                        })
+                    }
+                    InfoHorizontal => {
+                        state.scrollbar_info.info_h.as_ref().map(|(area, total, visible, _)| {
+                            (sb_horizontal_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, col.saturating_sub(area.x)), FocusZone::InfoLog)
+                        })
+                    }
+                    DetailVertical => {
+                        state.scrollbar_info.detail_v.as_ref().map(|(area, total, visible, _)| {
+                            (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::DetailLog)
+                        })
+                    }
+                    DetailHorizontal => {
+                        state.scrollbar_info.detail_h.as_ref().map(|(area, total, visible, _)| {
+                            (sb_horizontal_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, col.saturating_sub(area.x)), FocusZone::DetailLog)
+                        })
+                    }
+                };
+                if let Some((new_scroll, focus)) = result {
+                    match zone {
+                        TableVertical => state.table_scroll_offset = new_scroll,
+                        InfoVertical => state.info_log_scroll = new_scroll,
+                        InfoHorizontal => state.info_log_hscroll = new_scroll,
+                        DetailVertical => { state.detail_log_scroll = new_scroll; state.detail_log_auto_scroll = false; }
+                        DetailHorizontal => state.detail_log_hscroll = new_scroll,
+                    }
+                    state.focus_zone = focus;
+                    state.needs_redraw = true;
+                }
+            }
+        }
         MouseEventKind::Down(_button) => {
             if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
                 if let Some(btn_idx) = detect_dialog_button(col, row, area, state) {
@@ -532,6 +747,85 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                     return;
                 }
             }
+
+            {
+                let sb_info = state.scrollbar_info.clone();
+                let mut sb_detected = false;
+
+                if let Some((area, total, visible, scroll)) = &sb_info.table_v {
+                    if sb_vertical_track_hit(area, col, row) {
+                        if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                            state.scrollbar_drag = Some((ScrollbarDragZone::TableVertical, rel_pos as u16, state.table_scroll_offset));
+                        } else {
+                            state.table_scroll_offset = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                        }
+                        state.focus_zone = FocusZone::Table;
+                        state.needs_redraw = true;
+                        sb_detected = true;
+                    }
+                }
+                if !sb_detected {
+                    if let Some((area, total, visible, scroll)) = &sb_info.info_v {
+                        if sb_vertical_track_hit(area, col, row) {
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::InfoVertical, rel_pos as u16, state.info_log_scroll));
+                            } else {
+                                state.info_log_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                            }
+                            state.focus_zone = FocusZone::InfoLog;
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                }
+                if !sb_detected {
+                    if let Some((area, total, visible, scroll)) = &sb_info.info_h {
+                        if sb_horizontal_track_hit(area, col, row) {
+                            if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::InfoHorizontal, rel_pos as u16, state.info_log_hscroll));
+                            } else {
+                                state.info_log_hscroll = sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                            }
+                            state.focus_zone = FocusZone::InfoLog;
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                }
+                if !sb_detected {
+                    if let Some((area, total, visible, scroll)) = &sb_info.detail_v {
+                        if sb_vertical_track_hit(area, col, row) {
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DetailVertical, rel_pos as u16, state.detail_log_scroll));
+                            } else {
+                                state.detail_log_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                state.detail_log_auto_scroll = false;
+                            }
+                            state.focus_zone = FocusZone::DetailLog;
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                }
+                if !sb_detected {
+                    if let Some((area, total, visible, scroll)) = &sb_info.detail_h {
+                        if sb_horizontal_track_hit(area, col, row) {
+                            if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DetailHorizontal, rel_pos as u16, state.detail_log_hscroll));
+                            } else {
+                                state.detail_log_hscroll = sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                            }
+                            state.focus_zone = FocusZone::DetailLog;
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                }
+                if sb_detected {
+                    return;
+                }
+            }
+
             if in_buttons {
                 if let Some(btn_idx) = detect_button(col, row, &layout) {
                     state.clicked_button = Some(btn_idx);
@@ -582,6 +876,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
         }
         MouseEventKind::Up(_button) => {
+            state.scrollbar_drag = None;
             if let Some(btn_idx) = state.clicked_dialog_button {
                 if let Some(hover_idx) = detect_dialog_button(col, row, area, state) {
                     if hover_idx == btn_idx {

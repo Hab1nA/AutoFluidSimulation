@@ -67,6 +67,15 @@ pub enum FocusZone {
     DetailLog,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarDragZone {
+    TableVertical,
+    InfoVertical,
+    InfoHorizontal,
+    DetailVertical,
+    DetailHorizontal,
+}
+
 impl FocusZone {
     pub fn cycle_next(self) -> Self {
         match self {
@@ -92,6 +101,15 @@ pub struct EngineInfo {
     pub engine_status: String,
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScrollbarRenderedInfo {
+    pub table_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub info_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub info_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub detail_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub detail_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -132,6 +150,8 @@ pub struct AppState {
     pub last_detail_click_row: Option<u16>,
     pub clicked_detail_row: Option<u16>,
     pub detail_click_time: Option<std::time::Instant>,
+    pub scrollbar_drag: Option<(ScrollbarDragZone, u16, u16)>,
+    pub scrollbar_info: ScrollbarRenderedInfo,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
