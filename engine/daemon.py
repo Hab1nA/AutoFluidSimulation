@@ -33,7 +33,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
-from utils.logger import setup_logger
+from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
 
 logger = setup_logger("PipelineDaemon")
@@ -53,7 +53,13 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 初始化中...")
         logger.info("=" * 60)
 
-        # 1. 状态管理器
+        # 0. 确保必要目录存在（必须在 StateManager 之前，因为 StateManager 需要 data/ 目录存放 SQLite 数据库）
+        ensure_directories()
+
+        # 1. 安装日志广播处理器（供 TUI 增量拉取）
+        install_broadcast_handler(capacity=1000)
+
+        # 2. 状态管理器
         self.state = StateManager()
 
         # 2. 任务执行器
@@ -81,8 +87,7 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 启动中...")
         logger.info("=" * 60)
 
-        # 0. 确保目录存在 & 验证配置
-        ensure_directories()
+        # 0. 验证配置（目录已在 __init__ 中确保存在）
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")
@@ -147,13 +152,7 @@ class PipelineDaemon:
                 pass  # Windows 不支持某些信号
 
     def _load_excel_data(self):
-        """从 Excel 加载构型数据并同步到状态库。
-
-        启动时自动与设计表同步：
-        - 新增设计表中的构型（状态置为 Waiting）
-        - 保留已有构型的状态（断点续传）
-        - 删除设计表中已不存在的构型
-        """
+        """从 Excel 加载构型数据并同步到状态库。"""
         excel_path = LOCAL_PATHS["excel"]
         try:
             configs = read_model_configs(excel_path)
@@ -162,8 +161,14 @@ class PipelineDaemon:
                 return
             self.state.load_configs(configs)
             logger.info(f"已从 Excel 同步 {len(configs)} 个构型到状态库")
-        except (ValueError, OSError) as e:
-            logger.error(f"Excel 数据加载失败: {e}")
+        except FileNotFoundError as e:
+            logger.error(f"Excel 文件未找到: {e}")
+        except ValueError as e:
+            logger.error(f"Excel 数据格式错误: {e}")
+        except OSError as e:
+            logger.error(f"Excel 读取失败: {e}")
+        except Exception as e:
+            logger.error(f"Excel 数据加载失败: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # IPC 命令处理器
@@ -345,6 +350,33 @@ class PipelineDaemon:
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
         return True, None, msg
+
+    def handle_get_log_entries(self, params: dict) -> Tuple[bool, Any, str]:
+        """处理 get_log_entries 命令（增量拉取日志条目）。
+
+        params: {
+            "since_id": int,       # 返回 ID 大于此值的条目
+            "limit": int,          # 最大返回条数（默认 50）
+            "level_filter": str,   # 按级别过滤（可选）
+            "source_filter": str,  # 按来源过滤（可选）
+        }
+        """
+        handler = get_broadcast_handler()
+        if handler is None:
+            return True, {"entries": [], "latest_id": 0, "total": 0}, "日志处理器未安装"
+
+        since_id = params.get("since_id", 0)
+        limit = params.get("limit", 50)
+        level_filter = params.get("level_filter")
+        source_filter = params.get("source_filter")
+
+        result = handler.get_entries(
+            since_id=since_id,
+            limit=limit,
+            level_filter=level_filter,
+            source_filter=source_filter,
+        )
+        return True, result, ""
 
 
 # ============================================================================

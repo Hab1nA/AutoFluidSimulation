@@ -14,6 +14,7 @@ from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
+    CMD_GET_LOG_ENTRIES,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -78,6 +79,7 @@ class IPCServer:
         self.register_handler(CMD_GET_ALL_STATUS, lambda p: daemon.handle_get_all_status(p))
         self.register_handler(CMD_GET_STATISTICS, lambda p: daemon.handle_get_statistics(p))
         self.register_handler(CMD_GET_ENGINE_STATUS, lambda p: daemon.handle_get_engine_status(p))
+        self.register_handler(CMD_GET_LOG_ENTRIES, lambda p: daemon.handle_get_log_entries(p))
 
         # 重置
         self.register_handler(CMD_RESET_STEP, lambda p: daemon.handle_reset_step(p))

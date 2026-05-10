@@ -225,7 +225,7 @@ class PipelineScheduler:
                             ["taskkill", "/f", "/im", "SLDWORKS.exe"],
                             capture_output=True, timeout=30,
                         )
-                    except Exception:
+                    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                         pass
                     # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
                     logger.info("等待 SolidWorks 进程完全退出...")
@@ -240,7 +240,7 @@ class PipelineScheduler:
                             if "SLDWORKS.exe" not in check.stdout:
                                 logger.info("✓ SolidWorks 进程已退出")
                                 break
-                        except Exception:
+                        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                             break
                     # 额外冷却确保 COM 子系统完全释放
                     time.sleep(5)
@@ -414,17 +414,10 @@ class PipelineScheduler:
     # ------------------------------------------------------------------
 
     def _on_step_file_ready(self, config_name: int, filepath: str):
-        """
-        当 STEP 文件监控到某个构型的文件写入完成时调用。
+        if self._paused.is_set():
+            logger.info(f"构型{config_name} STEP 文件就绪，但系统已暂停，跳过入队")
+            return
 
-        此方法在文件监控线程中执行，仅做轻量操作：
-        将构型推入 SC 处理队列。
-
-        Args:
-            config_name: 构型名称
-            filepath: STEP 文件完整路径
-        """
-        # 检查该构型的 SW 状态是否为 Completed
         current_sw = self.state.get_step_status(config_name, "SW")
         if current_sw != STATUS_COMPLETED:
             self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
@@ -833,21 +826,12 @@ class PipelineScheduler:
     # ------------------------------------------------------------------
 
     def pause(self):
-        """暂停流水线（当前运行步骤完成后不再取新任务）。
-
-        暂停行为：
-        1. 设置暂停事件标志（worker/barrier 线程检查后进入等待）
-        2. 批量将所有 Running/Retrying 步骤切换为 Paused
-        3. 设置引擎状态为 paused
-
-        注意：SW 宏（RunMacro2）是同步 COM 阻塞调用，无法被中断。
-        pause 调用后 SW 宏会继续运行直到完成，但后续步骤不会被取走。
-        """
         logger.info("收到暂停指令")
         self._paused.set()
-        # 将所有 Running/Retrying 步骤批量切换为 Paused，让 TUI 正确反馈
         self.state.set_all_running_to_paused()
         self.state.set_engine_status("paused")
+        if self._file_monitor is not None:
+            self._file_monitor.pause()
         logger.info("流水线已暂停，所有运行中/重试中步骤已标记为 Paused")
 
     @property
@@ -861,20 +845,11 @@ class PipelineScheduler:
         return self._pipeline_thread is not None and self._pipeline_thread.is_alive()
 
     def resume(self):
-        """继续流水线。
-
-        处理多种暂停恢复场景：
-        1. 正常暂停恢复：workers/barrier 线程均在运行，仅清除暂停标志
-        2. SW 阶段暂停后恢复：workers 尚未启动，需检查并初始化流水线组件
-        3. SW 失败后暂停恢复：需要重新执行 SW 宏
-        """
         logger.info("收到继续指令")
-        # 将所有 Paused 步骤恢复为 Running
         self.state.set_all_paused_to_running()
         self._paused.clear()
         self.state.set_engine_status("running")
 
-        # 检查流水线组件是否需要初始化（SW 阶段暂停恢复场景）
         pipeline_needs_init = False
         if self._file_monitor is None or not self._file_monitor._running:
             pipeline_needs_init = True
@@ -885,11 +860,9 @@ class PipelineScheduler:
 
         if pipeline_needs_init:
             logger.info("检测到流水线组件未就绪，启动初始化...")
-            # SW 宏可能已完成（断点续传），检查并初始化下游组件
             if self.state.is_sw_macro_started():
                 self._init_downstream_components()
             else:
-                # SW 尚未完成，需要重新启动流水线
                 logger.info("SW 宏尚未完成，重新启动流水线...")
                 t = threading.Thread(
                     target=self.start_pipeline,
@@ -900,12 +873,8 @@ class PipelineScheduler:
                 self._pipeline_thread = t
                 return
 
-        # 重置文件监控器的已处理文件集合，确保暂停期间产生的
-        # STEP 文件在恢复后被重新评估并入队
         if self._file_monitor is not None:
-            self._file_monitor._processed_files.clear()
-            # 重新扫描已存在的 STEP 文件（断点续传/暂停恢复场景）
-            self._file_monitor._scan_existing_files()
+            self._file_monitor.resume_and_reset()
         logger.info("流水线已恢复运行")
 
     def _init_downstream_components(self):

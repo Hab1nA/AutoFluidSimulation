@@ -704,7 +704,7 @@ class TaskRunner:
             f"[COM验证] {label} 所有验证方法均失败，"
             f"对象可能为无效 COM 代理"
         )
-        return True
+        return False
     # swDocumentTypes_e
     _SW_DOC_PART = 1
     _SW_DOC_ASSEMBLY = 2
@@ -882,7 +882,6 @@ class TaskRunner:
 
         sw_model = LOCAL_PATHS["sw_model"]
         excel_path = LOCAL_PATHS.get("excel", "")
-        sw_macro = LOCAL_PATHS.get("sw_macro", "")
         step_dir = LOCAL_PATHS.get("step_dir", "")
         doc_type = self._guess_sw_doc_type(sw_model)
 
@@ -1346,9 +1345,21 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
                 return False
 
-        except (OSError, ValueError, RuntimeError) as e:
-            logger.error(f"SC 执行异常: {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, str(e))
+        except OSError as e:
+            logger.error(f"SC 执行失败 (IO错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"IO错误: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"SC 执行失败 (配置错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"配置错误: {e}")
+            return False
+        except RuntimeError as e:
+            logger.error(f"SC 执行失败 (运行时错误): {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"运行时错误: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"SC 执行失败 (未知错误): {e}", exc_info=True)
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"未知错误: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -1542,11 +1553,9 @@ class TaskRunner:
             "remote_checks": {},
         }
 
-        # ---- 本地检查 ----
         checks = {
             "SW模型": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
-            "SW宏文件": LOCAL_PATHS["sw_macro"],
             "STEP目录": LOCAL_PATHS["step_dir"],
             "SC程序": LOCAL_PATHS["sc_exe"],
             "SC脚本": LOCAL_PATHS["sc_script"],
