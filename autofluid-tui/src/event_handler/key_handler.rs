@@ -84,7 +84,7 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             AppAction::None
         }
         KeyCode::Delete => {
-            if state.command_cursor < state.command_input.len() {
+            if state.command_cursor < state.command_input.chars().count() {
                 let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
                 state.command_input.remove(byte_pos);
                 state.needs_redraw = true;
@@ -99,7 +99,7 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             AppAction::None
         }
         KeyCode::Right => {
-            if state.command_cursor < state.command_input.len() {
+            if state.command_cursor < state.command_input.chars().count() {
                 state.command_cursor += 1;
                 state.needs_redraw = true;
             }
@@ -111,7 +111,7 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             AppAction::None
         }
         KeyCode::End => {
-            state.command_cursor = state.command_input.len();
+            state.command_cursor = state.command_input.chars().count();
             state.needs_redraw = true;
             AppAction::None
         }
