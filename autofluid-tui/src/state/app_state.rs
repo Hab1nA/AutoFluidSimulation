@@ -266,4 +266,26 @@ impl AppState {
             }
         }
     }
+
+    pub fn clamp_info_hscroll(&mut self, max_content_width: usize, visible_width: usize) {
+        if max_content_width <= visible_width {
+            self.info_log_hscroll = 0;
+        } else {
+            let max_scroll = (max_content_width - visible_width) as u16;
+            if self.info_log_hscroll > max_scroll {
+                self.info_log_hscroll = max_scroll;
+            }
+        }
+    }
+
+    pub fn clamp_detail_hscroll(&mut self, max_content_width: usize, visible_width: usize) {
+        if max_content_width <= visible_width {
+            self.detail_log_hscroll = 0;
+        } else {
+            let max_scroll = (max_content_width - visible_width) as u16;
+            if self.detail_log_hscroll > max_scroll {
+                self.detail_log_hscroll = max_scroll;
+            }
+        }
+    }
 }

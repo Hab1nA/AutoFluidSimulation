@@ -58,6 +58,7 @@ impl Widget for HorizontalScrollbar {
         }
 
         let max_scroll = self.total - self.visible;
+        let scroll = self.scroll.min(max_scroll);
 
         let thumb_size = ((self.visible as f64 / self.total as f64) * track_width as f64).round() as usize;
         let thumb_size = thumb_size.max(1).min(track_width);
@@ -67,7 +68,7 @@ impl Widget for HorizontalScrollbar {
         let thumb_start = if max_scroll == 0 {
             0
         } else {
-            ((self.scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
+            ((scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
         };
 
         let y = area.y;

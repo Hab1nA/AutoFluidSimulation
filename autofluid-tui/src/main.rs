@@ -342,6 +342,16 @@ fn do_redraw(
         state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
         state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
 
+        let info_inner_width = layout.info_panel.width.saturating_sub(2) as usize;
+        let info_has_vscroll = info_visual_count > info_content_height;
+        let info_content_width = if info_has_vscroll { info_inner_width.saturating_sub(1) } else { info_inner_width };
+        state.clamp_info_hscroll(info_max_width, info_content_width);
+
+        let detail_inner_width = layout.detail_panel.width.saturating_sub(2) as usize;
+        let detail_has_vscroll = detail_visual_count > detail_content_height;
+        let detail_content_width = if detail_has_vscroll { detail_inner_width.saturating_sub(1) } else { detail_inner_width };
+        state.clamp_detail_hscroll(detail_max_width, detail_content_width);
+
         ui::header::render_header(frame, layout.header, &state);
         ui::header::render_info_bar(frame, layout.info_bar, &state);
         ui::table::render_table(frame, layout.status_table, &state);
