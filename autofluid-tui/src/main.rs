@@ -519,26 +519,30 @@ fn sb_horizontal_track_hit(area: &ratatui::layout::Rect, col: u16, row: u16) -> 
     row == area.y && col >= area.x && col < area.x + area.width
 }
 
-fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, _scroll: usize, row: u16) -> u16 {
-    let sb = VerticalScrollbar { total, visible, scroll: 0 };
+fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, row: u16) -> u16 {
+    let sb = VerticalScrollbar { total, visible, scroll };
     let rel = (row.saturating_sub(area.y)) as usize;
     let track_length = area.height as usize;
-    let thumb_size = ((visible as f64 / total as f64) * track_length as f64).round() as usize;
-    let thumb_size = thumb_size.max(1).min(track_length);
-    let half_thumb = (thumb_size / 2).min(track_length.saturating_sub(1));
-    let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
-    sb.scroll_from_thumb_position(center_pos, track_length) as u16
+    if let Some(ti) = sb.thumb_info(track_length) {
+        let half_thumb = (ti.thumb_size / 2).min(track_length.saturating_sub(1));
+        let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+        sb.scroll_from_thumb_position(center_pos, track_length) as u16
+    } else {
+        scroll as u16
+    }
 }
 
-fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, _scroll: usize, col: u16) -> u16 {
-    let sb = HorizontalScrollbar { total, visible, scroll: 0 };
+fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16) -> u16 {
+    let sb = HorizontalScrollbar { total, visible, scroll };
     let rel = (col.saturating_sub(area.x)) as usize;
     let track_length = area.width as usize;
-    let thumb_size = ((visible as f64 / total as f64) * track_length as f64).round() as usize;
-    let thumb_size = thumb_size.max(1).min(track_length);
-    let half_thumb = (thumb_size / 2).min(track_length.saturating_sub(1));
-    let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
-    sb.scroll_from_thumb_position(center_pos, track_length) as u16
+    if let Some(ti) = sb.thumb_info(track_length) {
+        let half_thumb = (ti.thumb_size / 2).min(track_length.saturating_sub(1));
+        let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+        sb.scroll_from_thumb_position(center_pos, track_length) as u16
+    } else {
+        scroll as u16
+    }
 }
 
 fn sb_vertical_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
