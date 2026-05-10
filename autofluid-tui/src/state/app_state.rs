@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use ratatui::widgets::ScrollbarState;
-
 pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
 pub const STATUS_PAUSED: &str = "Paused";
@@ -130,11 +128,6 @@ pub struct AppState {
     pub clicked_dialog_button: Option<u8>,
     pub click_time: Option<std::time::Instant>,
     pub dialog_click_time: Option<std::time::Instant>,
-    pub table_scrollbar_state: ScrollbarState,
-    pub info_scrollbar_state: ScrollbarState,
-    pub detail_scrollbar_state: ScrollbarState,
-    pub info_hscrollbar_state: ScrollbarState,
-    pub detail_hscrollbar_state: ScrollbarState,
     pub last_detail_click_time: Option<std::time::Instant>,
     pub last_detail_click_row: Option<u16>,
     pub clicked_detail_row: Option<u16>,

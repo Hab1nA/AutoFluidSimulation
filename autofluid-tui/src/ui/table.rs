@@ -1,10 +1,11 @@
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Cell, Row, Table, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use crate::state::app_state::{AppState, FocusZone, STEP_NAMES, status_icon, status_color, step_display_name};
+use crate::ui::scrollbar;
 
-pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState, scrollbar_state: &mut ScrollbarState) {
+pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let visible_data_rows = area.height.saturating_sub(3) as usize;
     let total_rows = state.configs.len();
     let scroll = state.table_scroll_offset as usize;
@@ -72,17 +73,19 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
     frame.render_widget(table, area);
 
     if total_rows > visible_data_rows {
-        *scrollbar_state = ScrollbarState::new(total_rows)
-            .viewport_content_length(visible_data_rows)
-            .position(scroll);
         let scrollbar_area = ratatui::layout::Rect {
             x: inner.x + inner.width.saturating_sub(1),
-            y: inner.y,
+            y: inner.y + 1,
             width: 1,
-            height: inner.height,
+            height: inner.height.saturating_sub(1),
         };
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
+        frame.render_widget(
+            scrollbar::VerticalScrollbar {
+                total: total_rows,
+                visible: visible_data_rows,
+                scroll,
+            },
+            scrollbar_area,
+        );
     }
 }

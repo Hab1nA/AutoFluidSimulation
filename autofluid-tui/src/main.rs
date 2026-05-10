@@ -314,12 +314,6 @@ fn do_redraw(
     state: &mut AppState,
     log_buffer: &LogBuffer,
 ) -> Result<(), String> {
-    let mut table_sb = std::mem::take(&mut state.table_scrollbar_state);
-    let mut info_sb = std::mem::take(&mut state.info_scrollbar_state);
-    let mut detail_sb = std::mem::take(&mut state.detail_scrollbar_state);
-    let mut info_hsb = std::mem::take(&mut state.info_hscrollbar_state);
-    let mut detail_hsb = std::mem::take(&mut state.detail_hscrollbar_state);
-
     terminal.draw(|frame| {
         let area = frame.area();
         let layout = AppLayout::new(area);
@@ -350,8 +344,8 @@ fn do_redraw(
 
         ui::header::render_header(frame, layout.header, &state);
         ui::header::render_info_bar(frame, layout.info_bar, &state);
-        ui::table::render_table(frame, layout.status_table, &state, &mut table_sb);
-        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, &mut info_sb, state.info_log_hscroll, &mut info_hsb);
+        ui::table::render_table(frame, layout.status_table, &state);
+        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll);
         ui::logs::render_detail_panel(
             frame,
             layout.detail_panel,
@@ -361,11 +355,9 @@ fn do_redraw(
             state.detail_log_scroll,
             state.detail_log_auto_scroll,
             state.focus_zone,
-            &mut detail_sb,
             state.hovered_detail_row,
             state.clicked_detail_row,
             state.detail_log_hscroll,
-            &mut detail_hsb,
         );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, &state);
 
@@ -383,12 +375,6 @@ fn do_redraw(
             UiMode::Normal => {}
         }
     }).map_err(|e| e.to_string())?;
-
-    state.table_scrollbar_state = table_sb;
-    state.info_scrollbar_state = info_sb;
-    state.detail_scrollbar_state = detail_sb;
-    state.info_hscrollbar_state = info_hsb;
-    state.detail_hscrollbar_state = detail_hsb;
 
     Ok(())
 }

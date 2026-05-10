@@ -2,10 +2,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
+use crate::ui::scrollbar;
 
 fn info_message_color(msg: &str) -> Color {
     if msg.contains('✅') {
@@ -99,9 +100,7 @@ pub fn render_info_panel(
     log_buffer: &LogBuffer,
     scroll_offset: u16,
     focus_zone: FocusZone,
-    scrollbar_state: &mut ScrollbarState,
     hscroll: u16,
-    hscrollbar_state: &mut ScrollbarState,
 ) {
     let border_style = if focus_zone == FocusZone::InfoLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
@@ -146,12 +145,14 @@ pub fn render_info_panel(
             width: 1,
             height: content_height as u16,
         };
-        *scrollbar_state = ScrollbarState::new(total)
-            .viewport_content_length(content_height)
-            .position(scroll);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
+        frame.render_widget(
+            scrollbar::VerticalScrollbar {
+                total,
+                visible: content_height,
+                scroll,
+            },
+            scrollbar_area,
+        );
     }
 
     if has_hscroll {
@@ -161,12 +162,14 @@ pub fn render_info_panel(
             width: content_width as u16,
             height: 1,
         };
-        *hscrollbar_state = ScrollbarState::new(max_content_width)
-            .viewport_content_length(content_width)
-            .position(hscroll as usize);
-        let hscrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
-            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(hscrollbar, hscrollbar_area, hscrollbar_state);
+        frame.render_widget(
+            scrollbar::HorizontalScrollbar {
+                total: max_content_width,
+                visible: content_width,
+                scroll: hscroll as usize,
+            },
+            hscrollbar_area,
+        );
     }
 }
 
@@ -194,11 +197,9 @@ pub fn render_detail_panel(
     scroll_offset: u16,
     auto_scroll: bool,
     focus_zone: FocusZone,
-    scrollbar_state: &mut ScrollbarState,
     hovered_detail_row: Option<u16>,
     clicked_detail_row: Option<u16>,
     hscroll: u16,
-    hscrollbar_state: &mut ScrollbarState,
 ) {
     let border_style = if focus_zone == FocusZone::DetailLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
@@ -277,12 +278,14 @@ pub fn render_detail_panel(
             width: 1,
             height: content_height as u16,
         };
-        *scrollbar_state = ScrollbarState::new(total)
-            .viewport_content_length(content_height)
-            .position(scroll);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(scrollbar, scrollbar_area, scrollbar_state);
+        frame.render_widget(
+            scrollbar::VerticalScrollbar {
+                total,
+                visible: content_height,
+                scroll,
+            },
+            scrollbar_area,
+        );
     }
 
     if has_hscroll {
@@ -292,11 +295,13 @@ pub fn render_detail_panel(
             width: content_width as u16,
             height: 1,
         };
-        *hscrollbar_state = ScrollbarState::new(max_content_width)
-            .viewport_content_length(content_width)
-            .position(hscroll as usize);
-        let hscrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
-            .style(Style::default().fg(Color::Rgb(100, 100, 100)));
-        frame.render_stateful_widget(hscrollbar, hscrollbar_area, hscrollbar_state);
+        frame.render_widget(
+            scrollbar::HorizontalScrollbar {
+                total: max_content_width,
+                visible: content_width,
+                scroll: hscroll as usize,
+            },
+            hscrollbar_area,
+        );
     }
 }

@@ -53,10 +53,13 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 初始化中...")
         logger.info("=" * 60)
 
-        # 0. 安装日志广播处理器（供 TUI 增量拉取）
+        # 0. 确保必要目录存在（必须在 StateManager 之前，因为 StateManager 需要 data/ 目录存放 SQLite 数据库）
+        ensure_directories()
+
+        # 1. 安装日志广播处理器（供 TUI 增量拉取）
         install_broadcast_handler(capacity=1000)
 
-        # 1. 状态管理器
+        # 2. 状态管理器
         self.state = StateManager()
 
         # 2. 任务执行器
@@ -84,8 +87,7 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 启动中...")
         logger.info("=" * 60)
 
-        # 0. 确保目录存在 & 验证配置
-        ensure_directories()
+        # 0. 验证配置（目录已在 __init__ 中确保存在）
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")
