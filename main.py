@@ -52,7 +52,12 @@ def _find_rust_tui_binary():
 def _check_rust_tui_source():
     tui_dir = os.path.join(PROJECT_DIR, "autofluid-tui")
     cargo_toml = os.path.join(tui_dir, "Cargo.toml")
-    return os.path.isdir(tui_dir) and os.path.isfile(cargo_toml)
+    src_dir = os.path.join(tui_dir, "src")
+    main_rs = os.path.join(src_dir, "main.rs")
+    return (os.path.isdir(tui_dir) and
+            os.path.isfile(cargo_toml) and
+            os.path.isdir(src_dir) and
+            os.path.isfile(main_rs))
 
 
 def _print_rust_tui_not_found_help():
