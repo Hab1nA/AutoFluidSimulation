@@ -30,6 +30,12 @@ fn button_style(idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {
     }
 }
 
+/// 对话框渲染信息
+///
+/// - content_total_lines: 内容总行数
+/// - content_visible_lines: 可见行数
+/// - scrollbar_area: 滚动条区域
+/// - button_bar_y: 按钮栏Y坐标
 pub struct DialogRenderInfo {
     pub content_total_lines: usize,
     pub content_visible_lines: usize,
