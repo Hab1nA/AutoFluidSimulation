@@ -1,5 +1,7 @@
 use ratatui::Frame;
+use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
 use crate::state::app_state::{AppState, FocusZone, STEP_NAMES, status_icon, status_color, step_display_name};
@@ -10,9 +12,9 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
     let total_rows = state.configs.len();
     let scroll = state.table_scroll_offset as usize;
 
-    let header_cells: Vec<Cell> = std::iter::once(Cell::new("构型").style(Style::default().add_modifier(Modifier::BOLD)))
+    let header_cells: Vec<Cell> = std::iter::once(Cell::new(Text::from("构型").alignment(Alignment::Center)).style(Style::default().add_modifier(Modifier::BOLD)))
         .chain(STEP_NAMES.iter().map(|step| {
-            Cell::new(step_display_name(step)).style(Style::default().add_modifier(Modifier::BOLD))
+            Cell::new(Text::from(step_display_name(step)).alignment(Alignment::Center)).style(Style::default().add_modifier(Modifier::BOLD))
         }))
         .collect();
 
@@ -41,13 +43,13 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
             Style::default()
         };
 
-        let cells: Vec<Cell> = std::iter::once(Cell::new(cn_str.clone()))
+        let cells: Vec<Cell> = std::iter::once(Cell::new(Text::from(cn_str.clone()).alignment(Alignment::Center)))
             .chain(STEP_NAMES.iter().map(|step| {
                 let status = state.get_step_status(&cn_str, step);
                 let icon = status_icon(status);
                 let color = status_color(status);
                 let text = format!("{} {}", icon, status);
-                Cell::new(text).style(Style::default().fg(color))
+                Cell::new(Text::from(text).alignment(Alignment::Center)).style(Style::default().fg(color))
             }))
             .collect();
         Row::new(cells).height(1).style(row_style)

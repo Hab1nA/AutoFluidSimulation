@@ -74,6 +74,7 @@ pub enum ScrollbarDragZone {
     InfoHorizontal,
     DetailVertical,
     DetailHorizontal,
+    DialogVertical,
 }
 
 impl FocusZone {
@@ -110,6 +111,7 @@ pub struct ScrollbarRenderedInfo {
     pub info_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
     pub detail_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
     pub detail_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub dialog_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +154,8 @@ pub struct AppState {
     pub detail_click_time: Option<std::time::Instant>,
     pub scrollbar_drag: Option<(ScrollbarDragZone, u16, u16)>,
     pub scrollbar_info: ScrollbarRenderedInfo,
+    pub dialog_scroll: u16,
+    pub dialog_button_bar_y: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -237,19 +241,16 @@ impl AppState {
     }
 
     pub fn info_bar_text(&self) -> String {
-        let now = chrono::Local::now();
-        let time_str = now.format("%H:%M:%S").to_string();
         if !self.connected {
-            return format!("  引擎: 未连接  │  请先启动 Daemon  │  {}", time_str);
+            return "  引擎: 未连接  │  请先启动 Daemon".to_string();
         }
         let engine_status = engine_status_display(&self.engine_info.engine_status);
         let barrier = if self.engine_info.barrier_passed { "已通过" } else { "未通过" };
         format!(
-            "  引擎: {}  │  构型数: {}  │  屏障: {}  │  {}",
+            "  引擎: {}  │  构型数: {}  │  屏障: {}",
             engine_status,
             self.configs.len(),
             barrier,
-            time_str
         )
     }
 
@@ -305,6 +306,17 @@ impl AppState {
             let max_scroll = (max_content_width - visible_width) as u16;
             if self.detail_log_hscroll > max_scroll {
                 self.detail_log_hscroll = max_scroll;
+            }
+        }
+    }
+
+    pub fn clamp_dialog_scroll(&mut self, total_lines: usize, visible_lines: usize) {
+        if total_lines <= visible_lines {
+            self.dialog_scroll = 0;
+        } else {
+            let max_scroll = (total_lines - visible_lines) as u16;
+            if self.dialog_scroll > max_scroll {
+                self.dialog_scroll = max_scroll;
             }
         }
     }

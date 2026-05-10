@@ -76,6 +76,7 @@ pub async fn dispatch_command(
                 Ok(resp) if resp.is_ok() => {
                     log_buffer.push_info("✅ 系统自检完成".to_string());
                     state.check_data = Some(resp.data);
+                    state.dialog_scroll = 0;
                     state.ui_mode = UiMode::CheckResult;
                 }
                 Ok(resp) => {
@@ -148,6 +149,7 @@ pub async fn dispatch_command(
                 config_name: config_arg.to_string(),
                 step_name,
             });
+            state.dialog_scroll = 0;
             state.ui_mode = UiMode::ConfirmDialog;
             CommandResult::None
         }
@@ -188,6 +190,7 @@ pub async fn dispatch_command(
                 step_name,
                 config_name: config_value,
             });
+            state.dialog_scroll = 0;
             state.ui_mode = UiMode::ConfirmDialog;
             CommandResult::None
         }
@@ -195,6 +198,7 @@ pub async fn dispatch_command(
             if parts.len() > 1 && parts[1].eq_ignore_ascii_case("full") {
                 state.confirm_message = Some("确定要【完全退出】后台引擎和界面吗？\n所有正在运行的任务将被中止！".to_string());
                 state.confirm_callback = Some(ConfirmAction::FullQuit);
+                state.dialog_scroll = 0;
                 state.ui_mode = UiMode::ConfirmDialog;
             } else {
                 log_buffer.push_info("⚠️ 界面已退出，后台引擎仍在运行".to_string());
@@ -213,6 +217,7 @@ pub async fn dispatch_command(
                 "stop" => {
                     state.confirm_message = Some("确定要【停止后台引擎】吗？\n所有正在运行的任务将被中止！\n（TUI 界面将保持运行，可随时重新启动 daemon）".to_string());
                     state.confirm_callback = Some(ConfirmAction::StopDaemon);
+                    state.dialog_scroll = 0;
                     state.ui_mode = UiMode::ConfirmDialog;
                     CommandResult::None
                 }

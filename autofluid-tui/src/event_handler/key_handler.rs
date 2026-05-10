@@ -339,15 +339,53 @@ fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
+        KeyCode::Up => {
+            if state.dialog_scroll > 0 {
+                state.dialog_scroll -= 1;
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Down => {
+            state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::PageUp => {
+            if state.dialog_scroll >= 10 {
+                state.dialog_scroll -= 10;
+            } else {
+                state.dialog_scroll = 0;
+            }
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::PageDown => {
+            state.dialog_scroll = state.dialog_scroll.saturating_add(10);
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Home => {
+            state.dialog_scroll = 0;
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::End => {
+            state.dialog_scroll = u16::MAX;
+            state.needs_redraw = true;
+            AppAction::None
+        }
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             state.ui_mode = UiMode::Normal;
             state.confirm_message = None;
+            state.dialog_scroll = 0;
             AppAction::Confirm
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             state.ui_mode = UiMode::Normal;
             state.confirm_message = None;
             state.confirm_callback = None;
+            state.dialog_scroll = 0;
             AppAction::Cancel
         }
         _ => AppAction::None,
@@ -356,9 +394,46 @@ fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_check_result(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
+        KeyCode::Up => {
+            if state.dialog_scroll > 0 {
+                state.dialog_scroll -= 1;
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Down => {
+            state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::PageUp => {
+            if state.dialog_scroll >= 10 {
+                state.dialog_scroll -= 10;
+            } else {
+                state.dialog_scroll = 0;
+            }
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::PageDown => {
+            state.dialog_scroll = state.dialog_scroll.saturating_add(10);
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Home => {
+            state.dialog_scroll = 0;
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::End => {
+            state.dialog_scroll = u16::MAX;
+            state.needs_redraw = true;
+            AppAction::None
+        }
         KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
             state.ui_mode = UiMode::Normal;
             state.check_data = None;
+            state.dialog_scroll = 0;
             AppAction::DismissDialog
         }
         _ => AppAction::None,
