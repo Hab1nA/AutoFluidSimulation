@@ -38,6 +38,17 @@ IPC_READY_TIMEOUT = 20
 MIN_VALID_PID = 1
 
 
+def _find_rust_tui_binary():
+    tui_dir = os.path.join(PROJECT_DIR, "autofluid-tui")
+    debug_bin = os.path.join(tui_dir, "target", "debug", "autofluid-tui.exe")
+    release_bin = os.path.join(tui_dir, "target", "release", "autofluid-tui.exe")
+    if os.path.exists(release_bin):
+        return release_bin
+    if os.path.exists(debug_bin):
+        return debug_bin
+    return None
+
+
 def _ensure_dirs():
     os.makedirs(PID_DIR, exist_ok=True)
 
@@ -385,10 +396,19 @@ def _run_all_mode():
         except (AttributeError, ValueError):
             pass
 
-    # 启动 TUI（在主进程中运行，占据当前终端）
+    # 启动 TUI（在主进程中运行 Rust TUI 子进程，占据当前终端）
     try:
-        from client.tui import main as client_main
-        client_main()
+        rust_bin = _find_rust_tui_binary()
+        if rust_bin:
+            tui_proc = subprocess.Popen(
+                [rust_bin],
+                cwd=PROJECT_DIR,
+            )
+            tui_proc.wait()
+        else:
+            sp_logger.error("未找到 Rust TUI 二进制文件")
+            print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
+            print("请先编译: 在 autofluid-tui/ 目录下运行 cargo build --release", file=sys.stderr)
     except Exception as e:
         sp_logger.error(f"TUI Client 异常退出: {e}", exc_info=True)
         print(f"\n[错误] TUI 客户端异常退出: {e}", file=sys.stderr)
@@ -437,8 +457,21 @@ def main():
         from utils.logger import init_session, get_session_log_dir
         init_session("client")
         print(f"  日志目录: {get_session_log_dir()}")
-        from client.tui import main as client_main
-        client_main()
+
+        rust_bin = _find_rust_tui_binary()
+        if rust_bin:
+            try:
+                result = subprocess.run([rust_bin], cwd=PROJECT_DIR)
+                sys.exit(result.returncode)
+            except FileNotFoundError:
+                print(f"[错误] 找不到 Rust TUI 二进制文件: {rust_bin}", file=sys.stderr)
+                sys.exit(1)
+            except KeyboardInterrupt:
+                sys.exit(0)
+        else:
+            print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
+            print("请先编译: 在 autofluid-tui/ 目录下运行 cargo build --release", file=sys.stderr)
+            sys.exit(1)
     elif args.all:
         _run_all_mode()
     elif args.stop:

@@ -58,11 +58,8 @@
 │  │  │ Rust TUI     │ │ IPC  │  │ IPCServer (TCP :9527)    │ │   │
 │  │  │ (ratatui)    │◄├──────►│  ├──────────────────────────┤ │   │
 │  │  └──────────────┘ │ JSON │  │ StateManager (SQLite WAL) │ │   │
-│  │  ┌──────────────┐ │      │  ├──────────────────────────┤ │   │
-│  │  │ Python TUI   │ │      │  │ PipelineScheduler         │ │   │
-│  │  │ (Textual)    │ │      │  │  ├─ 3 Worker 线程        │ │   │
-│  │  └──────────────┘ │      │  │  ├─ BarrierMonitor 线程   │ │   │
-│  └──────────────────┘      │  │  └─ Solver 线程池         │ │   │
+│  └──────────────────┘      │  ├──────────────────────────┤ │   │
+│                             │  │ PipelineScheduler         │ │   │
 │                             │  ├──────────────────────────┤ │   │
 │                             │  │ TaskRunner                │ │   │
 │                             │  │  ├─ SW (win32com COM)    │ │   │
@@ -113,8 +110,6 @@ SW → SC → Transfer → Meshing → Solver
 | IPCProtocol | `ipc/protocol.py` | ~120 | JSON over TCP 消息协议 |
 | RemoteWorkstation | `utils/ssh_client.py` | ~415 | paramiko SSH 封装 |
 | Config | `engine/config.py` | ~250 | 全局硬编码配置 |
-| IPCClient (Py) | `client/ipc_client.py` | ~243 | Python IPC 客户端 |
-| TUI (Py) | `client/tui.py` | - | Python Textual TUI |
 | IpcClient (Rust) | `autofluid-tui/src/ipc/client.rs` | ~80 | Rust tokio TCP 客户端 |
 | IpcProtocol (Rust) | `autofluid-tui/src/ipc/protocol.rs` | ~70 | Rust 端协议定义 |
 | AppState (Rust) | `autofluid-tui/src/state/app_state.rs` | ~200+ | Rust 端状态管理 |
@@ -667,8 +662,6 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 | `utils/ssh_client.py` | 🟢 轻度 | 接口微调 | `RemoteWorkstation` 类本身无需修改，但调用方式从单实例变为池化管理 |
 | `utils/logger.py` | 🟢 轻度 | 无变更 | 日志广播机制可复用 |
 | `utils/excel_reader.py` | 🟢 轻度 | 无变更 | Excel 读取逻辑不变 |
-| `client/ipc_client.py` | 🟡 中度 | 接口扩展 | 连接目标从 `127.0.0.1` 改为服务器 A 地址；新增 `collect_results()` / `collect_ack()` 便捷方法 |
-| `client/tui.py` | 🟡 中度 | UI 扩展 | 表格需显示 PostProcess/Collect 列；新增结果回收面板 |
 
 ### 5.2 Rust TUI 前端影响矩阵
 

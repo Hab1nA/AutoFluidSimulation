@@ -52,7 +52,7 @@
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
 | **v2.1.0** | 2026-05 | 新增设计表自动检测与多策略导入（InsertFamilyTableOpen → COM 直接设参降级）；递归深度安全限制与优雅降级；Excel 设计表格式预验证；文件监控增强（SW 宏重试前重置监控状态）；TUI 新增 Daemon 启停控制按钮与增量表格更新；命令日志 IPC 通道 |
-| **v2.0.0** | 2025-05 | 架构重写：SW 导出从宏文件驱动改为直接 COM API 调用；C/S 分离 IPC 架构；Textual TUI 界面；DAG 调度器与全局屏障；SQLite WAL 状态持久化；远程 SSH 后台任务编排 |
+| **v2.0.0** | 2025-05 | 架构重写：SW 导出从宏文件驱动改为直接 COM API 调用；C/S 分离 IPC 架构；Rust TUI 界面（ratatui）；DAG 调度器与全局屏障；SQLite WAL 状态持久化；远程 SSH 后台任务编排 |
 | **v1.0.0** | 2025-04 | 初始原型：基于 SolidWorks 宏文件 (`Macro1.swp`) 的 STEP 批量导出；基础流水线控制 |
 
 ---
@@ -62,7 +62,7 @@
 ```mermaid
 graph TB
     subgraph "TUI 客户端进程"
-        TUI[Textual TUI 界面]
+        TUI[Rust TUI 界面<br/>ratatui + tokio]
         IPC_C[IPC Client<br/>TCP Socket]
     end
 
@@ -114,7 +114,7 @@ graph TB
 | **TaskRunner** | 执行各阶段具体操作，三层 SW 启动降级 | win32com / subprocess / paramiko |
 | **StepFileMonitor** | 检测 SW 导出的 STEP 文件，文件大小稳定判定 | 轮询 + 历史采样 |
 | **IPC Server/Client** | Daemon 与 TUI 间通信 | TCP Socket + JSON |
-| **PipelineTUI** | 交互式终端界面，增量表格更新 | Textual 框架 |
+| **PipelineTUI** | 交互式终端界面，增量表格更新 | Rust ratatui 框架 |
 
 ---
 
@@ -188,12 +188,6 @@ AutoFluidSimulation/
 │   ├── state_manager.py     # StateManager：SQLite 共享状态管理器
 │   └── file_monitor.py      # StepFileMonitor：STEP 文件监控与稳定检测
 │
-├── client/                  # TUI 客户端模块
-│   ├── ipc_client.py        # IPCClient：与 Daemon 通信的 TCP 客户端
-│   ├── tui.py               # PipelineTUI：Textual 交互式终端界面
-│   └── widgets/             # 自定义 TUI 控件
-│       └── __init__.py
-│
 ├── ipc/                     # 进程间通信模块
 │   ├── protocol.py          # IPC 协议定义（命令常量、消息序列化）
 │   └── server.py            # IPCServer：TCP Socket 命令服务器
@@ -231,8 +225,6 @@ AutoFluidSimulation/
 
 | 包 | 最低版本 | 用途 |
 |----|----------|------|
-| `textual` | ≥0.40.0 | TUI 框架（交互式终端界面） |
-| `rich` | ≥13.0.0 | 终端美化（Textual 依赖） |
 | `openpyxl` | ≥3.1.0 | Excel 参数表读写与设计表格式预验证 |
 | `python-dotenv` | ≥1.0.0 | `.env` 环境变量文件加载 |
 | `pywin32` | ≥305 | SolidWorks COM 自动化接口 |
@@ -835,7 +827,7 @@ AUTOFLUID_SSH_PASSWORD=your_password
 - 状态数据库路径：`{LOCAL_PATHS["data_dir"]}\pipeline_state.db`
 - IPC 默认端口：`9527`
 - 日志格式：`[时间] [级别] [模块名] 消息内容`
-- TUI 界面使用 Textual CSS 进行样式定制（定义在 `PipelineTUI.CSS` 类属性中）
+- TUI 界面使用 Rust ratatui 框架进行渲染
 - 文件监控稳定检测参数：`stable_time=2.0s`，`check_interval=1.0s`
 
 ---

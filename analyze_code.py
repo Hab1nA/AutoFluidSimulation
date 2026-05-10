@@ -145,8 +145,6 @@ def test_imports(root_dir):
         'engine.daemon',
         'ipc.protocol',
         'ipc.server',
-        'client.ipc_client',
-        'client.tui',
         'utils.logger',
         'utils.ssh_client',
         'utils.excel_reader',

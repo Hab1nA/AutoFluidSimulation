@@ -15,9 +15,8 @@
 4. [核心模块详解](#4-核心模块详解)
    - 4.1 [engine — 调度引擎](#41-engine--调度引擎)
    - 4.2 [ipc — 进程间通信](#42-ipc--进程间通信)
-   - 4.3 [client — Python TUI 客户端](#43-client--python-tui-客户端)
-   - 4.4 [utils — 工具模块](#44-utils--工具模块)
-   - 4.5 [autofluid-tui — Rust TUI 客户端](#45-autofluid-tui--rust-tui-客户端)
+   - 4.3 [utils — 工具模块](#43-utils--工具模块)
+   - 4.4 [autofluid-tui — Rust TUI 客户端](#44-autofluid-tui--rust-tui-客户端)
 5. [关键类与函数说明](#5-关键类与函数说明)
 6. [数据流与状态机](#6-数据流与状态机)
 7. [IPC 通信协议](#7-ipc-通信协议)
@@ -49,14 +48,14 @@ AutoFluid 是一套**液氧甲烷火箭发动机仿真自动化流水线**控制
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      用户交互层                              │
-│  ┌──────────────────────┐  ┌──────────────────────────────┐ │
-│  │  Python TUI (Textual) │  │  Rust TUI (ratatui + tokio) │ │
-│  │  client/tui.py        │  │  autofluid-tui/              │ │
-│  └──────────┬───────────┘  └──────────────┬───────────────┘ │
-└─────────────┼──────────────────────────────┼────────────────┘
-              │ IPC (TCP :9527)              │ IPC (TCP :9527)
-┌─────────────┼──────────────────────────────┼────────────────┐
-│             ▼                              ▼                │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  Rust TUI (ratatui + tokio)                         │   │
+│  │  autofluid-tui/                                     │   │
+│  └──────────────────────┬───────────────────────────────┘   │
+└─────────────────────────┼──────────────────────────────────┘
+                          │ IPC (TCP :9527)
+┌─────────────────────────┼──────────────────────────────────┐
+│                         ▼                                    │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              IPC Server (ipc/server.py)               │   │
 │  │              命令路由 & 请求/响应处理                    │   │
@@ -104,7 +103,7 @@ AutoFluid 是一套**液氧甲烷火箭发动机仿真自动化流水线**控制
 autofluid/
 ├── main.py                  # 统一入口（--daemon / --client 模式选择）
 ├── start_daemon.py          # Daemon 启动脚本
-├── start_client.py          # Python TUI 启动脚本
+├── start_client.py          # TUI 客户端启动脚本
 ├── start.bat                # Windows 一键启动批处理
 ├── requirements.txt         # Python 依赖
 ├── .env                     # 环境变量配置（敏感信息）
@@ -122,10 +121,6 @@ autofluid/
 ├── ipc/                     # 🔌 进程间通信协议
 │   ├── protocol.py          # JSON over TCP 协议定义 & 消息序列化
 │   └── server.py            # IPC 服务器（运行在 Daemon 中）
-│
-├── client/                  # 🖥️ Python TUI 客户端
-│   ├── ipc_client.py        # IPC 客户端（同步请求-响应）
-│   └── tui.py               # Textual 框架终端界面
 │
 ├── utils/                   # 🛠️ 工具模块
 │   ├── logger.py            # 日志系统 & 广播处理器
@@ -389,50 +384,9 @@ engine_state (key TEXT PK, value TEXT)
 
 ---
 
-### 4.3 client — Python TUI 客户端
+### 4.3 utils — 工具模块
 
-#### 4.3.1 ipc_client.py — IPC 客户端
-
-`IPCClient` 提供同步请求-响应模式，自动处理连接、超时和重连。所有 socket 操作受 `_send_lock`（可重入锁）保护，线程安全。
-
-**便捷方法**：`start_pipeline()`, `pause_pipeline()`, `full_quit()`, `check_system()`, `get_all_status()`, `get_statistics()`, `get_engine_status()`, `reset_step()`, `clean_step()`, `get_log_entries()`
-
-#### 4.3.2 tui.py — Textual TUI 界面
-
-`PipelineTUI` 基于 Textual 框架构建交互式终端界面。
-
-**界面布局**：
-
-```
-┌──────────────────────────────────────────────────┐
-│   🚀 液氧甲烷火箭发动机仿真总控程序 v2.1.0         │
-│  引擎: 运行中 | 构型数: 12 | 屏障: 未通过          │
-├──────────────────────────────────────────────────┤
-│  构型  │  SW  │  SC  │ 传输 │ 网格 │ 求解        │
-│    1   │  ✅  │  ✅  │  ✅  │  ⏳  │  ⏳         │
-│    2   │  ✅  │  ⏳  │  ⏳  │  ⏳  │  ⏳         │
-├──────────────────┬───────────────────────────────┤
-│  📋 信息提示     │  📝 详细日志                    │
-├──────────────────┴───────────────────────────────┤
-│  > _                                              │
-│  [Start] [Pause] [Check] [Status] [Daemon] ...   │
-└──────────────────────────────────────────────────┘
-```
-
-**状态图标映射**：✅ Completed / ⏳ Running / 🔄 Retrying / ⏸️ Waiting/Paused / ❌ Error
-
-**支持命令**：help, start, pause, check, status, reset, clean, daemon start/stop, quit, quit full, filter, export
-
-**日志系统**：
-- 信息提示面板：用户操作反馈
-- 详细日志面板：通过 IPC 增量拉取，支持级别/来源过滤
-- 日志导出为文件
-
----
-
-### 4.4 utils — 工具模块
-
-#### 4.4.1 logger.py — 日志系统
+#### 4.3.1 logger.py — 日志系统
 
 **核心组件**：
 
@@ -457,7 +411,7 @@ engine_state (key TEXT PK, value TEXT)
 
 **轮询日志过滤**：自动过滤来自 IPC 轮询命令（`get_all_status`, `get_log_entries`, `get_engine_status`）的日志，避免刷屏。
 
-#### 4.4.2 ssh_client.py — SSH 客户端
+#### 4.3.2 ssh_client.py — SSH 客户端
 
 `RemoteWorkstation` 封装了 paramiko 的 SSH/SFTP 操作：
 
@@ -475,7 +429,7 @@ engine_state (key TEXT PK, value TEXT)
 
 **后台进程机制**：使用 `PowerShell Start-Process` 启动 `cmd.exe` 子进程，该进程不依附于 SSH 会话，SSH 断开后继续运行。任务完成后写入标志文件。
 
-#### 4.4.3 excel_reader.py — Excel 读取器
+#### 4.3.3 excel_reader.py — Excel 读取器
 
 `read_model_configs(excel_path)` 从 Excel 文件读取构型参数配置：
 - 从第 3 行开始读取（跳过 2 行表头）
@@ -485,11 +439,11 @@ engine_state (key TEXT PK, value TEXT)
 
 ---
 
-### 4.5 autofluid-tui — Rust TUI 客户端
+### 4.4 autofluid-tui — Rust TUI 客户端
 
 高性能 Rust 实现的 TUI 客户端，使用 `ratatui` 渲染 + `tokio` 异步运行时 + `crossterm` 终端事件。
 
-#### 4.5.1 main.rs — 异步主循环
+#### 4.4.1 main.rs — 异步主循环
 
 ```rust
 tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonManager
@@ -502,7 +456,7 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
         └─ ratatui 渲染 → ui 模块各组件
 ```
 
-#### 4.5.2 state/ — 应用状态
+#### 4.4.2 state/ — 应用状态
 
 | 结构体 | 说明 |
 |--------|------|
@@ -515,7 +469,7 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 | `ConfirmAction` | 确认操作枚举（ResetStep / CleanStep / FullQuit / StopDaemon） |
 | `FilterType` | 过滤类型枚举（Level / Source） |
 
-#### 4.5.3 ipc/ — IPC 通信
+#### 4.4.3 ipc/ — IPC 通信
 
 | 结构体 | 说明 |
 |--------|------|
@@ -523,14 +477,14 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 | `IpcResponse` | IPC 响应（status / data / message / request_id） |
 | `IpcClient` | 异步 IPC 客户端（tokio TcpStream），5 秒超时 |
 
-#### 4.5.4 event_handler/ — 事件处理
+#### 4.4.4 event_handler/ — 事件处理
 
 | 模块 | 说明 |
 |------|------|
 | `key_handler` | 键盘事件分发（按 UiMode 和 FocusZone 路由） |
 | `command` | 命令解析与执行（help/start/pause/check/status/reset/clean/daemon/quit/filter/export） |
 
-#### 4.5.5 ui/ — UI 渲染
+#### 4.4.5 ui/ — UI 渲染
 
 | 模块 | 说明 |
 |------|------|
@@ -541,7 +495,7 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 | `command_bar` | 命令输入栏 + 8 个快捷按钮 |
 | `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层） |
 
-#### 4.5.6 daemon_mgr.rs — Daemon 进程管理
+#### 4.4.6 daemon_mgr.rs — Daemon 进程管理
 
 `DaemonManager` 管理 Daemon 子进程的生命周期：
 - `launch(project_dir)`：启动 Daemon 子进程（Windows 使用 CREATE_NO_WINDOW 标志）
@@ -563,8 +517,6 @@ tokio::main → 初始化终端 → 创建 AppState/LogBuffer/IpcClient/DaemonMa
 | `StepFileMonitor` | engine/file_monitor.py | STEP 文件目录监控 |
 | `FileStableDetector` | engine/file_monitor.py | 文件写入完成检测 |
 | `IPCServer` | ipc/server.py | IPC 服务器 |
-| `IPCClient` | client/ipc_client.py | IPC 客户端 |
-| `PipelineTUI` | client/tui.py | Textual TUI 应用 |
 | `RemoteWorkstation` | utils/ssh_client.py | SSH/SFTP 客户端 |
 | `LogBroadcastHandler` | utils/logger.py | 日志广播处理器 |
 | `LogEntry` | utils/logger.py | 结构化日志条目 |
@@ -701,9 +653,6 @@ main.py ──► engine/daemon.py ──► engine/config.py
                            │                  ──► engine/config.py
                            ──► utils/logger.py
                            ──► utils/excel_reader.py
-
-start_client.py ──► client/tui.py ──► client/ipc_client.py ──► ipc/protocol.py
-                                       ──► engine/config.py
 ```
 
 ### Rust 模块依赖
@@ -736,7 +685,6 @@ main.rs ──► state/app_state.rs
 | `openpyxl` | 读取 Excel 参数表 |
 | `paramiko` | SSH/SFTP 远程操作 |
 | `python-dotenv` | 加载 .env 环境变量 |
-| `textual` | Python TUI 框架 |
 | `pywin32` | Windows COM 自动化（SolidWorks） |
 
 **Rust**（Cargo.toml）：
@@ -761,11 +709,11 @@ main.rs ──► state/app_state.rs
 # 启动后台引擎
 python main.py --daemon
 
-# 启动 Python TUI 客户端
+# 启动 TUI 客户端（Rust TUI）
 python main.py --client
 
-# 启动 Rust TUI 客户端
-python main.py --tui
+# 同时启动 daemon + client
+python main.py --all
 ```
 
 ### 方式二：独立脚本
@@ -774,7 +722,7 @@ python main.py --tui
 # 启动后台引擎
 python start_daemon.py
 
-# 启动 Python TUI 客户端
+# 启动 TUI 客户端（Rust TUI）
 python start_client.py
 ```
 
@@ -795,7 +743,7 @@ cargo build --release
 ### 运行顺序
 
 1. **先启动 Daemon**：`python start_daemon.py`
-2. **再启动 TUI 客户端**：`python start_client.py` 或运行 Rust TUI
+2. **再启动 TUI 客户端**：`python start_client.py`
 3. TUI 也可通过 `daemon start` 命令从界面内启动 Daemon
 
 ### Rust TUI 构建

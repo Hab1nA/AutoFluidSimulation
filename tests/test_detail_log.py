@@ -3,7 +3,7 @@
 详细日志栏目功能验证测试脚本
 ===============================================================================
 测试 LogBroadcastHandler、LogEntry、IPC 日志传输、
-TUI 日志过滤和导出功能。
+日志过滤和导出功能。
 
 运行方式：
   cd "项目根目录"
@@ -503,46 +503,7 @@ def test_log_export_with_filter():
 
 
 # ============================================================================
-# 测试 7: TUI 日志格式化渲染
-# ============================================================================
-
-def test_log_level_colors():
-    """测试日志级别颜色映射完整性。"""
-    from client.tui import LOG_LEVEL_COLORS
-
-    assert "DEBUG" in LOG_LEVEL_COLORS
-    assert "INFO" in LOG_LEVEL_COLORS
-    assert "WARNING" in LOG_LEVEL_COLORS
-    assert "ERROR" in LOG_LEVEL_COLORS
-    assert "CRITICAL" in LOG_LEVEL_COLORS
-    print("  ✅ 日志级别颜色映射完整")
-
-
-def test_log_source_icons():
-    """测试日志来源图标映射完整性。"""
-    from client.tui import LOG_SOURCE_ICONS
-
-    assert "local_ps" in LOG_SOURCE_ICONS
-    assert "remote_ps" in LOG_SOURCE_ICONS
-    assert "com" in LOG_SOURCE_ICONS
-    assert "scheduler" in LOG_SOURCE_ICONS
-    assert "system" in LOG_SOURCE_ICONS
-    assert "ipc" in LOG_SOURCE_ICONS
-    print("  ✅ 日志来源图标映射完整")
-
-
-def test_tui_import():
-    """测试 TUI 模块可以正常导入。"""
-    from client.tui import PipelineTUI, VALID_LOG_LEVELS, VALID_LOG_SOURCES
-
-    assert PipelineTUI is not None
-    assert "DEBUG" in VALID_LOG_LEVELS
-    assert "remote_ps" in VALID_LOG_SOURCES
-    print("  ✅ TUI 模块导入正常")
-
-
-# ============================================================================
-# 测试 8: 边界条件
+# 测试 7: 边界条件
 # ============================================================================
 
 def test_handler_since_id_exceeds_buffer():
@@ -880,34 +841,6 @@ def test_export_uses_full_message():
     print("  ✅ 导出文件使用完整 message 格式（含时间戳和级别）")
 
 
-def test_tui_render_uses_raw_message():
-    """测试 TUI 渲染使用 raw_message 而非 message。"""
-    from client.tui import PipelineTUI
-
-    entry = {
-        "level": "ERROR",
-        "source": "remote_ps",
-        "message": "[2026-05-08 12:00:00] [ERROR] [utils.ssh_client] SSH 连接失败",
-        "raw_message": "[utils.ssh_client] SSH 连接失败",
-    }
-
-    level = entry.get("level", "INFO")
-    source = entry.get("source", "system")
-    raw_message = entry.get("raw_message", entry.get("message", ""))
-
-    color = "red"
-    icon = "🌐"
-
-    formatted = f"{icon} [{color}][{level}][/{color}] {raw_message}"
-
-    assert "[2026-05-08" not in formatted, "TUI 显示不应包含时间戳"
-    assert "[ERROR]" in formatted, "TUI 显示应包含级别标签（由渲染器添加）"
-    assert "[utils.ssh_client] SSH 连接失败" in formatted
-    assert formatted.count("[ERROR]") == 1, "级别标签应仅出现一次"
-
-    print("  ✅ TUI 渲染使用 raw_message，不重复显示时间戳和级别")
-
-
 def test_from_dict_backward_compatible():
     """测试 from_dict 在缺少 raw_message 时回退到 message。"""
     data = {
@@ -996,99 +929,6 @@ def test_get_broadcast_handler_thread_safe():
 
 
 # ============================================================================
-# 测试 12: Issue2 - _detail_log_buffer 容量限制
-# ============================================================================
-
-def test_detail_log_buffer_is_deque():
-    """测试 TUI _detail_log_buffer 使用 deque 类型。"""
-    import collections
-    from client.tui import PipelineTUI
-
-    app = PipelineTUI()
-    assert isinstance(app._detail_log_buffer, collections.deque), \
-        f"_detail_log_buffer 应为 deque，实际为 {type(app._detail_log_buffer)}"
-    print("  ✅ _detail_log_buffer 使用 deque 类型")
-
-
-def test_detail_log_buffer_has_maxlen():
-    """测试 TUI _detail_log_buffer 有容量限制。"""
-    from client.tui import PipelineTUI
-
-    app = PipelineTUI()
-    assert app._detail_log_buffer.maxlen is not None, \
-        "_detail_log_buffer 应设置 maxlen"
-    assert app._detail_log_buffer.maxlen > 0, \
-        f"maxlen 应大于0，实际为 {app._detail_log_buffer.maxlen}"
-    print(f"  ✅ _detail_log_buffer 有容量限制 (maxlen={app._detail_log_buffer.maxlen})")
-
-
-def test_detail_log_buffer_capacity_enforced():
-    """测试 _detail_log_buffer 超出容量后自动淘汰旧条目。"""
-    from client.tui import PipelineTUI
-
-    app = PipelineTUI()
-    maxlen = app._detail_log_buffer.maxlen
-
-    for i in range(maxlen + 500):
-        app._detail_log_buffer.append({"id": i, "message": f"msg{i}"})
-
-    assert len(app._detail_log_buffer) == maxlen, \
-        f"超出容量后应保持 maxlen={maxlen}，实际 {len(app._detail_log_buffer)}"
-
-    first = app._detail_log_buffer[0]
-    assert first["id"] == 500, f"最旧条目应被淘汰，最早的 id 应为500，实际为 {first['id']}"
-    print("  ✅ _detail_log_buffer 超出容量后自动淘汰旧条目")
-
-
-def test_detail_log_buffer_export_compatible():
-    """测试 deque 类型的 _detail_log_buffer 与导出功能兼容。"""
-    from client.tui import PipelineTUI
-
-    app = PipelineTUI()
-    app._detail_log_buffer.append({
-        "level": "INFO", "source": "system",
-        "message": "test message", "raw_message": "test raw",
-    })
-    app._detail_log_buffer.append({
-        "level": "ERROR", "source": "remote_ps",
-        "message": "error message", "raw_message": "error raw",
-    })
-
-    lines = []
-    for entry in app._detail_log_buffer:
-        lines.append(entry["message"])
-
-    assert len(lines) == 2
-    assert "test message" in lines[0]
-    assert "error message" in lines[1]
-    print("  ✅ deque 类型的 _detail_log_buffer 与导出功能兼容")
-
-
-def test_detail_log_buffer_filter_compatible():
-    """测试 deque 类型的 _detail_log_buffer 与过滤刷新功能兼容。"""
-    from client.tui import PipelineTUI
-
-    app = PipelineTUI()
-    app._detail_log_buffer.append({
-        "level": "INFO", "source": "system",
-        "message": "info msg", "raw_message": "info raw",
-    })
-    app._detail_log_buffer.append({
-        "level": "ERROR", "source": "remote_ps",
-        "message": "error msg", "raw_message": "error raw",
-    })
-
-    filtered = []
-    for entry in app._detail_log_buffer:
-        if entry.get("level") == "ERROR":
-            filtered.append(entry)
-
-    assert len(filtered) == 1
-    assert filtered[0]["level"] == "ERROR"
-    print("  ✅ deque 类型的 _detail_log_buffer 与过滤功能兼容")
-
-
-# ============================================================================
 # 主测试入口
 # ============================================================================
 
@@ -1123,9 +963,6 @@ def main():
         ("IPC日志过滤参数", test_ipc_log_transmission_with_filter),
         ("日志导出", test_log_export),
         ("带过滤日志导出", test_log_export_with_filter),
-        ("TUI级别颜色映射", test_log_level_colors),
-        ("TUI来源图标映射", test_log_source_icons),
-        ("TUI模块导入", test_tui_import),
         ("边界: since_id超出", test_handler_since_id_exceeds_buffer),
         ("边界: limit=0", test_handler_zero_limit),
         ("边界: 组合过滤", test_handler_combined_filter),
@@ -1142,15 +979,9 @@ def main():
         ("raw_message: message保留完整格式", test_message_still_has_full_format),
         ("raw_message: 比message更短", test_raw_message_vs_message_difference),
         ("导出: 使用完整message格式", test_export_uses_full_message),
-        ("TUI渲染: 使用raw_message", test_tui_render_uses_raw_message),
         ("向后兼容: from_dict缺raw_message", test_from_dict_backward_compatible),
         ("Issue1: 并发安装handler线程安全", test_install_broadcast_handler_thread_safe),
         ("Issue1: 并发读取handler线程安全", test_get_broadcast_handler_thread_safe),
-        ("Issue2: buffer使用deque类型", test_detail_log_buffer_is_deque),
-        ("Issue2: buffer有容量限制", test_detail_log_buffer_has_maxlen),
-        ("Issue2: buffer超出容量自动淘汰", test_detail_log_buffer_capacity_enforced),
-        ("Issue2: buffer与导出兼容", test_detail_log_buffer_export_compatible),
-        ("Issue2: buffer与过滤兼容", test_detail_log_buffer_filter_compatible),
     ]
 
     passed = 0
