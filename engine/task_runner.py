@@ -19,12 +19,11 @@ import tempfile
 import time
 import threading
 import gc
-from typing import Optional, Callable, List
+from typing import Optional, List
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
+    STATUS_COMPLETED, STATUS_ERROR, STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
 )
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
@@ -112,7 +111,6 @@ class TaskRunner:
             logger.info("SolidWorks 进程已启动，等待 COM 接口就绪...")
 
             # 轮询等待 SW 完全启动（最多等待 60 秒）
-            import pythoncom
             import win32com.client
             max_wait = 60
             for attempt in range(max_wait):
@@ -652,7 +650,6 @@ class TaskRunner:
         logger.info(f"  Excel 参数 ({len(excel_params)}): {excel_params}")
         logger.info(f"  模型匹配参数 ({len(model_param_names)}): {model_param_names}")
 
-        matched = [p for p in excel_params if p in model_param_names]
         unmatched = [p for p in excel_params if p not in model_param_names]
 
         if unmatched:
@@ -1017,8 +1014,8 @@ class TaskRunner:
                 # ---- 验证 doc COM 对象有效性 ----
                 if not self._verify_com_object(doc, "IModelDoc2"):
                     logger.error(
-                        f"OpenDoc6 返回了无效的文档 COM 代理，"
-                        f"模型可能未正确加载"
+                        "OpenDoc6 返回了无效的文档 COM 代理，"
+                        "模型可能未正确加载"
                     )
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
@@ -1164,7 +1161,6 @@ class TaskRunner:
                 return True
             finally:
                 # ---- 清理：关闭模型文档 → 退出 SW → 释放 COM 资源 ----
-                doc_closed = False
 
                 # 步骤 1: 关闭已打开的模型文档
                 if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
@@ -1174,7 +1170,6 @@ class TaskRunner:
                         title = os.path.basename(sw_model)
                     try:
                         sw_app.CloseDoc(title)
-                        doc_closed = True
                         logger.info(f"已关闭模型文档: {title}")
                     except Exception as e_doc:
                         logger.debug(f"关闭模型文档异常: {e_doc}")
@@ -1218,9 +1213,7 @@ class TaskRunner:
                 # 在 CoUninitialize 前用 del 确保 COM 代理的 __del__ 被调用，
                 # 防止下次 Dispatch 返回退化的 IDispatch 代理。
                 del doc
-                doc = None
                 del sw_app
-                sw_app = None
                 gc.collect()
                 # 双重 CoFreeUnusedLibraries 确保 STA 消息泵排空
                 for _ in range(2):

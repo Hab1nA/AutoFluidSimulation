@@ -25,7 +25,6 @@ import time
 import socket
 import logging
 from datetime import datetime
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -242,7 +241,6 @@ def _stop_all_processes():
     print("=" * 60)
 
     if sys.platform == "win32":
-        import ctypes
 
         for pattern, label in [
             ("start_daemon.py", "后台引擎"),
@@ -345,7 +343,7 @@ def _show_status():
 
 
 def _run_all_mode():
-    from utils.logger import init_session, build_session_log_dir, get_session_log_dir
+    from utils.logger import init_session, build_session_log_dir
 
     _ensure_dirs()
 

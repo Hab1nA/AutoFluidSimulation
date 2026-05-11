@@ -13,7 +13,7 @@ import itertools
 import logging
 import os
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 _session_type: str | None = None

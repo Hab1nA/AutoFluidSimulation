@@ -24,7 +24,7 @@ import os
 from typing import Optional
 
 from engine.config import (
-    STEP_NAMES, STEP_INDEX,
+    STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     ENGINE_CONFIG, LOCAL_PATHS, get_step_filename,
 )
@@ -691,16 +691,13 @@ class PipelineScheduler:
             # ---- 前置检查：SW 阶段是否已全部终结且有错误 ----
             # 若 SW 宏执行完毕但所有构型的 STEP 均缺失，后续流程无法推进。
             sw_all_terminal = True
-            sw_has_error = False
             sw_has_completed = False
             for cn in all_configs:
                 s = self.state.get_step_status(cn, "SW")
                 if s not in (STATUS_COMPLETED, STATUS_ERROR):
                     sw_all_terminal = False
                     break
-                if s == STATUS_ERROR:
-                    sw_has_error = True
-                else:
+                if s == STATUS_COMPLETED:
                     sw_has_completed = True
             if sw_all_terminal and not sw_has_completed:
                 logger.error("=" * 60)

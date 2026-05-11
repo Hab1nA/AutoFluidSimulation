@@ -343,7 +343,7 @@ class RemoteWorkstation:
 
         while time.time() - start_time < timeout:
             if self.check_remote_file(flag_file):
-                logger.info(f"远程任务完成（检测到标志文件）")
+                logger.info("远程任务完成（检测到标志文件）")
                 # 清理标志文件
                 self.exec_command(f'if exist "{flag_file}" del /f "{flag_file}"')
                 return True

@@ -12,7 +12,6 @@ Daemon 写入状态，TUI 客户端读取状态。通过 IPC 命令触发状态�
 """
 import sqlite3
 import threading
-import time
 from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 

@@ -38,11 +38,11 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
 
     let prefix = "> ";
     let before_text = format!("{}{}", prefix, before_cursor);
-    let before_width = unicode_width::UnicodeWidthStr::width(before_text.as_str()) as usize;
+    let before_width = unicode_width::UnicodeWidthStr::width(before_text.as_str());
     let cursor_display_w = cursor_char
-        .and_then(|c| unicode_width::UnicodeWidthChar::width(c))
+        .and_then(unicode_width::UnicodeWidthChar::width)
         .unwrap_or(0);
-    let after_width = unicode_width::UnicodeWidthStr::width(after_cursor.as_str()) as usize;
+    let after_width = unicode_width::UnicodeWidthStr::width(after_cursor.as_str());
     let total_width = before_width + cursor_display_w + after_width;
 
     let input_display_width = input_area.width.saturating_sub(2) as usize;
