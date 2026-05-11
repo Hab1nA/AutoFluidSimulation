@@ -194,6 +194,7 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         KeyCode::Up => {
             if state.info_log_scroll > 0 {
                 state.info_log_scroll -= 1;
+                state.info_log_auto_scroll = false;
                 state.needs_redraw = true;
             }
             AppAction::None
@@ -209,6 +210,7 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
             } else {
                 state.info_log_scroll = 0;
             }
+            state.info_log_auto_scroll = false;
             state.needs_redraw = true;
             AppAction::None
         }
@@ -219,11 +221,12 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         }
         KeyCode::Home => {
             state.info_log_scroll = 0;
+            state.info_log_auto_scroll = false;
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::End => {
-            state.info_log_scroll = u16::MAX;
+            state.info_log_auto_scroll = true;
             state.needs_redraw = true;
             AppAction::None
         }

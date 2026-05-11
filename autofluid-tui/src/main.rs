@@ -98,7 +98,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             }
         }
         if let Some(ct) = state.detail_click_time {
-            if state.clicked_detail_row.is_some() && ct.elapsed() > Duration::from_millis(120) {
+            if state.clicked_detail_row.is_some() && ct.elapsed() > Duration::from_millis(20) {
                 state.clicked_detail_row = None;
                 state.detail_click_time = None;
                 state.needs_redraw = true;
@@ -335,12 +335,36 @@ fn do_redraw(
         let info_content_height = if info_has_hscroll { info_inner_height.saturating_sub(1) } else { info_inner_height };
         let detail_content_height = if detail_has_hscroll { detail_inner_height.saturating_sub(1) } else { detail_inner_height };
 
+        if log_buffer.info_generation != state.last_info_generation {
+            state.info_log_auto_scroll = true;
+            state.last_info_generation = log_buffer.info_generation;
+        }
+
+        if state.info_log_auto_scroll
+            && info_visual_count > info_content_height {
+                state.info_log_scroll = (info_visual_count - info_content_height) as u16;
+            }
+
         if state.detail_log_auto_scroll
             && detail_visual_count > detail_content_height {
                 state.detail_log_scroll = (detail_visual_count - detail_content_height) as u16;
             }
         state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
         state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
+
+        if detail_visual_count > detail_content_height {
+            let detail_max_scroll = (detail_visual_count - detail_content_height) as u16;
+            if state.detail_log_scroll >= detail_max_scroll {
+                state.detail_log_auto_scroll = true;
+            }
+        }
+
+        if info_visual_count > info_content_height {
+            let info_max_scroll = (info_visual_count - info_content_height) as u16;
+            if state.info_log_scroll >= info_max_scroll {
+                state.info_log_auto_scroll = true;
+            }
+        }
 
         let info_inner_width = layout.info_panel.width.saturating_sub(2) as usize;
         let info_has_vscroll = info_visual_count > info_content_height;
@@ -444,7 +468,7 @@ fn do_redraw(
         ui::header::render_header(frame, layout.header, state);
         ui::header::render_info_bar(frame, layout.info_bar, state);
         ui::table::render_table(frame, layout.status_table, state);
-        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll);
+        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll);
         ui::logs::render_detail_panel(
             frame,
             layout.detail_panel,
@@ -682,6 +706,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             } else if in_info {
                 if state.info_log_scroll > 0 {
                     state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
+                    state.info_log_auto_scroll = false;
                     state.focus_zone = FocusZone::InfoLog;
                     state.needs_redraw = true;
                 }
@@ -757,7 +782,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 if let Some((new_scroll, focus)) = result {
                     match zone {
                         TableVertical => state.table_scroll_offset = new_scroll,
-                        InfoVertical => state.info_log_scroll = new_scroll,
+                        InfoVertical => { state.info_log_scroll = new_scroll; state.info_log_auto_scroll = false; }
                         InfoHorizontal => state.info_log_hscroll = new_scroll,
                         DetailVertical => { state.detail_log_scroll = new_scroll; state.detail_log_auto_scroll = false; }
                         DetailHorizontal => state.detail_log_hscroll = new_scroll,
@@ -802,6 +827,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                             } else {
                                 state.info_log_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
                             }
+                            state.info_log_auto_scroll = false;
                             state.focus_zone = FocusZone::InfoLog;
                             state.needs_redraw = true;
                             sb_detected = true;
@@ -884,19 +910,21 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             } else if in_detail {
                 state.focus_zone = FocusZone::DetailLog;
                 let now = std::time::Instant::now();
+                let inner_top = layout.detail_panel.y + 1;
+                let inner_y = row.saturating_sub(inner_top);
+                let visual_line = state.detail_log_scroll + inner_y;
+                state.clicked_detail_row = Some(visual_line);
+                state.detail_click_time = Some(now);
                 let is_double_click = state.last_detail_click_row == Some(row)
                     && state.last_detail_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
                 if is_double_click {
-                    let inner_top = layout.detail_panel.y + 1;
-                    let inner_y = row - inner_top;
-                    let visual_line = state.detail_log_scroll as usize + inner_y as usize;
                     let max_width = layout.detail_panel.width.saturating_sub(2) as usize;
                     if let Some(msg) = ui::logs::get_raw_message_at_visual_line(
                         log_buffer,
                         &state.log_filter_level,
                         &state.log_filter_source,
                         max_width,
-                        visual_line,
+                        visual_line as usize,
                     ) {
                         if let Ok(mut clipboard) = arboard::Clipboard::new() {
                             if clipboard.set_text(&msg).is_ok() {
@@ -904,8 +932,6 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                             }
                         }
                     }
-                    state.clicked_detail_row = Some(state.detail_log_scroll + inner_y);
-                    state.detail_click_time = Some(now);
                     state.last_detail_click_time = None;
                     state.last_detail_click_row = None;
                 } else {

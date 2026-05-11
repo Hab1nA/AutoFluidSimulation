@@ -138,6 +138,8 @@ pub struct AppState {
     pub detail_log_scroll: u16,
     pub detail_log_hscroll: u16,
     pub detail_log_auto_scroll: bool,
+    pub info_log_auto_scroll: bool,
+    pub last_info_generation: u64,
     pub terminal_size: ratatui::layout::Rect,
     pub pending_command: Option<String>,
     pub hovered_table_row: Option<u16>,
@@ -178,6 +180,8 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             detail_log_auto_scroll: true,
+            info_log_auto_scroll: true,
+            last_info_generation: 0,
             focus_zone: FocusZone::CommandInput,
             ..Default::default()
         }

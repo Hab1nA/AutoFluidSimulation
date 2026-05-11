@@ -114,6 +114,7 @@ pub fn render_info_panel(
     scroll_offset: u16,
     focus_zone: FocusZone,
     hscroll: u16,
+    auto_scroll: bool,
 ) {
     let border_style = if focus_zone == FocusZone::InfoLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
@@ -121,10 +122,15 @@ pub fn render_info_panel(
         Style::default().fg(Color::Rgb(51, 51, 51))
     };
 
+    let mut title_text = " 📋 信息提示 ".to_string();
+    if auto_scroll {
+        title_text.push_str("[自动▼] ");
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(" 📋 信息提示 ")
+        .title(title_text)
         .title_style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Rgb(22, 33, 62)));
     frame.render_widget(Clear, area);

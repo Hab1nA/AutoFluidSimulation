@@ -131,7 +131,7 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
     let focus_hint = match state.focus_zone {
         FocusZone::CommandInput => "命令输入",
         FocusZone::Table => "表格 ↑↓滚动",
-        FocusZone::InfoLog => "信息 ↑↓滚动",
+        FocusZone::InfoLog => "信息 ↑↓ End=自动",
         FocusZone::DetailLog => "日志 ↑↓ End=自动",
     };
     let hint_style = Style::default().fg(Color::Rgb(80, 80, 80)).add_modifier(Modifier::ITALIC);

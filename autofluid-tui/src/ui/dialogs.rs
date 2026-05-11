@@ -159,8 +159,88 @@ pub fn render_confirm_dialog(
     }
 }
 
-fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
-    let left_pad = "   ";
+fn wrap_line(line: &Line<'static>, max_width: usize) -> Vec<Line<'static>> {
+    if max_width == 0 {
+        return vec![line.clone()];
+    }
+    let mut result: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize = 0;
+
+    for span in &line.spans {
+        let span_str: &str = &span.content;
+        let span_width = unicode_width::UnicodeWidthStr::width(span_str);
+        if current_width + span_width <= max_width {
+            current_spans.push(span.clone());
+            current_width += span_width;
+        } else {
+            let mut remaining: &str = span_str;
+            let remaining_style = span.style;
+            while !remaining.is_empty() {
+                let available = max_width.saturating_sub(current_width);
+                if available == 0 {
+                    if !current_spans.is_empty() {
+                        result.push(Line::from(std::mem::take(&mut current_spans)));
+                        current_width = 0;
+                    }
+                    continue;
+                }
+                let mut cut = 0;
+                let mut cut_width = 0;
+                for (i, ch) in remaining.char_indices() {
+                    let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if cut_width + cw > available {
+                        break;
+                    }
+                    cut = i + ch.len_utf8();
+                    cut_width += cw;
+                }
+                if cut == 0 {
+                    if !current_spans.is_empty() {
+                        result.push(Line::from(std::mem::take(&mut current_spans)));
+                        current_width = 0;
+                        continue;
+                    }
+                    let mut ch_cut = 0;
+                    for (i, ch) in remaining.char_indices() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if ch_cut + cw > max_width {
+                            break;
+                        }
+                        ch_cut = i + ch.len_utf8();
+                    }
+                    if ch_cut == 0 {
+                        ch_cut = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    }
+                    current_spans.push(Span::styled(remaining[..ch_cut].to_string(), remaining_style));
+                    remaining = &remaining[ch_cut..];
+                    result.push(Line::from(std::mem::take(&mut current_spans)));
+                    current_width = 0;
+                } else {
+                    current_spans.push(Span::styled(remaining[..cut].to_string(), remaining_style));
+                    current_width += cut_width;
+                    remaining = &remaining[cut..];
+                    if !remaining.is_empty() {
+                        result.push(Line::from(std::mem::take(&mut current_spans)));
+                        current_width = 0;
+                    }
+                }
+            }
+        }
+    }
+    if !current_spans.is_empty() {
+        result.push(Line::from(current_spans));
+    }
+    if result.is_empty() {
+        result.push(Line::from(""));
+    }
+    result
+}
+
+fn build_check_content_lines(data: &serde_json::Value, content_width: usize) -> Vec<Line<'static>> {
+    let pad = "  ";
+    let pad_width = unicode_width::UnicodeWidthStr::width(pad);
+    let text_width = content_width.saturating_sub(pad_width * 2);
 
     let local_sections: &[(&str, &[&str])] = &[
         ("[SW 阶段]", &["SW模型", "Excel参数表", "STEP目录"]),
@@ -168,21 +248,21 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         ("[系统]", &["日志目录"]),
     ];
 
-    let mut lines: Vec<Line> = vec![
+    let mut raw_lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            format!("{}系统自检结果", left_pad),
+            "系统自检结果",
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!("{}─── 本地检查 ───", left_pad),
+            "─── 本地检查 ───",
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )),
     ];
 
     if let Some(local) = data.get("local_checks").and_then(|v| v.as_object()) {
         for (section_label, section_keys) in local_sections {
-            lines.push(Line::from(Span::styled(
-                format!("{}  {}", left_pad, section_label),
+            raw_lines.push(Line::from(Span::styled(
+                format!("  {}", section_label),
                 Style::default()
                     .fg(Color::Rgb(128, 128, 128))
                     .add_modifier(Modifier::BOLD),
@@ -193,9 +273,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
                     let path = info.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     let icon = if exists { "✅" } else { "❌" };
                     let color = if exists { Color::Green } else { Color::Red };
-                    lines.push(Line::from(vec![
+                    raw_lines.push(Line::from(vec![
                         Span::styled(
-                            format!("{}    {} ", left_pad, icon),
+                            format!("    {} ", icon),
                             Style::default().fg(color),
                         ),
                         Span::styled(
@@ -208,9 +288,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("{}─── 远程检查 ───", left_pad),
+    raw_lines.push(Line::from(""));
+    raw_lines.push(Line::from(Span::styled(
+        "─── 远程检查 ───",
         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
 
@@ -221,9 +301,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
             } else {
                 ("❌", Color::Red)
             };
-            lines.push(Line::from(vec![
+            raw_lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}    {} ", left_pad, icon),
+                    format!("    {} ", icon),
                     Style::default().fg(color),
                 ),
                 Span::styled(
@@ -236,9 +316,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         if let Some(conda) = remote.get("conda_available").and_then(|v| v.as_bool()) {
             let (icon, status) = if conda { ("✅", "可用") } else { ("❌", "不可用") };
             let conda_color = if conda { Color::Green } else { Color::Red };
-            lines.push(Line::from(vec![
+            raw_lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}    {} ", left_pad, icon),
+                    format!("    {} ", icon),
                     Style::default().fg(conda_color),
                 ),
                 Span::styled(
@@ -251,9 +331,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         if let Some(py_ver) = remote.get("python_version").and_then(|v| v.as_str()) {
             let display = if py_ver.is_empty() { "未安装或无法检测" } else { py_ver };
             let (icon, color) = if py_ver.is_empty() { ("❌", Color::Red) } else { ("✅", Color::Green) };
-            lines.push(Line::from(vec![
+            raw_lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}    {} ", left_pad, icon),
+                    format!("    {} ", icon),
                     Style::default().fg(color),
                 ),
                 Span::styled(
@@ -264,9 +344,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         }
 
         if let Some(disk) = remote.get("disk_space").and_then(|v| v.as_str()) {
-            lines.push(Line::from(vec![
+            raw_lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}    💾 ", left_pad),
+                    "    💾 ",
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
@@ -279,9 +359,9 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         if let Some(procs) = remote.get("background_processes").and_then(|v| v.as_array()) {
             let proc_list: Vec<&str> = procs.iter().map(|v| v.as_str().unwrap_or("?")).collect();
             let display = if proc_list.is_empty() { "无".to_string() } else { proc_list.join(", ") };
-            lines.push(Line::from(vec![
+            raw_lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}    ⚙️  ", left_pad),
+                    "    ⚙️  ",
                     Style::default().fg(Color::Cyan),
                 ),
                 Span::styled(
@@ -292,6 +372,43 @@ fn build_check_content_lines(data: &serde_json::Value) -> Vec<Line<'static>> {
         }
     }
 
+    let mut lines: Vec<Line> = Vec::new();
+    for raw_line in &raw_lines {
+        let line_width: usize = raw_line.spans.iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(&*s.content))
+            .sum();
+        if line_width <= text_width {
+            let mut padded_spans = vec![Span::raw(pad.to_string())];
+            padded_spans.extend(raw_line.spans.iter().cloned());
+            padded_spans.push(Span::raw(pad.to_string()));
+            lines.push(Line::from(padded_spans));
+        } else {
+            let leading = raw_line.spans.first()
+                .map(|s| {
+                    let content: &str = &s.content;
+                    let leading_len = content.len() - content.trim_start().len();
+                    content[..leading_len].to_string()
+                })
+                .unwrap_or_default();
+            let leading_width = unicode_width::UnicodeWidthStr::width(leading.as_str());
+            let wrapped = wrap_line(raw_line, text_width);
+            for (i, mut wl) in wrapped.into_iter().enumerate() {
+                let mut padded_spans = vec![Span::raw(pad.to_string())];
+                if i > 0 && leading_width > 0 {
+                    padded_spans.push(Span::raw(leading.clone()));
+                }
+                padded_spans.append(&mut wl.spans);
+                let cur_width: usize = padded_spans.iter()
+                    .map(|s| unicode_width::UnicodeWidthStr::width(&*s.content))
+                    .sum();
+                let remaining = content_width.saturating_sub(cur_width);
+                if remaining > 0 {
+                    padded_spans.push(Span::raw(" ".repeat(remaining)));
+                }
+                lines.push(Line::from(padded_spans));
+            }
+        }
+    }
     lines
 }
 
@@ -336,7 +453,7 @@ pub fn render_check_result(
         height: content_height,
     };
 
-    let content_lines = build_check_content_lines(data);
+    let content_lines = build_check_content_lines(data, content_area.width as usize);
     let total_lines = content_lines.len();
     let visible = content_height as usize;
     let max_scroll = total_lines.saturating_sub(visible);
