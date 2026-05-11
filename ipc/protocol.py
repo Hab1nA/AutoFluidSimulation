@@ -114,7 +114,11 @@ def deserialize(data: bytes) -> Optional[Dict[str, Any]]:
         text = data.decode("utf-8").strip()
         if not text:
             return None
-        return json.loads(text)  # type: ignore[no-any-return]
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            logger.warning(f"消息反序列化后不是对象: {type(obj).__name__}")
+            return None
+        return obj
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
         return None

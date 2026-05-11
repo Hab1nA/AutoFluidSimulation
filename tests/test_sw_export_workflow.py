@@ -765,7 +765,7 @@ class TestErrorHandling(unittest.TestCase):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_design_table_delete_existing_failure_graceful(self):
+    def test_design_table_existing_skip_import(self):
         """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
         import openpyxl
         excel_path = os.path.join(self.tmpdir, "nonexistent_params.xlsx")
@@ -862,7 +862,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
     def test_full_export_workflow_mocked(self):
         """模拟完整 SW 导出工作流：打开模型 → 导入设计表 → 导出 STEP → 退出。"""
-        _excel_path = self._create_e2e_excel(num_configs=5)
+        self._create_e2e_excel(num_configs=5)
 
         mock_app, mock_doc = create_mock_sw_app(
             config_names=["0", "1", "2", "3", "4"],
@@ -898,7 +898,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
         )
         self.assertTrue(result, "COM fallback should succeed when InsertFamilyTableOpen fails")
 
-    def test_workflow_all_strategies_fail(self):
+    def test_workflow_existing_design_table_skip_import(self):
         """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
         import openpyxl
         excel_path = os.path.join(self.tmpdir, "bad_params.xlsx")

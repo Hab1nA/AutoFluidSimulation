@@ -37,7 +37,9 @@ def init_session(process_type: str, timestamp: str | None = None) -> str:
     global _session_type, _session_timestamp, _session_log_dir
 
     if _session_type is not None:
-        return _session_log_dir  # type: ignore[return-value]
+        if _session_log_dir is None:
+            raise RuntimeError("日志会话状态异常：_session_log_dir 未初始化")
+        return _session_log_dir
 
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

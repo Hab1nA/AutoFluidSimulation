@@ -368,12 +368,13 @@ def test_sw_fail_then_restart():
         ctx.runner._sw_should_fail = True
         ctx.runner._sw_delay = 0.1
 
-        ctx.run_pipeline_async()
+        t1 = ctx.run_pipeline_async()
 
         ok = ctx.wait_for_condition(
             lambda: ctx.state.get_engine_status() == "stopped",
             timeout=15
         )
+        t1.join(timeout=5)
         assert ok, "引擎未能进入 stopped 状态"
         ctx.assert_engine_status("stopped", "SW 失败后")
 

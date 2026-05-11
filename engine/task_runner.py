@@ -1543,7 +1543,7 @@ class TaskRunner:
         Returns:
             自检结果字典
         """
-        results: dict[str, dict[str, str]] = {
+        results: dict[str, dict[str, object]] = {
             "local_checks": {},
             "remote_checks": {},
         }
@@ -1559,7 +1559,7 @@ class TaskRunner:
         }
         for name, path in checks.items():
             exists = os.path.exists(path)
-            results["local_checks"][name] = "存在" if exists else "不存在"
+            results["local_checks"][name] = {"path": path, "exists": exists}
 
         # ---- 远程检查 ----
         try:
