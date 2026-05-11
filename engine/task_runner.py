@@ -1283,19 +1283,28 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
-        # 构建命令行（严格按需求格式）
-        cmd = [
-            sc_exe,
-            f'/RunScript="{sc_script}"',
-            f'/ScriptArgs="{config_name}"',
-        ]
+        # 构建命令行（字符串格式，避免 list2cmdline 破坏引号）
+        #
+        # 关键：subprocess.Popen 接收列表时，Windows 上会调用 list2cmdline()
+        # 将列表转为命令行字符串。list2cmdline 会将参数中已有的双引号用
+        # 反斜杠转义（" → \"），导致 SpaceClaim 收到的命令行变为：
+        #   /RunScript=\"C:\path\script.scscript\" /ScriptArgs=\"1\"
+        # SpaceClaim 无法解析反斜杠转义的引号，因此既找不到脚本也获取不到参数。
+        #
+        # 解决方案：传入字符串而非列表，Python 直接将字符串传给 CreateProcess，
+        # 跳过 list2cmdline 转换，完全掌控引号格式。
+        #
+        # 命令行格式：
+        #   SpaceClaim.exe "step文件" /RunScript="脚本" /ScriptArgs="构型名"
+        # - STEP 文件作为位置参数，SpaceClaim 启动时自动加载
+        # - /RunScript 指定要执行的脚本
+        # - /ScriptArgs 传递构型名称给脚本
+        cmd = f'"{sc_exe}" "{step_file}" /RunScript="{sc_script}" /ScriptArgs="{config_name}"'
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")
-        logger.debug(f"命令: {' '.join(cmd)}")
+        logger.info(f"命令: {cmd}")
 
         try:
-            # 使用 subprocess 启动 SpaceClaim（无头模式）
-            # SpaceClaim 在 /RunScript 模式下会自动在脚本执行完毕后退出
             sc_creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
             process = subprocess.Popen(
                 cmd,
