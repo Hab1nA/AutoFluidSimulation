@@ -1,7 +1,8 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.0  
+> 文档版本：v1.1  
 > 创建日期：2026-05-09  
+> 最后更新：2026-05-11  
 > 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.2.0)
 
 ---
@@ -138,7 +139,7 @@ SW → SC → Transfer → Meshing → Solver
 │  └─────────────┘  │         │  │  ├─ StateManager (SQLite WAL)          │  │
 │                   │         │  │  ├─ PipelineScheduler                   │  │
 │  ┌─────────────┐  │  RPC   │  │  │  ├─ Worker 线程池                    │  │
-│  │ LocalWorker  │◄├────────►│  │  │  ├─ Per-WS BarrierMonitor ×2       │  │
+│  │ LocalWorker  │◄├────────►│  │  │  ├─ Per-WS BarrierMonitor        │  │
 │  │ ├─ SW (COM)  │  │       │  │  │  └─ Solver 线程池                    │  │
 │  │ ├─ SC (sub)  │  │       │  │  ├─ TaskRunner (多WS版)                 │  │
 │  │ └─ Monitor   │  │       │  │  │  ├─ SSH 连接池 (3条)                 │  │
@@ -177,7 +178,7 @@ SW → SC → Transfer → Meshing → Solver → PostProcess → Collect
 | Transfer | 本地 PC → 服务器 A → 工作站 | SC 完成 | 流水线并发 |
 | Meshing | 工作站 A/B/C | Transfer 完成 | 工作站级并行 |
 | Solver | 工作站 A/B/C | **工作站级屏障**通过 | 工作站级并行 |
-| PostProcess | 工作站 A/B/C | **工作站级 Solver 屏障**通过 | 每站一个任务 |
+| PostProcess | 工作站 A/B/C | Solver 完成（仿真脚本自动触发） | 构型级（随 Solver 自动进行） |
 | Collect | 服务器 A → 本地 PC | 本地 PC 上线 | 异步拉取 |
 
 ### 3.3 文件流转路径
@@ -298,7 +299,7 @@ REMOTE_CONFIG = {
     ...
 }
 
-# 改造后
+# 改造后 — 三台工作站真实信息
 WORKSTATIONS = [
     {
         "id": "WS-A",
@@ -311,16 +312,35 @@ WORKSTATIONS = [
         "result_dir": r"D:\xkz_1020\case",
         "postprocess_script": r"D:\xkz_1020\batch_postprocess_gen4.py",
         "postprocess_output_dir": r"D:\xkz_1020\results",
+        "notes": "现有工作站，已配置好环境",
         ...
     },
     {
         "id": "WS-B",
-        "host": "172.17.135.241",
+        "host": "172.17.135.89",
+        "port": 22,
+        "username": "ps",
+        "password": None,            # 无需密码，直接 ssh ps@172.17.135.89 即可连接
+        "scdoc_dir": r"D:\xkz_1020\scdoc",
+        "msh_dir": r"D:\xkz_1020\msh",
+        "result_dir": r"D:\xkz_1020\case",
+        "postprocess_script": r"D:\xkz_1020\batch_postprocess_gen4.py",
+        "postprocess_output_dir": r"D:\xkz_1020\results",
+        "notes": "待引入；无需密码登录",
         ...
     },
     {
         "id": "WS-C",
-        "host": "172.17.135.242",
+        "host": "172.17.135.254",
+        "port": 22,
+        "username": "ps",
+        "password": "待定",            # 密码目前未知，待后续补充
+        "scdoc_dir": r"D:\xkz_1020\scdoc",
+        "msh_dir": r"D:\xkz_1020\msh",
+        "result_dir": r"D:\xkz_1020\case",
+        "postprocess_script": r"D:\xkz_1020\batch_postprocess_gen4.py",
+        "postprocess_output_dir": r"D:\xkz_1020\results",
+        "notes": "待引入；SSH 密码待确认",
         ...
     },
 ]
@@ -393,6 +413,137 @@ class ConfigAssigner:
 #### 4.2.5 Meshing/Solver 阶段改造
 
 `execute_meshing()` 和 `execute_solver()` 需增加 `workstation_id` 参数，使用对应的 SSH 连接执行远程命令。标志文件路径需包含工作站标识以避免冲突。
+
+#### 4.2.6 工作站环境配置指引
+
+在引入 WS-B (172.17.135.89) 和 WS-C (172.17.135.254) 之前，需要确保其软件环境与现有工作站 WS-A (172.17.135.240) 保持一致。以下是环境配置检查清单：
+
+##### 4.2.6.1 现有工作站环境基线（WS-A）
+
+首先应在 WS-A 上收集当前环境信息作为基线：
+
+```powershell
+# 1. 检查 Python 版本
+ssh ps@172.17.135.240 "python --version"
+ssh ps@172.17.135.240 "where python"
+
+# 2. 检查 Conda 环境（如果使用）
+ssh ps@172.17.135.240 "conda --version"
+ssh ps@172.17.135.240 "conda env list"
+ssh ps@172.17.135.240 "conda list -n <fluent_env_name>"
+
+# 3. 检查 PyFluent 版本
+ssh ps@172.17.135.240 "python -c 'import ansys.fluent.core; print(ansys.fluent.core.__version__)'"
+
+# 4. 检查 Fluent 安装路径和版本
+ssh ps@172.17.135.240 "dir 'C:\Program Files\ANSYS Inc'"
+ssh ps@172.17.135.240 'reg query "HKLM\SOFTWARE\ANSYS, Inc.\Fluent" /s 2>nul'
+
+# 5. 导出当前环境为 requirements.txt（用于复现）
+ssh ps@172.17.135.240 "pip freeze > D:\xkz_1020\ws_env_requirements.txt"
+
+# 6. 检查 ANSYS 许可证配置
+ssh ps@172.17.135.240 'echo %ANSYSLMD_LICENSE_FILE%'
+ssh ps@172.17.135.240 'echo %ANSYS_VER%'
+
+# 7. 检查关键目录结构
+ssh ps@172.17.135.240 "dir D:\xkz_1020"
+```
+
+##### 4.2.6.2 新工作站环境配置步骤
+
+对 WS-B (172.17.135.89) 和 WS-C (172.17.135.254) 分别按以下步骤配置：
+
+**Step 1：基础环境**
+```powershell
+# WS-B：无需密码
+ssh ps@172.17.135.89
+
+# WS-C：密码待确认后连接
+ssh ps@172.17.135.254   # 密码待定
+```
+
+```powershell
+# 安装 Miniconda/Anaconda（如果未安装）
+# 下载地址：https://docs.conda.io/en/latest/miniconda.html
+# 安装后创建与 WS-A 相同的 conda 环境
+conda create -n fluento -c pyfluent pyfluent       # 示例，以 WS-A 实际环境为准
+conda activate fluento
+```
+
+**Step 2：Python 及关键包**
+```powershell
+# 方式一：使用 WS-A 导出的 requirements.txt 复现
+pip install -r D:\xkz_1020\ws_env_requirements.txt
+
+# 方式二：手动安装关键包（版本号以 WS-A 实际版本为准）
+pip install ansys-fluent-core==<version>
+pip install paramiko
+pip install openpyxl
+pip install python-dotenv
+```
+
+**Step 3：ANSYS/Fluent 安装**
+- 确保安装与 WS-A 相同版本的 ANSYS Fluent
+- 配置许可证服务器环境变量 `ANSYSLMD_LICENSE_FILE`
+- 验证：`fluent -version` 或通过 PyFluent 测试启动
+
+**Step 4：目录结构**
+```powershell
+# 在工作站上创建必要的目录结构（与 WS-A 保持一致）
+mkdir D:\xkz_1020
+mkdir D:\xkz_1020\scdoc
+mkdir D:\xkz_1020\msh
+mkdir D:\xkz_1020\case
+mkdir D:\xkz_1020\results
+mkdir D:\xkz_1020\scripts
+```
+
+**Step 5：仿真/后处理脚本部署**
+```powershell
+# 将 WS-A 上的 Fluent journal 文件和后处理脚本复制到新工作站
+# 从 WS-A 拉取脚本列表:
+ssh ps@172.17.135.240 "dir D:\xkz_1020\*.py"
+ssh ps@172.17.135.240 "dir D:\xkz_1020\scripts\*"
+
+# 然后逐个 scp/sftp 到新工作站对应目录
+```
+
+**Step 6：连通性验证**
+```powershell
+# 从服务器 A 测试 SSH 连通性
+ssh ps@172.17.135.89 "echo 'WS-B OK'"
+ssh ps@172.17.135.254 "echo 'WS-C OK'"  # 密码确认后
+
+# 测试 Python 环境
+ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core; print(\"PyFluent OK\")'"
+
+# 测试 Fluent 可用性
+ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"Fluent launch test OK\")'"
+```
+
+##### 4.2.6.3 环境一致性检查清单
+
+| 检查项 | WS-A (172.17.135.240) | WS-B (172.17.135.89) | WS-C (172.17.135.254) |
+|--------|:---:|:---:|:---:|
+| Windows 版本 | ✅ 已确认 | ⬜ 待检查 | ⬜ 待检查 |
+| Python 版本 | ✅ 已确认 | ⬜ 待安装 | ⬜ 待安装 |
+| Conda 环境 | ✅ 已确认 | ⬜ 待安装 | ⬜ 待安装 |
+| PyFluent 版本 | ✅ 已确认 | ⬜ 待安装 | ⬜ 待安装 |
+| ANSYS Fluent 版本 | ✅ 已确认 | ⬜ 待安装 | ⬜ 待安装 |
+| 许可证配置 | ✅ 已确认 | ⬜ 待配置 | ⬜ 待配置 |
+| 目录结构 (D:\xkz_1020\) | ✅ 已确认 | ⬜ 待创建 | ⬜ 待创建 |
+| 仿真脚本部署 | ✅ 已确认 | ⬜ 待部署 | ⬜ 待部署 |
+| SSH 免密/密码连接 | ✅ 已确认 | ✅ ssh ps@IP 无密码 | ❌ 密码待定 |
+| 22 端口可达 | ✅ 已确认 | ⬜ 待验证 | ⬜ 待验证 |
+
+##### 4.2.6.4 注意事项
+
+1. **PyFluent 版本敏感**：不同版本的 PyFluent 与 ANSYS Fluent 之间有版本对应关系，必须与 WS-A 保持一致，否则仿真结果可能不可复现
+2. **许可证**：新工作站必须能够访问相同的 ANSYS 许可证服务器
+3. **Windows 版本**：建议与 WS-A 同为 Windows 22H2 或更新版本，避免兼容性问题
+4. **网络策略**：确保服务器 A 能够通过 SSH（端口 22）访问新工作站，注意防火墙规则
+5. **磁盘空间**：仿真中产生的 cas/dat 文件可能较大，确保 `D:\xkz_1020\` 有足够空间
 
 ---
 
@@ -498,20 +649,37 @@ def configs_completed_at_step_for_workstation(
 
 ### 4.4 后处理阶段 (PostProcess)
 
-#### 4.4.1 阶段定义
+#### 4.4.1 阶段定义与实际运行方式
 
-PostProcess 是新增的流水线阶段，在各工作站本地执行后处理脚本。与 Meshing/Solver 不同，它是**工作站级任务**（每站一个），而非构型级任务。
+PostProcess 是流水线中紧接在 Solver 之后的阶段。**关键理解**：后处理步骤并不是独立的流水线阶段，而是内嵌在仿真运行阶段所调用的 Python 脚本中的——仿真求解完成后，该 Python 程序会即刻调用另一个后处理脚本自动完成当前构型的后处理。因此：
 
-#### 4.4.2 触发条件
+- **完成一个仿真就会自动触发其对应的后处理**，不需要额外的调度触发
+- **后处理是构型级任务**（每构型一个），而非工作站级任务
+- **不需要 Solver 屏障来同步所有构型**：各构型的后处理独立进行，互不依赖
 
-第二道工作站级屏障：每台工作站的 Solver 全部完成后，启动该站的后处理。
+#### 4.4.2 完成判断依据（重要）
 
-```
-工作站 A 的完整调度链:
-  Meshing屏障 → Solver(10并行) → Solver屏障 → PostProcess(1个)
-```
+由于仿真和后处理由同一个 Python 程序执行，**不能以 Python 程序退出作为"仿真完成"的信号**——因为此时后处理正在运行，程序尚未退出。会导致 TUI 上仿真完成状态的显示不准确。
 
-#### 4.4.3 代码改造要点
+**正确做法**：以结果文件的产生作为各阶段的完成判断依据：
+
+| 阶段 | 判断依据（结果文件） | 说明 |
+|------|---------------------|------|
+| Solver（仿真求解） | `.cas` + `.dat` 文件 | Fluent 求解完成后生成的 case/data 文件对 |
+| PostProcess（后处理） | `待定` | 后处理脚本输出的结果文件格式待定，后续补充 |
+
+具体实现方式：在远程工作站上，Fluent 求解完成后会生成 `.cas` / `.dat` 文件，Daemon 通过 SSH 轮询检测这些文件是否产生来判断 Solver 是否完成。后处理同理，检测后处理脚本预计输出的结果文件。
+
+#### 4.4.3 对架构设计的影响
+
+由于后处理内嵌在仿真脚本中自动执行，ROADMAP 中之前设想的以下内容需要调整：
+
+1. **不需要 Solver 屏障**：各构型 Solver 完成后自动进入 PostProcess，无需等待同工作站其他构型
+2. **不需要独立的 PostProcess 调度逻辑**：`_solver_barrier_monitor_loop` / `_start_postprocess` 等方法不再需要
+3. **Solver 完成状态标记时机变更**：从 "Python 程序退出时标记" 改为 "检测到 .cas/.dat 文件时标记"
+4. **PostProcess 完成状态标记**：从 "Python 程序退出时标记" 改为 "检测到后处理输出文件时标记"
+
+#### 4.4.4 代码改造要点
 
 **config.py** 扩展：
 
@@ -524,45 +692,42 @@ STEP_DISPLAY = {
     "Collect": "结果回收",
 }
 
-STEP_FILE_PATTERNS = {
-    ...
-    "PostProcess": "postprocess_results_{config}.csv",
-    "Collect": None,
+# 各阶段完成的文件判断依据
+STEP_COMPLETION_FILES = {
+    "Meshing": {"pattern": "meshing_done_{config}.txt"},   # 标志文件
+    "Solver": {"pattern": "{config}.cas"},                  # cas+dat 文件对
+    "PostProcess": {"pattern": "待定"},                     # 后处理输出文件格式待定
 }
 ```
 
-**TaskRunner** 新增方法：
+**TaskRunner** 改造要点：
 
 ```python
-def execute_postprocess(self, workstation_id: str) -> bool:
-    """在指定工作站执行后处理脚本（工作站级任务）"""
+def wait_solver_completion(self, config_name: int, workstation_id: str) -> bool:
+    """等待仿真完成——轮询检测 .cas / .dat 文件而非 Python 进程结束"""
     ...
 
-def wait_postprocess_completion(self, workstation_id: str) -> bool:
-    """等待后处理完成"""
+def wait_postprocess_completion(self, config_name: int, workstation_id: str) -> bool:
+    """等待后处理完成——轮询检测后处理输出文件"""
     ...
 ```
 
-**Scheduler** 新增 Solver 屏障和 PostProcess 调度：
+**Scheduler** 改造要点：
 
 ```python
-def _solver_barrier_monitor_loop(self, workstation_id: str):
-    """工作站级 Solver 屏障"""
-    assigned = self._config_assigner.get_configs(workstation_id)
-    while not self._stopped.is_set():
-        if all(self.state.get_step_status(cn, "Solver") == STATUS_COMPLETED
-               for cn in assigned):
-            self._start_postprocess(workstation_id)
-            break
-        time.sleep(5.0)
-
-def _start_postprocess(self, workstation_id: str):
-    """启动工作站的后处理任务"""
-    self.state.set_step_status(..., "PostProcess", STATUS_RUNNING)
-    if self.runner.execute_postprocess(workstation_id):
-        if self.runner.wait_postprocess_completion(workstation_id):
-            self.state.set_step_status(..., "PostProcess", STATUS_COMPLETED)
-            self._collect_results_from_workstation(workstation_id)
+def _execute_solver_for_config(self, config_name: int, workstation_id: str):
+    """执行单个构型的仿真求解"""
+    # Solver 在远程启动后，不再等待 Python 进程结束
+    # 改为等待 .cas/.dat 文件出现
+    if self.runner.execute_solver(config_name, workstation_id):
+        self.state.set_step_status(config_name, "Solver", STATUS_RUNNING)
+        if self.runner.wait_solver_completion(config_name, workstation_id):
+            self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
+            # Solver 完成后 PostProcess 由仿真脚本自动触发
+            # 转入等待后处理输出文件
+            self.state.set_step_status(config_name, "PostProcess", STATUS_RUNNING)
+            if self.runner.wait_postprocess_completion(config_name, workstation_id):
+                self.state.set_step_status(config_name, "PostProcess", STATUS_COMPLETED)
 ```
 
 ---
@@ -653,8 +818,8 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 |------|:--------:|---------|---------|
 | `engine/config.py` | 🔴 重度 | 结构变更 | `REMOTE_CONFIG` → `WORKSTATIONS` 列表；`STEP_NAMES` 增加 PostProcess/Collect；`IPC_CONFIG["host"]` 改为 `0.0.0.0`；新增 `STAGING_DIR`、`LOCAL_WORKER_CONFIG` 等配置；`STEP_FILE_PATTERNS` 增加 PostProcess/Collect 条目；`STEP_INDEX` 自动扩展 |
 | `engine/daemon.py` | 🔴 重度 | 架构重构 | 新增 `LocalWorkerAdapter`；新增 `handle_collect_results` / `handle_worker_register` / `handle_worker_heartbeat` 等 IPC 命令处理器；`_load_excel_data()` 需触发构型分配；`handle_start()` 需区分本地 Worker 在线/离线场景 |
-| `engine/scheduler.py` | 🔴 重度 | 核心逻辑重写 | `_barrier_passed` 改为 dict；`_barrier_monitor_loop` 改为每工作站一个；新增 `_solver_barrier_monitor_loop`；`_dispatch_solver_tasks` 增加工作站参数；`_worker_loop` 中 `_process_single_config` 需感知工作站分配；`_on_step_file_ready` 改为接收 RPC 上报；`reset_config` 需处理多工作站屏障重置 |
-| `engine/task_runner.py` | 🔴 重度 | 接口重构 | `self._ssh` → `self._ssh_pool`；`get_ssh()` 增加 `workstation_id` 参数；`execute_transfer()` 需指定目标工作站；`execute_meshing()` / `execute_solver()` 增加 `workstation_id` 参数；新增 `execute_postprocess(ws_id)` / `collect_results_from_workstation(ws_id)`；`clean_step_files()` 需遍历所有工作站；`run_system_check()` 需检查所有工作站 |
+| `engine/scheduler.py` | 🔴 重度 | 核心逻辑重写 | `_barrier_passed` 改为 dict；`_barrier_monitor_loop` 改为每工作站一个；`_dispatch_solver_tasks` 增加工作站参数；Solver/PostProcess 完成判断改为基于结果文件（.cas/.dat/后处理输出）轮询而非进程退出；`_worker_loop` 中 `_process_single_config` 需感知工作站分配；`_on_step_file_ready` 改为接收 RPC 上报；`reset_config` 需处理多工作站屏障重置 |
+| `engine/task_runner.py` | 🔴 重度 | 接口重构 | `self._ssh` → `self._ssh_pool`；`get_ssh()` 增加 `workstation_id` 参数；`execute_transfer()` 需指定目标工作站；`execute_meshing()` / `execute_solver()` 增加 `workstation_id` 参数；`wait_solver_completion()` / `wait_postprocess_completion()` 改为基于结果文件轮询；`collect_results_from_workstation(ws_id)` 新增；`clean_step_files()` 需遍历所有工作站；`run_system_check()` 需检查所有工作站 |
 | `engine/state_manager.py` | 🟡 中度 | 表结构扩展 | `steps` 表新增 `workstation_id` 列；新增 `result_delivery` 表；新增 `mark_result_staged()` / `get_undelivered_results()` / `mark_result_delivered()` 方法；`all_configs_completed_at_step()` 增加 `config_names` 过滤参数；`load_configs()` 需同步构型分配信息 |
 | `engine/file_monitor.py` | 🟡 中度 | 运行模式变更 | 在 LocalWorker 侧保持原有逻辑不变；Daemon 侧不再需要此模块，改为接收 RPC 上报事件 |
 | `ipc/protocol.py` | 🟡 中度 | 协议扩展 | 新增 9 个命令常量（`CMD_WORKER_REGISTER` 等）；新增 `CMD_COLLECT_RESULTS` / `CMD_COLLECT_ACK` |
@@ -720,7 +885,7 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 | Daemon 拆分迁移 | ⭐⭐⭐⭐⭐ | 涉及进程间通信重构、本地/远程执行路径分离、断点续传逻辑适配，是整个改造中最复杂的部分 |
 | 多工作站支持 | ⭐⭐⭐⭐ | SSH 连接池化、构型分配策略、Transfer 路径变更，涉及多个模块接口变更 |
 | 屏障机制适配 | ⭐⭐⭐ | 逻辑清晰但需仔细处理线程同步、状态一致性，以及 reset 操作时的屏障重置 |
-| PostProcess 阶段 | ⭐⭐⭐ | 新增阶段相对独立，但需与现有调度框架集成，包括状态管理、TUI 显示 |
+| PostProcess 阶段 | ⭐⭐ | 后处理内嵌在仿真脚本中，无需独立调度；复杂度主要在完成检测逻辑（基于结果文件轮询而非进程退出） |
 | Collect 阶段 | ⭐⭐⭐⭐ | 离线/上线状态管理、交付确认机制、文件暂存与清理，涉及新的数据库表和异步交互模式 |
 
 ### 6.3 依赖关系图
@@ -734,7 +899,7 @@ P1: 工作站级屏障 ◄──────────────────
 (BarrierMonitor 多实例化 + steps 表增加 workstation_id)      │
     │                                                      │
     ├──► P2: PostProcess 阶段                              │
-    │    (后处理脚本执行 + Solver 屏障)                      │
+    │    (完成判断依据：结果文件检测)                        │
     │         │                                             │
     │         ▼                                             │
     │    P4: 结果暂存与交付确认                              │
@@ -785,14 +950,14 @@ P1: 工作站级屏障 ◄──────────────────
 | R12 | **工作站级屏障与全局状态不一致** | 🔴 高 | `is_global_barrier_met()` 在多处被引用（`daemon.py:269`、`scheduler.py:82-83`），改为工作站级后语义变化 | 全面搜索 `barrier` 相关引用，逐一适配；`is_global_barrier_met()` 改为 `all_workstation_barriers_met()` 或保留全局语义（所有工作站屏障都通过） |
 | R13 | **reset 操作后屏障状态未正确清理** | 🟡 中 | `reset_config()` 中 `_barrier_passed.clear()` 只清理了单个 Event，改为 dict 后需清理对应工作站的 Event | `reset_config` 遍历受影响工作站的 `_barrier_passed[ws_id]` 并 clear |
 | R14 | **断点续传时工作站分配变化** | 🟡 中 | 重启后 WORKSTATIONS 列表顺序变化导致同一构型分配到不同工作站 | 构型分配结果持久化到 `steps` 表的 `workstation_id` 列；断点续传时优先使用已记录的分配 |
-| R15 | **Solver 屏障与 Meshing 屏障的线程同步** | 🟡 中 | 两个屏障的 Monitor 线程同时操作状态 | 每个工作站的两道屏障串行触发（Meshing 屏障 → Solver 启动 → Solver 屏障 → PostProcess），不存在并发冲突 |
+| R15 | **Solver 与 PostProcess 的完成判断时机** | 🟡 中 | 由于仿真脚本内嵌后处理，如果不以文件产出为判断依据，会导致 Solver/PostProcess 完成状态提前标记 | Meshing 屏障通过后启动 Solver；Solver 和 PostProcess 均以检测结果文件（.cas/.dat 及后处理输出文件）为完成信号，而非 Python 程序退出信号 |
 
 ### 7.4 PostProcess 相关
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
 | R16 | **后处理脚本无幂等性** | 🟡 中 | PostProcess 失败重试时重复处理已有结果 | 后处理脚本应实现幂等（检查输出是否已存在）；或每次执行前清理旧输出 |
-| R17 | **PostProcess 作为工作站级任务的状态管理** | 🟡 中 | 当前 `steps` 表是每构型每步骤一条记录，PostProcess 是每工作站一个任务 | 方案一：为分配到该工作站的所有构型同时设置 PostProcess 状态；方案二：新增 `workstation_steps` 表管理工作站级任务 |
+| R17 | **PostProcess 结果文件格式待定** | 🟡 中 | 后处理由仿真脚本内嵌执行，但输出文件的格式/命名尚未确定，导致完成检测逻辑无法落地 | 待后续确认后处理脚本的实际输出文件格式后，补充到 `STEP_COMPLETION_FILES["PostProcess"]` 配置中 |
 | R18 | **后处理输出文件名不确定** | 🟢 低 | 后处理脚本输出文件名可能包含时间戳等不确定因素 | 约定后处理脚本输出到固定目录，Daemon 拉取整个目录而非逐文件 |
 
 ### 7.5 Collect 相关
@@ -824,7 +989,7 @@ P1: 工作站级屏障 ◄──────────────────
 |------|------|:-------:|---------|---------|
 | **P0** | 多工作站配置 | 1-2 周 | 无 | `WORKSTATIONS` 列表可配置；SSH 连接池可建立多连接；`ConfigAssigner` 正确分配构型 |
 | **P1** | 工作站级屏障 | 1-2 周 | P0 | 每工作站独立 Meshing 屏障；屏障通过后仅启动该站 Solver；reset 正确清理对应屏障 |
-| **P2** | PostProcess 阶段 | 1 周 | P1 | Solver 屏障通过后自动启动后处理；后处理状态正确显示在 TUI |
+| **P2** | PostProcess 阶段 | 1 周 | P1 | 完成检测逻辑：Solver 完成后轮询检测 .cas/.dat 文件出现即为 Solver 完成；后处理输出文件检测逻辑待文件格式确认后补充；TUI 正确显示 PostProcess 状态 |
 | **P3** | Daemon 拆分迁移 | 3-4 周 | P0, P1 | LocalWorker 可独立运行 SW/SC；Daemon 在 Ubuntu 上稳定运行；RPC 通信可靠 |
 | **P4** | 结果暂存与交付 | 2 周 | P2, P3 | PostProcess 完成后自动拉取到暂存区；`result_delivery` 表正确记录状态 |
 | **P5** | 本地 PC 上线收集 | 1-2 周 | P4 | 本地 PC 上线后可拉取暂存结果；交付确认正确更新；离线期间结果不丢失 |
@@ -832,7 +997,7 @@ P1: 工作站级屏障 ◄──────────────────
 ### 8.2 建议的验证顺序
 
 1. **P0 + P1 在当前单工作站架构上验证**：先不迁移 Daemon，仅在本地 PC 上实现多工作站配置和工作站级屏障，用单工作站模拟多工作站行为
-2. **P2 在当前架构上验证**：新增 PostProcess 阶段，验证第二道屏障和后处理脚本执行
+2. **P2 在当前架构上验证**：新增 PostProcess 状态追踪，验证基于结果文件（.cas/.dat）的完成检测逻辑；后处理输出文件检测待格式确认后补充
 3. **P3 独立验证**：搭建 Ubuntu 服务器 A，部署 Daemon，LocalWorker 连接测试
 4. **P4 + P5 集成验证**：完整的三层架构端到端测试
 
