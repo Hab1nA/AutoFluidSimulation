@@ -147,11 +147,11 @@ class StepFileMonitor:
         """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
         if cls._FILENAME_REGEX is None:
             sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
-            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)
+            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
         return cls._FILENAME_REGEX
 
-    def __init__(self, step_dir: str = None,
-                 on_file_ready: Callable[[int, str], None] = None):
+    def __init__(self, step_dir: str | None = None,
+                 on_file_ready: Callable[[int, str], None] | None = None):
         self.step_dir = step_dir or LOCAL_PATHS["step_dir"]
         self.on_file_ready = on_file_ready
         self._running = False
@@ -345,9 +345,9 @@ class StepFileMonitor:
         """检查文件是否已被处理。"""
         return filename in self._processed_files
 
-    def get_pending_configs(self) -> list:
+    def get_pending_configs(self) -> list[tuple[int, str]]:
         """获取所有未被处理的构型列表（扫描 STEP 目录）。"""
-        pending = []
+        pending: list[tuple[int, str]] = []
         if not os.path.isdir(self.step_dir):
             return pending
         try:

@@ -456,7 +456,7 @@ class StateManager:
                 "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status != ?",
                 (step_name, STATUS_COMPLETED)
             ).fetchone()
-            return row["cnt"] == 0
+            return (row["cnt"] or 0) == 0
 
     def get_error_configs(self) -> List[Tuple[int, str, str]]:
         """获取所有处于 Error 状态的构型和步骤。"""

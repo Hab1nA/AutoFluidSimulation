@@ -205,7 +205,7 @@ class PipelineScheduler:
             # 增加重试机制：SW 启动/COM 调用可能因瞬时问题失败
             sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
             success = False
-            for sw_attempt in range(1, sw_max_retries + 1):
+            for sw_attempt in range(1, int(sw_max_retries) + 1):
                 if sw_attempt > 1:
                     # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
                     for cn in all_configs:
@@ -602,7 +602,7 @@ class PipelineScheduler:
         """
         max_retries = ENGINE_CONFIG["max_retries"]
 
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, int(max_retries) + 1):
             # 检查是否被停止
             if self._stopped.is_set():
                 return False
@@ -936,7 +936,7 @@ class PipelineScheduler:
         self.state.set_engine_status("stopped")
         logger.info("流水线已停止")
 
-    def reset_config(self, config_name, step_name: str = None):
+    def reset_config(self, config_name, step_name: str | None = None):
         """
         重置指定构型的指定步骤（及后续步骤）。
 

@@ -18,7 +18,7 @@ from typing import Optional
 try:
     import paramiko
 except ImportError:  # pragma: no cover
-    paramiko = None  # type: ignore[assignment]
+    paramiko = None
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -124,7 +124,7 @@ class RemoteWorkstation:
             self._ensure_remote_dir(remote_dir)
 
             logger.info(f"正在上传: {local_path} -> {remote_path}")
-            self._sftp.put(local_path, remote_path)
+            self._sftp.put(local_path, remote_path)  # type: ignore[union-attr]
             logger.info(f"上传完成: {os.path.basename(local_path)}")
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
@@ -176,7 +176,7 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
         try:
-            self._sftp.stat(remote_path)
+            self._sftp.stat(remote_path)  # type: ignore[union-attr]
             return True
         except FileNotFoundError:
             return False
@@ -213,7 +213,7 @@ class RemoteWorkstation:
             return ("", "SSH 未连接", -1)
         try:
             logger.debug(f"远程执行: {command}")
-            stdin, stdout, stderr = self._ssh.exec_command(command, timeout=timeout)
+            stdin, stdout, stderr = self._ssh.exec_command(command, timeout=timeout)  # type: ignore[union-attr]
             exit_code = stdout.channel.recv_exit_status()
             out_raw = stdout.read()
             err_raw = stderr.read()

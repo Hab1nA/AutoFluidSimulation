@@ -21,7 +21,7 @@ _session_timestamp: str | None = None
 _session_log_dir: str | None = None
 
 
-def init_session(process_type: str, timestamp: str = None) -> str:
+def init_session(process_type: str, timestamp: str | None = None) -> str:
     """初始化日志会话，为当前进程创建独立的日志存放目录。
 
     必须在首次调用 setup_logger() 之前调用此函数，
@@ -37,7 +37,7 @@ def init_session(process_type: str, timestamp: str = None) -> str:
     global _session_type, _session_timestamp, _session_log_dir
 
     if _session_type is not None:
-        return _session_log_dir
+        return _session_log_dir  # type: ignore[return-value]
 
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -347,8 +347,8 @@ class LogBroadcastHandler(logging.Handler):
         with self._lock:
             snapshot = list(self._buffer)
 
-        level_counts = {}
-        source_counts = {}
+        level_counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
         for entry in snapshot:
             level_counts[entry.level] = level_counts.get(entry.level, 0) + 1
             source_counts[entry.source] = source_counts.get(entry.source, 0) + 1

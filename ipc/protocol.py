@@ -55,7 +55,7 @@ CMD_GET_LOG_ENTRIES = "get_log_entries"  # 增量拉取日志条目
 # 消息构造与解析
 # ============================================================================
 
-def create_request(command: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
+def create_request(command: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """
     创建一个标准请求消息。
 
@@ -114,7 +114,7 @@ def deserialize(data: bytes) -> Optional[Dict[str, Any]]:
         text = data.decode("utf-8").strip()
         if not text:
             return None
-        return json.loads(text)
+        return json.loads(text)  # type: ignore[no-any-return]
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
         return None
