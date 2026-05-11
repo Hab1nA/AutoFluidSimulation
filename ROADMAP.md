@@ -334,13 +334,13 @@ WORKSTATIONS = [
         "host": "172.17.135.254",
         "port": 22,
         "username": "ps",
-        "password": "待定",            # 密码目前未知，待后续补充
+        "password": None,            # 无需密码，直接 ssh ps@172.17.135.254 即可连接
         "scdoc_dir": r"D:\xkz_1020\scdoc",
         "msh_dir": r"D:\xkz_1020\msh",
         "result_dir": r"D:\xkz_1020\case",
         "postprocess_script": r"D:\xkz_1020\batch_postprocess_gen4.py",
         "postprocess_output_dir": r"D:\xkz_1020\results",
-        "notes": "待引入；SSH 密码待确认",
+        "notes": "待引入；无需密码登录",
         ...
     },
 ]
@@ -459,8 +459,8 @@ ssh ps@172.17.135.240 "dir D:\xkz_1020"
 # WS-B：无需密码
 ssh ps@172.17.135.89
 
-# WS-C：密码待确认后连接
-ssh ps@172.17.135.254   # 密码待定
+# WS-C：无需密码
+ssh ps@172.17.135.254
 ```
 
 ```powershell
@@ -513,7 +513,7 @@ ssh ps@172.17.135.240 "dir D:\xkz_1020\scripts\*"
 ```powershell
 # 从服务器 A 测试 SSH 连通性
 ssh ps@172.17.135.89 "echo 'WS-B OK'"
-ssh ps@172.17.135.254 "echo 'WS-C OK'"  # 密码确认后
+ssh ps@172.17.135.254 "echo 'WS-C OK'"
 
 # 测试 Python 环境
 ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core; print(\"PyFluent OK\")'"
@@ -534,7 +534,7 @@ ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"F
 | 许可证配置 | ✅ 已确认 | ⬜ 待配置 | ⬜ 待配置 |
 | 目录结构 (D:\xkz_1020\) | ✅ 已确认 | ⬜ 待创建 | ⬜ 待创建 |
 | 仿真脚本部署 | ✅ 已确认 | ⬜ 待部署 | ⬜ 待部署 |
-| SSH 免密/密码连接 | ✅ 已确认 | ✅ ssh ps@IP 无密码 | ❌ 密码待定 |
+| SSH 免密/密码连接 | ✅ 已确认 | ✅ ssh ps@IP 无密码 | ✅ ssh ps@IP 无密码 |
 | 22 端口可达 | ✅ 已确认 | ⬜ 待验证 | ⬜ 待验证 |
 
 ##### 4.2.6.4 注意事项
