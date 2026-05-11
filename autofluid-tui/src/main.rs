@@ -335,36 +335,27 @@ fn do_redraw(
         let info_content_height = if info_has_hscroll { info_inner_height.saturating_sub(1) } else { info_inner_height };
         let detail_content_height = if detail_has_hscroll { detail_inner_height.saturating_sub(1) } else { detail_inner_height };
 
+        fn apply_auto_scroll(auto_scroll: &mut bool, scroll: &mut u16, visual_count: usize, content_height: usize) {
+            if *auto_scroll && visual_count > content_height {
+                *scroll = (visual_count - content_height) as u16;
+            }
+            if visual_count > content_height {
+                let max_scroll = (visual_count - content_height) as u16;
+                if *scroll >= max_scroll {
+                    *auto_scroll = true;
+                }
+            }
+        }
+
         if log_buffer.info_generation != state.last_info_generation {
             state.info_log_auto_scroll = true;
             state.last_info_generation = log_buffer.info_generation;
         }
 
-        if state.info_log_auto_scroll
-            && info_visual_count > info_content_height {
-                state.info_log_scroll = (info_visual_count - info_content_height) as u16;
-            }
-
-        if state.detail_log_auto_scroll
-            && detail_visual_count > detail_content_height {
-                state.detail_log_scroll = (detail_visual_count - detail_content_height) as u16;
-            }
+        apply_auto_scroll(&mut state.info_log_auto_scroll, &mut state.info_log_scroll, info_visual_count, info_content_height);
+        apply_auto_scroll(&mut state.detail_log_auto_scroll, &mut state.detail_log_scroll, detail_visual_count, detail_content_height);
         state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
         state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
-
-        if detail_visual_count > detail_content_height {
-            let detail_max_scroll = (detail_visual_count - detail_content_height) as u16;
-            if state.detail_log_scroll >= detail_max_scroll {
-                state.detail_log_auto_scroll = true;
-            }
-        }
-
-        if info_visual_count > info_content_height {
-            let info_max_scroll = (info_visual_count - info_content_height) as u16;
-            if state.info_log_scroll >= info_max_scroll {
-                state.info_log_auto_scroll = true;
-            }
-        }
 
         let info_inner_width = layout.info_panel.width.saturating_sub(2) as usize;
         let info_has_vscroll = info_visual_count > info_content_height;

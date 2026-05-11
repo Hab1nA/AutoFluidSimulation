@@ -1,7 +1,7 @@
 # AutoFluid 仿真流水线总控系统 — Code Wiki
 
 > **项目全称**：液氧甲烷火箭发动机仿真自动化流水线总控程序
-> **版本**：v2.2.0
+> **版本**：v2.3.0
 > **语言栈**：Python（后端引擎） + Rust（TUI 客户端）
 > **目标平台**：本地 Windows PC + 远程 Windows 工作站
 
@@ -462,7 +462,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
         │   │   ├─ 键盘事件 → key_handler::handle_key()
         │   │   ├─ 鼠标事件 → handle_mouse()（悬停/点击/拖拽/滚轮）
         │   │   └─ 终端大小变化 → update_terminal_size()
-        │   ├─ 条件重绘（needs_redraw 时执行 do_redraw）
+        │   ├─ 条件重绘（needs_redraw 时执行 do_redraw，含信息面板/详细日志自动滚动逻辑）
         │   ├─ IPC 定时轮询（1 秒间隔：状态 + 增量日志；5 秒间隔：引擎状态）
         │   └─ 时钟刷新（500ms 间隔触发重绘更新标题栏时间）
         └─ 退出清理：disconnect IPC + stop Daemon
@@ -482,9 +482,9 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 
 | 结构体 | 说明 |
 |--------|------|
-| `AppState` | 全局状态（连接、构型数据、引擎信息、UI 模式、焦点、滚动位置、悬停/点击状态、滚动条拖拽状态等） |
+| `AppState` | 全局状态（连接、构型数据、引擎信息、UI 模式、焦点、滚动位置、悬停/点击状态、滚动条拖拽状态、信息面板/详细日志自动滚动状态等） |
 | `EngineInfo` | 引擎状态信息（engine_status / sw_macro_started / barrier_passed） |
-| `LogBuffer` | 日志环形缓冲区（detail_buffer: 2000 条 / info_messages: 200 条） |
+| `LogBuffer` | 日志环形缓冲区（detail_buffer: 2000 条 / info_messages: 200 条 / info_generation: 新消息计数器） |
 | `LogEntry` | 结构化日志条目（id / timestamp / level / source / message） |
 | `FocusZone` | 焦点区域枚举（CommandInput / Table / InfoLog / DetailLog） |
 | `UiMode` | UI 模式枚举（Normal / ConfirmDialog / CheckResult） |
@@ -505,7 +505,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 
 | 模块 | 说明 |
 |------|------|
-| `key_handler` | 键盘事件分发（按 UiMode 和 FocusZone 路由） |
+| `key_handler` | 键盘事件分发（按 UiMode 和 FocusZone 路由，含信息面板/详细日志自动滚动切换） |
 | `command` | 命令解析与执行（help/start/pause/check/status/reset/clean/daemon/quit/filter/export） |
 
 #### 4.4.5 ui/ — UI 渲染
@@ -515,9 +515,9 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `layout` | 布局管理（`AppLayout`：header / info_bar / status_table / info_panel / detail_panel / cmd_input / quick_buttons） |
 | `header` | 标题栏 + 信息栏渲染 |
 | `table` | 构型状态表格渲染（含垂直滚动条、悬停高亮） |
-| `logs` | 信息面板 + 详细日志面板渲染（含 Unicode 宽度感知换行、水平滚动偏移） |
+| `logs` | 信息面板 + 详细日志面板渲染（含 Unicode 宽度感知换行、水平滚动偏移、自动滚动状态指示器） |
 | `command_bar` | 命令输入栏 + 8 个快捷按钮 |
-| `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层，支持内容滚动和按钮鼠标交互） |
+| `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层，支持内容滚动、按钮鼠标交互、自检结果自动换行与对称边距） |
 | `scrollbar` | 通用滚动条组件（`VerticalScrollbar` / `HorizontalScrollbar`），支持 thumb 计算和拖拽定位 |
 
 #### 4.4.6 daemon_mgr.rs — Daemon 进程管理
@@ -550,7 +550,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 
 | 结构体 | 文件 | 职责 |
 |--------|------|------|
-| `AppState` | state/app_state.rs | 全局应用状态（含滚动条拖拽、悬停/点击动画状态） |
+| `AppState` | state/app_state.rs | 全局状态（含滚动条拖拽、悬停/点击动画状态、信息面板/详细日志自动滚动状态） |
 | `LogBuffer` | state/log_buffer.rs | 日志环形缓冲区 |
 | `IpcClient` | ipc/client.rs | 异步 IPC 客户端 |
 | `IpcRequest` / `IpcResponse` | ipc/protocol.rs | IPC 消息结构 |

@@ -16,7 +16,7 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, _state: &Ap
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序 v2.2.0")
+    let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序 v2.3.0")
         .style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
         .alignment(Alignment::Center);
     frame.render_widget(title, inner);
