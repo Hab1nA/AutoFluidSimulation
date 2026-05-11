@@ -28,10 +28,8 @@ import os
 import sys
 import time
 import threading
-import sqlite3
 import tempfile
 import shutil
-from typing import Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,10 +39,8 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
-    STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    STATUS_RETRYING,
-    IPC_CONFIG, ENGINE_CONFIG,
+    STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    IPC_CONFIG,
 )
 from engine.state_manager import StateManager
 
@@ -195,7 +191,7 @@ class TestContext:
 
         from engine.scheduler import PipelineScheduler
         self.scheduler = PipelineScheduler(self.state, self.runner)
-        print(f"  [Setup] 调度器已创建")
+        print("  [Setup] 调度器已创建")
 
     def cleanup(self):
         IPC_CONFIG["db_path"] = self._orig_db_path
@@ -372,12 +368,13 @@ def test_sw_fail_then_restart():
         ctx.runner._sw_should_fail = True
         ctx.runner._sw_delay = 0.1
 
-        t = ctx.run_pipeline_async()
+        t1 = ctx.run_pipeline_async()
 
         ok = ctx.wait_for_condition(
             lambda: ctx.state.get_engine_status() == "stopped",
             timeout=15
         )
+        t1.join(timeout=5)
         assert ok, "引擎未能进入 stopped 状态"
         ctx.assert_engine_status("stopped", "SW 失败后")
 
@@ -440,7 +437,6 @@ def test_start_when_already_running():
         t.join(timeout=5)
         ctx.assert_engine_status("running", "初始")
 
-        old_paused = ctx.scheduler._paused.is_set()
         ctx.scheduler._paused.set()
         if ctx.scheduler._paused.is_set() and ctx.state.get_engine_status() == "running":
             ctx.scheduler.resume()

@@ -24,7 +24,7 @@ import os
 from typing import Optional
 
 from engine.config import (
-    STEP_NAMES, STEP_INDEX,
+    STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     ENGINE_CONFIG, LOCAL_PATHS, get_step_filename,
 )
@@ -205,7 +205,7 @@ class PipelineScheduler:
             # 增加重试机制：SW 启动/COM 调用可能因瞬时问题失败
             sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
             success = False
-            for sw_attempt in range(1, sw_max_retries + 1):
+            for sw_attempt in range(1, int(sw_max_retries) + 1):
                 if sw_attempt > 1:
                     # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
                     for cn in all_configs:
@@ -602,7 +602,7 @@ class PipelineScheduler:
         """
         max_retries = ENGINE_CONFIG["max_retries"]
 
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, int(max_retries) + 1):
             # 检查是否被停止
             if self._stopped.is_set():
                 return False
@@ -691,16 +691,13 @@ class PipelineScheduler:
             # ---- 前置检查：SW 阶段是否已全部终结且有错误 ----
             # 若 SW 宏执行完毕但所有构型的 STEP 均缺失，后续流程无法推进。
             sw_all_terminal = True
-            sw_has_error = False
             sw_has_completed = False
             for cn in all_configs:
                 s = self.state.get_step_status(cn, "SW")
                 if s not in (STATUS_COMPLETED, STATUS_ERROR):
                     sw_all_terminal = False
                     break
-                if s == STATUS_ERROR:
-                    sw_has_error = True
-                else:
+                if s == STATUS_COMPLETED:
                     sw_has_completed = True
             if sw_all_terminal and not sw_has_completed:
                 logger.error("=" * 60)
@@ -939,7 +936,7 @@ class PipelineScheduler:
         self.state.set_engine_status("stopped")
         logger.info("流水线已停止")
 
-    def reset_config(self, config_name, step_name: str = None):
+    def reset_config(self, config_name, step_name: str | None = None):
         """
         重置指定构型的指定步骤（及后续步骤）。
 

@@ -24,10 +24,7 @@ from typing import Any, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, REMOTE_CONFIG, IPC_CONFIG, ENGINE_CONFIG,
-    STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR,
-    ensure_directories, validate_config,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, ensure_directories, validate_config,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner

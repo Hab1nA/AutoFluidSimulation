@@ -12,7 +12,6 @@ Daemon 写入状态，TUI 客户端读取状态。通过 IPC 命令触发状态�
 """
 import sqlite3
 import threading
-import time
 from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 
@@ -457,7 +456,7 @@ class StateManager:
                 "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status != ?",
                 (step_name, STATUS_COMPLETED)
             ).fetchone()
-            return row["cnt"] == 0
+            return (row["cnt"] or 0) == 0
 
     def get_error_configs(self) -> List[Tuple[int, str, str]]:
         """获取所有处于 Error 状态的构型和步骤。"""

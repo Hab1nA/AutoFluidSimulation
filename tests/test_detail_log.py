@@ -28,7 +28,6 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 from utils.logger import (
     LogEntry, LogBroadcastHandler, _classify_source,
     install_broadcast_handler, get_broadcast_handler,
-    setup_logger,
 )
 
 
@@ -684,10 +683,10 @@ def test_polling_filter_high_frequency():
     ipc_logger.setLevel(logging.DEBUG)
 
     for i in range(100):
-        ipc_logger.debug(f"收到命令: get_all_status, params={{}}")
+        ipc_logger.debug("收到命令: get_all_status, params={}")
         ipc_logger.debug(f"收到命令: get_log_entries, params={{'since_id': {i}}}")
         if i % 5 == 0:
-            ipc_logger.debug(f"收到命令: get_engine_status, params={{}}")
+            ipc_logger.debug("收到命令: get_engine_status, params={}")
 
     ipc_logger.info("用户手动触发: start 命令")
     ipc_logger.error("SSH 连接超时")

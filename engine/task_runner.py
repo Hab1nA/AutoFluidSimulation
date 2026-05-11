@@ -19,12 +19,11 @@ import tempfile
 import time
 import threading
 import gc
-from typing import Optional, Callable, List
+from typing import Optional, List
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
+    STATUS_COMPLETED, STATUS_ERROR, STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
 )
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
@@ -66,10 +65,10 @@ class TaskRunner:
         with self._ssh_lock:
             if self._ssh is None:
                 self._ssh = RemoteWorkstation(
-                    host=REMOTE_CONFIG["host"],
-                    port=REMOTE_CONFIG["port"],
-                    username=REMOTE_CONFIG["username"],
-                    password=REMOTE_CONFIG["password"],
+                    host=REMOTE_CONFIG["host"],  # type: ignore[arg-type]
+                    port=REMOTE_CONFIG["port"],  # type: ignore[arg-type]
+                    username=REMOTE_CONFIG["username"],  # type: ignore[arg-type]
+                    password=REMOTE_CONFIG["password"],  # type: ignore[arg-type]
                 )
             # 如果连接断开则尝试重连
             if not self._ssh.is_connected():
@@ -103,16 +102,16 @@ class TaskRunner:
         logger.info(f"正在通过 subprocess 启动 SolidWorks: {sw_exe}")
         try:
             # 使用 Popen 启动 SW，不等待其退出
+            creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
             subprocess.Popen(
                 [sw_exe],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                creationflags=creation_flags,
             )
             logger.info("SolidWorks 进程已启动，等待 COM 接口就绪...")
 
             # 轮询等待 SW 完全启动（最多等待 60 秒）
-            import pythoncom
             import win32com.client
             max_wait = 60
             for attempt in range(max_wait):
@@ -652,7 +651,6 @@ class TaskRunner:
         logger.info(f"  Excel 参数 ({len(excel_params)}): {excel_params}")
         logger.info(f"  模型匹配参数 ({len(model_param_names)}): {model_param_names}")
 
-        matched = [p for p in excel_params if p in model_param_names]
         unmatched = [p for p in excel_params if p not in model_param_names]
 
         if unmatched:
@@ -1017,8 +1015,8 @@ class TaskRunner:
                 # ---- 验证 doc COM 对象有效性 ----
                 if not self._verify_com_object(doc, "IModelDoc2"):
                     logger.error(
-                        f"OpenDoc6 返回了无效的文档 COM 代理，"
-                        f"模型可能未正确加载"
+                        "OpenDoc6 返回了无效的文档 COM 代理，"
+                        "模型可能未正确加载"
                     )
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
@@ -1164,7 +1162,6 @@ class TaskRunner:
                 return True
             finally:
                 # ---- 清理：关闭模型文档 → 退出 SW → 释放 COM 资源 ----
-                doc_closed = False
 
                 # 步骤 1: 关闭已打开的模型文档
                 if doc is not None and ENGINE_CONFIG.get("sw_close_doc_on_finish", True):
@@ -1173,8 +1170,7 @@ class TaskRunner:
                     except Exception:
                         title = os.path.basename(sw_model)
                     try:
-                        sw_app.CloseDoc(title)
-                        doc_closed = True
+                        sw_app.CloseDoc(title)  # type: ignore[union-attr]
                         logger.info(f"已关闭模型文档: {title}")
                     except Exception as e_doc:
                         logger.debug(f"关闭模型文档异常: {e_doc}")
@@ -1218,9 +1214,7 @@ class TaskRunner:
                 # 在 CoUninitialize 前用 del 确保 COM 代理的 __del__ 被调用，
                 # 防止下次 Dispatch 返回退化的 IDispatch 代理。
                 del doc
-                doc = None
                 del sw_app
-                sw_app = None
                 gc.collect()
                 # 双重 CoFreeUnusedLibraries 确保 STA 消息泵排空
                 for _ in range(2):
@@ -1302,12 +1296,13 @@ class TaskRunner:
         try:
             # 使用 subprocess 启动 SpaceClaim（无头模式）
             # SpaceClaim 在 /RunScript 模式下会自动在脚本执行完毕后退出
+            sc_creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                creationflags=sc_creation_flags,
             )
 
             # 等待完成（带超时）
@@ -1382,11 +1377,11 @@ class TaskRunner:
             self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
         local_file = os.path.join(
-            LOCAL_PATHS["scdoc_dir"],
+            str(LOCAL_PATHS["scdoc_dir"]),
             _scdoc_name,
         )
         remote_file = os.path.join(
-            REMOTE_CONFIG["scdoc_dir"],
+            str(REMOTE_CONFIG["scdoc_dir"]),
             _scdoc_name,
         ).replace("\\", "/")
 
@@ -1471,7 +1466,7 @@ class TaskRunner:
                 ssh = self.get_ssh()
                 success = ssh.wait_for_flag(
                     flag_file,
-                    timeout=ENGINE_CONFIG["meshing_timeout"],
+                    timeout=ENGINE_CONFIG["meshing_timeout"],  # type: ignore[arg-type]
                     poll_interval=10
                 )
                 return success
@@ -1529,7 +1524,7 @@ class TaskRunner:
                 ssh = self.get_ssh()
                 success = ssh.wait_for_flag(
                     flag_file,
-                    timeout=ENGINE_CONFIG["solver_timeout"],
+                    timeout=ENGINE_CONFIG["solver_timeout"],  # type: ignore[arg-type]
                     poll_interval=30  # 求解时间较长，轮询间隔加大
                 )
                 return success
@@ -1548,7 +1543,7 @@ class TaskRunner:
         Returns:
             自检结果字典
         """
-        results = {
+        results: dict[str, dict[str, object]] = {
             "local_checks": {},
             "remote_checks": {},
         }
@@ -1564,17 +1559,14 @@ class TaskRunner:
         }
         for name, path in checks.items():
             exists = os.path.exists(path)
-            results["local_checks"][name] = {
-                "path": path,
-                "exists": exists,
-            }
+            results["local_checks"][name] = {"path": path, "exists": exists}
 
         # ---- 远程检查 ----
         try:
             ssh = self.get_ssh()
             if ssh.is_connected():
                 results["remote_checks"]["ssh"] = "连接成功"
-                remote_info = ssh.check_system(conda_exe=REMOTE_CONFIG["conda_exe"])
+                remote_info = ssh.check_system(conda_exe=REMOTE_CONFIG["conda_exe"])  # type: ignore[arg-type]
                 results["remote_checks"].update(remote_info)
             else:
                 results["remote_checks"]["ssh"] = "连接失败"
@@ -1605,21 +1597,18 @@ class TaskRunner:
         else:
             self._clean_single_step(step_name, config_name)
 
-    def _clean_single_step(self, step_name: str, config_name: int = None):
+    def _clean_single_step(self, step_name: str, config_name: int | None = None):
         """清理单个步骤的文件（内部方法）。
 
         文件命名模式来源于 engine.config.STEP_FILE_PATTERNS，
         由此处统一引用以确保清理与实际产生的文件匹配。
         """
-        # ---- 本地文件清理映射 ----
-        # (目录key, 文件名模板, 额外清理的后缀对 (原后缀, 新后缀))
-        # 注意：SW 导出的 STEP 文件名为 model_gen4.SLDPRT_{N}.step（含 .SLDPRT 中缀）
         local_patterns = {
             "SW":       ("step_dir",  STEP_FILE_PATTERNS["SW"],       None),
             "SC":       ("scdoc_dir", STEP_FILE_PATTERNS["SC"],       None),
-            "Transfer": None,  # 传输无本地文件
-            "Meshing":  None,  # MSH 文件仅在远程工作站上
-            "Solver":   None,  # CAS/DAT 文件仅在远程工作站上
+            "Transfer": None,
+            "Meshing":  None,
+            "Solver":   None,
         }
 
         # ---- 远程文件清理映射 ----
@@ -1638,9 +1627,9 @@ class TaskRunner:
         local_info = local_patterns.get(step_name)
         if local_info is not None:
             dir_key, file_template, extra_suffix_pair = local_info
-            target_dir = LOCAL_PATHS.get(dir_key, "")
+            target_dir = str(LOCAL_PATHS.get(dir_key, ""))
             for cn in configs:
-                filename = file_template.format(config=cn)
+                filename = str(file_template).format(config=cn)
                 filepath = os.path.join(target_dir, filename)
                 try:
                     os.remove(filepath)
@@ -1665,12 +1654,12 @@ class TaskRunner:
         remote_info = remote_patterns.get(step_name)
         if remote_info is not None:
             dir_key, file_template, extra_suffix_pair = remote_info
-            target_dir = REMOTE_CONFIG.get(dir_key, "")
+            target_dir = str(REMOTE_CONFIG.get(dir_key, ""))
             try:
                 ssh = self.get_ssh()
                 if ssh.is_connected():
                     for cn in configs:
-                        filename = file_template.format(config=cn)
+                        filename = str(file_template).format(config=cn)
                         # 统一使用 / 作为远程路径分隔符（SFTP 协议标准，Windows 兼容）
                         remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
                         ssh.delete_remote_file(remote_path)

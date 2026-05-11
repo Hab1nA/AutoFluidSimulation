@@ -335,11 +335,10 @@ fn do_redraw(
         let info_content_height = if info_has_hscroll { info_inner_height.saturating_sub(1) } else { info_inner_height };
         let detail_content_height = if detail_has_hscroll { detail_inner_height.saturating_sub(1) } else { detail_inner_height };
 
-        if state.detail_log_auto_scroll {
-            if detail_visual_count > detail_content_height {
+        if state.detail_log_auto_scroll
+            && detail_visual_count > detail_content_height {
                 state.detail_log_scroll = (detail_visual_count - detail_content_height) as u16;
             }
-        }
         state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
         state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
 
@@ -442,24 +441,26 @@ fn do_redraw(
             None
         };
 
-        ui::header::render_header(frame, layout.header, &state);
-        ui::header::render_info_bar(frame, layout.info_bar, &state);
-        ui::table::render_table(frame, layout.status_table, &state);
-        ui::logs::render_info_panel(frame, layout.info_panel, &log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll);
+        ui::header::render_header(frame, layout.header, state);
+        ui::header::render_info_bar(frame, layout.info_bar, state);
+        ui::table::render_table(frame, layout.status_table, state);
+        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll);
         ui::logs::render_detail_panel(
             frame,
             layout.detail_panel,
-            &log_buffer,
-            &state.log_filter_level,
-            &state.log_filter_source,
-            state.detail_log_scroll,
-            state.detail_log_auto_scroll,
-            state.focus_zone,
-            state.hovered_detail_row,
-            state.clicked_detail_row,
-            state.detail_log_hscroll,
+            &ui::logs::DetailPanelParams {
+                log_buffer,
+                level_filter: &state.log_filter_level,
+                source_filter: &state.log_filter_source,
+                scroll_offset: state.detail_log_scroll,
+                auto_scroll: state.detail_log_auto_scroll,
+                focus_zone: state.focus_zone,
+                hovered_detail_row: state.hovered_detail_row,
+                clicked_detail_row: state.clicked_detail_row,
+                hscroll: state.detail_log_hscroll,
+            },
         );
-        ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, &state);
+        ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);
 
         match state.ui_mode {
             UiMode::ConfirmDialog => {
@@ -541,7 +542,7 @@ fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, vis
     let track_length = area.height as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let half_thumb = (ti.thumb_size / 2).min(track_length.saturating_sub(1));
-        let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+        let center_pos = rel.saturating_sub(half_thumb);
         sb.scroll_from_thumb_position(center_pos, track_length) as u16
     } else {
         scroll as u16
@@ -554,7 +555,7 @@ fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, v
     let track_length = area.width as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let half_thumb = (ti.thumb_size / 2).min(track_length.saturating_sub(1));
-        let center_pos = if rel >= half_thumb { rel - half_thumb } else { 0 };
+        let center_pos = rel.saturating_sub(half_thumb);
         sb.scroll_from_thumb_position(center_pos, track_length) as u16
     } else {
         scroll as u16
@@ -645,7 +646,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
 
             if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
-                state.hovered_dialog_button = detect_dialog_button(col, row, area, &state);
+                state.hovered_dialog_button = detect_dialog_button(col, row, area, state);
             } else {
                 state.hovered_dialog_button = None;
             }
@@ -672,28 +673,25 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                     state.detail_log_hscroll = state.detail_log_hscroll.saturating_sub(5);
                     state.needs_redraw = true;
                 }
-            } else {
-                if in_table {
-                    if state.table_scroll_offset > 0 {
-                        state.table_scroll_offset -= 1;
-                        state.focus_zone = FocusZone::Table;
-                        state.needs_redraw = true;
-                    }
-                } else if in_info {
-                    if state.info_log_scroll > 0 {
-                        state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
-                        state.focus_zone = FocusZone::InfoLog;
-                        state.needs_redraw = true;
-                    }
-                } else if in_detail {
-                    if state.detail_log_scroll > 0 {
-                        state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
-                        state.detail_log_auto_scroll = false;
-                        state.focus_zone = FocusZone::DetailLog;
-                        state.needs_redraw = true;
-                    }
+            } else if in_table {
+                if state.table_scroll_offset > 0 {
+                    state.table_scroll_offset -= 1;
+                    state.focus_zone = FocusZone::Table;
+                    state.needs_redraw = true;
                 }
-            }
+            } else if in_info {
+                if state.info_log_scroll > 0 {
+                    state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
+                    state.focus_zone = FocusZone::InfoLog;
+                    state.needs_redraw = true;
+                }
+            } else if in_detail
+                && state.detail_log_scroll > 0 {
+                    state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
+                    state.detail_log_auto_scroll = false;
+                    state.focus_zone = FocusZone::DetailLog;
+                    state.needs_redraw = true;
+                }
         }
         MouseEventKind::ScrollDown => {
             if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
@@ -707,20 +705,18 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                     state.detail_log_hscroll = state.detail_log_hscroll.saturating_add(5);
                     state.needs_redraw = true;
                 }
-            } else {
-                if in_table {
-                    state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
-                    state.focus_zone = FocusZone::Table;
-                    state.needs_redraw = true;
-                } else if in_info {
-                    state.info_log_scroll = state.info_log_scroll.saturating_add(3);
-                    state.focus_zone = FocusZone::InfoLog;
-                    state.needs_redraw = true;
-                } else if in_detail {
-                    state.detail_log_scroll = state.detail_log_scroll.saturating_add(3);
-                    state.focus_zone = FocusZone::DetailLog;
-                    state.needs_redraw = true;
-                }
+            } else if in_table {
+                state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
+                state.focus_zone = FocusZone::Table;
+                state.needs_redraw = true;
+            } else if in_info {
+                state.info_log_scroll = state.info_log_scroll.saturating_add(3);
+                state.focus_zone = FocusZone::InfoLog;
+                state.needs_redraw = true;
+            } else if in_detail {
+                state.detail_log_scroll = state.detail_log_scroll.saturating_add(3);
+                state.focus_zone = FocusZone::DetailLog;
+                state.needs_redraw = true;
             }
         }
         MouseEventKind::Drag(_button) => {
@@ -889,7 +885,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.focus_zone = FocusZone::DetailLog;
                 let now = std::time::Instant::now();
                 let is_double_click = state.last_detail_click_row == Some(row)
-                    && state.last_detail_click_time.map_or(false, |t| now.duration_since(t).as_millis() < 400);
+                    && state.last_detail_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
                 if is_double_click {
                     let inner_top = layout.detail_panel.y + 1;
                     let inner_y = row - inner_top;
@@ -1103,13 +1099,10 @@ fn handle_dialog_button_click(
             }
         }
         UiMode::CheckResult => {
-            match btn_idx {
-                0 => {
-                    state.ui_mode = UiMode::Normal;
-                    state.check_data = None;
-                    state.dialog_scroll = 0;
-                }
-                _ => {}
+            if btn_idx == 0 {
+                state.ui_mode = UiMode::Normal;
+                state.check_data = None;
+                state.dialog_scroll = 0;
             }
         }
         UiMode::Normal => {}

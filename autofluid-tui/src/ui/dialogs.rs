@@ -339,7 +339,7 @@ pub fn render_check_result(
     let content_lines = build_check_content_lines(data);
     let total_lines = content_lines.len();
     let visible = content_height as usize;
-    let max_scroll = if total_lines > visible { total_lines - visible } else { 0 };
+    let max_scroll = total_lines.saturating_sub(visible);
     let scroll_offset = (scroll as usize).min(max_scroll);
 
     let paragraph = Paragraph::new(content_lines)

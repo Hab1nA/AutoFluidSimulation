@@ -8,6 +8,19 @@ use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
 use crate::ui::scrollbar;
 
+#[derive(Debug, Clone)]
+pub struct DetailPanelParams<'a> {
+    pub log_buffer: &'a LogBuffer,
+    pub level_filter: &'a Option<String>,
+    pub source_filter: &'a Option<String>,
+    pub scroll_offset: u16,
+    pub auto_scroll: bool,
+    pub focus_zone: FocusZone,
+    pub hovered_detail_row: Option<u16>,
+    pub clicked_detail_row: Option<u16>,
+    pub hscroll: u16,
+}
+
 fn info_message_color(msg: &str) -> Color {
     if msg.contains('✅') {
         Color::Rgb(0, 204, 102)
@@ -188,20 +201,20 @@ pub fn get_raw_message_at_visual_line(
     }
 }
 
-pub fn render_detail_panel(
-    frame: &mut Frame,
-    area: Rect,
-    log_buffer: &LogBuffer,
-    level_filter: &Option<String>,
-    source_filter: &Option<String>,
-    scroll_offset: u16,
-    auto_scroll: bool,
-    focus_zone: FocusZone,
-    hovered_detail_row: Option<u16>,
-    clicked_detail_row: Option<u16>,
-    hscroll: u16,
-) {
-    let border_style = if focus_zone == FocusZone::DetailLog {
+pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelParams) {
+    let DetailPanelParams {
+        log_buffer,
+        ref level_filter,
+        ref source_filter,
+        ref scroll_offset,
+        ref auto_scroll,
+        ref focus_zone,
+        ref hovered_detail_row,
+        ref clicked_detail_row,
+        ref hscroll,
+    } = params;
+
+    let border_style = if *focus_zone == FocusZone::DetailLog {
         Style::default().fg(Color::Rgb(233, 69, 96))
     } else {
         Style::default().fg(Color::Rgb(51, 51, 51))
@@ -214,7 +227,7 @@ pub fn render_detail_panel(
     if let Some(sf) = source_filter {
         title_text.push_str(&format!("[{}] ", sf));
     }
-    if auto_scroll {
+    if *auto_scroll {
         title_text.push_str("[自动▼] ");
     }
 
@@ -232,7 +245,7 @@ pub fn render_detail_panel(
     let total = lines.len();
     let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
 
-    let scroll = scroll_offset as usize;
+    let scroll = *scroll_offset as usize;
     let start = scroll.min(total);
 
     let visible_lines: Vec<Line> = lines
@@ -241,8 +254,8 @@ pub fn render_detail_panel(
         .skip(start)
         .take(content_height)
         .map(|(idx, mut line)| {
-            let is_clicked = clicked_detail_row == Some(idx as u16);
-            let is_hovered = !is_clicked && hovered_detail_row == Some(idx as u16);
+            let is_clicked = *clicked_detail_row == Some(idx as u16);
+            let is_hovered = !is_clicked && *hovered_detail_row == Some(idx as u16);
             let highlight_style = if is_clicked {
                 CLICK_HIGHLIGHT_STYLE
             } else if is_hovered {
@@ -268,7 +281,7 @@ pub fn render_detail_panel(
 
     let paragraph = Paragraph::new(visible_lines)
         .style(Style::default().bg(Color::Rgb(13, 13, 13)))
-        .scroll((0, hscroll));
+        .scroll((0, *hscroll));
     frame.render_widget(paragraph, text_area);
 
     if has_vscroll {
@@ -299,7 +312,7 @@ pub fn render_detail_panel(
             scrollbar::HorizontalScrollbar {
                 total: max_content_width,
                 visible: content_width,
-                scroll: hscroll as usize,
+                scroll: (*hscroll) as usize,
             },
             hscrollbar_area,
         );
