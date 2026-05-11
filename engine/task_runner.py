@@ -1283,23 +1283,32 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
-        # 构建命令行（字符串格式，避免 list2cmdline 破坏引号）
+        # 构建 SpaceClaim 命令行（字符串格式，避免 list2cmdline 破坏引号）
         #
-        # 关键：subprocess.Popen 接收列表时，Windows 上会调用 list2cmdline()
-        # 将列表转为命令行字符串。list2cmdline 会将参数中已有的双引号用
-        # 反斜杠转义（" → \"），导致 SpaceClaim 收到的命令行变为：
-        #   /RunScript=\"C:\path\script.scscript\" /ScriptArgs=\"1\"
-        # SpaceClaim 无法解析反斜杠转义的引号，因此既找不到脚本也获取不到参数。
+        # 参考格式（ANSYS 官方文档 & 社区验证）：
+        #   SpaceClaim.exe /RunScript="脚本" /ScriptArgs="arg1,arg2,..." /ExitAfterScript=True /Splash=False /Welcome=False
         #
-        # 解决方案：传入字符串而非列表，Python 直接将字符串传给 CreateProcess，
-        # 跳过 list2cmdline 转换，完全掌控引号格式。
-        #
-        # 命令行格式：
-        #   SpaceClaim.exe "step文件" /RunScript="脚本" /ScriptArgs="构型名"
-        # - STEP 文件作为位置参数，SpaceClaim 启动时自动加载
-        # - /RunScript 指定要执行的脚本
-        # - /ScriptArgs 传递构型名称给脚本
-        cmd = f'"{sc_exe}" "{step_file}" /RunScript="{sc_script}" /ScriptArgs="{config_name}"'
+        # 关键规则：
+        # 1. 不能将模型文件作为位置参数传入——SpaceClaim 会以"正常模式"打开文件
+        #    而忽略 /RunScript，导致脚本不执行。模型文件路径必须通过
+        #    /ScriptArgs 传入，由脚本内部通过 args 列表获取并打开。
+        # 2. /ExitAfterScript=True 是批处理模式的关键标志，确保脚本执行完毕后
+        #    SpaceClaim 自动退出，否则进程会挂起直到超时。
+        # 3. /Splash=False /Welcome=False 禁用启动画面和欢迎对话框，
+        #    避免弹窗阻塞脚本执行。
+        # 4. /ScriptArgs 中多个参数以逗号分隔，脚本内通过 args[0], args[1]...
+        #    访问。此处传入：构型名,STEP文件路径,SCDOC输出目录。
+        # 5. 使用字符串而非列表传给 Popen，跳过 list2cmdline 转换，
+        #    避免双引号被反斜杠转义（" → \"）导致 SpaceClaim 无法解析。
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        cmd = (
+            f'"{sc_exe}"'
+            f' /RunScript="{sc_script}"'
+            f' /ScriptArgs="{config_name},{step_file},{scdoc_dir}"'
+            f' /ExitAfterScript=True'
+            f' /Splash=False'
+            f' /Welcome=False'
+        )
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")
         logger.info(f"命令: {cmd}")
