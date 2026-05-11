@@ -1297,17 +1297,21 @@ class TaskRunner:
         # 3. /Splash=False /Welcome=False 禁用启动画面和欢迎对话框，
         #    避免弹窗阻塞脚本执行。
         # 4. /ScriptArgs 中多个参数以逗号分隔，脚本内通过 args[0], args[1]...
-        #    访问。此处传入：构型名,STEP文件路径,SCDOC输出目录。
+        #    访问。此处传入：构型名,STEP文件目录,SCDOC输出目录。
+        #    注意：传入的是目录而非完整文件路径，脚本内部自行拼接文件名。
         # 5. 使用字符串而非列表传给 Popen，跳过 list2cmdline 转换，
         #    避免双引号被反斜杠转义（" → \"）导致 SpaceClaim 无法解析。
+        #为了调试，暂时打开上述的这些功能以观察软件行为
+        step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        os.makedirs(scdoc_dir, exist_ok=True)
         cmd = (
             f'"{sc_exe}"'
             f' /RunScript="{sc_script}"'
-            f' /ScriptArgs="{config_name},{step_file},{scdoc_dir}"'
-            f' /ExitAfterScript=True'
-            f' /Splash=False'
-            f' /Welcome=False'
+            f' /ScriptArgs="{config_name},{step_dir},{scdoc_dir}"'
+            f' /ExitAfterScript=False'
+            f' /Splash=True'
+            f' /Welcome=True'
         )
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")
@@ -1327,8 +1331,12 @@ class TaskRunner:
             timeout = ENGINE_CONFIG["sc_timeout"]
             try:
                 stdout, stderr = process.communicate(timeout=timeout)
+                if stdout and stdout.strip():
+                    logger.info(f"SC stdout:\n{stdout.strip()}")
+                if stderr and stderr.strip():
+                    logger.warning(f"SC stderr:\n{stderr.strip()}")
                 if process.returncode != 0:
-                    logger.error(f"SC 脚本执行失败 (exit={process.returncode}): {stderr}")
+                    logger.error(f"SC 脚本执行失败 (exit={process.returncode})")
                     self.state.set_step_status(
                         config_name, "SC", STATUS_ERROR,
                         f"SC 退出码={process.returncode}: {stderr[:200]}"
@@ -1342,7 +1350,11 @@ class TaskRunner:
                 except OSError as e:
                     logger.error(f"无法终止 SC 进程: {e}")
                 try:
-                    process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
+                    stdout, stderr = process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
+                    if stdout and stdout.strip():
+                        logger.info(f"SC stdout (超时终止):\n{stdout.strip()}")
+                    if stderr and stderr.strip():
+                        logger.warning(f"SC stderr (超时终止):\n{stderr.strip()}")
                 except subprocess.TimeoutExpired:
                     logger.warning("SC 进程在 kill 后未及时退出")
                 logger.error(f"SC 脚本执行超时 ({timeout}s)")
