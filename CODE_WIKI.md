@@ -1,7 +1,7 @@
 # AutoFluid 仿真流水线总控系统 — Code Wiki
 
 > **项目全称**：液氧甲烷火箭发动机仿真自动化流水线总控程序
-> **版本**：v2.3.0
+> **版本**：v2.4.0
 > **语言栈**：Python（后端引擎） + Rust（TUI 客户端）
 > **目标平台**：本地 Windows PC + 远程 Windows 工作站
 
@@ -118,14 +118,20 @@ autofluid/
 │   ├── state_manager.py     # 共享状态管理器（SQLite WAL）
 │   └── file_monitor.py      # STEP 文件目录监控器
 │
+├── executor/                # 🚀 外部执行器脚本
+│   └── spaceclaim_transit.py # SpaceClaim 脚本：STEP → SCDOC 转换（V23 API）
+│
 ├── ipc/                     # 🔌 进程间通信协议
+│   ├── __init__.py
 │   ├── protocol.py          # JSON over TCP 协议定义 & 消息序列化
 │   └── server.py            # IPC 服务器（运行在 Daemon 中）
 │
 ├── utils/                   # 🛠️ 工具模块
+│   ├── __init__.py
 │   ├── logger.py            # 日志系统 & 广播处理器
 │   ├── ssh_client.py        # SSH/SFTP 客户端（paramiko 封装）
-│   └── excel_reader.py      # Excel 参数表读取器
+│   ├── excel_reader.py      # Excel 参数表读取器
+│   └── tui_launcher.py      # Rust TUI 二进制查找与启动（main.py/start_client.py 共用）
 │
 ├── autofluid-tui/           # 🦀 Rust TUI 客户端（唯一前端界面）
 │   ├── Cargo.toml           # Rust 项目配置 & 依赖
@@ -451,6 +457,11 @@ Rust 实现的 TUI 客户端（项目唯一前端界面），使用 `ratatui` �
 
 #### 4.4.1 main.rs — 异步主循环
 
+`main.rs` 是 Rust TUI 的入口，负责初始化终端、事件循环和 IPC 轮询。同时提供两个通用工具函数供其他模块使用：
+
+- `generate_request_id()` — 基于系统时间纳秒生成 8 位十六进制请求 ID（替代 uuid crate）
+- `format_local_time(fmt)` — 通过 `windows-sys` 调用 `GetLocalTime` 实现本地时间格式化（替代 chrono crate）
+
 ```rust
 main() → 初始化终端（raw mode + alternate screen + mouse capture）
     → run_app():
@@ -724,12 +735,11 @@ main.rs ──► state/app_state.rs
 |-------|------|
 | `ratatui` | 终端 UI 渲染框架 |
 | `crossterm` | 跨平台终端事件处理（含鼠标捕获） |
-| `tokio` | 异步运行时 |
+| `tokio` | 异步运行时（net + time + io-util + rt-multi-thread） |
 | `serde` + `serde_json` | JSON 序列化/反序列化 |
-| `uuid` | 请求 ID 生成 |
-| `chrono` | 时间格式化 |
 | `unicode-width` | Unicode 字符宽度计算（中日韩文字对齐） |
 | `arboard` | 剪贴板操作（双击日志行复制消息） |
+| `windows-sys` | Windows API 绑定（`GetLocalTime` 实现本地时间格式化，替代 chrono） |
 
 ---
 
@@ -836,7 +846,6 @@ cargo build --release
 | `AUTOFLUID_SW_EXE` | SolidWorks 可执行文件路径 |
 | `AUTOFLUID_SW_MODEL` | SW 模型文件路径 |
 | `AUTOFLUID_SW_EXCEL` | Excel 参数表路径 |
-| `AUTOFLUID_SW_MACRO` | SW 宏文件路径 |
 | `AUTOFLUID_STEP_DIR` | STEP 文件输出目录 |
 | `AUTOFLUID_SC_EXE` | SpaceClaim 可执行文件路径 |
 | `AUTOFLUID_SC_SCRIPT` | SpaceClaim 脚本路径 |

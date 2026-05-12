@@ -1,6 +1,6 @@
 # 🚀 液氧甲烷火箭发动机仿真总控程序
 
-> **Pipeline Daemon Engine v2.3.0** — 全自动流水线式 CFD 仿真调度系统
+> **Pipeline Daemon Engine v2.4.0** — 全自动流水线式 CFD 仿真调度系统
 
 ---
 
@@ -51,6 +51,7 @@
 
 | 版本 | 日期 | 主要变更 |
 |------|------|----------|
+| **v2.4.0** | 2026-05 | SpaceClaim 步骤全面修复：脚本路径重构并移至 executor/ 目录、修复参数传递与错误处理、新增并发进程清理逻辑防止冲突；注入调度器控制事件以支持长时间阻塞操作的暂停/停止响应；移除 chrono 依赖改用本地时间实现；Rust TUI 二进制查找工具重构 |
 | **v2.3.0** | 2026-05 | TUI 交互体验优化：信息面板/详细日志面板智能自动滚动（新消息自动滚到底端、向上滚动暂停、滚回底端自动恢复）；详细日志每次单击高亮反馈；自检弹窗自动换行与对称边距；焦点提示信息统一 |
 | **v2.2.0** | 2026-05 | 移除 Python Textual TUI，统一使用 Rust ratatui TUI；新增滚动条拖拽（垂直/水平）；信息面板和详细日志面板支持水平滚动；对话框支持内容滚动和鼠标按钮交互；双击详细日志行复制到剪贴板；Rust TUI 编译状态检查与友好错误提示；新增分布式架构改造路线图（ROADMAP.md） |
 | **v2.1.0** | 2026-05 | 新增设计表自动检测与多策略导入（InsertFamilyTableOpen → COM 直接设参降级）；递归深度安全限制与优雅降级；Excel 设计表格式预验证；文件监控增强（SW 宏重试前重置监控状态）；TUI 新增 Daemon 启停控制按钮与增量表格更新；命令日志 IPC 通道 |
@@ -197,10 +198,14 @@ AutoFluidSimulation/
 │   ├── protocol.py          # IPC 协议定义（命令常量、消息序列化）
 │   └── server.py            # IPCServer：TCP Socket 命令服务器
 │
+├── executor/                # 外部执行器脚本
+│   └── spaceclaim_transit.py # SpaceClaim 脚本：STEP → SCDOC 转换（V23 API）
+│
 ├── utils/                   # 工具模块
 │   ├── excel_reader.py      # Excel 构型参数读取（openpyxl）
 │   ├── ssh_client.py        # RemoteWorkstation：SSH/SFTP 远程操作封装
-│   └── logger.py            # 统一日志工具
+│   ├── logger.py            # 统一日志工具
+│   └── tui_launcher.py      # Rust TUI 二进制查找与启动（main.py/start_client.py 共用）
 │
 ├── autofluid-tui/           # Rust TUI 客户端（唯一前端界面）
 │   ├── Cargo.toml           # Rust 项目配置 & 依赖
@@ -218,11 +223,6 @@ AutoFluidSimulation/
 │   ├── test_sw_step_naming.py       # SW 步骤命名测试
 │   └── test_detail_log.py          # 详细日志功能测试
 │
-└── tools/                   # 开发/诊断工具
-    ├── test_direct_step_export.py   # 直接 COM 导出测试
-    ├── diagnose_com_cleanup.py      # COM 清理诊断
-    ├── apply_fix_to_model.py        # 模型修复工具
-    └── ...                          # 其他诊断脚本
 ```
 
 ---
@@ -256,7 +256,7 @@ pip install -r requirements.txt
 ### 外部依赖
 
 - **SolidWorks**: 需安装并注册 COM 接口，模型文件需位于指定路径。支持通过 `sw_exit_on_finish` 配置自动退出或保持运行
-- **SpaceClaim**: 需安装 ANSYS SpaceClaim 2023 R1，脚本（`.py` 或 `.scscript` 格式）需预先编写，支持 `/RunScript` 和 `/ScriptArgs` 参数传递
+- **SpaceClaim**: 需安装 ANSYS SpaceClaim 2023 R1。转换脚本 `executor/spaceclaim_transit.py` 已集成在项目中（V23 API 兼容），通过 subprocess `/RunScript` + `/ScriptArgs` 无头调用
 - **远程 Windows 工作站**: 需启用 OpenSSH Server，安装 ANSYS Fluent + pyfluent，配置 Conda 环境，建议配置 `conda_exe` 完整路径
 
 ---
@@ -502,7 +502,7 @@ python start_daemon.py
 ```
 ============================================================
   液氧甲烷火箭发动机仿真 - 后台调度引擎
-  Pipeline Daemon Engine v2.3.0
+  Pipeline Daemon Engine v2.4.0
 ============================================================
 
 启动后将监听 IPC 连接，等待 TUI 客户端...
@@ -550,7 +550,6 @@ LOCAL_PATHS = {
     "sw_exe": r"C:\...\SLDWORKS.exe",              # SolidWorks 可执行文件（subprocess 备选启动）
     "sw_model": r"C:\...\model_gen4.SLDPRT",      # SolidWorks 初始模型
     "excel": r"C:\...\model_gen4.xlsx",            # Excel 参数表（唯一数据源）
-    "sw_macro": r"C:\...\Macro1.swp",              # SW 宏文件（已弃用——STEP 导出改为直接 COM 调用）
     "step_dir": r"C:\...\step",                    # STEP 输出目录
     "sc_exe": r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
     "sc_script": r".\executor\spaceclaim_transit.py",  # SC 脚本（项目内 executor/ 目录）
@@ -607,7 +606,7 @@ ENGINE_CONFIG = {
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.3.0         │  ← 标题栏
+│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.4.0         │  ← 标题栏
 │  引擎: 运行中  |  构型数: 12  |  屏障: 未通过      │  ← 信息栏
 ├──────────────────────────────────────────────────┤
 │  构型  │ SW导出  │ SC转换  │ 文件传输│ 网格划分│ 仿真求解│  ← 状态表格
@@ -810,7 +809,7 @@ AUTOFLUID_SSH_PASSWORD=your_password
 ### 运行前提
 
 1. **SolidWorks 必须已安装并注册 COM 接口**。程序支持三种启动方式：`GetActiveObject`（连接已有实例）→ `Dispatch`（COM 启动新实例）→ `subprocess Popen`（直接启动 EXE），依次降级
-2. **SpaceClaim 脚本需预先编写**（推荐 `.py` 格式，兼容 `.scscript`），确保无头模式可正常运行，需接收三个 `/ScriptArgs` 参数（构型名, STEP目录, SCDOC目录）
+2. **SpaceClaim 转换脚本已集成**在 `executor/spaceclaim_transit.py`（V23 API 兼容），无需额外编写。脚本通过 subprocess `/RunScript` 无头调用，接收三个 `/ScriptArgs` 参数（构型名, STEP目录, SCDOC目录）
 3. **远程工作站必须开启 OpenSSH Server**，且允许密码登录。`conda_exe` 需使用完整路径（SSH 非交互会话 PATH 不含用户级路径）
 4. **Excel 参数表格式**: 第 1 行为设计表头（含 "Design Table"），第 2 行为参数列头（如 `$PRP@Dimension`），第 3 行起为数据行（构型名 + 4 个参数）。系统启动时会自动进行格式预验证
 5. **网络连通性**: 本地需能 ping 通远程工作站 IP
@@ -854,6 +853,6 @@ AUTOFLUID_SSH_PASSWORD=your_password
 
 ---
 
-> **当前版本**: v2.3.0
+> **当前版本**: v2.4.0
 > **开发周期**: 2025-04 — 2026-05
 > **适用场景**: 液氧甲烷火箭发动机喷注器构型批量 CFD 仿真
