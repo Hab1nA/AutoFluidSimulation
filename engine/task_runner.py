@@ -50,6 +50,12 @@ class TaskRunner:
         self._ssh: Optional[RemoteWorkstation] = None
         self._ssh_lock = threading.RLock()  # 可重入锁：SSH 操作需串行化，get_ssh() 内部也需加锁
 
+        # SpaceClaim 并发控制
+        # _sc_cleanup_done: 确保整个 SC 阶段只清理一次旧残留进程
+        # _sc_cleanup_lock: 保护 _sc_cleanup_done 的读写和首次清理的原子性
+        self._sc_cleanup_done = False
+        self._sc_cleanup_lock = threading.Lock()
+
     # ------------------------------------------------------------------
     # SSH 连接管理
     # ------------------------------------------------------------------
@@ -1238,12 +1244,50 @@ class TaskRunner:
     # 阶段 3: SpaceClaim 脚本执行
     # ------------------------------------------------------------------
 
+    def _cleanup_sc_processes(self):
+        """
+        清理可能残留的 SpaceClaim 进程。
+
+        在启动新 SC 实例前调用，避免多个 SC 实例冲突或 /RunScript 被忽略。
+        仅在 Windows 平台生效。
+
+        关键问题：如果 SpaceClaim 已经运行（例如上次启动因超时/崩溃残留），
+        新的 SpaceClaim.exe /RunScript=... 命令只会打开新窗口但不会执行脚本，
+        因为 /RunScript 参数只会被首个进程实例处理。
+        """
+        if os.name != "nt":
+            return
+        try:
+            result = subprocess.run(
+                ["tasklist", "/fi", "IMAGENAME eq SpaceClaim.exe", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "SpaceClaim.exe" in result.stdout:
+                logger.info("[SC清理] 检测到残留 SpaceClaim 进程，正在终止...")
+                kill_result = subprocess.run(
+                    ["taskkill", "/f", "/im", "SpaceClaim.exe"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if kill_result.returncode == 0:
+                    logger.info("[SC清理] ✓ 残留 SpaceClaim 进程已终止，等待 5 秒确保完全退出...")
+                    time.sleep(5)
+                else:
+                    logger.warning(
+                        f"[SC清理] taskkill 返回非零码 {kill_result.returncode}: "
+                        f"{kill_result.stderr.strip()}"
+                    )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning(f"[SC清理] 检查/终止 SC 进程时异常: {e}")
+
     def execute_spaceclaim(self, config_name: int) -> bool:
         """
         通过 subprocess 无头调用 SpaceClaim，将 STEP 转换为 SCDOC。
 
         调用格式：
-        SpaceClaim.exe /RunScript="<脚本路径>" /ScriptArgs="<构型名> <STEP目录> <SCDOC输出目录>"
+        SpaceClaim.exe /RunScript=<脚本路径> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>
+
+        每个 ScriptArg 作为独立的命令行参数传递，确保 SpaceClaim 正确解析。
+        同时通过环境变量 AUTOFLUID_SC_* 传递参数作为后备方案。
 
         脚本通过 args[0]=构型名, args[1]=STEP目录, args[2]=SCDOC目录 三个参数
         定位输入 STEP 文件并保存输出 SCDOC 文件。
@@ -1296,20 +1340,42 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
+        # ★ SC阶段首次调用时清理一次旧残留进程（线程安全）
+        # 设计原则：SC阶段开始前统一清理旧残留，运行中不再杀进程，
+        # 允许3个Worker并行启动独立的SpaceClaim实例，避免互杀导致exit=1。
+        # 超时/崩溃残留：超时分支仍会调用 _cleanup_sc_processes()；
+        # 崩溃残留不影响新SC实例（新进程独立PID，/RunScript正常生效）。
+        with self._sc_cleanup_lock:
+            if not self._sc_cleanup_done:
+                self._cleanup_sc_processes()
+                self._sc_cleanup_done = True
+
         # 构建命令行：传递三个参数给脚本
-        # ScriptArgs 格式：以空格分隔的三个参数
+        # ScriptArgs 格式：每个参数独立传递给 SpaceClaim
         #   args[0] = config_name   (构型编号)
         #   args[1] = step_dir      (STEP 文件所在目录)
         #   args[2] = scdoc_dir     (SCDOC 输出目录)
-        script_args = f"{config_name} {step_dir} {scdoc_dir}"
+        #
+        # 注意：不同版本的 SpaceClaim 对命令行的解析方式不同。
+        # 将每个 ScriptArg 作为独立的命令行参数传递（而非空格分隔的引用字符串），
+        # 确保 SpaceClaim 正确解析每个参数，同时避免路径中括号等特殊字符干扰。
         cmd = [
             sc_exe,
-            f'/RunScript="{sc_script}"',
-            f'/ScriptArgs="{script_args}"',
+            f"/RunScript={sc_script}",
+            "/ScriptArgs=" + str(config_name),
+            step_dir,
+            scdoc_dir,
         ]
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")
         logger.debug(f"命令: {' '.join(cmd)}")
+
+        # ★ 同时通过环境变量传递参数（双重保障）
+        # 即使 /ScriptArgs 解析失败，脚本也能通过 os.environ 获取参数
+        sc_env = os.environ.copy()
+        sc_env["AUTOFLUID_SC_CONFIG"] = str(config_name)
+        sc_env["AUTOFLUID_SC_STEP_DIR"] = step_dir
+        sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
 
         try:
             # 使用 subprocess 启动 SpaceClaim（无头模式）
@@ -1321,6 +1387,7 @@ class TaskRunner:
                 stderr=subprocess.PIPE,
                 text=True,
                 creationflags=sc_creation_flags,
+                env=sc_env,
             )
 
             # 等待完成（带超时）
@@ -1352,6 +1419,8 @@ class TaskRunner:
                     process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
                 except subprocess.TimeoutExpired:
                     logger.warning("SC 进程在 kill 后未及时退出")
+                # ★ 超时后强制清理所有残留 SC 进程
+                self._cleanup_sc_processes()
                 logger.error(f"SC 脚本执行超时 ({timeout}s)")
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 执行超时")
                 return False

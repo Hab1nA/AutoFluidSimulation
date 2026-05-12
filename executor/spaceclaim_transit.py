@@ -3,10 +3,15 @@
 # SpaceClaim Transit Script — V23 兼容版本
 # 功能：读取 STEP 文件 → 创建命名选择集 → 保存为 SCDOC
 #
-# 用法：SpaceClaim.exe /RunScript="<本脚本路径>" /ScriptArgs="<构型名> <STEP目录> <SCDOC输出目录>"
+# 用法（通过本项目 Daemon 调用）：SpaceClaim.exe /RunScript=<本脚本路径> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>
 #   args[0] = config_name   (构型编号，整数)
 #   args[1] = step_dir      (STEP 文件所在目录)
 #   args[2] = scdoc_dir     (SCDOC 输出目录)
+#
+# 手动交互式调试用法（在 SpaceClaim 控制台中输入）：
+#   import sys
+#   sys.argv = ["spaceclaim_transit.py", "6", r"<STEP目录>", r"<SCDOC输出目录>"]
+#   execfile(r"<脚本完整路径>")
 #
 # 兼容版本：SpaceClaim 2023 R1 (API V23)
 # 说明：args 是 SpaceClaim 在 /RunScript 模式下自动注入的全局变量，
@@ -26,11 +31,20 @@ from datetime import datetime
 # 0. 尽早建立日志文件（在任何可能失败的导入之前）
 # --------------------------------------------------------------------------
 # 智能定位项目根目录：
-#   优先从脚本所在路径上溯（scscript/ → 项目根 → logs/executor/）
-#   若不可用则回退到脚本所在目录下创建 logs/executor/
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)  # scscript/ 的父目录即项目根
-# 验证：项目根下应存在 logs/ 目录或 scscript/ 目录
+#   优先从脚本所在路径上溯（executor/ → 项目根 → logs/executor/）
+#   若 __file__ 不可用（IronPython /RunScript 模式可能缺失），回退到当前工作目录
+
+def _get_script_dir():
+    """获取脚本所在目录，兼容 IronPython /RunScript 模式下 __file__ 缺失的情况。"""
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except (NameError, AttributeError):
+        # __file__ 未定义（某些 IronPython 运行模式下）→ 回退到当前工作目录
+        return os.getcwd()
+
+_SCRIPT_DIR = _get_script_dir()
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)  # executor/ 的父目录即项目根
+# 验证：项目根下应存在 logs/ 目录或 executor/ 目录
 _candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
 if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
     # 回退：在脚本所在目录下创建
@@ -80,8 +94,8 @@ except ImportError as e:
 # ============================================================================
 # 脚本参数获取
 # ============================================================================
-# SpaceClaim 在 /RunScript 模式下会将 /ScriptArgs 的值按空格分割，
-# 存入全局变量 args。若交互式测试或其他模式运行，则回退到 sys.argv。
+# SpaceClaim 在 /RunScript 模式下会将 /ScriptArgs 中每个参数注入为独立的
+# 命令行参数或在 args 全局变量中。若交互式测试或其他模式运行，则回退到 sys.argv。
 def _get_script_args():
     """获取脚本参数列表。优先使用 SpaceClaim 注入的全局 args。"""
     # 方式1: SpaceClaim 注入的全局 args（/RunScript + /ScriptArgs）
@@ -98,8 +112,17 @@ def _get_script_args():
         pass
 
     # 方式3: 通过 sys.argv（去掉脚本路径本身）
+    #   - 交互式执行：sys.argv = ["script.py", "6", step_dir, scdoc_dir]
+    #   - /RunScript 模式：sys.argv 可能只含脚本路径，不含自定义参数
     if len(sys.argv) > 1:
         return sys.argv[1:]
+
+    # 方式4: 通过环境变量传递（最后的后备方案）
+    env_config = os.environ.get("AUTOFLUID_SC_CONFIG", "")
+    env_step = os.environ.get("AUTOFLUID_SC_STEP_DIR", "")
+    env_scdoc = os.environ.get("AUTOFLUID_SC_SCDOC_DIR", "")
+    if env_config and env_step and env_scdoc:
+        return [env_config, env_step, env_scdoc]
 
     return []
 
@@ -355,7 +378,8 @@ def Main():
         if not script_args or len(script_args) < 3:
             _log("=" * 60)
             _log("[ERROR] 参数不足！")
-            _log("用法: SpaceClaim.exe /RunScript=\"<脚本>\" /ScriptArgs=\"<构型名> <STEP目录> <SCDOC输出目录>\"")
+            _log("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
+            _log("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
             _log("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
             _log("=" * 60)
             return
@@ -381,6 +405,21 @@ def Main():
     except Exception as e:
         _log("\n[FATAL] 脚本执行异常: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
+
+    finally:
+        # ★ 脚本执行完毕后退出 SpaceClaim（/RunScript 模式会自动退出，
+        #    但显式调用确保在任何情况下 SpaceClaim 都能正常关闭，
+        #    避免残留进程影响下次启动）
+        # 若设置了环境变量 AUTOFLUID_SC_NOEXIT=1，则跳过退出（用于交互式调试）
+        if os.environ.get("AUTOFLUID_SC_NOEXIT", "") != "1":
+            try:
+                _log("[INFO] 正在退出 SpaceClaim...")
+                Command.Execute("Exit")
+            except Exception as e_exit:
+                _log("[WARN] 退出 SpaceClaim 时异常（可能已在关闭中）: {}: {}".format(
+                    type(e_exit).__name__, e_exit))
+        else:
+            _log("[INFO] AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
 
 
 # 显式调用 Main() —— SpaceClaim 不会自动调用，此处确保脚本执行
