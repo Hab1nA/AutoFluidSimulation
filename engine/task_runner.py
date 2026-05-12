@@ -1242,8 +1242,11 @@ class TaskRunner:
         """
         通过 subprocess 无头调用 SpaceClaim，将 STEP 转换为 SCDOC。
 
-        调用格式（严格按需求）：
-        SpaceClaim.exe /RunScript="<脚本路径>" /ScriptArgs="<构型名称>"
+        调用格式：
+        SpaceClaim.exe /RunScript="<脚本路径>" /ScriptArgs="<构型名> <STEP目录> <SCDOC输出目录>"
+
+        脚本通过 args[0]=构型名, args[1]=STEP目录, args[2]=SCDOC目录 三个参数
+        定位输入 STEP 文件并保存输出 SCDOC 文件。
 
         Args:
             config_name: 构型名称（整数）
@@ -1262,8 +1265,18 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
 
-        step_file = os.path.join(LOCAL_PATHS["step_dir"], _sw_step_name)
-        scdoc_file = os.path.join(LOCAL_PATHS["scdoc_dir"], _scdoc_name)
+        step_dir = LOCAL_PATHS["step_dir"]
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        step_file = os.path.join(step_dir, _sw_step_name)
+        scdoc_file = os.path.join(scdoc_dir, _scdoc_name)
+
+        # 确保输出目录存在
+        try:
+            os.makedirs(scdoc_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"无法创建 SCDOC 输出目录: {scdoc_dir}: {e}")
+            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"无法创建输出目录: {e}")
+            return False
 
         # 检查输入文件
         if not os.path.exists(step_file):
@@ -1283,11 +1296,16 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
-        # 构建命令行（严格按需求格式）
+        # 构建命令行：传递三个参数给脚本
+        # ScriptArgs 格式：以空格分隔的三个参数
+        #   args[0] = config_name   (构型编号)
+        #   args[1] = step_dir      (STEP 文件所在目录)
+        #   args[2] = scdoc_dir     (SCDOC 输出目录)
+        script_args = f"{config_name} {step_dir} {scdoc_dir}"
         cmd = [
             sc_exe,
             f'/RunScript="{sc_script}"',
-            f'/ScriptArgs="{config_name}"',
+            f'/ScriptArgs="{script_args}"',
         ]
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")
@@ -1309,11 +1327,18 @@ class TaskRunner:
             timeout = ENGINE_CONFIG["sc_timeout"]
             try:
                 stdout, stderr = process.communicate(timeout=timeout)
+                # 记录脚本标准输出（用于诊断脚本内部错误）
+                if stdout:
+                    logger.info(f"SC 脚本 stdout:\n{stdout.strip()}")
                 if process.returncode != 0:
-                    logger.error(f"SC 脚本执行失败 (exit={process.returncode}): {stderr}")
+                    stderr_msg = stderr.strip() if stderr else "(无 stderr 输出)"
+                    logger.error(
+                        f"SC 脚本执行失败 (exit={process.returncode}):\n"
+                        f"  stderr: {stderr_msg[:500]}"
+                    )
                     self.state.set_step_status(
                         config_name, "SC", STATUS_ERROR,
-                        f"SC 退出码={process.returncode}: {stderr[:200]}"
+                        f"SC 退出码={process.returncode}: {stderr_msg[:200]}"
                     )
                     return False
             except subprocess.TimeoutExpired:
@@ -1333,10 +1358,17 @@ class TaskRunner:
 
             # 验证输出文件
             if os.path.exists(scdoc_file):
-                logger.info(f"SC 转换完成: model_gen4_{config_name}.scdoc")
+                file_size = os.path.getsize(scdoc_file)
+                logger.info(
+                    f"SC 转换完成: model_gen4_{config_name}.scdoc "
+                    f"({file_size} bytes)"
+                )
                 return True
             else:
-                logger.error(f"SC 输出文件未生成: {scdoc_file}")
+                logger.error(
+                    f"SC 输出文件未生成: {scdoc_file}\n"
+                    f"  脚本可能执行失败但返回了零退出码。请检查上面的 stdout 输出。"
+                )
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
                 return False
 

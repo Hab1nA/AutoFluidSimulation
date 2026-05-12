@@ -54,10 +54,11 @@ LOCAL_PATHS = {
         "AUTOFLUID_SC_EXE",
         r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
     ),
-    # SpaceClaim 脚本文件
+    # SpaceClaim 脚本文件（Python 格式，兼容 V23 API）
+    # 注意：脚本需能访问 SpaceClaim.Api.V23；推荐使用 .py 文件以利用完整错误诊断
     "sc_script": _env_override(
         "AUTOFLUID_SC_SCRIPT",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\spaceclaim_transit.scscript",
+        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\spaceclaim_transit.py",
     ),
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(

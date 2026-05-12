@@ -256,7 +256,7 @@ pip install -r requirements.txt
 ### 外部依赖
 
 - **SolidWorks**: 需安装并注册 COM 接口，模型文件需位于指定路径。支持通过 `sw_exit_on_finish` 配置自动退出或保持运行
-- **SpaceClaim**: 需安装 ANSYS SpaceClaim 2023 R1，`.scscript` 脚本需预先编写，支持 `/RunScript` 和 `/ScriptArgs` 参数传递
+- **SpaceClaim**: 需安装 ANSYS SpaceClaim 2023 R1，脚本（`.py` 或 `.scscript` 格式）需预先编写，支持 `/RunScript` 和 `/ScriptArgs` 参数传递
 - **远程 Windows 工作站**: 需启用 OpenSSH Server，安装 ANSYS Fluent + pyfluent，配置 Conda 环境，建议配置 `conda_exe` 完整路径
 
 ---
@@ -553,7 +553,7 @@ LOCAL_PATHS = {
     "sw_macro": r"C:\...\Macro1.swp",              # SW 宏文件（已弃用——STEP 导出改为直接 COM 调用）
     "step_dir": r"C:\...\step",                    # STEP 输出目录
     "sc_exe": r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
-    "sc_script": r"C:\...\spaceclaim_transit.scscript",  # SC 脚本
+    "sc_script": r"C:\...\spaceclaim_transit.py",  # SC 脚本（Python 格式，兼容 V23）
     "scdoc_dir": r"C:\...\scdoc",                  # SCDOC 输出目录
     "log_dir": r".\logs",                          # 日志目录
     "data_dir": r".\data",                         # 数据库目录（独立于日志目录）
@@ -810,7 +810,7 @@ AUTOFLUID_SSH_PASSWORD=your_password
 ### 运行前提
 
 1. **SolidWorks 必须已安装并注册 COM 接口**。程序支持三种启动方式：`GetActiveObject`（连接已有实例）→ `Dispatch`（COM 启动新实例）→ `subprocess Popen`（直接启动 EXE），依次降级
-2. **SpaceClaim 脚本需预先编写**（`.scscript` 格式），确保无头模式可正常运行，支持 `/ScriptArgs` 参数
+2. **SpaceClaim 脚本需预先编写**（推荐 `.py` 格式，兼容 `.scscript`），确保无头模式可正常运行，需接收三个 `/ScriptArgs` 参数（构型名, STEP目录, SCDOC目录）
 3. **远程工作站必须开启 OpenSSH Server**，且允许密码登录。`conda_exe` 需使用完整路径（SSH 非交互会话 PATH 不含用户级路径）
 4. **Excel 参数表格式**: 第 1 行为设计表头（含 "Design Table"），第 2 行为参数列头（如 `$PRP@Dimension`），第 3 行起为数据行（构型名 + 4 个参数）。系统启动时会自动进行格式预验证
 5. **网络连通性**: 本地需能 ping 通远程工作站 IP
@@ -834,7 +834,7 @@ AUTOFLUID_SSH_PASSWORD=your_password
 | SW 导出失败（全部构型） | SolidWorks 未安装 / COM 注册问题 / 模型损坏 | `check` 命令排查，手动打开 SW 验证模型 |
 | SW 导出失败（部分构型） | 特定构型重建失败 / 设计表参数错误 | 查看 Daemon 日志，检查失败构型的参数值 |
 | SSH 连接失败 | 远程工作站未开启 SSH / 密码错误 / 网络不通 | 检查 IP、端口、用户名、密码，ping 测试 |
-| SC 脚本超时 | SpaceClaim 脚本出错或路径问题 | 检查 `.scscript` 文件和输入 STEP 文件 |
+| SC 脚本超时 | SpaceClaim 脚本出错或路径问题 | 检查脚本文件（`.py`/`.scscript`）和输入 STEP 文件，确认 ScriptArgs 参数正确 |
 | 网格划分/求解超时 | 远程任务执行异常或模型过大 | 增大超时配置，远程手动验证脚本 |
 | `[队列异常]` 日志警告 | SW 完成的构型未正确入队 | 检查文件监控器状态，使用 `reset` 重新触发 |
 

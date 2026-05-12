@@ -1,3 +1,15 @@
+# ============================================================================
+# SpaceClaim Transit Script — 文本参考版（已废弃）
+#
+# 注意：此文件是对原始 spaceclaim_transit.scscript 的文本副本。
+# 该脚本存在以下已知问题，已在 spaceclaim_transit.py 中修复：
+#   1. ScriptArgs 参数不完整（仅传1个而非所需的3个参数）
+#   2. args 全局变量未正确定义
+#   3. 缺少错误处理与诊断输出
+#
+# 请使用 scscript/spaceclaim_transit.py 作为 SpaceClaim 脚本。
+# 详见项目根目录下的 问题分析报告.md
+# ============================================================================
 import os
 import SpaceClaim.Api.V23 as sc
 from SpaceClaim.Api.V23 import *
