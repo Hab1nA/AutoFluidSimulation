@@ -11,6 +11,13 @@
     python start_daemon.py
     或
     python main.py --daemon
+
+进程锁：
+    同一时刻只允许一个 Daemon 运行。通过 PID 文件 + IPC 端口探测实现。
+
+数据库分片：
+    按构型组合指纹自动选择数据库文件。相同构型组合复用同一数据库，
+    修改设计表后自动使用新数据库，互不干扰。
 ===============================================================================
 """
 import os
@@ -25,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, ensure_directories, validate_config,
+    compute_config_fingerprint, get_db_path_for_fingerprint,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -34,6 +42,128 @@ from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_
 from utils.excel_reader import read_model_configs
 
 logger = setup_logger("PipelineDaemon")
+
+# PID 文件路径（与 main.py 保持一致）
+_PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
+_MIN_VALID_PID = 1
+
+
+# ------------------------------------------------------------------
+# 进程锁工具
+# ------------------------------------------------------------------
+
+def _is_process_alive(pid: int) -> bool:
+    """检测指定 PID 的进程是否存活（跨平台）。"""
+    if pid < _MIN_VALID_PID:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x100000, False, pid)
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
+
+def _read_pid_file() -> int | None:
+    """读取 PID 文件中的 PID。"""
+    try:
+        with open(_DAEMON_PID_FILE, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _write_pid_file(pid: int):
+    """写入 PID 文件。"""
+    os.makedirs(_PID_DIR, exist_ok=True)
+    with open(_DAEMON_PID_FILE, "w", encoding="utf-8") as f:
+        f.write(str(pid))
+
+
+def _remove_pid_file():
+    """删除 PID 文件。"""
+    try:
+        os.remove(_DAEMON_PID_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def _check_ipc_ready(host: str = None, port: int = None) -> bool:
+    """检测 IPC 端口是否已被监听。"""
+    import socket
+    h = host or IPC_CONFIG["host"]
+    p = port or IPC_CONFIG["port"]
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect((h, p))
+        s.close()
+        return True
+    except (ConnectionRefusedError, socket.timeout, OSError):
+        return False
+
+
+def acquire_process_lock() -> bool:
+    """
+    尝试获取进程锁。
+
+    检查逻辑：
+    1. PID 文件存在 → 进程存活 → IPC 有响应 → 另一个 Daemon 运行中 → 拒绝
+    2. PID 文件存在 → 进程存活 → IPC 无响应 → 僵尸残留 → 清理后继续
+    3. PID 文件存在 → 进程已死 → 僵尸残留 → 清理后继续
+    4. PID 文件不存在 → 全新启动 → 写入 PID 后继续
+
+    Returns:
+        True:  成功获取锁（可以启动）
+        False: 已有另一个 Daemon 在运行（拒绝启动）
+    """
+    stale_pid = _read_pid_file()
+
+    if stale_pid is not None:
+        if _is_process_alive(stale_pid):
+            if _check_ipc_ready():
+                logger.warning(
+                    f"已有 Daemon 实例运行中 (PID: {stale_pid})，"
+                    f"IPC {IPC_CONFIG['host']}:{IPC_CONFIG['port']} 已监听，拒绝重复启动"
+                )
+                return False
+            else:
+                logger.warning(
+                    f"PID 文件存在且进程存活 (PID: {stale_pid})，"
+                    f"但 IPC 无响应，视为僵尸残留，清理后继续"
+                )
+        else:
+            logger.info(f"PID 文件中的进程已退出 (PID: {stale_pid})，清理残留 PID 文件")
+
+        _remove_pid_file()
+
+    current_pid = os.getpid()
+    _write_pid_file(current_pid)
+    logger.info(f"进程锁已获取 (PID: {current_pid})")
+    return True
+
+
+def release_process_lock():
+    """释放进程锁（删除 PID 文件）。"""
+    current_pid = os.getpid()
+    stale_pid = _read_pid_file()
+    if stale_pid == current_pid:
+        _remove_pid_file()
+        logger.info(f"进程锁已释放 (PID: {current_pid})")
+    else:
+        logger.debug(f"PID 文件不属于当前进程 (文件PID: {stale_pid}, 当前PID: {current_pid})，跳过清理")
 
 
 class PipelineDaemon:
@@ -45,34 +175,27 @@ class PipelineDaemon:
     """
 
     def __init__(self):
-        """初始化守护进程各组件。"""
+        """初始化守护进程基础环境（不创建业务组件）。"""
         logger.info("=" * 60)
         logger.info("PipelineDaemon 初始化中...")
         logger.info("=" * 60)
 
-        # 0. 确保必要目录存在（必须在 StateManager 之前，因为 StateManager 需要 data/ 目录存放 SQLite 数据库）
+        # 0. 确保必要目录存在
         ensure_directories()
 
         # 1. 安装日志广播处理器（供 TUI 增量拉取）
         install_broadcast_handler(capacity=1000)
 
-        # 2. 状态管理器
-        self.state = StateManager()
-
-        # 3. 任务执行器
-        self.runner = TaskRunner(self.state)
-
-        # 4. 流水线调度器
-        self.scheduler = PipelineScheduler(self.state, self.runner)
-
-        # 5. IPC 服务器
-        self.ipc_server = IPCServer()
-        self.ipc_server.register_default_handlers(self)
+        # 业务组件在 start() 中创建，因为需要先读取 Excel 确定数据库路径
+        self.state = None
+        self.runner = None
+        self.scheduler = None
+        self.ipc_server = None
 
         # 运行标志
         self._running = False
 
-        logger.info("PipelineDaemon 初始化完成")
+        logger.info("PipelineDaemon 基础环境就绪")
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -84,33 +207,75 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 启动中...")
         logger.info("=" * 60)
 
-        # 0. 验证配置（目录已在 __init__ 中确保存在）
+        # ---- 0. 进程锁 ----
+        if not acquire_process_lock():
+            logger.error("进程锁获取失败，退出启动")
+            self._running = False
+            return
+
+        # ---- 0.5 验证配置 ----
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")
 
         self._running = True
 
-        # 1. 加载 Excel 数据（初始化状态库）
-        self._load_excel_data()
+        # ---- 1. 加载 Excel 数据，计算构型指纹，确定数据库路径 ----
+        excel_path = LOCAL_PATHS["excel"]
+        try:
+            configs = read_model_configs(excel_path)
+        except FileNotFoundError as e:
+            logger.error(f"Excel 文件未找到: {e}")
+            release_process_lock()
+            self._running = False
+            return
+        except (ValueError, OSError) as e:
+            logger.error(f"Excel 读取失败: {e}")
+            release_process_lock()
+            self._running = False
+            return
 
-        # 2. 启动 IPC 服务器（接受 TUI 客户端连接）
+        if not configs:
+            logger.error("Excel 中未读取到任何构型数据！")
+            release_process_lock()
+            self._running = False
+            return
+
+        fingerprint = compute_config_fingerprint(configs)
+        db_path = get_db_path_for_fingerprint(fingerprint)
+        logger.info(f"构型组合指纹: {fingerprint}（{len(configs)} 个构型）")
+        logger.info(f"状态数据库: {db_path}")
+
+        # ---- 2. 创建业务组件 ----
+        self.state = StateManager(db_path=db_path)
+        self.state.load_configs(configs)
+        logger.info(f"已同步 {len(configs)} 个构型到状态库")
+
+        self.runner = TaskRunner(self.state)
+        self.scheduler = PipelineScheduler(self.state, self.runner)
+
+        self.ipc_server = IPCServer()
+        self.ipc_server.register_default_handlers(self)
+
+        # ---- 3. 启动 IPC 服务器 ----
         try:
             self.ipc_server.start()
         except OSError as e:
             logger.error(f"IPC 服务器启动失败: {e}")
             logger.error("可能已有另一个 Daemon 在运行？")
             self._running = False
-            self.ipc_server.stop()  # 清理部分初始化的 socket
+            self.ipc_server.stop()
+            release_process_lock()
             return
 
-        # 3. 注册信号处理（优雅退出）
+        # ---- 4. 注册信号处理 ----
         self._setup_signal_handlers()
 
         logger.info("PipelineDaemon 已就绪，等待客户端指令...")
         logger.info(f"IPC 地址: {IPC_CONFIG['host']}:{IPC_CONFIG['port']}")
+        logger.info(f"数据库指纹: {fingerprint}")
 
-        # 4. 主循环（保持进程存活）
+        # ---- 5. 主循环 ----
         try:
             while self._running:
                 time.sleep(1)
@@ -125,13 +290,19 @@ class PipelineDaemon:
         self._running = False
 
         # 停止调度器
-        self.scheduler.stop()
+        if self.scheduler:
+            self.scheduler.stop()
 
         # 断开 SSH
-        self.runner.disconnect_ssh()
+        if self.runner:
+            self.runner.disconnect_ssh()
 
         # 停止 IPC 服务器
-        self.ipc_server.stop()
+        if self.ipc_server:
+            self.ipc_server.stop()
+
+        # 释放进程锁
+        release_process_lock()
 
         logger.info("PipelineDaemon 已关闭")
 
@@ -147,25 +318,6 @@ class PipelineDaemon:
                 signal.signal(sig, signal_handler)
             except (AttributeError, ValueError):
                 pass  # Windows 不支持某些信号
-
-    def _load_excel_data(self):
-        """从 Excel 加载构型数据并同步到状态库。"""
-        excel_path = LOCAL_PATHS["excel"]
-        try:
-            configs = read_model_configs(excel_path)
-            if not configs:
-                logger.error("Excel 中未读取到任何构型数据！")
-                return
-            self.state.load_configs(configs)
-            logger.info(f"已从 Excel 同步 {len(configs)} 个构型到状态库")
-        except FileNotFoundError as e:
-            logger.error(f"Excel 文件未找到: {e}")
-        except ValueError as e:
-            logger.error(f"Excel 数据格式错误: {e}")
-        except OSError as e:
-            logger.error(f"Excel 读取失败: {e}")
-        except Exception as e:
-            logger.error(f"Excel 数据加载失败: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # IPC 命令处理器

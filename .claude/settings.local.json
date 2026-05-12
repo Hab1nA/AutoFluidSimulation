@@ -3,7 +3,10 @@
     "allow": [
       "Bash(cargo check *)",
       "Bash(python -m pytest tests/ -v)",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Bash(python -m py_compile engine/config.py)",
+      "Bash(python -m py_compile engine/daemon.py)",
+      "Bash(python -m py_compile main.py)"
     ]
   }
 }

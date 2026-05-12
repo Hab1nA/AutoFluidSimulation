@@ -163,7 +163,6 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
             creationflags=creationflags,
             env=env,
         )
-        _write_pid(DAEMON_PID_FILE, proc.pid)
         return proc
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[错误] 启动后台引擎失败: {e}", file=sys.stderr)
@@ -313,6 +312,37 @@ def _run_all_mode():
     from utils.logger import init_session, build_session_log_dir
 
     _ensure_dirs()
+
+    # ---- 0. 检测是否已有 Daemon 在运行 ----
+    daemon_already_running = _check_ipc_ready()
+
+    if daemon_already_running:
+        print("=" * 60)
+        print("  TUI 界面 (连接到已有后台引擎)")
+        print("=" * 60)
+        print()
+        daemon_pid = _read_pid(DAEMON_PID_FILE)
+        if daemon_pid:
+            print(f"  后台引擎已在运行 (PID: {daemon_pid})，直接启动客户端...")
+        else:
+            print("  后台引擎已在运行，直接启动客户端...")
+        print()
+
+        # 直接启动 TUI（在主进程中运行 Rust TUI 子进程）
+        try:
+            rust_bin = find_rust_tui_binary(PROJECT_DIR)
+            if rust_bin:
+                tui_proc = subprocess.Popen([rust_bin], cwd=PROJECT_DIR)
+                tui_proc.wait()
+            else:
+                print_rust_tui_not_found_help(PROJECT_DIR)
+                sys.exit(1)
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            print(f"\n[错误] TUI 客户端异常退出: {e}", file=sys.stderr)
+            sys.exit(1)
+        return
 
     session_timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
