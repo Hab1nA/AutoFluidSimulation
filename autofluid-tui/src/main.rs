@@ -22,6 +22,31 @@ use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
 use event_handler::key_handler;
 use event_handler::command;
 
+pub fn format_local_time(fmt: &str) -> String {
+    let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+    fmt.replace("%Y", &format!("{:04}", st.wYear))
+        .replace("%m", &format!("{:02}", st.wMonth))
+        .replace("%d", &format!("{:02}", st.wDay))
+        .replace("%H", &format!("{:02}", st.wHour))
+        .replace("%M", &format!("{:02}", st.wMinute))
+        .replace("%S", &format!("{:02}", st.wSecond))
+}
+
+pub fn generate_request_id() -> String {
+    use std::time::SystemTime;
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut s = String::with_capacity(8);
+    for i in 0..8 {
+        let nibble = ((t >> (i * 4)) ^ (t >> ((i + 8) * 4))) as u8 & 0x0f;
+        s.push(std::char::from_digit(nibble as u32, 16).unwrap_or('0'));
+    }
+    s
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     crossterm::terminal::enable_raw_mode()?;
 
@@ -1123,5 +1148,57 @@ fn handle_dialog_button_click(
             }
         }
         UiMode::Normal => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_local_time_time_format() {
+        let result = format_local_time("%H:%M:%S");
+        assert_eq!(result.len(), 8, "时间格式应为 HH:MM:SS (8字符)");
+        let parts: Vec<&str> = result.split(':').collect();
+        assert_eq!(parts.len(), 3, "应包含3个部分");
+        let h: u32 = parts[0].parse().expect("小时应为数字");
+        let m: u32 = parts[1].parse().expect("分钟应为数字");
+        let s: u32 = parts[2].parse().expect("秒应为数字");
+        assert!(h < 24, "小时应在0-23之间");
+        assert!(m < 60, "分钟应在0-59之间");
+        assert!(s < 60, "秒应在0-59之间");
+    }
+
+    #[test]
+    fn test_format_local_time_datetime_format() {
+        let result = format_local_time("%Y%m%d_%H%M%S");
+        assert_eq!(result.len(), 15, "日期时间格式应为 YYYYMMDD_HHMMSS (15字符)");
+        let parts: Vec<&str> = result.split('_').collect();
+        assert_eq!(parts.len(), 2, "应包含日期和时间两部分");
+        assert_eq!(parts[0].len(), 8, "日期部分应为8字符");
+        assert_eq!(parts[1].len(), 6, "时间部分应为6字符");
+        let year: u32 = parts[0][0..4].parse().expect("年份应为数字");
+        assert!(year >= 2024 && year <= 2100, "年份应在合理范围内");
+        let month: u32 = parts[0][4..6].parse().expect("月份应为数字");
+        assert!(month >= 1 && month <= 12, "月份应在1-12之间");
+        let day: u32 = parts[0][6..8].parse().expect("日期应为数字");
+        assert!(day >= 1 && day <= 31, "日期应在1-31之间");
+    }
+
+    #[test]
+    fn test_generate_request_id() {
+        let id1 = generate_request_id();
+        let id2 = generate_request_id();
+        assert_eq!(id1.len(), 8, "请求ID应为8字符");
+        assert_eq!(id2.len(), 8, "请求ID应为8字符");
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()), "请求ID应为十六进制");
+        assert!(id2.chars().all(|c| c.is_ascii_hexdigit()), "请求ID应为十六进制");
+    }
+
+    #[test]
+    fn test_format_local_time_consistency() {
+        let r1 = format_local_time("%H:%M:%S");
+        let r2 = format_local_time("%H:%M:%S");
+        assert_eq!(r1, r2, "同一秒内两次调用结果应相同");
     }
 }

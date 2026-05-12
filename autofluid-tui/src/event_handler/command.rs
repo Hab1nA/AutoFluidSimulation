@@ -4,6 +4,7 @@ use crate::ipc::client::IpcClient;
 use crate::state::app_state::{AppState, UiMode, ConfirmAction, STEP_NAMES};
 use crate::state::log_buffer::LogBuffer;
 use crate::state::filter;
+use crate::format_local_time;
 
 pub enum CommandResult {
     None,
@@ -272,8 +273,8 @@ pub async fn dispatch_command(
                 }
                 f
             } else {
-                let now = chrono::Local::now();
-                format!("export_{}.log", now.format("%Y%m%d_%H%M%S"))
+                let time_str = format_local_time("%Y%m%d_%H%M%S");
+                format!("export_{}.log", time_str)
             };
 
             let log_dir = std::env::current_dir()

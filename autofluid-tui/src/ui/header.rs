@@ -4,10 +4,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::app_state::AppState;
+use crate::format_local_time;
 
 pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, _state: &AppState) {
-    let now = chrono::Local::now();
-    let time_str = now.format("%H:%M:%S").to_string();
+    let time_str = format_local_time("%H:%M:%S");
 
     let block = Block::default()
         .borders(Borders::ALL)

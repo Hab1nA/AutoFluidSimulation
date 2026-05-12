@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::generate_request_id;
+
 pub const CMD_START: &str = "start";
 pub const CMD_PAUSE: &str = "pause";
 pub const CMD_STOP: &str = "stop";
@@ -35,7 +37,7 @@ impl IpcRequest {
         Self {
             command: command.to_string(),
             params: Value::Object(serde_json::Map::new()),
-            request_id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+            request_id: generate_request_id(),
         }
     }
 
@@ -43,7 +45,7 @@ impl IpcRequest {
         Self {
             command: command.to_string(),
             params,
-            request_id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
+            request_id: generate_request_id(),
         }
     }
 
