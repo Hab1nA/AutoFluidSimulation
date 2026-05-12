@@ -59,13 +59,13 @@ class PipelineDaemon:
         # 2. 状态管理器
         self.state = StateManager()
 
-        # 2. 任务执行器
+        # 3. 任务执行器
         self.runner = TaskRunner(self.state)
 
-        # 3. 流水线调度器
+        # 4. 流水线调度器
         self.scheduler = PipelineScheduler(self.state, self.runner)
 
-        # 4. IPC 服务器
+        # 5. IPC 服务器
         self.ipc_server = IPCServer()
         self.ipc_server.register_default_handlers(self)
 

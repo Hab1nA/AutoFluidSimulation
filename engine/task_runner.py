@@ -845,13 +845,30 @@ class TaskRunner:
                 )
 
                 if status:
-                    logger.info(
-                        f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
-                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
-                    )
-                    if cn_int is not None:
-                        self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
-                        success_configs.append(cn_int)
+                    # 二次验证：SaveAs 返回 True 但某些 SW 版本/NAS 存储
+                    # 可能延迟刷写，检查文件是否确实存在于磁盘
+                    save_ok = True
+                    if not os.path.exists(filepath):
+                        logger.warning(
+                            f"  ✗ 构型{cn_str}: SaveAs 返回 True 但文件不存在"
+                            f"（{os.path.basename(filepath)}）"
+                        )
+                        save_ok = False
+                    if save_ok:
+                        logger.info(
+                            f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                            f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
+                        )
+                        if cn_int is not None:
+                            self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
+                            success_configs.append(cn_int)
+                    else:
+                        if cn_int is not None:
+                            self.state.set_step_status(
+                                cn_int, "SW", STATUS_ERROR,
+                                "SaveAs 返回 True 但 STEP 文件未写入磁盘"
+                            )
+                            fail_configs.append(cn_int)
                 else:
                     logger.warning(
                         f"  ✗ 构型{cn_str}: SaveAs 返回 False "

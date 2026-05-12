@@ -109,6 +109,10 @@ class MockTaskRunner:
     def get_ssh(self):
         return None
 
+    def set_control_events(self, paused_event, stopped_event):
+        self._paused_event = paused_event
+        self._stopped_event = stopped_event
+
     def disconnect_ssh(self):
         pass
 

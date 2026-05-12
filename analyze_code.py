@@ -69,8 +69,9 @@ def analyze_python_file(file_path):
         checker = NameChecker()
         checker.visit(tree)
         # 检查是否有未定义的名称（排除内置名称）
-        builtins = set(dir(__builtins__))
-        undefined = checker.used_names - checker.defined_names - builtins - imports
+        import builtins
+        builtin_names = set(dir(builtins))
+        undefined = checker.used_names - checker.defined_names - builtin_names - imports
         for name in undefined:
             if not name.startswith('_'):  # 忽略私有变量和特殊变量
                 issues.append(f"可能使用了未定义的变量: {name}")
@@ -161,6 +162,6 @@ def test_imports(root_dir):
             print(f"✗ 其他错误: {e}")
 
 if __name__ == "__main__":
-    workspace = '/workspace'
-    all_issues = check_all_python_files(workspace)
-    test_imports(workspace)
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    all_issues = check_all_python_files(root_dir)
+    test_imports(root_dir)

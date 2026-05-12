@@ -54,6 +54,7 @@ impl IpcClient {
         let mut stream = stream;
         let data = request.serialize();
         if let Err(e) = stream.write_all(&data).await {
+            // Stream may be broken; discard and let caller re-connect
             return Err(format!("发送失败: {}", e));
         }
 
@@ -70,8 +71,12 @@ impl IpcClient {
                     None => Err("无效响应格式".to_string()),
                 }
             }
-            Ok(Err(e)) => Err(format!("读取失败: {}", e)),
+            Ok(Err(e)) => {
+                Err(format!("读取失败: {}", e))
+            }
             Err(_) => {
+                // Timeout: stream is consumed by BufReader and dropped.
+                // Clear self.stream so the caller can detect disconnection and re-connect.
                 Err("请求超时".to_string())
             }
         }
