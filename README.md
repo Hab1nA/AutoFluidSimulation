@@ -553,7 +553,7 @@ LOCAL_PATHS = {
     "sw_macro": r"C:\...\Macro1.swp",              # SW 宏文件（已弃用——STEP 导出改为直接 COM 调用）
     "step_dir": r"C:\...\step",                    # STEP 输出目录
     "sc_exe": r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
-    "sc_script": r"C:\...\spaceclaim_transit.py",  # SC 脚本（Python 格式，兼容 V23）
+    "sc_script": r".\executor\spaceclaim_transit.py",  # SC 脚本（项目内 executor/ 目录）
     "scdoc_dir": r"C:\...\scdoc",                  # SCDOC 输出目录
     "log_dir": r".\logs",                          # 日志目录
     "data_dir": r".\data",                         # 数据库目录（独立于日志目录）

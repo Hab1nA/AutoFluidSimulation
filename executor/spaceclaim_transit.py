@@ -12,7 +12,7 @@
 # 说明：args 是 SpaceClaim 在 /RunScript 模式下自动注入的全局变量，
 #       包含 /ScriptArgs 中以空格分隔的参数列表。
 #
-# 调试：诊断日志写入 %TEMP%\spaceclaim_transit_debug.log
+# 调试：诊断日志写入 <项目根>/logs/executor/spaceclaim_transit_debug.log
 #       SpaceClaim 是 GUI 程序，print() 输出可能不会显示在终端，
 #       请查看该日志文件获取脚本执行详情。
 # ============================================================================
@@ -25,10 +25,24 @@ from datetime import datetime
 # --------------------------------------------------------------------------
 # 0. 尽早建立日志文件（在任何可能失败的导入之前）
 # --------------------------------------------------------------------------
-_LOG_FILE = os.path.join(
-    os.environ.get("TEMP", os.path.dirname(os.path.abspath(__file__))),
-    "spaceclaim_transit_debug.log",
-)
+# 智能定位项目根目录：
+#   优先从脚本所在路径上溯（scscript/ → 项目根 → logs/executor/）
+#   若不可用则回退到脚本所在目录下创建 logs/executor/
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)  # scscript/ 的父目录即项目根
+# 验证：项目根下应存在 logs/ 目录或 scscript/ 目录
+_candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
+if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
+    # 回退：在脚本所在目录下创建
+    _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
+
+try:
+    if not os.path.isdir(_candidate_log_dir):
+        os.makedirs(_candidate_log_dir)
+except (OSError, IOError):
+    _candidate_log_dir = os.environ.get("TEMP", _SCRIPT_DIR)
+
+_LOG_FILE = os.path.join(_candidate_log_dir, "spaceclaim_transit_debug.log")
 
 def _log(msg):
     """同时写入日志文件和 print（print 在 SpaceClaim GUI 下可能不可见）。"""
