@@ -56,6 +56,26 @@ class TaskRunner:
         self._sc_cleanup_done = False
         self._sc_cleanup_lock = threading.Lock()
 
+        # 调度器控制事件引用（由 PipelineScheduler 注入）
+        # 用于在长时间阻塞操作（如 SC 的 process.communicate）中响应暂停/停止指令
+        self._paused_event: Optional[threading.Event] = None
+        self._stopped_event: Optional[threading.Event] = None
+
+    def set_control_events(
+        self,
+        paused_event: threading.Event,
+        stopped_event: threading.Event,
+    ) -> None:
+        """
+        注入调度器的暂停/停止事件，供任务执行方法在长时间阻塞操作中轮询。
+
+        Args:
+            paused_event: 调度器的 _paused 事件
+            stopped_event: 调度器的 _stopped 事件
+        """
+        self._paused_event = paused_event
+        self._stopped_event = stopped_event
+
     # ------------------------------------------------------------------
     # SSH 连接管理
     # ------------------------------------------------------------------
@@ -1390,40 +1410,89 @@ class TaskRunner:
                 env=sc_env,
             )
 
-            # 等待完成（带超时）
+            # ★ 使用轮询循环替代 process.communicate(timeout=300)，
+            # 以便在 SC 执行期间响应暂停/停止指令。
+            # 否则 pause 发出后 worker 线程仍阻塞在 communicate() 中，
+            # 直到 300s 超时到期 → 状态被错误标记为 Error → 触发 retry → 重新 running。
             timeout = ENGINE_CONFIG["sc_timeout"]
-            try:
-                stdout, stderr = process.communicate(timeout=timeout)
-                # 记录脚本标准输出（用于诊断脚本内部错误）
-                if stdout:
-                    logger.info(f"SC 脚本 stdout:\n{stdout.strip()}")
-                if process.returncode != 0:
-                    stderr_msg = stderr.strip() if stderr else "(无 stderr 输出)"
-                    logger.error(
-                        f"SC 脚本执行失败 (exit={process.returncode}):\n"
-                        f"  stderr: {stderr_msg[:500]}"
+            deadline = time.time() + timeout
+            poll_interval = 2.0  # 每 2 秒检查一次
+
+            while True:
+                retcode = process.poll()
+                if retcode is not None:
+                    # 进程已退出，读取剩余 stdout/stderr
+                    stdout, stderr = process.communicate(timeout=None)
+                    # 记录脚本标准输出（用于诊断脚本内部错误）
+                    if stdout:
+                        logger.info(f"SC 脚本 stdout:\n{stdout.strip()}")
+                    if retcode != 0:
+                        stderr_msg = stderr.strip() if stderr else "(无 stderr 输出)"
+                        logger.error(
+                            f"SC 脚本执行失败 (exit={retcode}):\n"
+                            f"  stderr: {stderr_msg[:500]}"
+                        )
+                        self.state.set_step_status(
+                            config_name, "SC", STATUS_ERROR,
+                            f"SC 退出码={retcode}: {stderr_msg[:200]}"
+                        )
+                        return False
+                    break  # 成功退出，跳转到输出文件验证
+
+                # ---- 暂停检查：终止 SC 进程（不修改状态，由调度器 _execute_with_retry 统一处理） ----
+                if self._paused_event is not None and self._paused_event.is_set():
+                    try:
+                        process.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                    try:
+                        process.communicate(timeout=5)  # 回收子进程资源
+                    except subprocess.TimeoutExpired:
+                        logger.warning("SC 进程在 pause-kill 后未及时退出")
+                    logger.info(
+                        f"SC 脚本因暂停被终止: 构型{config_name}"
                     )
-                    self.state.set_step_status(
-                        config_name, "SC", STATUS_ERROR,
-                        f"SC 退出码={process.returncode}: {stderr_msg[:200]}"
+                    # 不在此处设置步骤状态（交由 _execute_with_retry 根据 _paused 标志统一决定），
+                    # 避免 resume() 的 set_all_paused_to_running() 将状态改为 RUNNING 后
+                    # _process_single_config 跳过 SC 步骤
+                    return False
+
+                # ---- 停止检查 ----
+                if self._stopped_event is not None and self._stopped_event.is_set():
+                    try:
+                        process.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                    try:
+                        process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    logger.info(
+                        f"SC 脚本因停止被终止: 构型{config_name}"
                     )
                     return False
-            except subprocess.TimeoutExpired:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass  # 进程已自行退出
-                except OSError as e:
-                    logger.error(f"无法终止 SC 进程: {e}")
-                try:
-                    process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
-                except subprocess.TimeoutExpired:
-                    logger.warning("SC 进程在 kill 后未及时退出")
-                # ★ 超时后强制清理所有残留 SC 进程
-                self._cleanup_sc_processes()
-                logger.error(f"SC 脚本执行超时 ({timeout}s)")
-                self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 执行超时")
-                return False
+
+                # ---- 超时检查 ----
+                if time.time() >= deadline:
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except OSError as e:
+                        logger.error(f"无法终止 SC 进程: {e}")
+                    try:
+                        process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
+                    except subprocess.TimeoutExpired:
+                        logger.warning("SC 进程在 kill 后未及时退出")
+                    # ★ 超时后强制清理所有残留 SC 进程
+                    self._cleanup_sc_processes()
+                    logger.error(f"SC 脚本执行超时 ({timeout}s)")
+                    self.state.set_step_status(
+                        config_name, "SC", STATUS_ERROR, "SC 执行超时"
+                    )
+                    return False
+
+                time.sleep(poll_interval)
 
             # 验证输出文件
             if os.path.exists(scdoc_file):

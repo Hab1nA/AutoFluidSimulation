@@ -64,6 +64,10 @@ class PipelineScheduler:
         self._stopped = threading.Event()        # 停止事件
         self._barrier_passed = threading.Event() # 全局屏障通过事件
 
+        # 将控制事件注入 TaskRunner，使长时间阻塞操作（如 SC 的 process.communicate）
+        # 能够响应暂停/停止指令
+        self.runner.set_control_events(self._paused, self._stopped)
+
         # ---- 工作队列 ----
         # SC 处理队列：(config_name, step_file_path)
         self._sc_queue: queue.Queue = queue.Queue()
@@ -551,22 +555,25 @@ class PipelineScheduler:
             config_name: 构型名称
         """
         # ---- SC 阶段 ----
+        # 注：STATUS_RUNNING 也包含在内，以处理以下场景：
+        # pause→kill SC进程→标记PAUSED→resume→set_all_paused_to_running()→RUNNING，
+        # 此时需重新执行 SC（进程已被终止，不可恢复）。
         sc_status = self.state.get_step_status(config_name, "SC")
-        if sc_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+        if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "SC",
                                              self.runner.execute_spaceclaim):
                 return  # 失败则中止此构型的后续处理
 
         # ---- Transfer 阶段 ----
         transfer_status = self.state.get_step_status(config_name, "Transfer")
-        if transfer_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+        if transfer_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "Transfer",
                                              self.runner.execute_transfer):
                 return
 
         # ---- Meshing 阶段 ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
-        if meshing_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+        if meshing_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not self._execute_with_retry(config_name, "Meshing",
                                              self.runner.execute_meshing):
                 return
@@ -637,6 +644,21 @@ class PipelineScheduler:
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
                     return True
                 else:
+                    # ★ 检查是否因暂停/停止导致执行失败
+                    # （例如 execute_spaceclaim 在轮询中检测到暂停标志，终止了 SC 进程）
+                    if self._paused.is_set():
+                        self.state.set_step_status(
+                            config_name, step_name, STATUS_PAUSED,
+                            "暂停——任务已中断，恢复后将重新执行"
+                        )
+                        logger.info(
+                            f"[{step_name}] 构型{config_name} 因暂停中断，"
+                            f"已标记为 Paused"
+                        )
+                        return False  # 用户主动暂停，不重试
+                    if self._stopped.is_set():
+                        return False  # 引擎已停止，不重试
+
                     logger.warning(f"[{step_name}] 构型{config_name} 执行失败 (尝试 {attempt}/{max_retries})")
                     if attempt < max_retries:
                         retry_count = self.state.increment_retry(config_name, step_name)
