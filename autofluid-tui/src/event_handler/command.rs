@@ -248,14 +248,14 @@ pub async fn dispatch_command(
                 _ => {
                     match filter::parse_filter_arg(&sub) {
                         Some(filter::FilterType::Level(level)) => {
-                            state.log_filter_level = Some(level.clone());
-                            state.log_filter_source = None;
                             log_buffer.push_info(format!("日志过滤: 仅显示 {} 级别", level));
+                            state.log_filter_level = Some(level);
+                            state.log_filter_source = None;
                         }
                         Some(filter::FilterType::Source(source)) => {
-                            state.log_filter_source = Some(source.clone());
-                            state.log_filter_level = None;
                             log_buffer.push_info(format!("日志过滤: 仅显示 {} 来源", source));
+                            state.log_filter_source = Some(source);
+                            state.log_filter_level = None;
                         }
                         None => {
                             log_buffer.push_info(format!("❌ 未知过滤条件: {}", sub));

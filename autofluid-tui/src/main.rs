@@ -1016,30 +1016,10 @@ fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
     None
 }
 
-fn dialog_centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
-    let popup_layout = ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-            ratatui::layout::Constraint::Percentage(percent_y),
-            ratatui::layout::Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    ratatui::layout::Layout::default()
-        .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-            ratatui::layout::Constraint::Percentage(percent_x),
-            ratatui::layout::Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
-
 fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: &AppState) -> Option<u8> {
     let dialog_area = match state.ui_mode {
-        UiMode::ConfirmDialog => dialog_centered_rect(80, 40, area),
-        UiMode::CheckResult => dialog_centered_rect(80, 70, area),
+        UiMode::ConfirmDialog => ui::dialogs::centered_rect(80, 40, area),
+        UiMode::CheckResult => ui::dialogs::centered_rect(80, 70, area),
         UiMode::Normal => return None,
     };
 

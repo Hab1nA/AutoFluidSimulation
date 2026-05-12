@@ -41,7 +41,6 @@ MIN_VALID_PID = 1
 
 
 
-
 def _ensure_dirs():
     os.makedirs(PID_DIR, exist_ok=True)
 

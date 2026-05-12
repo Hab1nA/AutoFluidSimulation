@@ -241,5 +241,3 @@ def validate_config() -> list:
 
     return warnings
 
-
-

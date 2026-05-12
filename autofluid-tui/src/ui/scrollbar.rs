@@ -17,6 +17,36 @@ pub struct ScrollbarThumbInfo {
     pub track_space: usize,
 }
 
+fn thumb_info_impl(total: usize, visible: usize, scroll: usize, track_length: usize) -> Option<ScrollbarThumbInfo> {
+    if total <= visible || track_length == 0 {
+        return None;
+    }
+    let thumb_size = calc_thumb_size(visible, total, track_length);
+    let track_space = track_length - thumb_size;
+    let max_scroll = total - visible;
+    let clamped = scroll.min(max_scroll);
+    let thumb_start = if max_scroll == 0 {
+        0
+    } else {
+        ((clamped as f64 / max_scroll as f64) * track_space as f64).round() as usize
+    };
+    Some(ScrollbarThumbInfo { thumb_start, thumb_size, track_space })
+}
+
+fn scroll_from_thumb_impl(total: usize, visible: usize, scroll: usize, thumb_pos: usize, track_length: usize) -> usize {
+    let ti = match thumb_info_impl(total, visible, scroll, track_length) {
+        Some(ti) => ti,
+        None => return scroll,
+    };
+    if ti.track_space == 0 {
+        return 0;
+    }
+    let max_scroll = total - visible;
+    let clamped_pos = thumb_pos.min(ti.track_space);
+    let new_scroll = ((clamped_pos as f64 / ti.track_space as f64) * max_scroll as f64).round() as usize;
+    new_scroll.min(max_scroll)
+}
+
 pub struct VerticalScrollbar {
     pub total: usize,
     pub visible: usize,
@@ -25,65 +55,25 @@ pub struct VerticalScrollbar {
 
 impl VerticalScrollbar {
     pub fn thumb_info(&self, track_length: usize) -> Option<ScrollbarThumbInfo> {
-        if self.total <= self.visible || track_length == 0 {
-            return None;
-        }
-
-        let thumb_size = calc_thumb_size(self.visible, self.total, track_length);
-        let track_space = track_length - thumb_size;
-        let max_scroll = self.total - self.visible;
-
-        let thumb_start = if max_scroll == 0 {
-            0
-        } else {
-            ((self.scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
-        };
-
-        Some(ScrollbarThumbInfo {
-            thumb_start,
-            thumb_size,
-            track_space,
-        })
+        thumb_info_impl(self.total, self.visible, self.scroll, track_length)
     }
 
     pub fn scroll_from_thumb_position(&self, thumb_pos: usize, track_length: usize) -> usize {
-        let ti = match self.thumb_info(track_length) {
-            Some(ti) => ti,
-            None => return self.scroll,
-        };
-        if ti.track_space == 0 {
-            return 0;
-        }
-        let max_scroll = self.total - self.visible;
-        let clamped_pos = thumb_pos.min(ti.track_space);
-        let new_scroll = ((clamped_pos as f64 / ti.track_space as f64) * max_scroll as f64).round() as usize;
-        new_scroll.min(max_scroll)
+        scroll_from_thumb_impl(self.total, self.visible, self.scroll, thumb_pos, track_length)
     }
 }
 
 impl Widget for VerticalScrollbar {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let track_height = area.height as usize;
-        if self.total <= self.visible || track_height == 0 {
-            return;
-        }
-
-        let max_scroll = self.total - self.visible;
-
-        let thumb_size = calc_thumb_size(self.visible, self.total, track_height);
-
-        let track_space = track_height - thumb_size;
-
-        let thumb_start = if max_scroll == 0 {
-            0
-        } else {
-            ((self.scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
+        let ti = match thumb_info_impl(self.total, self.visible, self.scroll, track_height) {
+            Some(ti) => ti,
+            None => return,
         };
-
         let x = area.x;
         for i in 0..track_height {
             let y = area.y + i as u16;
-            if i >= thumb_start && i < thumb_start + thumb_size {
+            if i >= ti.thumb_start && i < ti.thumb_start + ti.thumb_size {
                 buf.set_string(x, y, "█", THUMB_STYLE);
             } else {
                 buf.set_string(x, y, "│", TRACK_STYLE);
@@ -100,68 +90,25 @@ pub struct HorizontalScrollbar {
 
 impl HorizontalScrollbar {
     pub fn thumb_info(&self, track_length: usize) -> Option<ScrollbarThumbInfo> {
-        if self.total <= self.visible || track_length == 0 {
-            return None;
-        }
-
-        let thumb_size = calc_thumb_size(self.visible, self.total, track_length);
-
-        let track_space = track_length - thumb_size;
-        let max_scroll = self.total - self.visible;
-
-        let scroll = self.scroll.min(max_scroll);
-        let thumb_start = if max_scroll == 0 {
-            0
-        } else {
-            ((scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
-        };
-
-        Some(ScrollbarThumbInfo {
-            thumb_start,
-            thumb_size,
-            track_space,
-        })
+        thumb_info_impl(self.total, self.visible, self.scroll, track_length)
     }
 
     pub fn scroll_from_thumb_position(&self, thumb_pos: usize, track_length: usize) -> usize {
-        let ti = match self.thumb_info(track_length) {
-            Some(ti) => ti,
-            None => return self.scroll,
-        };
-        if ti.track_space == 0 {
-            return 0;
-        }
-        let max_scroll = self.total - self.visible;
-        let clamped_pos = thumb_pos.min(ti.track_space);
-        let new_scroll = ((clamped_pos as f64 / ti.track_space as f64) * max_scroll as f64).round() as usize;
-        new_scroll.min(max_scroll)
+        scroll_from_thumb_impl(self.total, self.visible, self.scroll, thumb_pos, track_length)
     }
 }
 
 impl Widget for HorizontalScrollbar {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let track_width = area.width as usize;
-        if self.total <= self.visible || track_width == 0 {
-            return;
-        }
-
-        let max_scroll = self.total - self.visible;
-        let scroll = self.scroll.min(max_scroll);
-
-        let thumb_size = calc_thumb_size(self.visible, self.total, track_width);
-
-        let track_space = track_width - thumb_size;
-
-        let thumb_start = if max_scroll == 0 {
-            0
-        } else {
-            ((scroll as f64 / max_scroll as f64) * track_space as f64).round() as usize
+        let ti = match thumb_info_impl(self.total, self.visible, self.scroll, track_width) {
+            Some(ti) => ti,
+            None => return,
         };
-
         let y = area.y;
         for i in 0..track_width {
             let x = area.x + i as u16;
-            if i >= thumb_start && i < thumb_start + thumb_size {
+            if i >= ti.thumb_start && i < ti.thumb_start + ti.thumb_size {
                 buf.set_string(x, y, "█", THUMB_STYLE);
             } else {
                 buf.set_string(x, y, "─", TRACK_STYLE);
