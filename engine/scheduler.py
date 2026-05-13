@@ -1218,9 +1218,87 @@ class PipelineScheduler:
         """公共只读属性：主调度线程是否存活（供外部模块查询）。"""
         return self._pipeline_thread is not None and self._pipeline_thread.is_alive()
 
+    def _resume_paused_steps(self):
+        """
+        恢复暂停的步骤：检查输出文件，决定标记完成或重新入队。
+
+        设计原则：
+        - SC 步骤的并发数受 _num_workers 限制。若暂停前有 N 个 SC 进程
+          正在运行，恢复时不应将所有 PAUSED 直接改为 RUNNING（会导致
+          超过并发限制的进程同时显示为 Running）。
+        - 对 PAUSED 的 SC 步骤：先检查 SCDOC 输出文件是否已生成。
+          若已生成 → 标记 Completed，后续 Transfer/Meshing 由 worker 自动衔接。
+          若未生成 → 重新推入 _sc_queue，由 worker 池按并发限制逐个处理。
+        - 其他步骤（Transfer/Meshing/Solver）的 PAUSED 状态由
+          set_all_paused_to_running(exclude_steps=["SC"]) 统一恢复。
+        """
+        paused_sc = self.state.get_configs_at_step("SC", STATUS_PAUSED)
+        if not paused_sc:
+            return
+
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        completed_count = 0
+        re_enqueued_count = 0
+
+        for cn in paused_sc:
+            scdoc_name = get_step_filename("SC", cn)
+            if scdoc_name:
+                scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                    # SCDOC 已生成 → 标记完成，worker 会自动处理后续 Transfer
+                    self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
+                    logger.info(
+                        f"[恢复] 构型{cn} SC: SCDOC 已存在，标记为 Completed"
+                    )
+                    completed_count += 1
+                    continue
+
+            # SCDOC 不存在 → 重新推入队列，由 worker 池按并发限制处理
+            # ★ 使用 appendleft 插入队列前端，确保暂停的构型优先于新扫描到的构型被恢复
+            sw_filename = get_step_filename("SW", cn)
+            if sw_filename:
+                step_file = os.path.join(step_dir, sw_filename)
+                # 仅当 STEP 文件存在时才入队（防止无效任务堆积）
+                if os.path.exists(step_file):
+                    with self._sc_queue.mutex:
+                        self._sc_queue.queue.appendleft((cn, step_file))
+                    re_enqueued_count += 1
+                    logger.info(
+                        f"[恢复] 构型{cn} SC: 无输出文件，优先重新入队等待处理"
+                    )
+                else:
+                    # STEP 文件缺失 → 上游异常，标记 Error
+                    self.state.set_step_status(
+                        cn, "SC", STATUS_ERROR,
+                        "暂停恢复: STEP 文件缺失，无法重新入队"
+                    )
+                    logger.warning(
+                        f"[恢复] 构型{cn} SC: STEP 文件缺失，标记为 Error"
+                    )
+            else:
+                self.state.set_step_status(
+                    cn, "SC", STATUS_ERROR,
+                    "暂停恢复: 无法生成 SW 文件名"
+                )
+
+        if completed_count or re_enqueued_count:
+            logger.info(
+                f"[恢复] SC 步骤处理完成: {completed_count} 个标记完成, "
+                f"{re_enqueued_count} 个重新入队"
+            )
+
     def resume(self):
         logger.info("收到继续指令")
-        self.state.set_all_paused_to_running()
+
+        # ★ 第一步：智能恢复暂停的 SC 步骤（检查输出、重新入队）
+        #    避免 set_all_paused_to_running() 将 SC 步骤全部改为 Running，
+        #    导致超过 _num_workers 并发限制的进程同时显示为 Running
+        self._resume_paused_steps()
+
+        # ★ 第二步：其他步骤（Transfer/Meshing/Solver）的 PAUSED → RUNNING
+        #    SC 步骤已在上一步处理完毕，此处排除 SC 避免覆盖
+        self.state.set_all_paused_to_running(exclude_steps=["SC"])
+
         self._paused.clear()
         self.state.set_engine_status("running")
 

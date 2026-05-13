@@ -402,16 +402,31 @@ class StateManager:
                 )
         logger.info("已将所有运行中/重试中步骤切换为 Paused")
 
-    def set_all_paused_to_running(self):
-        """将所有 Paused 状态的步骤恢复为 Running。"""
+    def set_all_paused_to_running(self, exclude_steps: list[str] | None = None):
+        """将所有 Paused 状态的步骤恢复为 Running。
+
+        Args:
+            exclude_steps: 可选的步骤名列表，这些步骤的 Paused 状态不会被修改
+        """
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute(
-                    "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                    "WHERE status = ?",
-                    (STATUS_RUNNING, STATUS_PAUSED)
-                )
-        logger.info("已将所有 Paused 步骤恢复为 Running")
+                if exclude_steps:
+                    placeholders = ','.join(['?'] * len(exclude_steps))
+                    conn.execute(
+                        f"UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                        f"WHERE status = ? AND step_name NOT IN ({placeholders})",
+                        (STATUS_RUNNING, STATUS_PAUSED, *exclude_steps)
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                        "WHERE status = ?",
+                        (STATUS_RUNNING, STATUS_PAUSED)
+                    )
+        if exclude_steps:
+            logger.info(f"已将所有 Paused 步骤恢复为 Running（排除步骤: {exclude_steps}）")
+        else:
+            logger.info("已将所有 Paused 步骤恢复为 Running")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""
