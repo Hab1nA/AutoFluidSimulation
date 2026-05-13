@@ -655,6 +655,7 @@ class TaskRunner:
         # 读取 Excel 参数名
         import openpyxl
         excel_params = []
+        wb = None
         try:
             wb = openpyxl.load_workbook(excel_path, data_only=True)
             ws = wb.active
@@ -664,9 +665,11 @@ class TaskRunner:
                 excel_params = [
                     str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
                 ]
-            wb.close()
         except Exception:
             pass
+        finally:
+            if wb is not None:
+                wb.close()
 
         # 获取模型参数 — 逐个测试 Excel 参数名
         model_param_names = []

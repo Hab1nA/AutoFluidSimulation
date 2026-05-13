@@ -29,7 +29,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, check_rust_tui_source, print_rust_tui_not_found_help
-from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file, run_taskkill
+from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill
 from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,7 +41,7 @@ IPC_READY_TIMEOUT = PROCESS_MANAGEMENT["ipc_ready_timeout"]
 
 
 def _ensure_dirs():
-    \"\"\"创建必要的目录结构。\"\"\"
+    """创建必要的目录结构。"""
     os.makedirs(PID_DIR, exist_ok=True)
 
 
@@ -275,7 +275,7 @@ def _run_all_mode():
         print("  TUI 界面 (连接到已有后台引擎)")
         print("=" * 60)
         print()
-        daemon_pid = _read_pid(DAEMON_PID_FILE)
+        daemon_pid = read_pid_file(DAEMON_PID_FILE)
         if daemon_pid:
             print(f"  后台引擎已在运行 (PID: {daemon_pid})，直接启动客户端...")
         else:

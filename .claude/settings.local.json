@@ -13,7 +13,8 @@
       "Bash(cargo build *)",
       "Bash(python -c \"from engine.config import load_toml_config, LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS, ENGINE_CONFIG; print\\('Config loaded OK'\\); print\\('LOCAL_PATHS keys:', list\\(LOCAL_PATHS.keys\\(\\)\\)\\); print\\('TOML test:', load_toml_config\\(\\)\\)\")",
       "Bash(python -c ' *)",
-      "Bash(taskkill /f /im cargo.exe)"
+      "Bash(taskkill /f /im cargo.exe)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('main.py syntax OK'\\)\")"
     ]
   }
 }

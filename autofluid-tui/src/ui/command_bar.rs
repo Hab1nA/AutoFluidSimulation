@@ -105,7 +105,7 @@ pub fn daemon_menu_item_bounds(buttons_area: Rect, index: usize) -> Option<Rect>
 }
 
 pub fn detect_daemon_menu_item(col: u16, row: u16, buttons_area: Rect) -> Option<u8> {
-    let menu = daemon_menu_bounds(buttons_area)?;
+    daemon_menu_bounds(buttons_area)?;
     for idx in 0..DAEMON_MENU_ITEMS.len() {
         if let Some(item_rect) = daemon_menu_item_bounds(buttons_area, idx) {
             if point_in_rect(col, row, item_rect) {
@@ -113,11 +113,7 @@ pub fn detect_daemon_menu_item(col: u16, row: u16, buttons_area: Rect) -> Option
             }
         }
     }
-    if point_in_rect(col, row, menu) {
-        None
-    } else {
-        None
-    }
+    None
 }
 
 pub fn daemon_menu_command(index: u8) -> Option<&'static str> {

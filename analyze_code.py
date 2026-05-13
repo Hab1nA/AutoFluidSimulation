@@ -82,8 +82,6 @@ def analyze_python_file(file_path):
                 if not node.type:
                     issues.append(f"裸 except 子句在第 {node.lineno} 行")
                 elif isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-                    pass  # 捕获所有异常是可以的
-                else:
                     pass
 
         return issues
