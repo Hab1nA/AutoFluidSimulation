@@ -17,6 +17,7 @@ use ratatui::Terminal;
 use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::{FocusZone, UiMode, ScrollbarDragZone};
+use settings::SettingsState;
 use ui::layout::AppLayout;
 use ui::command_bar::BUTTON_DEFS;
 use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
@@ -128,6 +129,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 state.clicked_detail_row = None;
                 state.detail_click_time = None;
                 state.needs_redraw = true;
+            }
+        }
+        // 设置页面字段点击动画超时
+        if let Some(ref mut ss) = state.settings_state {
+            if let Some(ct) = ss.field_click_time {
+                if ss.clicked_field.is_some() && ct.elapsed() > Duration::from_millis(20) {
+                    ss.clicked_field = None;
+                    ss.field_click_time = None;
+                    state.needs_redraw = true;
+                }
             }
         }
 
@@ -512,20 +523,20 @@ fn do_redraw(
         ui::table::render_table(frame, layout.status_table, state);
         ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll);
         ui::logs::render_detail_panel(
-            frame,
-            layout.detail_panel,
-            &ui::logs::DetailPanelParams {
-                log_buffer,
-                level_filter: &state.log_filter_level,
-                source_filter: &state.log_filter_source,
-                scroll_offset: state.detail_log_scroll,
-                auto_scroll: state.detail_log_auto_scroll,
-                focus_zone: state.focus_zone,
-                hovered_detail_row: state.hovered_detail_row,
-                clicked_detail_row: state.clicked_detail_row,
-                hscroll: state.detail_log_hscroll,
-            },
-        );
+        frame,
+        layout.detail_panel,
+        &ui::logs::DetailPanelParams {
+            log_buffer,
+            level_filter: &state.log_filter_level,
+            source_filter: &state.log_filter_source,
+            scroll_offset: state.detail_log_scroll,
+            auto_scroll: state.detail_log_auto_scroll,
+            focus_zone: state.focus_zone,
+            hovered_detail_row: state.hovered_detail_row,
+            clicked_detail_row: state.clicked_detail_row,
+            hscroll: state.detail_log_hscroll,
+        },
+    );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);
 
         match state.ui_mode {
@@ -561,6 +572,7 @@ fn do_redraw(
                         state.hovered_dialog_button,
                         state.clicked_dialog_button,
                     );
+                    ss.field_positions = info.field_positions;
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
                         Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, ss.scroll as usize))
                     } else {
@@ -697,7 +709,9 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             let prev_hover_detail = state.hovered_detail_row;
             let prev_hover_dialog_btn = state.hovered_dialog_button;
 
-            if in_table {
+            // 对话框激活时跳过背景面板的 hover 检测，只处理对话框内按钮
+            if state.ui_mode == UiMode::Normal {
+                if in_table {
                 let inner_y = row.saturating_sub(layout.status_table.y + 1);
                 if inner_y > 0 {
                     let data_row = state.table_scroll_offset + inner_y - 1;
@@ -727,11 +741,12 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.hovered_detail_row = None;
             }
 
-            if in_buttons {
-                state.hovered_button = detect_button(col, row, &layout);
-            } else {
-                state.hovered_button = None;
-            }
+                if in_buttons {
+                    state.hovered_button = detect_button(col, row, &layout);
+                } else {
+                    state.hovered_button = None;
+                }
+            } // end Normal-mode-only hover detection
 
             if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
                 state.hovered_dialog_button = detect_dialog_button(col, row, area, state);
@@ -739,10 +754,20 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.hovered_dialog_button = None;
             }
 
+            // Settings 模式下检测字段 hover
+            let prev_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+            if state.ui_mode == UiMode::Settings {
+                if let Some(ref mut ss) = state.settings_state {
+                    ss.hovered_field = detect_settings_field(col, row, area, ss);
+                }
+            }
+            let new_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+
             if state.hovered_table_row != prev_hover_row
                 || state.hovered_button != prev_hover_btn
                 || state.hovered_detail_row != prev_hover_detail
                 || state.hovered_dialog_button != prev_hover_dialog_btn
+                || prev_hovered_field != new_hovered_field
             {
                 state.needs_redraw = true;
             }
@@ -892,6 +917,24 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 let sb_info = state.scrollbar_info.clone();
                 let mut sb_detected = false;
 
+                // Settings 模式下仅检测对话框滚动条，跳过背景面板滚动条
+                if state.ui_mode == UiMode::Settings {
+                    if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
+                        if sb_vertical_track_hit(area, col, row) {
+                            let current_scroll = state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16);
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                            } else {
+                                let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                if let Some(ref mut ss) = state.settings_state {
+                                    ss.scroll = new_scroll;
+                                }
+                            }
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                } else {
                 if let Some((area, total, visible, scroll)) = &sb_info.table_v {
                     if sb_vertical_track_hit(area, col, row) {
                         if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
@@ -987,9 +1030,49 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                         }
                     }
                 }
+                } // end else (non-Settings scrollbar detection)
                 if sb_detected {
                     return;
                 }
+            }
+
+            // Settings 模式下检测字段点击（双击触发编辑）
+            if state.ui_mode == UiMode::Settings {
+                if let Some(ref mut ss) = state.settings_state {
+                    // 编辑模式下阻止鼠标对其他行进行双击/单击操作
+                    if !ss.focus.editing {
+                        if let Some((cat_idx, fi)) = detect_settings_field(col, row, area, ss) {
+                            let now = std::time::Instant::now();
+                            // Double-click: same field clicked within 400ms
+                            let is_double = ss.last_clicked_field == Some((cat_idx, fi))
+                                && ss.last_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+                            if is_double {
+                                ss.focus.category_index = cat_idx;
+                                ss.focus.field_index = fi;
+                                ss.begin_edit_current_field();
+                                ss.clicked_field = None;
+                                ss.field_click_time = None;
+                                ss.last_clicked_field = None;
+                                ss.last_click_time = None;
+                            } else {
+                                // Single click: select field + animation + track for double-click
+                                ss.focus.category_index = cat_idx;
+                                ss.focus.field_index = fi;
+                                ss.clicked_field = Some((cat_idx, fi));
+                                ss.field_click_time = Some(now);
+                                ss.last_clicked_field = Some((cat_idx, fi));
+                                ss.last_click_time = Some(now);
+                            }
+                            state.needs_redraw = true;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // 当对话框覆盖层激活时，阻止鼠标事件穿透到背景面板
+            if state.ui_mode != UiMode::Normal {
+                return;
             }
 
             if in_buttons {
@@ -1100,7 +1183,7 @@ fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
 fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: &AppState) -> Option<u8> {
     let dialog_area = match state.ui_mode {
         UiMode::ConfirmDialog => ui::dialogs::centered_rect(80, 40, area),
-        UiMode::CheckResult => ui::dialogs::centered_rect(80, 70, area),
+        UiMode::CheckResult => ui::dialogs::centered_rect(90, 90, area),
         UiMode::Settings => ui::dialogs::centered_rect(90, 90, area),
         UiMode::Normal => return None,
     };
@@ -1176,6 +1259,34 @@ fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: 
         }
         UiMode::Normal => None,
     }
+}
+
+/// 检测鼠标是否悬停在 Settings 对话框的某一行字段上。
+/// 返回 (category_index, field_index)
+fn detect_settings_field(col: u16, row: u16, area: ratatui::layout::Rect, ss: &SettingsState) -> Option<(usize, usize)> {
+    let dialog_area = ui::dialogs::centered_rect(90, 90, area);
+    if !point_in_rect(col, row, dialog_area) {
+        return None;
+    }
+    let inner_y = dialog_area.y + 1;
+    let top_height: u16 = 2; // title + separator
+    let content_y = inner_y + top_height;
+    let bottom_height: u16 = 2;
+    let content_height = (dialog_area.height as u16).saturating_sub(2).saturating_sub(top_height).saturating_sub(bottom_height);
+    let content_bottom = content_y + content_height;
+
+    if row < content_y || row >= content_bottom {
+        return None;
+    }
+    let rel_row = row - content_y;
+    let visual_line = ss.scroll + rel_row;
+
+    for (cat_idx, fi, y) in &ss.field_positions {
+        if *y == visual_line {
+            return Some((*cat_idx, *fi));
+        }
+    }
+    None
 }
 
 fn handle_dialog_button_click(

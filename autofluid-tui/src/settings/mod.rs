@@ -178,7 +178,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 9,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 9,
-            SettingCategory::StepPatterns => 5,
+            SettingCategory::StepPatterns => 4,
             SettingCategory::EngineConfig => 12,
         }
     }
@@ -200,7 +200,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW", 1 => "SC", 2 => "Transfer", 3 => "Meshing", 4 => "Solver",
+                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver",
                 _ => "",
             },
             SettingCategory::EngineConfig => match idx {
@@ -230,7 +230,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Transfer模板", 3 => "Meshing模板", 4 => "Solver模板",
+                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板",
                 _ => "",
             },
             SettingCategory::EngineConfig => match idx {
@@ -283,6 +283,18 @@ pub struct SettingsState {
     pub undo_stack: Vec<UndoEntry>,
     pub saved: bool,
     pub save_error: Option<String>,
+    /// Mouse hover tracking: (category_index, field_index)
+    pub hovered_field: Option<(usize, usize)>,
+    /// Click animation highlight (short-lived, ~20ms)
+    pub clicked_field: Option<(usize, usize)>,
+    pub field_click_time: Option<std::time::Instant>,
+    /// Double-click tracking (longer window, ~400ms)
+    pub last_clicked_field: Option<(usize, usize)>,
+    pub last_click_time: Option<std::time::Instant>,
+    /// Field positions computed during rendering: (cat_idx, fi, y)
+    pub field_positions: Vec<(usize, usize, u16)>,
+    /// Path existence cache: field_name -> exists
+    pub path_status: std::collections::HashMap<String, bool>,
 }
 
 impl SettingsState {
@@ -295,6 +307,27 @@ impl SettingsState {
                 config.remote_config.password = env_pwd;
             }
         }
+        // 路径在运行时计算相对于项目根目录的默认值
+        let project_dir = std::env::current_dir().unwrap_or_default();
+        if config.local_paths.sc_script.is_empty() {
+            config.local_paths.sc_script = project_dir
+                .join("executor")
+                .join("spaceclaim_transit.py")
+                .to_string_lossy()
+                .to_string();
+        }
+        if config.local_paths.log_dir.is_empty() {
+            config.local_paths.log_dir = project_dir
+                .join("logs")
+                .to_string_lossy()
+                .to_string();
+        }
+        if config.local_paths.data_dir.is_empty() {
+            config.local_paths.data_dir = project_dir
+                .join("data")
+                .to_string_lossy()
+                .to_string();
+        }
         Self {
             config,
             focus: SettingsFocus::default(),
@@ -306,6 +339,13 @@ impl SettingsState {
             undo_stack: Vec::new(),
             saved: false,
             save_error: None,
+            hovered_field: None,
+            clicked_field: None,
+            field_click_time: None,
+            last_clicked_field: None,
+            last_click_time: None,
+            field_positions: Vec::new(),
+            path_status: std::collections::HashMap::new(),
         }
     }
 
@@ -353,9 +393,8 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => self.config.step_file_patterns.sw.clone(),
                 1 => self.config.step_file_patterns.sc.clone(),
-                2 => self.config.step_file_patterns.transfer.clone().unwrap_or_default(),
-                3 => self.config.step_file_patterns.meshing.clone(),
-                4 => self.config.step_file_patterns.solver.clone(),
+                2 => self.config.step_file_patterns.meshing.clone(),
+                3 => self.config.step_file_patterns.solver.clone(),
                 _ => String::new(),
             },
             SettingCategory::EngineConfig => match idx {
@@ -416,9 +455,8 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => self.config.step_file_patterns.sw = value.to_string(),
                 1 => self.config.step_file_patterns.sc = value.to_string(),
-                2 => self.config.step_file_patterns.transfer = if value.is_empty() { None } else { Some(value.to_string()) },
-                3 => self.config.step_file_patterns.meshing = value.to_string(),
-                4 => self.config.step_file_patterns.solver = value.to_string(),
+                2 => self.config.step_file_patterns.meshing = value.to_string(),
+                3 => self.config.step_file_patterns.solver = value.to_string(),
                 _ => {}
             },
             SettingCategory::EngineConfig => match idx {
@@ -514,6 +552,15 @@ impl SettingsState {
                 self.undo_stack.remove(0);
             }
             self.set_field_value(cat, idx, &new_value);
+
+            // 路径字段提交后立即检查文件是否存在
+            if let SettingCategory::LocalPaths = cat {
+                let value = self.get_field_value(cat, idx);
+                let field_name = format!("local_paths.{}", cat.field_name(idx));
+                if !value.is_empty() {
+                    self.path_status.insert(field_name, std::path::Path::new(&value).exists());
+                }
+            }
         }
 
         self.edit_buffer.clear();

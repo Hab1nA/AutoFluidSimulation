@@ -1736,13 +1736,15 @@ class TaskRunner:
         }
 
         checks = {
-            "SW模型": LOCAL_PATHS["sw_model"],
+            "SW可执行文件": LOCAL_PATHS["sw_exe"],
+            "SW模型文件": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
-            "STEP目录": LOCAL_PATHS["step_dir"],
-            "SC程序": LOCAL_PATHS["sc_exe"],
-            "SC脚本": LOCAL_PATHS["sc_script"],
-            "SCDOC目录": LOCAL_PATHS["scdoc_dir"],
+            "STEP输出目录": LOCAL_PATHS["step_dir"],
+            "SC可执行文件": LOCAL_PATHS["sc_exe"],
+            "SC脚本文件": LOCAL_PATHS["sc_script"],
+            "SCDOC输出目录": LOCAL_PATHS["scdoc_dir"],
             "日志目录": LOCAL_PATHS["log_dir"],
+            "数据目录": LOCAL_PATHS["data_dir"],
         }
         for name, path in checks.items():
             exists = os.path.exists(path)

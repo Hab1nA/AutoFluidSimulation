@@ -436,7 +436,7 @@ fn handle_key_check_result(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+        KeyCode::Esc => {
             state.ui_mode = UiMode::Normal;
             state.check_data = None;
             state.dialog_scroll = 0;

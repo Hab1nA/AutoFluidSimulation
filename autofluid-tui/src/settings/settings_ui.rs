@@ -1,11 +1,11 @@
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::{SettingCategory, SettingsState};
-use crate::ui::dialogs::centered_rect;
+use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
 
 const DIALOG_BG: Color = Color::Rgb(22, 33, 62);
@@ -17,6 +17,7 @@ const SECTION_HEADER: Color = Color::Rgb(0, 255, 136);
 const HINT_COLOR: Color = Color::Rgb(80, 80, 80);
 const ERROR_COLOR: Color = Color::Rgb(255, 69, 58);
 const WARN_COLOR: Color = Color::Rgb(255, 170, 0);
+const HOVER_BG: Color = Color::Rgb(30, 45, 80);
 
 const BTN_NORMAL: Style = Style::new()
     .fg(Color::Rgb(224, 224, 224))
@@ -35,6 +36,8 @@ pub struct SettingsRenderInfo {
     pub content_visible_lines: usize,
     pub scrollbar_area: Rect,
     pub button_bar_y: u16,
+    /// Map from (category_index, field_index) to y offset in content_area
+    pub field_positions: Vec<(usize, usize, u16)>,
 }
 
 fn btn_style(idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {
@@ -55,7 +58,7 @@ pub fn render_settings_dialog(
     clicked_dialog_button: Option<u8>,
 ) -> SettingsRenderInfo {
     let dialog_area = centered_rect(90, 90, area);
-    frame.render_widget(Clear, dialog_area);
+    clear_dialog_background(frame, dialog_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -70,14 +73,40 @@ pub fn render_settings_dialog(
         height: dialog_area.height.saturating_sub(2),
     };
 
-    // Title bar
-    let title_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-    let title = Line::from(vec![
-        Span::styled(" 程序设置 (Settings)", title_style),
-    ]);
+    // Title bar: title left-aligned, hint centered in remaining space
+    let hint_text = if ss.focus.editing {
+        "Enter提交 Esc取消 ←→移动光标 Home/End跳转"
+    } else {
+        "↑↓导航 Tab跳转分类 Enter编辑 Ctrl+Z撤销 Esc退出 Ctrl+S保存"
+    };
+
+    let title_text = "程序设置 (Settings)";
+    let title_w = unicode_width::UnicodeWidthStr::width(title_text) as u16 + 2;
+
+    let title_row = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    let title_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(title_w.min(inner.width)),
+            Constraint::Min(1),
+        ])
+        .split(title_row);
+
     frame.render_widget(
-        Paragraph::new(title),
-        Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
+        Paragraph::new(Line::from(Span::styled(
+            format!(" {}", title_text),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ))),
+        title_chunks[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint_text,
+            Style::default().fg(HINT_COLOR),
+        )))
+        .alignment(Alignment::Right),
+        title_chunks[1],
     );
 
     // Separator after title
@@ -89,12 +118,11 @@ pub fn render_settings_dialog(
         Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
     );
 
-    // Hint bar at bottom
-    let hint_bar_height: u16 = 2;
-    let btn_bar_height: u16 = 2;
-    let bottom_height = hint_bar_height + btn_bar_height;
-    let content_top = sep_y + 1;
-    let content_height = inner.height.saturating_sub(2).saturating_sub(bottom_height);
+    // Layout: top(2 rows) + content + bottom(2 rows = separator + button)
+    let top_height: u16 = 2;
+    let bottom_height: u16 = 2;
+    let content_top = inner.y + top_height;
+    let content_height = inner.height.saturating_sub(top_height).saturating_sub(bottom_height);
     let content_y = content_top;
 
     let content_area = Rect {
@@ -111,17 +139,27 @@ pub fn render_settings_dialog(
         height: content_height,
     };
 
-    // Build content lines with padding
-    let label_width: u16 = 18;
+    let label_width: u16 = 20;
     let field_content_width = content_area.width.saturating_sub(label_width).saturating_sub(2) as usize;
 
     let mut raw_lines: Vec<Line> = Vec::new();
+    let mut field_positions: Vec<(usize, usize, u16)> = Vec::new();
+
+    // 预计算子标题最大显示宽度，确保所有标题长度一致
+    let target_header_w: usize = SettingCategory::ALL.iter().map(|c| {
+        let hdr = format!("─── {} ──", c.display_name());
+        unicode_width::UnicodeWidthStr::width(hdr.as_str())
+    }).max().unwrap_or(20) + 2;
 
     for (cat_idx, cat) in SettingCategory::ALL.iter().enumerate() {
-        // Section header
         raw_lines.push(Line::from(""));
         let header_str = format!("─── {} ──", cat.display_name());
-        let header_pad = "─".repeat((content_area.width as usize).saturating_sub(header_str.len()).min(20));
+        let header_dw = unicode_width::UnicodeWidthStr::width(header_str.as_str());
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
         raw_lines.push(Line::from(Span::styled(
             format!("  {}{}", header_str, header_pad),
             Style::default().fg(SECTION_HEADER).add_modifier(Modifier::BOLD),
@@ -129,10 +167,16 @@ pub fn render_settings_dialog(
         raw_lines.push(Line::from(""));
 
         for fi in 0..cat.field_count() {
+            let field_y = raw_lines.len() as u16;
+            field_positions.push((cat_idx, fi, field_y));
+
             let label = cat.display_label(fi);
             let value = ss.get_field_value(*cat, fi);
+            let field_name = make_field_name(*cat, fi);
 
             let is_focused = ss.focus.category_index == cat_idx && ss.focus.field_index == fi;
+            let is_hovered = ss.hovered_field == Some((cat_idx, fi));
+            let is_clicked = ss.clicked_field == Some((cat_idx, fi));
             let is_current_field = is_focused && ss.focus.editing;
 
             let display_value = if cat.is_password_field(fi) && !is_current_field {
@@ -149,53 +193,64 @@ pub fn render_settings_dialog(
                 truncate_for_display(&value, field_content_width.saturating_sub(3))
             };
 
-            let label_style = if is_focused {
-                Style::default().fg(GREEN).add_modifier(Modifier::BOLD)
+            let row_bg = if is_clicked {
+                Color::Rgb(15, 52, 96)
+            } else if is_hovered {
+                HOVER_BG
             } else {
-                Style::default().fg(FIELD_LABEL)
+                DIALOG_BG
+            };
+
+            let label_style = if is_focused {
+                Style::default().fg(GREEN).add_modifier(Modifier::BOLD).bg(row_bg)
+            } else {
+                Style::default().fg(FIELD_LABEL).bg(row_bg)
             };
 
             let value_style = if is_current_field {
-                Style::default().fg(GREEN)
+                Style::default().fg(GREEN).bg(row_bg)
             } else if is_focused {
                 Style::default().fg(Color::White).bg(Color::Rgb(15, 52, 96))
+            } else if is_hovered {
+                Style::default().fg(Color::White).bg(row_bg)
             } else {
-                Style::default().fg(FIELD_VALUE)
-            };
-
-            // Check for validation errors on this field
-            let field_name = match cat {
-                SettingCategory::LocalPaths => format!("local_paths.{}", cat.field_name(fi)),
-                SettingCategory::RemoteConnection | SettingCategory::RemoteDirs => {
-                    format!("remote_config.{}", cat.field_name(fi))
-                }
-                SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
-                SettingCategory::EngineConfig => format!("engine_config.{}", cat.field_name(fi)),
+                Style::default().fg(FIELD_VALUE).bg(row_bg)
             };
 
             let mut spans = vec![
-                Span::raw("  "),
+                Span::styled("  ", Style::default().bg(row_bg)),
                 Span::styled(
-                    format!("{:<width$}", label, width = label_width as usize),
+                    pad_label_by_display_width(label, label_width),
                     label_style,
                 ),
                 Span::styled(display_value, value_style),
             ];
 
+            // Path status check
+            if let Some(exists) = ss.path_status.get(&field_name) {
+                let (icon, color) = if *exists {
+                    (" ✅", GREEN)
+                } else {
+                    (" ❌", ERROR_COLOR)
+                };
+                spans.push(Span::styled(icon, Style::default().fg(color).bg(row_bg)));
+            }
+
+            // Validation error
             if let Some(err) = ss.validation_errors.iter().find(|e| e.field_name == field_name) {
                 let color = if matches!(err.severity, super::validation::Severity::Error) {
                     ERROR_COLOR
                 } else {
                     WARN_COLOR
                 };
-                spans.push(Span::styled(format!("  ⚠ {}", err.message), Style::default().fg(color)));
+                spans.push(Span::styled(format!("  ⚠ {}", err.message), Style::default().fg(color).bg(row_bg)));
             }
 
-            // Show edit indicator for focused non-editing field
+            // Edit indicator
             if is_focused && !ss.focus.editing {
                 spans.push(Span::styled(
                     "  [Enter 编辑]",
-                    Style::default().fg(HINT_COLOR),
+                    Style::default().fg(HINT_COLOR).bg(row_bg),
                 ));
             }
 
@@ -222,29 +277,15 @@ pub fn render_settings_dialog(
         frame.render_widget(sb, scrollbar_area);
     }
 
-    // Separator above hint bar
+    // Bottom separator
     let sep2_y = content_y + content_height;
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, sep_style)),
         Rect { x: inner.x, y: sep2_y, width: inner.width, height: 1 },
     );
 
-    // Hint bar
-    let hint_y = sep2_y + 1;
-    let hint_text = if ss.focus.editing {
-        " Enter提交 Esc取消 ←→移动光标 Home/End跳转 "
-    } else {
-        " ↑↓导航 Tab跳转分类 Enter编辑 Ctrl+Z撤销 Esc退出 Ctrl+S保存 "
-    };
-
-    let hint_style = Style::default().fg(HINT_COLOR);
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint_text, hint_style)).alignment(Alignment::Center),
-        Rect { x: inner.x, y: hint_y, width: inner.width, height: 1 },
-    );
-
-    // Button bar
-    let btn_y = hint_y + 1;
+    // Button bar — btn_y = inner.y + inner.height - 1 (matches detect_dialog_button formula)
+    let btn_y = inner.y + inner.height - 1;
     let save_label = " 保存更改 (Ctrl+S) ";
     let cancel_label = " 取消 (Esc) ";
     let gap: u16 = 4;
@@ -258,7 +299,6 @@ pub fn render_settings_dialog(
         Span::styled(cancel_label.to_string(), cancel_style),
     ];
 
-    // Show save status
     if let Some(ref err) = ss.save_error {
         btn_spans.push(Span::raw("  "));
         btn_spans.push(Span::styled(err, Style::default().fg(ERROR_COLOR)));
@@ -277,7 +317,25 @@ pub fn render_settings_dialog(
         content_visible_lines: visible,
         scrollbar_area,
         button_bar_y: btn_y,
+        field_positions,
     }
+}
+
+fn make_field_name(cat: SettingCategory, fi: usize) -> String {
+    match cat {
+        SettingCategory::LocalPaths => format!("local_paths.{}", cat.field_name(fi)),
+        SettingCategory::RemoteConnection | SettingCategory::RemoteDirs => {
+            format!("remote_config.{}", cat.field_name(fi))
+        }
+        SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
+        SettingCategory::EngineConfig => format!("engine_config.{}", cat.field_name(fi)),
+    }
+}
+
+fn pad_label_by_display_width(label: &str, target_width: u16) -> String {
+    let dw = unicode_width::UnicodeWidthStr::width(label);
+    let pad = (target_width as usize).saturating_sub(dw);
+    format!("{}{}", label, " ".repeat(pad))
 }
 
 fn build_edit_display(buffer: &str, cursor: usize, max_width: usize) -> String {
