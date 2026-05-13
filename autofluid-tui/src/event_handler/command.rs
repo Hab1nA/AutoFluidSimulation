@@ -228,6 +228,10 @@ pub async fn dispatch_command(
                 }
             }
         }
+        "settings" => {
+            state.open_settings();
+            CommandResult::None
+        }
         "filter" => {
             if parts.len() < 2 {
                 log_buffer.push_info("用法: filter <error|warning|info|debug|remote|local|com|scheduler|system|clear|status>".to_string());
@@ -360,6 +364,7 @@ fn show_help(log_buffer: &mut LogBuffer) {
         "  help                       - 显示此帮助",
         "  start                      - 启动或继续流水线",
         "  pause                      - 暂停流水线",
+        "  settings                   - 打开程序设置页面",
         "  check                      - 系统自检",
         "  status                     - 显示状态摘要",
         "  reset <XX|all> <step|all>  - 重置构型步骤状态",

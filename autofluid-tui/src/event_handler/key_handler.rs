@@ -9,6 +9,8 @@ pub enum AppAction {
     Confirm,
     Cancel,
     DismissDialog,
+    SaveSettings,
+    DiscardSettings,
 }
 
 pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
@@ -16,6 +18,7 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
         UiMode::Normal => handle_key_normal(key, state),
         UiMode::ConfirmDialog => handle_key_confirm(key, state),
         UiMode::CheckResult => handle_key_check_result(key, state),
+        UiMode::Settings => handle_key_settings(key, state),
     }
 }
 
@@ -438,6 +441,175 @@ fn handle_key_check_result(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.check_data = None;
             state.dialog_scroll = 0;
             AppAction::DismissDialog
+        }
+        _ => AppAction::None,
+    }
+}
+
+fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
+    if let Some(ref mut ss) = state.settings_state {
+        if ss.is_editing_field() {
+            let cat = ss.current_category();
+            let idx = ss.focus.field_index;
+
+            if cat.is_bool_field(idx) {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        ss.toggle_boolean();
+                        ss.cancel_edit_current_field();
+                        state.needs_redraw = true;
+                        return AppAction::None;
+                    }
+                    KeyCode::Left | KeyCode::Right => {
+                        ss.toggle_boolean();
+                        state.needs_redraw = true;
+                        return AppAction::None;
+                    }
+                    KeyCode::Esc => {
+                        ss.cancel_edit_current_field();
+                        state.needs_redraw = true;
+                        return AppAction::None;
+                    }
+                    _ => return AppAction::None,
+                }
+            }
+
+            let action = handle_settings_text_input(key, ss);
+            state.needs_redraw = true;
+            return action;
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            if let Some(ref mut ss) = state.settings_state {
+                if ss.dirty {
+                    ss.cancel_edit_current_field();
+                }
+            }
+            state.close_settings();
+            AppAction::DiscardSettings
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            AppAction::SaveSettings
+        }
+        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.undo();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Up => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.move_focus_up();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Down => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.move_focus_down();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Tab => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.move_focus_next();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::BackTab => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.move_focus_prev();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Enter => {
+            if let Some(ref mut ss) = state.settings_state {
+                let cat = ss.current_category();
+                let idx = ss.focus.field_index;
+                if cat.is_bool_field(idx) {
+                    ss.toggle_boolean();
+                } else {
+                    ss.begin_edit_current_field();
+                }
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.scroll = ss.scroll.saturating_sub(10);
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.scroll = ss.scroll.saturating_add(10);
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Home => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.scroll = 0;
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::End => {
+            if let Some(ref mut ss) = state.settings_state {
+                ss.scroll = u16::MAX;
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        _ => AppAction::None,
+    }
+}
+
+fn handle_settings_text_input(key: KeyEvent, ss: &mut crate::settings::SettingsState) -> AppAction {
+    match key.code {
+        KeyCode::Esc => {
+            ss.cancel_edit_current_field();
+            AppAction::None
+        }
+        KeyCode::Enter => {
+            ss.commit_edit_current_field();
+            AppAction::None
+        }
+        KeyCode::Char(c) => {
+            ss.input_char(c);
+            AppAction::None
+        }
+        KeyCode::Backspace => {
+            ss.input_backspace();
+            AppAction::None
+        }
+        KeyCode::Delete => {
+            ss.input_delete();
+            AppAction::None
+        }
+        KeyCode::Left => {
+            ss.move_cursor_left();
+            AppAction::None
+        }
+        KeyCode::Right => {
+            ss.move_cursor_right();
+            AppAction::None
+        }
+        KeyCode::Home => {
+            ss.move_cursor_home();
+            AppAction::None
+        }
+        KeyCode::End => {
+            ss.move_cursor_end();
+            AppAction::None
         }
         _ => AppAction::None,
     }

@@ -14,7 +14,7 @@ from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
-    CMD_GET_LOG_ENTRIES,
+    CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -86,6 +86,9 @@ class IPCServer:
 
         # 清理
         self.register_handler(CMD_CLEAN_STEP, lambda p: daemon.handle_clean_step(p))
+
+        # 配置重载
+        self.register_handler(CMD_RELOAD_CONFIG, lambda p: daemon.handle_reload_config(p))
 
     # ------------------------------------------------------------------
     # 服务器生命周期

@@ -243,6 +243,86 @@ def ensure_directories():
                 print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
 
 
+def _apply_env_overrides():
+    """确保环境变量优先级高于 TOML 合并后的值。"""
+    _env_local_keys = [
+        ("sw_exe", "AUTOFLUID_SW_EXE"),
+        ("sw_model", "AUTOFLUID_SW_MODEL"),
+        ("excel", "AUTOFLUID_SW_EXCEL"),
+        ("step_dir", "AUTOFLUID_STEP_DIR"),
+        ("sc_exe", "AUTOFLUID_SC_EXE"),
+        ("sc_script", "AUTOFLUID_SC_SCRIPT"),
+        ("scdoc_dir", "AUTOFLUID_SCDOC_DIR"),
+        ("log_dir", "AUTOFLUID_LOG_DIR"),
+        ("data_dir", "AUTOFLUID_DATA_DIR"),
+    ]
+    for key, env_name in _env_local_keys:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            LOCAL_PATHS[key] = env_val
+
+    _env_remote_keys = [
+        ("host", "AUTOFLUID_SSH_HOST"),
+        ("port", "AUTOFLUID_SSH_PORT"),
+        ("username", "AUTOFLUID_SSH_USER"),
+        ("password", "AUTOFLUID_SSH_PASSWORD"),
+    ]
+    for key, env_name in _env_remote_keys:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            if key == "port":
+                REMOTE_CONFIG[key] = int(env_val)
+            else:
+                REMOTE_CONFIG[key] = env_val
+
+
+def reload_config_from_toml() -> bool:
+    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。"""
+    toml_data = load_toml_config()
+    if toml_data:
+        if "local_paths" in toml_data:
+            LOCAL_PATHS.update(toml_data["local_paths"])
+        if "remote_config" in toml_data:
+            REMOTE_CONFIG.update(toml_data["remote_config"])
+        if "step_file_patterns" in toml_data:
+            STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
+        if "engine_config" in toml_data:
+            ENGINE_CONFIG.update(toml_data["engine_config"])
+        _apply_env_overrides()
+        return True
+    return False
+
+
+def load_toml_config(toml_path: str = None) -> dict:
+    """
+    从 autofluid_config.toml 加载配置。
+    若文件不存在或无法解析，返回空字典。
+    """
+    if toml_path is None:
+        toml_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "autofluid_config.toml"
+        )
+
+    if not os.path.exists(toml_path):
+        return {}
+
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+            with open(toml_path, "rb") as f:
+                return tomllib.load(f)
+        else:
+            import toml
+            return toml.load(toml_path)
+    except Exception:
+        return {}
+
+
+# 启动时尝试加载 TOML 配置，合并到默认值中
+reload_config_from_toml()
+
+
 def validate_config() -> list:
     """验证配置完整性，返回警告信息列表。"""
     warnings = []

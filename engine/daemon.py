@@ -500,6 +500,13 @@ class PipelineDaemon:
                 msg += f" (构型{config_name})"
         return True, None, msg
 
+    def handle_reload_config(self, params: dict = None) -> Tuple[bool, Any, str]:
+        """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
+        from engine.config import reload_config_from_toml
+        if reload_config_from_toml():
+            return True, None, "配置已从 autofluid_config.toml 重新加载"
+        return True, None, "TOML 配置文件不存在，使用默认配置"
+
     def handle_get_log_entries(self, params: dict) -> Tuple[bool, Any, str]:
         """处理 get_log_entries 命令（增量拉取日志条目）。
 

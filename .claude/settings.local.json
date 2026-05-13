@@ -6,7 +6,13 @@
       "Bash(cargo test *)",
       "Bash(python -m py_compile engine/config.py)",
       "Bash(python -m py_compile engine/daemon.py)",
-      "Bash(python -m py_compile main.py)"
+      "Bash(python -m py_compile main.py)",
+      "Bash(find c:/Users/XKZ/Documents/VSCodeProjects/AutoFluidSimulation/src -type f -name \"*.rs\" | sort)",
+      "Read(//c/Users/XKZ/Documents/VSCodeProjects/AutoFluidSimulation/**)",
+      "Bash(git checkout *)",
+      "Bash(cargo build *)",
+      "Bash(python -c \"from engine.config import load_toml_config, LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS, ENGINE_CONFIG; print\\('Config loaded OK'\\); print\\('LOCAL_PATHS keys:', list\\(LOCAL_PATHS.keys\\(\\)\\)\\); print\\('TOML test:', load_toml_config\\(\\)\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

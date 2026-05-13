@@ -1,4 +1,5 @@
 mod ipc;
+mod settings;
 mod state;
 mod ui;
 mod event_handler;
@@ -321,6 +322,31 @@ fn process_event(
                     }
                 }
                 key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
+                key_handler::AppAction::DiscardSettings => {
+                    state.close_settings();
+                }
+                key_handler::AppAction::SaveSettings => {
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.validation_errors.clear();
+                        ss.save_error = None;
+                        match ss.save() {
+                            Ok(()) => {
+                                ss.saved = true;
+                                // Notify daemon via IPC
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.reload_config());
+                                }
+                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                            }
+                            Err(errors) => {
+                                ss.validation_errors = errors;
+                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
                 key_handler::AppAction::None => {}
             }
         }
@@ -526,6 +552,28 @@ fn do_redraw(
                     state.clamp_dialog_scroll(info.content_total_lines, info.content_visible_lines);
                 }
             }
+            UiMode::Settings => {
+                if let Some(ref mut ss) = state.settings_state {
+                    let info = settings::settings_ui::render_settings_dialog(
+                        frame,
+                        area,
+                        ss,
+                        state.hovered_dialog_button,
+                        state.clicked_dialog_button,
+                    );
+                    state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
+                        Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, ss.scroll as usize))
+                    } else {
+                        None
+                    };
+                    state.dialog_button_bar_y = Some(info.button_bar_y);
+                    // Clamp settings scroll
+                    let max_scroll = info.content_total_lines.saturating_sub(info.content_visible_lines) as u16;
+                    if ss.scroll > max_scroll {
+                        ss.scroll = max_scroll;
+                    }
+                }
+            }
             UiMode::Normal => {
                 state.scrollbar_info.dialog_v = None;
                 state.dialog_button_bar_y = None;
@@ -685,7 +733,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.hovered_button = None;
             }
 
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
                 state.hovered_dialog_button = detect_dialog_button(col, row, area, state);
             } else {
                 state.hovered_dialog_button = None;
@@ -700,8 +748,15 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
         }
         MouseEventKind::ScrollUp => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
-                if state.dialog_scroll > 0 {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+                if state.ui_mode == UiMode::Settings {
+                    if let Some(ref mut ss) = state.settings_state {
+                        if ss.scroll > 0 {
+                            ss.scroll = ss.scroll.saturating_sub(1);
+                            state.needs_redraw = true;
+                        }
+                    }
+                } else if state.dialog_scroll > 0 {
                     state.dialog_scroll = state.dialog_scroll.saturating_sub(1);
                     state.needs_redraw = true;
                 }
@@ -735,9 +790,16 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 }
         }
         MouseEventKind::ScrollDown => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
-                state.dialog_scroll = state.dialog_scroll.saturating_add(1);
-                state.needs_redraw = true;
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+                if state.ui_mode == UiMode::Settings {
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.scroll = ss.scroll.saturating_add(1);
+                        state.needs_redraw = true;
+                    }
+                } else {
+                    state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+                    state.needs_redraw = true;
+                }
             } else if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                 if in_info {
                     state.info_log_hscroll = state.info_log_hscroll.saturating_add(5);
@@ -802,7 +864,14 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                         InfoHorizontal => state.info_log_hscroll = new_scroll,
                         DetailVertical => { state.detail_log_scroll = new_scroll; state.detail_log_auto_scroll = false; }
                         DetailHorizontal => state.detail_log_hscroll = new_scroll,
-                        DialogVertical => state.dialog_scroll = new_scroll,
+                        DialogVertical => {
+                            state.dialog_scroll = new_scroll;
+                            if let Some(ref mut ss) = state.settings_state {
+                                if state.ui_mode == UiMode::Settings {
+                                    ss.scroll = new_scroll;
+                                }
+                            }
+                        }
                     }
                     state.focus_zone = focus;
                     state.needs_redraw = true;
@@ -810,7 +879,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
         }
         MouseEventKind::Down(_button) => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
                 if let Some(btn_idx) = detect_dialog_button(col, row, area, state) {
                     state.clicked_dialog_button = Some(btn_idx);
                     state.dialog_click_time = Some(std::time::Instant::now());
@@ -896,10 +965,22 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 if !sb_detected {
                     if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
                         if sb_vertical_track_hit(area, col, row) {
-                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, state.dialog_scroll));
+                            let current_scroll = if state.ui_mode == UiMode::Settings {
+                                state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16)
                             } else {
-                                state.dialog_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                state.dialog_scroll
+                            };
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                            } else {
+                                let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                if state.ui_mode == UiMode::Settings {
+                                    if let Some(ref mut ss) = state.settings_state {
+                                        ss.scroll = new_scroll;
+                                    }
+                                } else {
+                                    state.dialog_scroll = new_scroll;
+                                }
                             }
                             state.needs_redraw = true;
                             sb_detected = true;
@@ -1020,6 +1101,7 @@ fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: 
     let dialog_area = match state.ui_mode {
         UiMode::ConfirmDialog => ui::dialogs::centered_rect(80, 40, area),
         UiMode::CheckResult => ui::dialogs::centered_rect(80, 70, area),
+        UiMode::Settings => ui::dialogs::centered_rect(90, 90, area),
         UiMode::Normal => return None,
     };
 
@@ -1075,6 +1157,23 @@ fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: 
             }
             None
         }
+        UiMode::Settings => {
+            let save_label = " 保存更改 (Ctrl+S) ";
+            let cancel_label = " 取消 (Esc) ";
+            let save_w = unicode_width::UnicodeWidthStr::width(save_label) as u16;
+            let cancel_w = unicode_width::UnicodeWidthStr::width(cancel_label) as u16;
+            let gap: u16 = 4;
+            let total_w = save_w + cancel_w + gap;
+            let start_x = inner.x + (inner.width.saturating_sub(total_w)) / 2;
+
+            if col >= start_x && col < start_x + save_w {
+                return Some(0);
+            }
+            if col >= start_x + save_w + gap && col < start_x + save_w + gap + cancel_w {
+                return Some(1);
+            }
+            None
+        }
         UiMode::Normal => None,
     }
 }
@@ -1125,6 +1224,37 @@ fn handle_dialog_button_click(
                 state.ui_mode = UiMode::Normal;
                 state.check_data = None;
                 state.dialog_scroll = 0;
+            }
+        }
+        UiMode::Settings => {
+            match btn_idx {
+                0 => {
+                    // Save
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.validation_errors.clear();
+                        ss.save_error = None;
+                        match ss.save() {
+                            Ok(()) => {
+                                ss.saved = true;
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.reload_config());
+                                }
+                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                            }
+                            Err(errors) => {
+                                ss.validation_errors = errors;
+                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                1 => {
+                    // Cancel
+                    state.close_settings();
+                }
+                _ => {}
             }
         }
         UiMode::Normal => {}

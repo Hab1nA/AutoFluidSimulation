@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use crate::settings::SettingsState;
+
 pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
 pub const STATUS_PAUSED: &str = "Paused";
@@ -158,6 +160,7 @@ pub struct AppState {
     pub scrollbar_info: ScrollbarRenderedInfo,
     pub dialog_scroll: u16,
     pub dialog_button_bar_y: Option<u16>,
+    pub settings_state: Option<SettingsState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -166,6 +169,7 @@ pub enum UiMode {
     Normal,
     ConfirmDialog,
     CheckResult,
+    Settings,
 }
 
 #[derive(Debug, Clone)]
@@ -323,5 +327,17 @@ impl AppState {
                 self.dialog_scroll = max_scroll;
             }
         }
+    }
+
+    pub fn open_settings(&mut self) {
+        self.settings_state = Some(SettingsState::new());
+        self.ui_mode = UiMode::Settings;
+        self.needs_redraw = true;
+    }
+
+    pub fn close_settings(&mut self) {
+        self.settings_state = None;
+        self.ui_mode = UiMode::Normal;
+        self.needs_redraw = true;
     }
 }

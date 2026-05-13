@@ -134,6 +134,10 @@ impl IpcClient {
         )).await
     }
 
+    pub async fn reload_config(&mut self) -> Result<IpcResponse, String> {
+        self.send_request(&IpcRequest::new(super::protocol::CMD_RELOAD_CONFIG)).await
+    }
+
     pub async fn get_log_entries(
         &mut self,
         since_id: u64,

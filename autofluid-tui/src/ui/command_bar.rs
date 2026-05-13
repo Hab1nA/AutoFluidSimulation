@@ -6,9 +6,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::app_state::{AppState, FocusZone};
 
-pub const BUTTON_DEFS: [(&str, &str); 8] = [
+pub const BUTTON_DEFS: [(&str, &str); 9] = [
     ("▶ Start", "start"),
     ("⏸ Pause", "pause"),
+    ("⚙ Settings", "settings"),
     ("🔧 Check", "check"),
     ("📊 Status", "status"),
     ("▶ Daemon Start", "daemon start"),
