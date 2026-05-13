@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::process::{Child, Command};
 
 pub struct DaemonManager {
@@ -35,8 +37,27 @@ impl DaemonManager {
         }
     }
 
-    pub fn stop(&mut self) -> Result<(), String> {
+    fn pid_file_path(project_dir: &str) -> PathBuf {
+        PathBuf::from(project_dir).join("data").join("daemon.pid")
+    }
+
+    fn read_pid_file(project_dir: &str) -> Option<u32> {
+        let pid_file = Self::pid_file_path(project_dir);
+        let content = fs::read_to_string(pid_file).ok()?;
+        content.trim().parse::<u32>().ok()
+    }
+
+    fn remove_pid_file(project_dir: &str) {
+        let pid_file = Self::pid_file_path(project_dir);
+        let _ = fs::remove_file(pid_file);
+    }
+
+    pub fn stop(&mut self, project_dir: &str) -> Result<(), String> {
+        let mut stopped = false;
+
         if let Some(mut child) = self.process.take() {
+            stopped = true;
+
             #[cfg(target_os = "windows")]
             {
                 let pid = child.id();
@@ -54,6 +75,26 @@ impl DaemonManager {
 
             let _ = child.wait();
         }
+
+        if !stopped {
+            if let Some(pid) = Self::read_pid_file(project_dir) {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = Command::new("taskkill")
+                        .args(["/pid", &pid.to_string(), "/f"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+                }
+            }
+        }
+
+        Self::remove_pid_file(project_dir);
         Ok(())
     }
 }

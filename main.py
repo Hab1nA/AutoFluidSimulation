@@ -29,67 +29,27 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, check_rust_tui_source, print_rust_tui_not_found_help
+from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file, run_taskkill
+from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 PID_DIR = os.path.join(PROJECT_DIR, "data")
 DAEMON_PID_FILE = os.path.join(PID_DIR, "daemon.pid")
-IPC_HOST = "127.0.0.1"
-IPC_PORT = 9527
-IPC_READY_TIMEOUT = 20
-MIN_VALID_PID = 1
+IPC_READY_TIMEOUT = PROCESS_MANAGEMENT["ipc_ready_timeout"]
 
 
 
 
 def _ensure_dirs():
+    \"\"\"创建必要的目录结构。\"\"\"
     os.makedirs(PID_DIR, exist_ok=True)
-
-
-def _write_pid(pid_file: str, pid: int):
-    with open(pid_file, "w", encoding="utf-8") as f:
-        f.write(str(pid))
-
-
-def _read_pid(pid_file: str) -> int | None:
-    try:
-        with open(pid_file, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def _remove_pid(pid_file: str):
-    try:
-        os.remove(pid_file)
-    except FileNotFoundError:
-        pass
-
-
-def _is_process_alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(0x100000, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        except Exception:
-            return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
 
 
 def _check_ipc_ready() -> bool:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(1.0)
-        s.connect((IPC_HOST, IPC_PORT))
+        s.connect((IPC_CONFIG["host"], IPC_CONFIG["port"]))
         s.close()
         return True
     except (ConnectionRefusedError, socket.timeout, OSError):
@@ -121,32 +81,19 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
     return logger
 
 
-def _run_taskkill(pid: int) -> bool:
-    if pid < MIN_VALID_PID:
-        return False
-    try:
-        result = subprocess.run(
-            ["taskkill", "/pid", str(pid), "/f"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        return result.returncode == 0
-    except OSError as e:
-        print(f"  [警告] taskkill 失败 (PID: {pid}): {e}")
-        return False
-    except subprocess.SubprocessError as e:
-        print(f"  [警告] taskkill 失败 (PID: {pid}): {e}")
-        return False
-
-
 def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
+    """启动后台守护进程子进程。
+    
+    Args:
+        daemon_log_file: 日志文件路径
+    
+    Returns:
+        成功时返回 Popen 对象（包含日志文件句柄引用），失败时返回 None
+    """
     daemon_script = os.path.join(PROJECT_DIR, "start_daemon.py")
     if not os.path.exists(daemon_script):
         print(f"[错误] 未找到启动脚本: {daemon_script}", file=sys.stderr)
         return None
-
-    log_fo = open(daemon_log_file, "w", encoding="utf-8")
 
     creationflags = 0
     if sys.platform == "win32":
@@ -154,7 +101,11 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
 
     env = os.environ.copy()
 
+    log_fo = None
     try:
+        # 打开日志文件
+        log_fo = open(daemon_log_file, "w", encoding="utf-8")
+        
         proc = subprocess.Popen(
             [sys.executable, daemon_script],
             cwd=PROJECT_DIR,
@@ -163,27 +114,32 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
             creationflags=creationflags,
             env=env,
         )
+        # 保存文件句柄引用到 Popen 对象上，确保后续能够关闭
+        proc._log_file_handle = log_fo  # type: ignore[attr-defined]
         return proc
     except (OSError, subprocess.SubprocessError) as e:
         print(f"[错误] 启动后台引擎失败: {e}", file=sys.stderr)
-        log_fo.close()
+        if log_fo:
+            try:
+                log_fo.close()
+            except OSError:
+                pass
         return None
 
 
 def _stop_daemon_subprocess():
-    pid = _read_pid(DAEMON_PID_FILE)
+    """终止后台守护进程。"""
+    pid = read_pid_file(DAEMON_PID_FILE)
     if pid is None:
         print("  后台引擎: 未运行")
-        _remove_pid(DAEMON_PID_FILE)
+        remove_pid_file(DAEMON_PID_FILE)
         return
-    if pid < MIN_VALID_PID:
-        print(f"  [警告] 无效 PID (PID: {pid})，跳过终止操作")
-        _remove_pid(DAEMON_PID_FILE)
-        return
-    if _is_process_alive(pid):
+    if not is_process_alive(pid):
+        print("  后台引擎: 未运行")
+    else:
         try:
             if sys.platform == "win32":
-                if _run_taskkill(pid):
+                if run_taskkill(pid):
                     print(f"  后台引擎进程已终止 (PID: {pid})")
                 else:
                     print(f"  [警告] 无法终止后台引擎进程 (PID: {pid})")
@@ -196,9 +152,7 @@ def _stop_daemon_subprocess():
                 print(f"  后台引擎进程已终止 (PID: {pid})")
         except (OSError, ProcessLookupError) as e:
             print(f"  [警告] 终止后台引擎进程失败: {e}")
-    else:
-        print("  后台引擎: 未运行")
-    _remove_pid(DAEMON_PID_FILE)
+    remove_pid_file(DAEMON_PID_FILE)
 
 
 def _stop_all_processes():
@@ -231,7 +185,7 @@ def _stop_all_processes():
                         pids.append(int(parts[-1].strip()))
                 for p in pids:
                     try:
-                        if _run_taskkill(p):
+                        if run_taskkill(p):
                             print(f"  {label}进程已终止 (PID: {p})")
                         else:
                             print(f"  [警告] 无法终止 {label} 进程 (PID: {p})")
@@ -268,16 +222,16 @@ def _show_status():
     print("  仿真程序运行状态")
     print("=" * 60)
 
-    daemon_pid = _read_pid(DAEMON_PID_FILE)
-    if daemon_pid is not None and _is_process_alive(daemon_pid):
+    daemon_pid = read_pid_file(DAEMON_PID_FILE)
+    if daemon_pid is not None and is_process_alive(daemon_pid):
         print(f"  后台引擎: 运行中 (PID: {daemon_pid})")
     else:
         print("  后台引擎: 未运行")
 
     if _check_ipc_ready():
-        print(f"  IPC 端口 {IPC_PORT}: 已监听")
+        print(f"  IPC 端口 {IPC_CONFIG['port']}: 已监听")
     else:
-        print(f"  IPC 端口 {IPC_PORT}: 未监听")
+        print(f"  IPC 端口 {IPC_CONFIG['port']}: 未监听")
 
     daemon_session = _find_latest_session_dir("daemon")
     if daemon_session and os.path.isdir(daemon_session):
@@ -396,18 +350,27 @@ def _run_all_mode():
     def _cleanup_on_exit(signum=None, frame=None):
         sp_logger.info("收到退出信号，正在清理...")
         proc = _daemon_proc_ref[0]
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
+        if proc is not None:
+            # 关闭日志文件句柄（若存在）
+            if hasattr(proc, "_log_file_handle"):
                 try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                sp_logger.info(f"Daemon 子进程已终止 (PID: {proc.pid})")
-            except (OSError, subprocess.SubprocessError):
-                pass
-        _remove_pid(DAEMON_PID_FILE)
+                    proc._log_file_handle.close()  # type: ignore[attr-defined]
+                except (OSError, AttributeError):
+                    pass
+            
+            # 终止进程
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    sp_logger.info(f"Daemon 子进程已终止 (PID: {proc.pid})")
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        remove_pid_file(DAEMON_PID_FILE)
         if "AUTOFLUID_SESSION_TIMESTAMP" in os.environ:
             del os.environ["AUTOFLUID_SESSION_TIMESTAMP"]
 
@@ -429,6 +392,11 @@ def _run_all_mode():
         else:
             sp_logger.error("未找到 Rust TUI 二进制文件")
             print_rust_tui_not_found_help(PROJECT_DIR)
+    except KeyboardInterrupt:
+        sp_logger.info("TUI Client 接收到 Ctrl+C 信号")
+    except OSError as e:
+        sp_logger.error(f"TUI Client 启动失败: {e}", exc_info=True)
+        print(f"\n[错误] TUI 客户端启动失败: {e}", file=sys.stderr)
     except Exception as e:
         sp_logger.error(f"TUI Client 异常退出: {e}", exc_info=True)
         print(f"\n[错误] TUI 客户端异常退出: {e}", file=sys.stderr)
@@ -488,6 +456,9 @@ def main():
                 sys.exit(1)
             except KeyboardInterrupt:
                 sys.exit(0)
+            except OSError as e:
+                print(f"[错误] Rust TUI 启动失败: {e}", file=sys.stderr)
+                sys.exit(1)
         else:
             print_rust_tui_not_found_help(PROJECT_DIR)
             sys.exit(1)

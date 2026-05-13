@@ -147,7 +147,11 @@ class TaskRunner:
                     if sw_app is not None:
                         logger.info(f"SolidWorks COM 接口已就绪 (等待了 {attempt + 1} 秒)")
                         return True
-                except Exception:
+                except (AttributeError, TypeError):
+                    # SW COM 对象尚未就绪，继续等待
+                    pass
+                except Exception as e:
+                    logger.debug(f"获取 SolidWorks COM 对象异常: {e}")
                     pass  # SW 还没完全启动，继续等
             logger.error(f"等待 SolidWorks 启动超时 ({max_wait} 秒)")
             return False

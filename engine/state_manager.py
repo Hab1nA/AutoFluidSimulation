@@ -42,7 +42,20 @@ class StateManager:
         """
         self.db_path = db_path or IPC_CONFIG["db_path"]
         self._lock = threading.Lock()  # 线程安全锁
+        self._config_pragmas()  # 首次初始化 PRAGMA 配置
         self._init_database()
+    
+    def _config_pragmas(self):
+        """配置数据库 PRAGMA 设置（仅初始化一次）。"""
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # 数据库初始化
@@ -50,21 +63,26 @@ class StateManager:
 
     @contextmanager
     def _get_connection(self):
-        """获取数据库连接（上下文管理器，自动提交/关闭）。"""
+        """获取数据库连接（上下文管理器，自动提交/关闭）。
+        
+        注：PRAGMA 设置在 __init__ 中一次颒配置，此处不重复设置。
+        """
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
         try:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception as e:
+                logger.error(f"数据库回滚异常: {e}")
             raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.error(f"数据库连接关闭异常: {e}")
 
     def _init_database(self):
         """初始化数据库表结构。"""
@@ -328,7 +346,8 @@ class StateManager:
                 # 如果重置了 SW，需要同时重置 sw_macro_started 标志
                 if from_step == "SW" or from_step is None:
                     conn.execute(
-                        "UPDATE engine_state SET value = 'false' WHERE key = 'sw_macro_started'"
+                        "UPDATE engine_state SET value = ? WHERE key = ?",
+                        ("false", "sw_macro_started")
                     )
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")
@@ -337,11 +356,14 @@ class StateManager:
         """重置所有构型的所有步骤（含引擎全局状态）。"""
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ''",
-                           (STATUS_WAITING,))
-                conn.execute("UPDATE engine_state SET value = 'false' WHERE key = 'sw_macro_started'")
-                conn.execute("UPDATE engine_state SET value = 'false' WHERE key = 'global_barrier_met'")
-                conn.execute("UPDATE engine_state SET value = '0' WHERE key = 'error_count'")
+                conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ?",
+                           (STATUS_WAITING, ""))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("false", "sw_macro_started"))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("false", "global_barrier_met"))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("0", "error_count"))
         logger.warning("已重置所有构型的所有步骤！")
 
     # ------------------------------------------------------------------

@@ -19,7 +19,7 @@ use state::{AppState, LogBuffer};
 use state::app_state::{FocusZone, UiMode, ScrollbarDragZone};
 use settings::SettingsState;
 use ui::layout::AppLayout;
-use ui::command_bar::BUTTON_DEFS;
+use ui::command_bar::{self, BUTTON_DEFS};
 use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
 use event_handler::key_handler;
 use event_handler::command;
@@ -33,6 +33,83 @@ pub fn format_local_time(fmt: &str) -> String {
         .replace("%H", &format!("{:02}", st.wHour))
         .replace("%M", &format!("{:02}", st.wMinute))
         .replace("%S", &format!("{:02}", st.wSecond))
+}
+
+fn reconnect_ipc_after_daemon_launch(
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let timeout = Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + timeout;
+
+    while std::time::Instant::now() < deadline {
+        if ipc.is_connected() {
+            state.connected = true;
+            return;
+        }
+
+        match rt.block_on(ipc.connect()) {
+            Ok(()) => {
+                state.connected = true;
+                log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+                return;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    state.connected = false;
+    log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
+}
+
+fn stop_daemon_process(
+    daemon: &mut daemon_mgr::DaemonManager,
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    project_dir: &str,
+) {
+    if ipc.is_connected() {
+        let _ = rt.block_on(ipc.full_quit());
+        rt.block_on(ipc.disconnect());
+    }
+
+    let _ = daemon.stop(project_dir);
+    state.connected = false;
+    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+}
+
+fn restart_daemon_process(
+    daemon: &mut daemon_mgr::DaemonManager,
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    project_dir: &str,
+) {
+    stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
+
+    match daemon.launch(project_dir) {
+        Ok(pid) => {
+            log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
+            reconnect_ipc_after_daemon_launch(rt, ipc, state, log_buffer);
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
+        }
+    }
+}
+
+fn close_daemon_menu(state: &mut AppState) {
+    state.daemon_menu_open = false;
+    state.hovered_daemon_menu_item = None;
+    state.clicked_daemon_menu_item = None;
+    state.daemon_menu_click_time = None;
 }
 
 pub fn generate_request_id() -> String {
@@ -73,6 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let project_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     let mut ipc = IpcClient::new(None, None);
     let mut state = AppState::new();
@@ -114,6 +195,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             if state.clicked_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
                 state.clicked_button = None;
                 state.click_time = None;
+                state.needs_redraw = true;
+            }
+        }
+        if let Some(ct) = state.daemon_menu_click_time {
+            if state.clicked_daemon_menu_item.is_some() && ct.elapsed() > Duration::from_millis(120) {
+                state.clicked_daemon_menu_item = None;
+                state.daemon_menu_click_time = None;
                 state.needs_redraw = true;
             }
         }
@@ -166,6 +254,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                         match daemon.launch(&project_dir) {
                             Ok(pid) => {
                                 log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                reconnect_ipc_after_daemon_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
                             }
                             Err(e) => {
                                 log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -173,14 +262,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                         }
                     }
                 }
+                command::CommandResult::RestartDaemon => {
+                    restart_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                }
                 command::CommandResult::StopDaemon => {
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
-                        rt.block_on(ipc.disconnect());
-                    }
-                    let _ = daemon.stop();
-                    state.connected = false;
-                    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                    stop_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 _ => {}
             }
@@ -189,11 +275,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         let first_poll_timeout = Duration::from_millis(50);
         if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
             let event = crossterm_event::read().map_err(|e| e.to_string())?;
-            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
+            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir);
 
             while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
                 let event = crossterm_event::read().map_err(|e| e.to_string())?;
-                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
+                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir);
             }
         }
 
@@ -248,7 +334,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     rt.block_on(ipc.disconnect());
-    let _ = daemon.stop();
+    let _ = daemon.stop(&project_dir);
 
     Ok(())
 }
@@ -260,6 +346,7 @@ fn process_event(
     ipc: &mut IpcClient,
     daemon: &mut daemon_mgr::DaemonManager,
     rt: &tokio::runtime::Runtime,
+    project_dir: &str,
 ) {
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
@@ -293,6 +380,7 @@ fn process_event(
                                 match daemon.launch(&project_dir) {
                                     Ok(pid) => {
                                         log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                        reconnect_ipc_after_daemon_launch(&rt, ipc, state, log_buffer);
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -300,14 +388,11 @@ fn process_event(
                                 }
                             }
                         }
+                        command::CommandResult::RestartDaemon => {
+                            restart_daemon_process(daemon, ipc, &rt, state, log_buffer, project_dir);
+                        }
                         command::CommandResult::StopDaemon => {
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                                rt.block_on(ipc.disconnect());
-                            }
-                            let _ = daemon.stop();
-                            state.connected = false;
-                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                            stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
                         }
                         _ => {}
                     }
@@ -320,13 +405,7 @@ fn process_event(
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
-                                if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.full_quit());
-                                    rt.block_on(ipc.disconnect());
-                                }
-                                let _ = daemon.stop();
-                                state.connected = false;
-                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                                stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
                             }
                             _ => {}
                         }
@@ -706,45 +785,57 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
         MouseEventKind::Moved => {
             let prev_hover_row = state.hovered_table_row;
             let prev_hover_btn = state.hovered_button;
+            let prev_hover_daemon_menu = state.hovered_daemon_menu_item;
             let prev_hover_detail = state.hovered_detail_row;
             let prev_hover_dialog_btn = state.hovered_dialog_button;
 
             // 对话框激活时跳过背景面板的 hover 检测，只处理对话框内按钮
             if state.ui_mode == UiMode::Normal {
                 if in_table {
-                let inner_y = row.saturating_sub(layout.status_table.y + 1);
-                if inner_y > 0 {
-                    let data_row = state.table_scroll_offset + inner_y - 1;
-                    if (data_row as usize) < state.configs.len() {
-                        state.hovered_table_row = Some(data_row);
+                    let inner_y = row.saturating_sub(layout.status_table.y + 1);
+                    if inner_y > 0 {
+                        let data_row = state.table_scroll_offset + inner_y - 1;
+                        if (data_row as usize) < state.configs.len() {
+                            state.hovered_table_row = Some(data_row);
+                        } else {
+                            state.hovered_table_row = None;
+                        }
                     } else {
                         state.hovered_table_row = None;
                     }
                 } else {
                     state.hovered_table_row = None;
                 }
-            } else {
-                state.hovered_table_row = None;
-            }
 
-            if in_detail {
-                let inner_top = layout.detail_panel.y + 1;
-                let inner_bottom = layout.detail_panel.y + layout.detail_panel.height.saturating_sub(1);
-                if row >= inner_top && row < inner_bottom {
-                    let inner_y = row - inner_top;
-                    let visual_line = state.detail_log_scroll + inner_y;
-                    state.hovered_detail_row = Some(visual_line);
+                if in_detail {
+                    let inner_top = layout.detail_panel.y + 1;
+                    let inner_bottom = layout.detail_panel.y + layout.detail_panel.height.saturating_sub(1);
+                    if row >= inner_top && row < inner_bottom {
+                        let inner_y = row - inner_top;
+                        let visual_line = state.detail_log_scroll + inner_y;
+                        state.hovered_detail_row = Some(visual_line);
+                    } else {
+                        state.hovered_detail_row = None;
+                    }
                 } else {
                     state.hovered_detail_row = None;
                 }
-            } else {
-                state.hovered_detail_row = None;
-            }
 
-                if in_buttons {
-                    state.hovered_button = detect_button(col, row, &layout);
+                if state.daemon_menu_open {
+                    state.hovered_daemon_menu_item = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons);
+                    if let Some(btn_idx) = command_bar::daemon_button_index() {
+                        state.hovered_button = command_bar::button_bounds(layout.quick_buttons, btn_idx)
+                            .and_then(|rect| if point_in_rect(col, row, rect) { Some(btn_idx as u8) } else { None });
+                    } else {
+                        state.hovered_button = None;
+                    }
                 } else {
-                    state.hovered_button = None;
+                    state.hovered_daemon_menu_item = None;
+                    if in_buttons {
+                        state.hovered_button = detect_button(col, row, &layout);
+                    } else {
+                        state.hovered_button = None;
+                    }
                 }
             } // end Normal-mode-only hover detection
 
@@ -765,6 +856,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
 
             if state.hovered_table_row != prev_hover_row
                 || state.hovered_button != prev_hover_btn
+                || state.hovered_daemon_menu_item != prev_hover_daemon_menu
                 || state.hovered_detail_row != prev_hover_detail
                 || state.hovered_dialog_button != prev_hover_dialog_btn
                 || prev_hovered_field != new_hovered_field
@@ -1070,6 +1162,29 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 }
             }
 
+            if state.ui_mode == UiMode::Normal && state.daemon_menu_open {
+                if let Some(menu_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+                    state.clicked_daemon_menu_item = Some(menu_idx);
+                    state.daemon_menu_click_time = Some(std::time::Instant::now());
+                    state.needs_redraw = true;
+                    return;
+                }
+
+                if let Some(btn_idx) = command_bar::daemon_button_index() {
+                    if let Some(button_rect) = command_bar::button_bounds(layout.quick_buttons, btn_idx) {
+                        if point_in_rect(col, row, button_rect) {
+                            close_daemon_menu(state);
+                            state.needs_redraw = true;
+                            return;
+                        }
+                    }
+                }
+
+                close_daemon_menu(state);
+                state.needs_redraw = true;
+                return;
+            }
+
             // 当对话框覆盖层激活时，阻止鼠标事件穿透到背景面板
             if state.ui_mode != UiMode::Normal {
                 return;
@@ -1136,13 +1251,39 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 state.needs_redraw = true;
                 return;
             }
+            if let Some(menu_idx) = state.clicked_daemon_menu_item {
+                if state.daemon_menu_open {
+                    if let Some(hover_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+                        if hover_idx == menu_idx {
+                            if let Some(cmd) = command_bar::daemon_menu_command(menu_idx) {
+                                state.pending_command = Some(cmd.to_string());
+                                state.focus_zone = FocusZone::CommandInput;
+                            }
+                        }
+                    }
+                }
+                close_daemon_menu(state);
+                state.clicked_daemon_menu_item = None;
+                state.daemon_menu_click_time = None;
+                state.needs_redraw = true;
+                return;
+            }
             if let Some(btn_idx) = state.clicked_button {
                 if in_buttons {
                     if let Some(hover_idx) = detect_button(col, row, &layout) {
                         if hover_idx == btn_idx {
                             let cmd = BUTTON_DEFS[btn_idx as usize].1;
-                            state.pending_command = Some(cmd.to_string());
-                            state.focus_zone = FocusZone::CommandInput;
+                            if cmd == "daemon" {
+                                state.daemon_menu_open = !state.daemon_menu_open;
+                                if state.daemon_menu_open {
+                                    state.hovered_daemon_menu_item = None;
+                                } else {
+                                    close_daemon_menu(state);
+                                }
+                            } else {
+                                state.pending_command = Some(cmd.to_string());
+                                state.focus_zone = FocusZone::CommandInput;
+                            }
                         }
                     }
                 }

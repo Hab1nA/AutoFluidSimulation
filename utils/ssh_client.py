@@ -89,15 +89,17 @@ class RemoteWorkstation:
         if self._sftp:
             try:
                 self._sftp.close()
-            except (OSError, EOFError):
-                pass
-            self._sftp = None
+            except (OSError, EOFError) as e:
+                logger.warning(f"SFTP 关闭异常: {e}")
+            finally:
+                self._sftp = None
         if self._ssh:
             try:
                 self._ssh.close()
-            except (OSError, EOFError):
-                pass
-            self._ssh = None
+            except (OSError, EOFError) as e:
+                logger.warning(f"SSH 关闭异常: {e}")
+            finally:
+                self._ssh = None
         logger.info("SSH 连接已断开")
 
     def is_connected(self) -> bool:
@@ -115,22 +117,44 @@ class RemoteWorkstation:
     # 文件传输
     # ------------------------------------------------------------------
 
-    def upload_file(self, local_path: str, remote_path: str) -> bool:
-        """通过 SFTP 上传文件到远程工作站。"""
-        if not self.ensure_connected():
-            return False
-        try:
-            remote_dir = os.path.dirname(remote_path)
-            self._ensure_remote_dir(remote_dir)
+    def upload_file(self, local_path: str, remote_path: str, max_retries: int = 3) -> bool:
+        """通过 SFTP 上传文件到远程工作站（带重试机制）。
+        
+        Args:
+            local_path: 本地文件路径
+            remote_path: 远程文件路径
+            max_retries: 最大重试次数
+        
+        Returns:
+            上传成功返回 True，失败返回 False
+        """
+        for attempt in range(max_retries):
+            try:
+                # 每次尝试前确保连接有效（解决竞态条件）
+                if not self.ensure_connected():
+                    if attempt < max_retries - 1:
+                        logger.warning(f"连接失败，{attempt + 1}/{max_retries} 重试...")
+                        time.sleep(0.5 * (2 ** attempt))  # 指数退避
+                        continue
+                    return False
+                
+                remote_dir = os.path.dirname(remote_path)
+                self._ensure_remote_dir(remote_dir)
 
-            logger.info(f"正在上传: {local_path} -> {remote_path}")
-            self._sftp.put(local_path, remote_path)  # type: ignore[union-attr]
-            logger.info(f"上传完成: {os.path.basename(local_path)}")
-            return True
-        except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.error(f"文件上传失败: {e}")
-            self.disconnect()
-            return False
+                logger.info(f"正在上传: {local_path} -> {remote_path}")
+                # 再次确认 SFTP 连接有效（防止类型检查器报错）
+                assert self._sftp is not None, "SFTP 连接已断开"
+                self._sftp.put(local_path, remote_path)
+                logger.info(f"上传完成: {os.path.basename(local_path)}")
+                return True
+            except (paramiko.SSHException, OSError, EOFError) as e:
+                logger.error(f"文件上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                self.disconnect()
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (2 ** attempt))  # 指数退避
+                else:
+                    return False
+        return False
 
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
@@ -176,9 +200,14 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
         try:
-            self._sftp.stat(remote_path)  # type: ignore[union-attr]
+            if self._sftp is None:
+                return False
+            self._sftp.stat(remote_path)
             return True
         except FileNotFoundError:
+            return False
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"检查远程文件异常: {remote_path}: {e}")
             return False
 
     def delete_remote_file(self, remote_path: str) -> bool:
