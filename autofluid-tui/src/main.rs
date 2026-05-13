@@ -180,6 +180,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
     }
 
+    let mut full_quit = false;
     let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = std::time::Instant::now();
@@ -237,6 +238,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     state.should_quit = true;
                 }
                 command::CommandResult::FullQuit => {
+                    full_quit = true;
                     if ipc.is_connected() {
                         let _ = rt.block_on(ipc.full_quit());
                     }
@@ -275,11 +277,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         let first_poll_timeout = Duration::from_millis(50);
         if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
             let event = crossterm_event::read().map_err(|e| e.to_string())?;
-            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir);
+            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
 
             while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
                 let event = crossterm_event::read().map_err(|e| e.to_string())?;
-                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir);
+                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
             }
         }
 
@@ -334,7 +336,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     rt.block_on(ipc.disconnect());
-    let _ = daemon.stop(&project_dir);
+    if full_quit {
+        let _ = daemon.stop(&project_dir);
+    }
 
     Ok(())
 }
@@ -347,6 +351,7 @@ fn process_event(
     daemon: &mut daemon_mgr::DaemonManager,
     rt: &tokio::runtime::Runtime,
     project_dir: &str,
+    full_quit: &mut bool,
 ) {
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
@@ -363,6 +368,7 @@ fn process_event(
                             state.should_quit = true;
                         }
                         command::CommandResult::FullQuit => {
+                            *full_quit = true;
                             if ipc.is_connected() {
                                 let _ = rt.block_on(ipc.full_quit());
                             }
@@ -402,6 +408,7 @@ fn process_event(
                         let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
+                                *full_quit = true;
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
@@ -441,7 +448,7 @@ fn process_event(
             }
         }
         CrosstermEvent::Mouse(mouse) => {
-            handle_mouse(mouse, state, log_buffer, ipc, rt);
+            handle_mouse(mouse, state, log_buffer, ipc, rt, full_quit);
         }
         CrosstermEvent::Resize(w, h) => {
             state.update_terminal_size(w, h);
@@ -765,7 +772,7 @@ fn sb_horizontal_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, vi
     }
 }
 
-fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime) {
+fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime, full_quit: &mut bool) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
         return;
@@ -1244,7 +1251,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             if let Some(btn_idx) = state.clicked_dialog_button {
                 if let Some(hover_idx) = detect_dialog_button(col, row, area, state) {
                     if hover_idx == btn_idx {
-                        handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt);
+                        handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt, full_quit);
                     }
                 }
                 state.clicked_dialog_button = None;
@@ -1436,6 +1443,7 @@ fn handle_dialog_button_click(
     log_buffer: &mut LogBuffer,
     ipc: &mut IpcClient,
     rt: &tokio::runtime::Runtime,
+    full_quit: &mut bool,
 ) {
     match state.ui_mode {
         UiMode::ConfirmDialog => {
@@ -1445,6 +1453,7 @@ fn handle_dialog_button_click(
                         let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
+                                *full_quit = true;
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
