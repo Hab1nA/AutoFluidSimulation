@@ -26,7 +26,7 @@ from typing import Optional
 from engine.config import (
     STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, LOCAL_PATHS, get_step_filename,
+    ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
@@ -87,6 +87,147 @@ class PipelineScheduler:
             self._barrier_passed.set()
 
         logger.info("流水线调度器初始化完成")
+
+    # ------------------------------------------------------------------
+    # 输出文件预扫描（断点续传核心）
+    # ------------------------------------------------------------------
+
+    def _prescan_downstream_outputs(self):
+        """
+        在启动下游工作线程之前，扫描所有构型各步骤的输出文件。
+
+        若输出文件已存在于磁盘但数据库中该步骤仍为未完成状态，
+        则直接标记为 Completed，避免重复启动程序执行该步骤。
+
+        覆盖范围：
+        - SC: 本地 SCDOC 文件
+        - Transfer: 远程 SCDOC 文件（需 SSH）
+        - Meshing: 远程标志文件 + 网格输出文件（需 SSH）
+        - Solver: 远程标志文件 + 求解输出文件（需 SSH）
+        """
+        all_configs = self.state.get_all_configs()
+        if not all_configs:
+            return
+
+        prescan_count = 0
+        ssh_available = False
+        ssh = None
+
+        # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
+        try:
+            ssh = self.runner.get_ssh()
+            ssh_available = ssh.is_connected()
+        except Exception:
+            pass
+
+        for cn in all_configs:
+            # ---- SC: 检查本地 SCDOC 文件 ----
+            sc_status = self.state.get_step_status(cn, "SC")
+            if sc_status not in (STATUS_COMPLETED,):
+                scdoc_name = get_step_filename("SC", cn)
+                if scdoc_name:
+                    scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                    if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                        self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
+                        logger.info(
+                            f"[预扫描] 构型{cn} SC: SCDOC 文件已存在，"
+                            f"标记为 Completed"
+                        )
+                        prescan_count += 1
+
+            # ---- Transfer: 检查远程 SCDOC 文件 ----
+            transfer_status = self.state.get_step_status(cn, "Transfer")
+            if transfer_status not in (STATUS_COMPLETED,) and ssh_available:
+                # Transfer 依赖 SC 输出，SC Completed 后才检查远程文件
+                if self.state.get_step_status(cn, "SC") == STATUS_COMPLETED:
+                    scdoc_name = get_step_filename("SC", cn)
+                    if scdoc_name:
+                        remote_scdoc = (
+                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
+                            f"/{scdoc_name}"
+                        )
+                        try:
+                            if ssh.check_remote_file(remote_scdoc):
+                                self.state.set_step_status(
+                                    cn, "Transfer", STATUS_COMPLETED
+                                )
+                                logger.info(
+                                    f"[预扫描] 构型{cn} Transfer: "
+                                    f"远程 SCDOC 已存在，标记为 Completed"
+                                )
+                                prescan_count += 1
+                        except Exception:
+                            pass
+
+            # ---- Meshing: 检查远程标志文件 + 网格输出文件 ----
+            meshing_status = self.state.get_step_status(cn, "Meshing")
+            if meshing_status not in (STATUS_COMPLETED,) and ssh_available:
+                if self.state.get_step_status(cn, "Transfer") == STATUS_COMPLETED:
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/meshing_done_{cn}.txt"
+                    )
+                    mesh_name = get_step_filename("Meshing", cn)
+                    mesh_file = None
+                    if mesh_name:
+                        mesh_file = (
+                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
+                            f"/{mesh_name}"
+                        )
+                    try:
+                        # 标志文件存在 → 网格划分刚完成但状态未更新
+                        # 网格文件存在 → 上一次运行已完成
+                        if ssh.check_remote_file(flag_file) or (
+                            mesh_file and ssh.check_remote_file(mesh_file)
+                        ):
+                            self.state.set_step_status(
+                                cn, "Meshing", STATUS_COMPLETED
+                            )
+                            logger.info(
+                                f"[预扫描] 构型{cn} Meshing: "
+                                f"远程输出已存在，标记为 Completed"
+                            )
+                            prescan_count += 1
+                    except Exception:
+                        pass
+
+            # ---- Solver: 检查远程标志文件 + 求解输出文件 ----
+            solver_status = self.state.get_step_status(cn, "Solver")
+            if solver_status not in (STATUS_COMPLETED,) and ssh_available:
+                if self.state.get_step_status(cn, "Meshing") == STATUS_COMPLETED:
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/solver_done_{cn}.txt"
+                    )
+                    result_name = get_step_filename("Solver", cn)
+                    result_file = None
+                    if result_name:
+                        result_file = (
+                            f"{REMOTE_CONFIG['result_dir'].replace(chr(92), '/')}"
+                            f"/{result_name}"
+                        )
+                    try:
+                        if ssh.check_remote_file(flag_file) or (
+                            result_file and ssh.check_remote_file(result_file)
+                        ):
+                            self.state.set_step_status(
+                                cn, "Solver", STATUS_COMPLETED
+                            )
+                            logger.info(
+                                f"[预扫描] 构型{cn} Solver: "
+                                f"远程输出已存在，标记为 Completed"
+                            )
+                            prescan_count += 1
+                    except Exception:
+                        pass
+
+        if prescan_count > 0:
+            logger.info(
+                f"[预扫描] 共标记 {prescan_count} 个步骤为 Completed"
+                f"（输出文件已存在）"
+            )
+        else:
+            logger.info("[预扫描] 未发现可跳过的步骤")
 
     # ------------------------------------------------------------------
     # 主调度入口
@@ -385,6 +526,11 @@ class PipelineScheduler:
                 self.start_pipeline(_recursion_depth + 1)
                 return
 
+        # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
+        # 在启动工作线程之前扫描各步骤输出目录，若文件已存在则直接标记 Completed，
+        # 避免重复启动 SpaceClaim/传输/网格划分/求解程序。
+        self._prescan_downstream_outputs()
+
         # ---- 步骤 2: 启动文件监控 ----
         if self._file_monitor is None or not self._file_monitor._running:
             self._file_monitor = StepFileMonitor(
@@ -560,32 +706,104 @@ class PipelineScheduler:
         # 此时需重新执行 SC（进程已被终止，不可恢复）。
         sc_status = self.state.get_step_status(config_name, "SC")
         if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "SC",
-                                             self.runner.execute_spaceclaim):
-                return  # 失败则中止此构型的后续处理
+            # ★ 执行前检查输出文件：若 SCDOC 已存在则直接标记完成，避免重复启动 SC
+            scdoc_name = get_step_filename("SC", config_name)
+            if scdoc_name:
+                scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                    logger.info(
+                        f"构型{config_name} SC: SCDOC 文件已存在，跳过执行"
+                    )
+                    self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
+                elif not self._execute_with_retry(config_name, "SC",
+                                                   self.runner.execute_spaceclaim):
+                    return
+            elif not self._execute_with_retry(config_name, "SC",
+                                               self.runner.execute_spaceclaim):
+                return
 
         # ---- Transfer 阶段 ----
         transfer_status = self.state.get_step_status(config_name, "Transfer")
         if transfer_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "Transfer",
-                                             self.runner.execute_transfer):
-                return
+            # ★ 执行前检查远程输出文件：若远程 SCDOC 已存在则跳过上传
+            transfer_skip = False
+            scdoc_name = get_step_filename("SC", config_name)
+            if scdoc_name:
+                try:
+                    ssh = self.runner.get_ssh()
+                    if ssh.is_connected():
+                        remote_scdoc = (
+                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
+                            f"/{scdoc_name}"
+                        )
+                        if ssh.check_remote_file(remote_scdoc):
+                            logger.info(
+                                f"构型{config_name} Transfer: "
+                                f"远程 SCDOC 已存在，跳过执行"
+                            )
+                            self.state.set_step_status(
+                                config_name, "Transfer", STATUS_COMPLETED
+                            )
+                            transfer_skip = True
+                except Exception:
+                    pass
+            if not transfer_skip:
+                if not self._execute_with_retry(config_name, "Transfer",
+                                                 self.runner.execute_transfer):
+                    return
 
         # ---- Meshing 阶段 ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
         if meshing_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "Meshing",
-                                             self.runner.execute_meshing):
-                return
+            # ★ 执行前检查远程输出：若标志文件或网格文件已存在则跳过
+            meshing_skip = False
+            try:
+                ssh = self.runner.get_ssh()
+                if ssh.is_connected():
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/meshing_done_{config_name}.txt"
+                    )
+                    mesh_name = get_step_filename("Meshing", config_name)
+                    if ssh.check_remote_file(flag_file):
+                        logger.info(
+                            f"构型{config_name} Meshing: "
+                            f"标志文件已存在，跳过执行"
+                        )
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_COMPLETED
+                        )
+                        meshing_skip = True
+                    elif mesh_name:
+                        mesh_file = (
+                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
+                            f"/{mesh_name}"
+                        )
+                        if ssh.check_remote_file(mesh_file):
+                            logger.info(
+                                f"构型{config_name} Meshing: "
+                                f"网格文件已存在，跳过执行"
+                            )
+                            self.state.set_step_status(
+                                config_name, "Meshing", STATUS_COMPLETED
+                            )
+                            meshing_skip = True
+            except Exception:
+                pass
 
-            # 启动远程网格划分后，轮询等待完成
-            logger.info(f"等待构型{config_name} 网格划分完成...")
-            if self.runner.wait_meshing_completion(config_name):
-                self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
-                logger.info(f"构型{config_name} 网格划分完成 ✓")
-            else:
-                self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "网格划分超时")
-                return
+            if not meshing_skip:
+                if not self._execute_with_retry(config_name, "Meshing",
+                                                 self.runner.execute_meshing):
+                    return
+
+                # 启动远程网格划分后，轮询等待完成
+                logger.info(f"等待构型{config_name} 网格划分完成...")
+                if self.runner.wait_meshing_completion(config_name):
+                    self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
+                    logger.info(f"构型{config_name} 网格划分完成 ✓")
+                else:
+                    self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "网格划分超时")
+                    return
 
         logger.info(f"构型{config_name} SC→Transfer→Meshing 全部完成 ✓")
 
