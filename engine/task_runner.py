@@ -815,6 +815,16 @@ class TaskRunner:
 
             filepath = os.path.join(step_dir, filename)
 
+            # ★ 跳过已完成的构型（防御性优化：避免重复导出已存在的 STEP 文件）
+            if cn_int is not None:
+                _sw_st = self.state.get_step_status(cn_int, "SW")
+                if _sw_st == STATUS_COMPLETED and os.path.exists(filepath):
+                    logger.info(
+                        f"  ✓ 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
+                    )
+                    success_configs.append(cn_int)
+                    continue
+
             # ---- 切换配置 ----
             try:
                 doc.ShowConfiguration2(cn_str)
@@ -958,6 +968,26 @@ class TaskRunner:
         # ---- 清理残留 SW 进程（仅在连接失败时作为备选方案的辅助） ----
         # 注意：不在此处无条件清理，避免误杀用户正在运行的 SW 实例。
         # _launch_solidworks_via_subprocess 会在启动新的 SW 进程前自行处理。
+
+        # ★ 防御性优化：若所有构型的 SW 步骤已完成且 STEP 文件存在，跳过 SolidWorks 启动
+        _all_cfgs = self.state.get_all_configs()
+        if _all_cfgs:
+            _all_done = True
+            for _cn in _all_cfgs:
+                if self.state.get_step_status(_cn, "SW") != STATUS_COMPLETED:
+                    _all_done = False
+                    break
+                _fn = get_step_filename("SW", _cn)
+                if _fn and not os.path.exists(os.path.join(step_dir, _fn)):
+                    _all_done = False
+                    break
+            if _all_done:
+                logger.info(
+                    "所有 %d 个构型的 SW 步骤已完成且 STEP 文件存在，"
+                    "跳过 SolidWorks 启动",
+                    len(_all_cfgs),
+                )
+                return True
 
         try:
             import win32com.client
@@ -1403,12 +1433,17 @@ class TaskRunner:
         # 注意：不同版本的 SpaceClaim 对命令行的解析方式不同。
         # 将每个 ScriptArg 作为独立的命令行参数传递（而非空格分隔的引用字符串），
         # 确保 SpaceClaim 正确解析每个参数，同时避免路径中括号等特殊字符干扰。
+        #cmd = [
+        #    sc_exe,
+        #    f"/RunScript={sc_script}",
+        #    "/ScriptArgs=" + str(config_name),
+        #    step_dir,
+        #    scdoc_dir,
+        #]
         cmd = [
             sc_exe,
-            f"/RunScript={sc_script}",
-            "/ScriptArgs=" + str(config_name),
-            step_dir,
-            scdoc_dir,
+            f'/RunScript="{sc_script}"',
+            f'/ScriptArgs="{config_name},{step_dir},{scdoc_dir}"'
         ]
 
         logger.info(f"SpaceClaim 启动: 构型{config_name}")

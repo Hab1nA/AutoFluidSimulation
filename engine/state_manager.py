@@ -343,12 +343,25 @@ class StateManager:
                         SET status = ?, retry_count = 0, error_message = '', updated_at = strftime('%s','now')
                         WHERE config_name = ? AND step_name = ?
                     """, (STATUS_WAITING, config_name, step_name))
-                # 如果重置了 SW，需要同时重置 sw_macro_started 标志
+                # 如果重置了 SW，需谨慎处理 sw_macro_started 标志：
+                # 仅当数据库中不再有任何 SW=Completed 的构型时才清除该标志。
+                # 这样可以避免部分重置（仅重置单个构型）时意外允许全部重跑 SW。
                 if from_step == "SW" or from_step is None:
-                    conn.execute(
-                        "UPDATE engine_state SET value = ? WHERE key = ?",
-                        ("false", "sw_macro_started")
-                    )
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM steps "
+                        "WHERE step_name = 'SW' AND status = ?",
+                        (STATUS_COMPLETED,)
+                    ).fetchone()
+                    if not remaining or remaining["cnt"] == 0:
+                        conn.execute(
+                            "UPDATE engine_state SET value = ? WHERE key = ?",
+                            ("false", "sw_macro_started")
+                        )
+                    else:
+                        logger.debug(
+                            "仍有 %d 个构型的 SW=Completed，保持 sw_macro_started=true",
+                            remaining["cnt"] if remaining else 0,
+                        )
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")
 

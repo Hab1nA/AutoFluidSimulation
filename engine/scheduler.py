@@ -343,7 +343,37 @@ class PipelineScheduler:
         self._paused.clear()
 
         # ---- 步骤 1: SW 阶段 ----
-        if not self.state.is_sw_macro_started():
+        # ★ 诊断日志：记录 SW 步骤状态分布，便于排查断点续传问题
+        _all_configs_diag = self.state.get_all_configs()
+        _sw_status_dist: dict[str, list[int]] = {}
+        for _cn in _all_configs_diag:
+            _st = self.state.get_step_status(_cn, "SW")
+            _sw_status_dist.setdefault(_st, []).append(_cn)
+        logger.info(
+            "SW 步骤状态分布: %s；sw_macro_started=%s",
+            {k: len(v) for k, v in _sw_status_dist.items()},
+            self.state.is_sw_macro_started(),
+        )
+
+        # ★ 计算是否应执行 SW 宏：综合 sw_macro_started 标志和实际步骤状态
+        _should_run_sw = not self.state.is_sw_macro_started()
+        if _should_run_sw:
+            # 防御性交叉校验：若所有 SW 步骤已实际完成，自愈跳过
+            _sw_all_completed = (
+                len(_sw_status_dist.get(STATUS_COMPLETED, [])) == len(_all_configs_diag)
+                and len(_all_configs_diag) > 0
+            )
+            if _sw_all_completed:
+                logger.warning(
+                    "检测到 sw_macro_started=false 但所有 %d 个构型的 "
+                    "SW 步骤均为 Completed。自愈：设置 sw_macro_started=true，"
+                    "跳过 SW 宏执行，直接进入下游初始化。",
+                    len(_all_configs_diag),
+                )
+                self.state.set_sw_macro_started(True)
+                _should_run_sw = False
+
+        if _should_run_sw:
             logger.info("SW 宏尚未启动，准备执行...")
             all_configs = self.state.get_all_configs()
 
