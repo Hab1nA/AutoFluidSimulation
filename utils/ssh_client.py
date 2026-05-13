@@ -355,22 +355,47 @@ class RemoteWorkstation:
             logger.error(f"启动远程后台任务异常: {e}")
             return False
 
-    def wait_for_flag(self, flag_file: str, timeout: int = 3600, poll_interval: int = 10) -> bool:
+    def wait_for_flag(
+        self,
+        flag_file: str,
+        timeout: int = 3600,
+        poll_interval: int = 10,
+        paused_event=None,
+        stopped_event=None,
+    ) -> bool:
         """
         轮询等待远程标志文件出现（表示任务完成）。
+
+        支持通过 paused_event / stopped_event 响应外部暂停/停止指令，
+        在轮询间隔中检查这些事件，避免 pause 后仍持续轮询直至超时。
 
         Args:
             flag_file: 标志文件路径
             timeout: 最大等待时间（秒）
             poll_interval: 轮询间隔（秒）
+            paused_event: 可选的 threading.Event，set 时暂停轮询
+            stopped_event: 可选的 threading.Event，set 时提前退出
 
         Returns:
-            True 表示标志文件已出现（任务完成），False 表示超时
+            True 表示标志文件已出现（任务完成），False 表示超时或外部停止
         """
         logger.info(f"等待远程任务完成，标志文件: {flag_file}")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
+            # ★ 响应暂停指令：暂停期间不消耗超时配额
+            if paused_event is not None:
+                while paused_event.is_set():
+                    if stopped_event is not None and stopped_event.is_set():
+                        logger.info("等待远程任务期间收到停止指令，提前退出")
+                        return False
+                    time.sleep(1)
+
+            # ★ 响应停止指令
+            if stopped_event is not None and stopped_event.is_set():
+                logger.info("等待远程任务期间收到停止指令，提前退出")
+                return False
+
             if self.check_remote_file(flag_file):
                 logger.info("远程任务完成（检测到标志文件）")
                 # 清理标志文件

@@ -1643,12 +1643,18 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
                 return False
 
-    def wait_meshing_completion(self, config_name: int) -> bool:
+    def wait_meshing_completion(
+        self, config_name: int,
+        paused_event: Optional[threading.Event] = None,
+        stopped_event: Optional[threading.Event] = None,
+    ) -> bool:
         """
         轮询等待网格划分完成。
 
         Args:
             config_name: 构型名称
+            paused_event: 暂停事件（可选，用于响应暂停指令）
+            stopped_event: 停止事件（可选，用于响应停止指令）
 
         Returns:
             True 表示网格划分成功完成
@@ -1661,7 +1667,9 @@ class TaskRunner:
                 success = ssh.wait_for_flag(
                     flag_file,
                     timeout=ENGINE_CONFIG["meshing_timeout"],  # type: ignore[arg-type]
-                    poll_interval=10
+                    poll_interval=10,
+                    paused_event=paused_event,
+                    stopped_event=stopped_event,
                 )
                 return success
             except (OSError, ConnectionError) as e:
@@ -1709,8 +1717,18 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "Solver", STATUS_ERROR, str(e))
                 return False
 
-    def wait_solver_completion(self, config_name: int) -> bool:
-        """轮询等待仿真求解完成。"""
+    def wait_solver_completion(
+        self, config_name: int,
+        paused_event: Optional[threading.Event] = None,
+        stopped_event: Optional[threading.Event] = None,
+    ) -> bool:
+        """轮询等待仿真求解完成。
+
+        Args:
+            config_name: 构型名称
+            paused_event: 暂停事件（可选，用于响应暂停指令）
+            stopped_event: 停止事件（可选，用于响应停止指令）
+        """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
         with self._ssh_lock:
@@ -1719,7 +1737,9 @@ class TaskRunner:
                 success = ssh.wait_for_flag(
                     flag_file,
                     timeout=ENGINE_CONFIG["solver_timeout"],  # type: ignore[arg-type]
-                    poll_interval=30  # 求解时间较长，轮询间隔加大
+                    poll_interval=30,  # 求解时间较长，轮询间隔加大
+                    paused_event=paused_event,
+                    stopped_event=stopped_event,
                 )
                 return success
             except (OSError, ConnectionError) as e:

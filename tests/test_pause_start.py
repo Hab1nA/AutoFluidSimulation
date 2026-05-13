@@ -98,11 +98,13 @@ class MockTaskRunner:
         time.sleep(0.05)
         return True
 
-    def wait_meshing_completion(self, config_name: int) -> bool:
+    def wait_meshing_completion(self, config_name: int,
+                                 paused_event=None, stopped_event=None) -> bool:
         time.sleep(0.1)
         return True
 
-    def wait_solver_completion(self, config_name: int) -> bool:
+    def wait_solver_completion(self, config_name: int,
+                                paused_event=None, stopped_event=None) -> bool:
         time.sleep(0.1)
         return True
 

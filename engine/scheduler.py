@@ -89,6 +89,38 @@ class PipelineScheduler:
         logger.info("流水线调度器初始化完成")
 
     # ------------------------------------------------------------------
+    # 暂停感知的 sleep 辅助方法
+    # ------------------------------------------------------------------
+
+    def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
+        """
+        可响应暂停/停止的 sleep 替代方法。
+
+        将 sleep 切分为 check_interval 粒度的小段，每段检查
+        _paused 和 _stopped 标志。若检测到 stopped 则立即返回。
+
+        Args:
+            duration: 总等待时长（秒）
+            check_interval: 每次检查的间隔（秒）
+
+        Returns:
+            True 表示 sleep 完整结束，False 表示因 stopped 提前退出
+        """
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            if self._stopped.is_set():
+                return False
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return False
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(check_interval, remaining))
+        return True
+
+    # ------------------------------------------------------------------
     # 输出文件预扫描（断点续传核心）
     # ------------------------------------------------------------------
 
@@ -351,7 +383,16 @@ class PipelineScheduler:
             sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
             success = False
             for sw_attempt in range(1, int(sw_max_retries) + 1):
+                # ★ 检查停止标志
+                if self._stopped.is_set():
+                    return
+
                 if sw_attempt > 1:
+                    # ★ 重试前先等待暂停恢复（若有），然后立即设置重试状态
+                    #    注意：不在此处长时间等待暂停，而是在 _pause_aware_sleep 中
+                    #    合并等待，以避免重复消耗时间
+                    if self._paused.is_set():
+                        logger.info("SW 宏重试前检测到暂停标志，将在重试延迟中等待继续...")
                     # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
                     for cn in all_configs:
                         sw_st = self.state.get_step_status(cn, "SW")
@@ -364,7 +405,13 @@ class PipelineScheduler:
                         f"SW 宏重试 {sw_attempt}/{sw_max_retries}，"
                         f"等待 10 秒并清理残留进程..."
                     )
-                    time.sleep(10)
+                    # ★ 使用暂停感知 sleep 替代原始 time.sleep：
+                    #    若已暂停，则在此 sleep 期间等待恢复；
+                    #    若在 sleep 期间被暂停，状态会被 set_all_running_to_paused() 改为 Paused，
+                    #    恢复后 sleep 继续计时
+                    if not self._pause_aware_sleep(10):
+                        return
+                    # ★ kill SW 进程（暂停期间跳过，恢复后继续）
                     try:
                         subprocess.run(
                             ["taskkill", "/f", "/im", "SLDWORKS.exe"],
@@ -375,7 +422,8 @@ class PipelineScheduler:
                     # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
                     logger.info("等待 SolidWorks 进程完全退出...")
                     for _ in range(10):
-                        time.sleep(1)
+                        if not self._pause_aware_sleep(1):
+                            return
                         try:
                             check = subprocess.run(
                                 ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
@@ -388,7 +436,8 @@ class PipelineScheduler:
                         except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                             break
                     # 额外冷却确保 COM 子系统完全释放
-                    time.sleep(5)
+                    if not self._pause_aware_sleep(5):
+                        return
                     # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
                     #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
                     if self._file_monitor is not None:
@@ -398,8 +447,10 @@ class PipelineScheduler:
                         self._file_monitor._detector._first_seen.clear()
                         logger.info("文件监控器状态已重置（准备 SW 宏重试）")
                     # 恢复为 Running 后执行宏
+                    # ★ 仅将 RETRYING 状态的步骤恢复为 Running（Paused 保持不变）
                     for cn in all_configs:
-                        if self.state.get_step_status(cn, "SW") == STATUS_RETRYING:
+                        current_sw = self.state.get_step_status(cn, "SW")
+                        if current_sw == STATUS_RETRYING:
                             self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
                 logger.info(
@@ -706,6 +757,11 @@ class PipelineScheduler:
         # 此时需重新执行 SC（进程已被终止，不可恢复）。
         sc_status = self.state.get_step_status(config_name, "SC")
         if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+            # ★ 执行前检查暂停标志
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return
             # ★ 执行前检查输出文件：若 SCDOC 已存在则直接标记完成，避免重复启动 SC
             scdoc_name = get_step_filename("SC", config_name)
             if scdoc_name:
@@ -721,6 +777,12 @@ class PipelineScheduler:
             elif not self._execute_with_retry(config_name, "SC",
                                                self.runner.execute_spaceclaim):
                 return
+
+        # ★ SC 完成后检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
 
         # ---- Transfer 阶段 ----
         transfer_status = self.state.get_step_status(config_name, "Transfer")
@@ -751,6 +813,12 @@ class PipelineScheduler:
                 if not self._execute_with_retry(config_name, "Transfer",
                                                  self.runner.execute_transfer):
                     return
+
+        # ★ Transfer 完成后检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
 
         # ---- Meshing 阶段 ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
@@ -796,13 +864,37 @@ class PipelineScheduler:
                                                  self.runner.execute_meshing):
                     return
 
+                # ★ 启动远程网格划分后检查暂停标志
+                while self._paused.is_set() and not self._stopped.is_set():
+                    time.sleep(1)
+                if self._stopped.is_set():
+                    return
+
                 # 启动远程网格划分后，轮询等待完成
                 logger.info(f"等待构型{config_name} 网格划分完成...")
-                if self.runner.wait_meshing_completion(config_name):
+                if self.runner.wait_meshing_completion(
+                    config_name,
+                    paused_event=self._paused,
+                    stopped_event=self._stopped,
+                ):
                     self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
                     logger.info(f"构型{config_name} 网格划分完成 ✓")
                 else:
-                    self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "网格划分超时")
+                    # ★ 区分暂停和真正的超时
+                    if self._paused.is_set():
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_PAUSED,
+                            "等待网格划分期间暂停"
+                        )
+                    elif self._stopped.is_set():
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_PAUSED,
+                            "引擎已停止"
+                        )
+                    else:
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_ERROR, "网格划分超时"
+                        )
                     return
 
         logger.info(f"构型{config_name} SC→Transfer→Meshing 全部完成 ✓")
@@ -886,7 +978,11 @@ class PipelineScheduler:
                             f"重试 {attempt + 1}/{max_retries}（已重试 {retry_count} 次）"
                         )
                         logger.info(f"将在 {5 * attempt}s 后重试 (已重试 {retry_count} 次)")
-                        time.sleep(5 * attempt)  # 递增等待时间
+                        # ★ 使用暂停感知 sleep：若暂停被触发，sleep 期间状态
+                        #    会被 set_all_running_to_paused() 改为 Paused，
+                        #    恢复后下一轮迭代会检测 _paused 并正确等待
+                        if not self._pause_aware_sleep(5 * attempt):
+                            return False  # stopped
             except (RuntimeError, ValueError, OSError) as e:
                 logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
                 if attempt < max_retries:
@@ -894,7 +990,8 @@ class PipelineScheduler:
                         config_name, step_name, STATUS_RETRYING,
                         f"异常重试 {attempt + 1}/{max_retries}: {e}"
                     )
-                    time.sleep(5 * attempt)
+                    if not self._pause_aware_sleep(5 * attempt):
+                        return False  # stopped
 
         # 所有重试均失败
         self.state.set_step_status(config_name, step_name, STATUS_ERROR,
@@ -1002,7 +1099,9 @@ class PipelineScheduler:
                 _last_error_report = meshing_error_configs
 
             # 轮询间隔：网格划分通常耗时较长，不需要高频检查
-            time.sleep(5.0)
+            # ★ 使用暂停感知 sleep，避免暂停期间无谓轮询消耗 CPU
+            if not self._pause_aware_sleep(5.0):
+                break
 
         logger.info("[BarrierMonitor] 全局屏障监控退出")
 
@@ -1015,7 +1114,15 @@ class PipelineScheduler:
         全局屏障通过后，统一启动所有构型的仿真求解。
 
         所有构型的 Solver 在屏障通过后并行启动。
+        若暂停标志已置位，则等待恢复后再分发。
         """
+        # ★ 分发前检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            logger.warning("Solver 分发前检测到停止标志，取消分发")
+            return
+
         logger.info("=" * 60)
         logger.info("开始统一调度仿真求解任务...")
         logger.info("=" * 60)
@@ -1046,17 +1153,47 @@ class PipelineScheduler:
         Args:
             config_name: 构型名称
         """
+        # ★ 执行前检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
+
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
 
         # 启动远程求解后台任务
         if self._execute_with_retry(config_name, "Solver",
                                      self.runner.execute_solver):
+            # ★ 启动远程求解后检查暂停标志
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return
+
             # 轮询等待求解完成
-            if self.runner.wait_solver_completion(config_name):
+            if self.runner.wait_solver_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
                 self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
                 logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
             else:
-                self.state.set_step_status(config_name, "Solver", STATUS_ERROR, "求解超时")
+                # ★ 区分暂停和真正的超时
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_PAUSED,
+                        "等待求解期间暂停"
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_PAUSED,
+                        "引擎已停止"
+                    )
+                else:
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_ERROR, "求解超时"
+                    )
 
     # ------------------------------------------------------------------
     # 控制接口
