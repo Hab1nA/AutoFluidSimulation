@@ -75,9 +75,9 @@ pub fn render_settings_dialog(
 
     // Title bar: title left-aligned, hint centered in remaining space
     let hint_text = if ss.focus.editing {
-        "Enter提交 Esc取消 ←→移动光标 Home/End跳转"
+        "Enter 提交 | Esc 取消 | ←→ 移动光标 | Home/End 跳转"
     } else {
-        "↑↓导航 Tab跳转分类 Enter编辑 Ctrl+Z撤销 Esc退出 Ctrl+S保存"
+        "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Esc 关闭 | Ctrl+S 保存"
     };
 
     let title_text = "程序设置 (Settings)";

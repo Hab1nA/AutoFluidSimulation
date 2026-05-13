@@ -27,6 +27,10 @@ const SECTION_HEADER: Color = Color::Rgb(0, 255, 136);
 const HINT_COLOR: Color = Color::Rgb(80, 80, 80);
 const ERROR_COLOR: Color = Color::Rgb(255, 69, 58);
 
+fn symbol_is_wide(symbol: &str) -> bool {
+    unicode_width::UnicodeWidthStr::width(symbol) > 1
+}
+
 /// 清除对话框背景并处理 forbidden render margin：
 /// 主体区域精确清除，左侧 1 格禁止宽字符渲染，防止其右半身侵入边框
 pub fn clear_dialog_background(frame: &mut Frame, dialog_area: Rect) {
@@ -41,8 +45,7 @@ pub fn clear_dialog_background(frame: &mut Frame, dialog_area: Rect) {
         let max_y = (dialog_area.y + dialog_area.height).min(buffer.area().height);
         for y in dialog_area.y..max_y {
             if let Some(cell) = buffer.cell_mut((fx, y)) {
-                let ch = cell.symbol().chars().next().unwrap_or(' ');
-                if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) > 1 {
+                if symbol_is_wide(cell.symbol()) {
                     cell.set_char(' '); // 仅清除文字，保留原面板背景色
                 }
             }
@@ -405,7 +408,7 @@ pub fn render_check_result(
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "↑↓滚轮 Esc关闭",
+            "↑↓/滚轮 滚动 | Esc 关闭",
             Style::default().fg(HINT_COLOR),
         )))
         .alignment(Alignment::Right),
@@ -506,4 +509,22 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::symbol_is_wide;
+
+    #[test]
+    fn wide_symbol_detection_handles_composite_emoji() {
+        assert!(symbol_is_wide("⏸️"));
+        assert!(symbol_is_wide("✅"));
+        assert!(symbol_is_wide("❌"));
+    }
+
+    #[test]
+    fn wide_symbol_detection_keeps_ascii_narrow() {
+        assert!(!symbol_is_wide("A"));
+        assert!(!symbol_is_wide("?"));
+    }
 }
