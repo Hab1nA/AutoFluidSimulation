@@ -1,30 +1,31 @@
 using System;
-using System.Collections;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace AutoFluidSimulation.Bridge
 {
     /// <summary>
-    /// SpaceClaim Bridge — C# 5 兼容版本（纯 COM 互操作，无需 SpaceClaim API 引用）
+    /// SpaceClaim Bridge — C# 5 兼容版本，纯进程检测模式
     ///
-    /// 使用 .NET Framework 4.x 自带的 csc.exe 即可编译。
+    /// SpaceClaim 不向外部暴露 out-of-process COM 自动化接口（与 AutoCAD/SolidWorks 不同），
+    /// 因此采用命令行 /RunScript + 进程检测的纯进程模式。
     ///
     /// 用法:
     ///   SpaceClaimBridge.exe --script &lt;transit.py&gt; --config &lt;N&gt; --stepdir &lt;dir&gt; --scdocdir &lt;dir&gt; [--timeout &lt;s&gt;]
     ///
-    /// 返回值: 0=成功 1=脚本失败 2=连接失败 3=输出验证失败 4=参数错误 5=超时
+    /// 返回值: 0=成功 1=脚本失败 2=启动失败 3=输出验证失败 4=参数错误 5=超时
     /// </summary>
     class Program
     {
-        private static readonly string[] SpaceClaimProgIds =
+        private static readonly string[] SpaceClaimExePaths =
         {
-            "SpaceClaim.Application",
-            "SpaceClaim.Application.V23",
-            "SCDM.Application",
+            @"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
+            @"C:\Program Files\ANSYS Inc\v232\SCDM\SpaceClaim.exe",
+            @"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe",
         };
+
+        private const string ProcessName = "SpaceClaim";
 
         static int Main(string[] args)
         {
@@ -103,103 +104,184 @@ namespace AutoFluidSimulation.Bridge
 
             Directory.CreateDirectory(o.ScdocDir);
 
-            dynamic app = ConnectSC();
-            if (app == null) return 2;
-
-            Hashtable ps = new Hashtable();
-            ps["config_name"] = o.Config;
-            ps["step_dir"]    = o.StepDir;
-            ps["scdoc_dir"]   = o.ScdocDir;
-
-            Console.WriteLine("[BRIDGE] Running RunScript...");
-            Stopwatch sw = Stopwatch.StartNew();
-            try
-            {
-                app.RunScript(o.Script, ps);
-                sw.Stop();
-                Console.WriteLine(string.Format("[BRIDGE] RunScript returned (elapsed {0:F1}s)", sw.Elapsed.TotalSeconds));
-            }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                COMException comEx = ex as COMException;
-                if (comEx != null && (ex.Message.Contains("RPC") || ex.Message.Contains("disconnected")))
-                {
-                    Console.WriteLine("[BRIDGE] SC COM disconnected (script may have exited normally)");
-                }
-                else
-                {
-                    Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] RunScript exception: {0}: {1}", ex.GetType().Name, ex.Message));
-                    if (sw.Elapsed.TotalSeconds > o.Timeout)
-                        return 5;
-                    return 1;
-                }
-            }
-
-            string scdocFile = Path.Combine(o.ScdocDir, "model_gen4_" + o.Config + ".scdoc");
-            if (File.Exists(scdocFile))
-            {
-                FileInfo fi = new FileInfo(scdocFile);
-                Console.WriteLine(string.Format("[BRIDGE] OK SCDOC: {0} ({1} B)", scdocFile, fi.Length));
-                return 0;
-            }
-
-            Console.Error.WriteLine("[BRIDGE_ERROR] SCDOC not found: " + scdocFile);
-            return 3;
-        }
-
-        static object ConnectSC()
-        {
-            foreach (string pid in SpaceClaimProgIds)
-            {
-                try
-                {
-                    object app = Marshal.GetActiveObject(pid);
-                    Console.WriteLine("[BRIDGE] Connected to SpaceClaim (ProgID=" + pid + ")");
-                    return app;
-                }
-                catch (COMException) { continue; }
-            }
-
-            string[] exePaths = {
-                @"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
-                @"C:\Program Files\ANSYS Inc\v232\SCDM\SpaceClaim.exe",
-                @"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe",
-            };
-            string scExe = null;
-            foreach (string p in exePaths) { if (File.Exists(p)) { scExe = p; break; } }
+            string scExe = FindSpaceClaimExe();
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe not found");
-                return null;
+                return 2;
             }
 
-            Console.WriteLine("[BRIDGE] Starting SpaceClaim: " + scExe);
-            try { Process.Start(scExe); }
+            KillExistingProcesses();
+
+            DateTime launchBaseline = DateTime.UtcNow;
+
+            string runScriptArg = string.Format("/RunScript=\"{0}\"", o.Script);
+            string scriptArgsArg = string.Format("/ScriptArgs={0} {1} {2}", o.Config, EnsureQuoted(o.StepDir), EnsureQuoted(o.ScdocDir));
+
+            Console.WriteLine("[BRIDGE] Launching SpaceClaim with /RunScript...");
+            Console.WriteLine(string.Format("[BRIDGE]   Exe: {0}", scExe));
+            Console.WriteLine(string.Format("[BRIDGE]   Args: {0} {1}", runScriptArg, scriptArgsArg));
+
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = scExe,
+                    Arguments = runScriptArg + " " + scriptArgsArg,
+                    UseShellExecute = true,
+                };
+                Process.Start(psi);
+            }
             catch (Exception ex)
             {
-                Console.Error.WriteLine("[BRIDGE_ERROR] Failed to start: " + ex.Message);
-                return null;
+                Console.Error.WriteLine("[BRIDGE_ERROR] Failed to launch SpaceClaim: " + ex.Message);
+                return 2;
             }
 
-            Console.WriteLine("[BRIDGE] Waiting for COM...");
-            for (int i = 0; i < 120; i++)
+            Console.WriteLine("[BRIDGE] Waiting for SpaceClaim process to appear...");
+            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            if (workingProcess == null)
             {
-                Thread.Sleep(1000);
-                foreach (string pid in SpaceClaimProgIds)
+                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim process did not appear within 120s");
+                return 2;
+            }
+
+            Console.WriteLine(string.Format("[BRIDGE] SpaceClaim process found (PID={0}), waiting for GUI...", workingProcess.Id));
+            WaitForGuiReady(workingProcess, 30);
+
+            Console.WriteLine("[BRIDGE] SpaceClaim is running. Monitoring for completion...");
+
+            int totalTimeout = o.Timeout;
+            int pollIntervalMs = 2000;
+            DateTime deadline = DateTime.UtcNow.AddSeconds(totalTimeout);
+            string scdocFile = Path.Combine(o.ScdocDir, "model_gen4_" + o.Config + ".scdoc");
+
+            while (DateTime.UtcNow < deadline)
+            {
+                if (File.Exists(scdocFile))
+                {
+                    FileInfo fi = new FileInfo(scdocFile);
+                    Console.WriteLine(string.Format("[BRIDGE] OK SCDOC detected: {0} ({1} B)", scdocFile, fi.Length));
+                    return 0;
+                }
+
+                bool processAlive = false;
+                try
+                {
+                    if (workingProcess != null)
+                    {
+                        workingProcess.Refresh();
+                        processAlive = !workingProcess.HasExited;
+                    }
+                }
+                catch
+                {
+                    processAlive = false;
+                }
+
+                if (!processAlive)
+                {
+                    Console.WriteLine("[BRIDGE] SpaceClaim process exited. Final output check...");
+                    Thread.Sleep(2000);
+                    if (File.Exists(scdocFile))
+                    {
+                        FileInfo fi = new FileInfo(scdocFile);
+                        Console.WriteLine(string.Format("[BRIDGE] OK SCDOC: {0} ({1} B)", scdocFile, fi.Length));
+                        return 0;
+                    }
+                    Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim exited but no SCDOC file generated");
+                    return 3;
+                }
+
+                Thread.Sleep(pollIntervalMs);
+            }
+
+            Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] Timeout ({0}s)", totalTimeout));
+            try { KillExistingProcesses(); } catch { }
+            return 5;
+        }
+
+        static string FindSpaceClaimExe()
+        {
+            foreach (string p in SpaceClaimExePaths)
+            {
+                if (File.Exists(p))
+                {
+                    Console.WriteLine("[BRIDGE] Found SpaceClaim.exe: " + p);
+                    return p;
+                }
+            }
+            return null;
+        }
+
+        static void KillExistingProcesses()
+        {
+            Process[] procs = Process.GetProcessesByName(ProcessName);
+            foreach (Process p in procs)
+            {
+                try
+                {
+                    Console.WriteLine(string.Format("[BRIDGE] Killing existing SpaceClaim process (PID={0})...", p.Id));
+                    p.Kill();
+                    p.WaitForExit(10000);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(string.Format("[BRIDGE] Kill failed for PID={0}: {1}", p.Id, ex.Message));
+                }
+            }
+        }
+
+        static Process WaitForProcessAppear(DateTime after, int timeoutSec)
+        {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+            while (DateTime.UtcNow < deadline)
+            {
+                Process[] procs = Process.GetProcessesByName(ProcessName);
+                foreach (Process p in procs)
                 {
                     try
                     {
-                        object app = Marshal.GetActiveObject(pid);
-                        Console.WriteLine(string.Format("[BRIDGE] COM ready ({0}s, ProgID={1})", i + 1, pid));
-                        Thread.Sleep(3000);
-                        return app;
+                        if (p.StartTime.ToUniversalTime() >= after)
+                        {
+                            return p;
+                        }
                     }
-                    catch (COMException) { continue; }
+                    catch { }
+                }
+                if (procs.Length > 0)
+                {
+                    try { return procs[0]; }
+                    catch { }
+                }
+                Thread.Sleep(1000);
+            }
+            return null;
+        }
+
+        static void WaitForGuiReady(Process p, int timeoutSec)
+        {
+            try
+            {
+                if (p.WaitForInputIdle(timeoutSec * 1000))
+                {
+                    Console.WriteLine("[BRIDGE] SpaceClaim GUI is ready (WaitForInputIdle OK)");
+                    Thread.Sleep(5000);
+                    return;
                 }
             }
-            Console.Error.WriteLine("[BRIDGE_ERROR] COM wait timeout");
-            return null;
+            catch { }
+            Console.WriteLine("[BRIDGE] WaitForInputIdle not available, using fixed delay (10s)");
+            Thread.Sleep(10000);
+        }
+
+        static string EnsureQuoted(string path)
+        {
+            if (path.Contains(" "))
+            {
+                return "\"" + path + "\"";
+            }
+            return path;
         }
     }
 }
