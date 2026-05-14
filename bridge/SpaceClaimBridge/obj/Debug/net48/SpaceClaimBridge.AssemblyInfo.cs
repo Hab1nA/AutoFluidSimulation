@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SpaceClaimBridge")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fba699154aeaaadbbd8cc37ed95af5ee48bee98e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5a1ec3428cae9a68f2c4a530ce3e0e34b2550aa9")]
 [assembly: System.Reflection.AssemblyProductAttribute("SpaceClaimBridge")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SpaceClaimBridge")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

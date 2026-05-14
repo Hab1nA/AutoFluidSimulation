@@ -143,25 +143,28 @@ namespace AutoFluidSimulation.Bridge
                 return 2;
             }
 
-            KillExistingProcesses();
-
             DateTime launchBaseline = DateTime.UtcNow;
 
             string runScriptArg = $"/RunScript=\"{opts.ScriptPath}\"";
-            string scriptArgsArg = $"/ScriptArgs={opts.ConfigName} {EnsureQuoted(opts.StepDir)} {EnsureQuoted(opts.ScdocDir)}";
 
-            Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (Mode B /RunScript)...");
+            Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (环境变量传参模式)...");
             Console.WriteLine($"[BRIDGE]   Exe: {scExe}");
-            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} {scriptArgsArg}");
+            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} /Splash=False /Welcome=False /ExitAfterScript=True");
+            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
+            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
+            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
 
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = scExe,
-                    Arguments = runScriptArg + " " + scriptArgsArg,
-                    UseShellExecute = true,
+                    Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
+                    UseShellExecute = false,
                 };
+                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName;
+                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir;
                 Process.Start(psi);
             }
             catch (Exception ex)
@@ -229,7 +232,6 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
-            try { KillExistingProcesses(); } catch { }
             return 5;
         }
 
@@ -244,24 +246,6 @@ namespace AutoFluidSimulation.Bridge
                 }
             }
             return null;
-        }
-
-        private static void KillExistingProcesses()
-        {
-            Process[] procs = Process.GetProcessesByName(ProcessName);
-            foreach (Process p in procs)
-            {
-                try
-                {
-                    Console.WriteLine($"[BRIDGE] 正在终止已有 SpaceClaim 进程 (PID={p.Id})...");
-                    p.Kill();
-                    p.WaitForExit(10000);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[BRIDGE] 终止失败 PID={p.Id}: {ex.Message}");
-                }
-            }
         }
 
         private static Process WaitForProcessAppear(DateTime after, int timeoutSec)
@@ -293,18 +277,68 @@ namespace AutoFluidSimulation.Bridge
 
         private static void WaitForGuiReady(Process p, int timeoutSec)
         {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+
+            Console.WriteLine("[BRIDGE] Phase 1: 等待 SpaceClaim 主窗口出现...");
+            bool mainWindowFound = false;
+            while (DateTime.UtcNow < deadline && !mainWindowFound)
+            {
+                try
+                {
+                    p.Refresh();
+                    if (p.MainWindowHandle != IntPtr.Zero)
+                    {
+                        string title = p.MainWindowTitle;
+                        if (!string.IsNullOrEmpty(title))
+                        {
+                            Console.WriteLine($"[BRIDGE]   主窗口已检测到: \"{title}\"");
+                            mainWindowFound = true;
+                        }
+                    }
+                }
+                catch { }
+                if (!mainWindowFound) Thread.Sleep(1000);
+            }
+
+            if (!mainWindowFound)
+            {
+                Console.WriteLine("[BRIDGE]   Phase 1 超时, 使用 WaitForInputIdle 兜底...");
+                try
+                {
+                    if (p.WaitForInputIdle(15000))
+                    {
+                        Console.WriteLine("[BRIDGE]   WaitForInputIdle 兜底 OK");
+                        Thread.Sleep(10000);
+                        return;
+                    }
+                }
+                catch { }
+                Console.WriteLine("[BRIDGE]   兜底失败, 使用固定延时 (20s)");
+                Thread.Sleep(20000);
+                return;
+            }
+
+            Console.WriteLine("[BRIDGE] Phase 2: 等待主窗口线程空闲...");
             try
             {
-                if (p.WaitForInputIdle(timeoutSec * 1000))
+                p.Refresh();
+                if (p.WaitForInputIdle(15000))
                 {
-                    Console.WriteLine("[BRIDGE] SpaceClaim GUI 已就绪 (WaitForInputIdle OK)");
-                    Thread.Sleep(5000);
-                    return;
+                    Console.WriteLine("[BRIDGE]   主窗口线程已空闲");
+                }
+                else
+                {
+                    Console.WriteLine("[BRIDGE]   WaitForInputIdle 超时, 继续...");
                 }
             }
-            catch { }
-            Console.WriteLine("[BRIDGE] WaitForInputIdle 不可用, 使用固定延时 (10s)");
-            Thread.Sleep(10000);
+            catch
+            {
+                Console.WriteLine("[BRIDGE]   WaitForInputIdle 异常, 继续...");
+            }
+
+            Console.WriteLine("[BRIDGE] Phase 3: 等待加载稳定 (固定延时 15s)...");
+            Thread.Sleep(15000);
+            Console.WriteLine("[BRIDGE] SpaceClaim GUI 加载完成");
         }
 
         private static string EnsureQuoted(string path)

@@ -31,6 +31,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
 from engine.task_runner import TaskRunner
+from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -608,6 +609,9 @@ class PipelineScheduler:
                 return
 
         # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
+        # ★ 首次 SC 全体清理：进入 SC 阶段前清理所有旧残留 SpaceClaim 进程
+        self.runner._sc_pool.do_first_cleanup()
+
         # 在启动工作线程之前扫描各步骤输出目录，若文件已存在则直接标记 Completed，
         # 避免重复启动 SpaceClaim/传输/网格划分/求解程序。
         self._prescan_downstream_outputs()
@@ -1089,6 +1093,9 @@ class PipelineScheduler:
                 self._barrier_passed.set()
                 self.state.set_global_barrier_met(True)
 
+                # ★ 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理
+                self.runner._sc_pool.do_final_cleanup()
+
                 # 启动 Solver 调度
                 self._dispatch_solver_tasks()
                 break
@@ -1400,6 +1407,12 @@ class PipelineScheduler:
         self._stopped.set()
         self._paused.clear()  # 解除暂停以便线程退出
 
+        # 清理所有 SC 进程
+        try:
+            self.runner._sc_pool.shutdown_all()
+        except Exception as e:
+            logger.debug(f"SCPool 停止清理异常: {e}")
+
         # 等待关键线程退出
         for t in self._worker_threads:
             if t.is_alive():
@@ -1443,17 +1456,20 @@ class PipelineScheduler:
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
+            self.runner._sc_pool.reset()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
+                self.runner._sc_pool.reset()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
+                self.runner._sc_pool.reset()
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

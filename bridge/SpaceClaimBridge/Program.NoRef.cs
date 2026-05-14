@@ -111,25 +111,29 @@ namespace AutoFluidSimulation.Bridge
                 return 2;
             }
 
-            KillExistingProcesses();
-
             DateTime launchBaseline = DateTime.UtcNow;
 
             string runScriptArg = string.Format("/RunScript=\"{0}\"", o.Script);
-            string scriptArgsArg = string.Format("/ScriptArgs={0} {1} {2}", o.Config, EnsureQuoted(o.StepDir), EnsureQuoted(o.ScdocDir));
 
-            Console.WriteLine("[BRIDGE] Launching SpaceClaim with /RunScript...");
+            Console.WriteLine("[BRIDGE] Launching SpaceClaim with /RunScript (env vars mode)...");
             Console.WriteLine(string.Format("[BRIDGE]   Exe: {0}", scExe));
-            Console.WriteLine(string.Format("[BRIDGE]   Args: {0} {1}", runScriptArg, scriptArgsArg));
+            Console.WriteLine(string.Format("[BRIDGE]   Args: {0} /Splash=False /Welcome=False /ExitAfterScript=True",
+                runScriptArg));
+            Console.WriteLine(string.Format("[BRIDGE]   Env: AUTOFLUID_SC_CONFIG={0}", o.Config));
+            Console.WriteLine(string.Format("[BRIDGE]   Env: AUTOFLUID_SC_STEP_DIR={0}", o.StepDir));
+            Console.WriteLine(string.Format("[BRIDGE]   Env: AUTOFLUID_SC_SCDOC_DIR={0}", o.ScdocDir));
 
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = scExe,
-                    Arguments = runScriptArg + " " + scriptArgsArg,
-                    UseShellExecute = true,
+                    Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
+                    UseShellExecute = false,
                 };
+                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = o.Config;
+                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = o.StepDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = o.ScdocDir;
                 Process.Start(psi);
             }
             catch (Exception ex)
@@ -197,7 +201,6 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] Timeout ({0}s)", totalTimeout));
-            try { KillExistingProcesses(); } catch { }
             return 5;
         }
 
@@ -212,24 +215,6 @@ namespace AutoFluidSimulation.Bridge
                 }
             }
             return null;
-        }
-
-        static void KillExistingProcesses()
-        {
-            Process[] procs = Process.GetProcessesByName(ProcessName);
-            foreach (Process p in procs)
-            {
-                try
-                {
-                    Console.WriteLine(string.Format("[BRIDGE] Killing existing SpaceClaim process (PID={0})...", p.Id));
-                    p.Kill();
-                    p.WaitForExit(10000);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(string.Format("[BRIDGE] Kill failed for PID={0}: {1}", p.Id, ex.Message));
-                }
-            }
         }
 
         static Process WaitForProcessAppear(DateTime after, int timeoutSec)
@@ -261,18 +246,68 @@ namespace AutoFluidSimulation.Bridge
 
         static void WaitForGuiReady(Process p, int timeoutSec)
         {
+            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+
+            Console.WriteLine("[BRIDGE] Phase 1: Waiting for SpaceClaim main window...");
+            bool mainWindowFound = false;
+            while (DateTime.UtcNow < deadline && !mainWindowFound)
+            {
+                try
+                {
+                    p.Refresh();
+                    if (p.MainWindowHandle != IntPtr.Zero)
+                    {
+                        string title = p.MainWindowTitle;
+                        if (!string.IsNullOrEmpty(title))
+                        {
+                            Console.WriteLine(string.Format("[BRIDGE]   Main window detected: \"{0}\"", title));
+                            mainWindowFound = true;
+                        }
+                    }
+                }
+                catch { }
+                if (!mainWindowFound) Thread.Sleep(1000);
+            }
+
+            if (!mainWindowFound)
+            {
+                Console.WriteLine("[BRIDGE]   Phase 1 timed out, trying WaitForInputIdle fallback...");
+                try
+                {
+                    if (p.WaitForInputIdle(15000))
+                    {
+                        Console.WriteLine("[BRIDGE]   WaitForInputIdle fallback OK");
+                        Thread.Sleep(10000);
+                        return;
+                    }
+                }
+                catch { }
+                Console.WriteLine("[BRIDGE]   Fallback failed, using fixed delay (20s)");
+                Thread.Sleep(20000);
+                return;
+            }
+
+            Console.WriteLine("[BRIDGE] Phase 2: Waiting for main window thread idle...");
             try
             {
-                if (p.WaitForInputIdle(timeoutSec * 1000))
+                p.Refresh();
+                if (p.WaitForInputIdle(15000))
                 {
-                    Console.WriteLine("[BRIDGE] SpaceClaim GUI is ready (WaitForInputIdle OK)");
-                    Thread.Sleep(5000);
-                    return;
+                    Console.WriteLine("[BRIDGE]   Main window thread is idle");
+                }
+                else
+                {
+                    Console.WriteLine("[BRIDGE]   WaitForInputIdle timed out, continuing...");
                 }
             }
-            catch { }
-            Console.WriteLine("[BRIDGE] WaitForInputIdle not available, using fixed delay (10s)");
-            Thread.Sleep(10000);
+            catch
+            {
+                Console.WriteLine("[BRIDGE]   WaitForInputIdle exception, continuing...");
+            }
+
+            Console.WriteLine("[BRIDGE] Phase 3: Waiting for loading stabilization (fixed 15s)...");
+            Thread.Sleep(15000);
+            Console.WriteLine("[BRIDGE] SpaceClaim GUI loading complete");
         }
 
         static string EnsureQuoted(string path)

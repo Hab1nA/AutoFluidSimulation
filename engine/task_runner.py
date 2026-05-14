@@ -26,6 +26,7 @@ from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     STATUS_COMPLETED, STATUS_ERROR, STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
 )
+from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
 
@@ -49,16 +50,10 @@ class TaskRunner:
         """
         self.state = state_manager
         self._ssh: Optional[RemoteWorkstation] = None
-        self._ssh_lock = threading.RLock()  # 可重入锁：SSH 操作需串行化，get_ssh() 内部也需加锁
+        self._ssh_lock = threading.RLock()
 
-        # SpaceClaim 并发控制
-        # _sc_cleanup_done: 确保整个 SC 阶段只清理一次旧残留进程
-        # _sc_cleanup_lock: 保护 _sc_cleanup_done 的读写和首次清理的原子性
-        self._sc_cleanup_done = False
-        self._sc_cleanup_lock = threading.Lock()
+        self._sc_pool = SCProcessPool()
 
-        # 调度器控制事件引用（由 PipelineScheduler 注入）
-        # 用于在长时间阻塞操作（如 SC 的 process.communicate）中响应暂停/停止指令
         self._paused_event: Optional[threading.Event] = None
         self._stopped_event: Optional[threading.Event] = None
 
@@ -1355,22 +1350,6 @@ class TaskRunner:
             logger.warning(f"[SC清理] 检查/终止 SC 进程时异常: {e}")
 
     def execute_spaceclaim(self, config_name: int) -> bool:
-        """
-        通过 C# 桥接程序调用 SpaceClaim，将 STEP 转换为 SCDOC。
-
-        调用策略（二层降级）：
-          1. 优先：C# 桥接程序 SpaceClaimBridge.exe
-             通过 SpaceClaim 官方 API Application.RunScript() 执行 transit.py
-             参数通过参数字典传递（可靠、支持返回值）
-          2. 降级：subprocess 直接启动 SpaceClaim.exe /RunScript=/ScriptArgs=
-             （保留作为后备方案）
-
-        C# 桥接程序调用格式：
-          SpaceClaimBridge.exe --script <transit.py> --config <N> --stepdir <dir> --scdocdir <dir>
-
-        返回值：
-          True 表示 SC 脚本执行成功
-        """
         _sw_step_name = get_step_filename("SW", config_name)
         if not _sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
@@ -1385,17 +1364,9 @@ class TaskRunner:
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
         step_file = os.path.join(step_dir, _sw_step_name)
-        scdoc_file = os.path.join(scdoc_dir, _scdoc_name)
 
-        # 确保输出目录存在
-        try:
-            os.makedirs(scdoc_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(f"无法创建 SCDOC 输出目录: {scdoc_dir}: {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"无法创建输出目录: {e}")
-            return False
+        os.makedirs(scdoc_dir, exist_ok=True)
 
-        # 检查输入文件
         if not os.path.exists(step_file):
             logger.error(f"STEP 文件不存在: {step_file}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件不存在")
@@ -1403,7 +1374,6 @@ class TaskRunner:
 
         sc_exe = LOCAL_PATHS["sc_exe"]
         sc_script = LOCAL_PATHS["sc_script"]
-
         if not os.path.exists(sc_exe):
             logger.error(f"SpaceClaim 可执行文件不存在: {sc_exe}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 程序不存在")
@@ -1413,30 +1383,11 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
-        # ★ SC阶段首次调用时清理一次旧残留进程（线程安全）
-        with self._sc_cleanup_lock:
-            if not self._sc_cleanup_done:
-                self._cleanup_sc_processes()
-                self._sc_cleanup_done = True
-
-        # ---- 选择调用方式 ----
-        sc_bridge = LOCAL_PATHS.get("sc_bridge", "")
-        use_bridge = os.path.exists(sc_bridge) if sc_bridge else False
-
-        if use_bridge:
-            logger.info(f"SC 调用方式: C# 桥接程序 (SpaceClaimBridge.exe)")
-            return self._execute_spaceclaim_via_bridge(
-                config_name, sc_bridge, sc_script,
-                step_dir, scdoc_dir, scdoc_file,
-            )
-        else:
-            logger.warning(
-                f"SC 桥接程序未找到 ({sc_bridge})，降级为 subprocess 直接调用 SpaceClaim"
-            )
-            return self._execute_spaceclaim_via_subprocess(
-                config_name, sc_exe, sc_script,
-                step_dir, scdoc_dir, scdoc_file,
-            )
+        return self._sc_pool.run_config(
+            config_name,
+            paused_event=self._paused_event,
+            stopped_event=self._stopped_event,
+        )
 
     # ------------------------------------------------------------------
     # SC 调用方式A: C# 桥接程序（优先方案）
