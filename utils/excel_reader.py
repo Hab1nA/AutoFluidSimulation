@@ -8,11 +8,28 @@ Excel 读取工具 (Excel Reader)
 ===============================================================================
 """
 import os
-import openpyxl
 from typing import Dict, List
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# 延迟导入 openpyxl，仅在函数被调用时才导入，避免在模块导入时失败
+_openpyxl_imported = False
+_openpyxl = None
+
+def _import_openpyxl():
+    """延迟导入 openpyxl 库"""
+    global _openpyxl_imported, _openpyxl
+    if not _openpyxl_imported:
+        try:
+            import openpyxl as op
+            _openpyxl = op
+            _openpyxl_imported = True
+        except ImportError as e:
+            raise ImportError(
+                "openpyxl 库未安装，请运行：pip install openpyxl"
+            ) from e
+    return _openpyxl
 
 
 def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
@@ -28,7 +45,9 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
     Raises:
         FileNotFoundError: Excel 文件不存在
         ValueError: 数据格式错误
+        ImportError: openpyxl 库未安装
     """
+    openpyxl = _import_openpyxl()
     logger.info(f"正在读取 Excel 参数表: {excel_path}")
 
     if not os.path.exists(excel_path):
