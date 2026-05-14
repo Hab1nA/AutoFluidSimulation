@@ -4,7 +4,8 @@
 负责执行每个阶段的具体操作：
 
 1. SW 阶段：通过 win32com 唤醒 SolidWorks，执行 Macro1.swp 宏
-2. SC 阶段：通过 subprocess 无头调用 SpaceClaim
+2. SC 阶段：通过 C# 桥接程序 (SpaceClaimBridge.exe) 调用 SpaceClaim API
+   降级方案：subprocess 直接启动 /RunScript
 3. Transfer 阶段：通过 paramiko SSH 上传 scdoc 文件
 4. Meshing 阶段：通过 SSH 远程启动网格划分后台任务
 5. Solver 阶段：通过 SSH 远程启动仿真求解后台任务（全局屏障后）
@@ -1355,22 +1356,20 @@ class TaskRunner:
 
     def execute_spaceclaim(self, config_name: int) -> bool:
         """
-        通过 subprocess 无头调用 SpaceClaim，将 STEP 转换为 SCDOC。
+        通过 C# 桥接程序调用 SpaceClaim，将 STEP 转换为 SCDOC。
 
-        调用格式：
-        SpaceClaim.exe /RunScript=<脚本路径> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>
+        调用策略（二层降级）：
+          1. 优先：C# 桥接程序 SpaceClaimBridge.exe
+             通过 SpaceClaim 官方 API Application.RunScript() 执行 transit.py
+             参数通过参数字典传递（可靠、支持返回值）
+          2. 降级：subprocess 直接启动 SpaceClaim.exe /RunScript=/ScriptArgs=
+             （保留作为后备方案）
 
-        每个 ScriptArg 作为独立的命令行参数传递，确保 SpaceClaim 正确解析。
-        同时通过环境变量 AUTOFLUID_SC_* 传递参数作为后备方案。
+        C# 桥接程序调用格式：
+          SpaceClaimBridge.exe --script <transit.py> --config <N> --stepdir <dir> --scdocdir <dir>
 
-        脚本通过 args[0]=构型名, args[1]=STEP目录, args[2]=SCDOC目录 三个参数
-        定位输入 STEP 文件并保存输出 SCDOC 文件。
-
-        Args:
-            config_name: 构型名称（整数）
-
-        Returns:
-            True 表示 SC 脚本执行成功
+        返回值：
+          True 表示 SC 脚本执行成功
         """
         _sw_step_name = get_step_filename("SW", config_name)
         if not _sw_step_name:
@@ -1415,50 +1414,124 @@ class TaskRunner:
             return False
 
         # ★ SC阶段首次调用时清理一次旧残留进程（线程安全）
-        # 设计原则：SC阶段开始前统一清理旧残留，运行中不再杀进程，
-        # 允许3个Worker并行启动独立的SpaceClaim实例，避免互杀导致exit=1。
-        # 超时/崩溃残留：超时分支仍会调用 _cleanup_sc_processes()；
-        # 崩溃残留不影响新SC实例（新进程独立PID，/RunScript正常生效）。
         with self._sc_cleanup_lock:
             if not self._sc_cleanup_done:
                 self._cleanup_sc_processes()
                 self._sc_cleanup_done = True
 
-        # 构建命令行：传递三个参数给脚本
-        # ScriptArgs 格式：每个参数独立传递给 SpaceClaim
-        #   args[0] = config_name   (构型编号)
-        #   args[1] = step_dir      (STEP 文件所在目录)
-        #   args[2] = scdoc_dir     (SCDOC 输出目录)
-        #
-        # 注意：不同版本的 SpaceClaim 对命令行的解析方式不同。
-        # 将每个 ScriptArg 作为独立的命令行参数传递（而非空格分隔的引用字符串），
-        # 确保 SpaceClaim 正确解析每个参数，同时避免路径中括号等特殊字符干扰。
-        #cmd = [
-        #    sc_exe,
-        #    f"/RunScript={sc_script}",
-        #    "/ScriptArgs=" + str(config_name),
-        #    step_dir,
-        #    scdoc_dir,
-        #]
+        # ---- 选择调用方式 ----
+        sc_bridge = LOCAL_PATHS.get("sc_bridge", "")
+        use_bridge = os.path.exists(sc_bridge) if sc_bridge else False
+
+        if use_bridge:
+            logger.info(f"SC 调用方式: C# 桥接程序 (SpaceClaimBridge.exe)")
+            return self._execute_spaceclaim_via_bridge(
+                config_name, sc_bridge, sc_script,
+                step_dir, scdoc_dir, scdoc_file,
+            )
+        else:
+            logger.warning(
+                f"SC 桥接程序未找到 ({sc_bridge})，降级为 subprocess 直接调用 SpaceClaim"
+            )
+            return self._execute_spaceclaim_via_subprocess(
+                config_name, sc_exe, sc_script,
+                step_dir, scdoc_dir, scdoc_file,
+            )
+
+    # ------------------------------------------------------------------
+    # SC 调用方式A: C# 桥接程序（优先方案）
+    # ------------------------------------------------------------------
+
+    def _execute_spaceclaim_via_bridge(
+        self, config_name: int, bridge_path: str, script_path: str,
+        step_dir: str, scdoc_dir: str, scdoc_file: str,
+    ) -> bool:
+        """
+        通过 C# SpaceClaimBridge.exe 调用 SpaceClaim。
+
+        Bridge 内部流程：
+        1. 通过 COM 连接或启动 SpaceClaim
+        2. 调用 Application.RunScript(scriptPath, argDictionary)
+        3. 等待脚本执行完成
+        4. 验证输出 SCDOC 文件
+        5. 返回 exit code (0=成功)
+        """
+        cmd = [
+            bridge_path,
+            "--script", script_path,
+            "--config", str(config_name),
+            "--stepdir", step_dir,
+            "--scdocdir", scdoc_dir,
+        ]
+
+        logger.info(f"SpaceClaim Bridge 启动: 构型{config_name}")
+        logger.debug(f"Bridge 命令: {' '.join(cmd)}")
+
+        # 通过环境变量传递参数（Bridge 将其继承给 SpaceClaim 进程 → transit.py）
+        # AUTOFLUID_SC_NOEXIT=1 阻止 transit.py 脚本内部退出 SpaceClaim，
+        # 改由 Bridge 的 TryExitSpaceClaim() 统一管理退出
+        sc_env = os.environ.copy()
+        sc_env["AUTOFLUID_SC_NOEXIT"] = "1"
+        sc_env["AUTOFLUID_SC_CONFIG"] = str(config_name)
+        sc_env["AUTOFLUID_SC_STEP_DIR"] = step_dir
+        sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
+
+        return self._run_sc_process(
+            config_name, cmd, scdoc_file, sc_env,
+            "SpaceClaim Bridge",
+        )
+
+    # ------------------------------------------------------------------
+    # SC 调用方式B: subprocess 直接启动（降级方案）
+    # ------------------------------------------------------------------
+
+    def _execute_spaceclaim_via_subprocess(
+        self, config_name: int, sc_exe: str, sc_script: str,
+        step_dir: str, scdoc_dir: str, scdoc_file: str,
+    ) -> bool:
+        """
+        降级方案：通过 subprocess 直接启动 SpaceClaim.exe /RunScript。
+
+        调用格式：
+        SpaceClaim.exe /RunScript=<脚本路径> /ScriptArgs="构型名,STEP目录,SCDOC目录"
+        """
         cmd = [
             sc_exe,
             f'/RunScript="{sc_script}"',
             f'/ScriptArgs="{config_name},{step_dir},{scdoc_dir}"'
         ]
 
-        logger.info(f"SpaceClaim 启动: 构型{config_name}")
+        logger.info(f"SpaceClaim 启动 (降级模式): 构型{config_name}")
         logger.debug(f"命令: {' '.join(cmd)}")
 
-        # ★ 同时通过环境变量传递参数（双重保障）
-        # 即使 /ScriptArgs 解析失败，脚本也能通过 os.environ 获取参数
         sc_env = os.environ.copy()
         sc_env["AUTOFLUID_SC_CONFIG"] = str(config_name)
         sc_env["AUTOFLUID_SC_STEP_DIR"] = step_dir
         sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
 
+        return self._run_sc_process(
+            config_name, cmd, scdoc_file, sc_env,
+            "SpaceClaim 脚本",
+        )
+
+    # ------------------------------------------------------------------
+    # SC 进程管理（公共逻辑）
+    # ------------------------------------------------------------------
+
+    def _run_sc_process(
+        self, config_name: int, cmd: list,
+        scdoc_file: str, sc_env: dict, label: str,
+    ) -> bool:
+        """
+        SC 子进程启动、监控、超时/暂停/停止处理。
+
+        提取 Bridge 和 subprocess 两种调用方式的公共逻辑：
+        - subprocess.Popen 启动
+        - 轮询等待（响应暂停/停止事件）
+        - 超时处理
+        - 输出文件验证
+        """
         try:
-            # 使用 subprocess 启动 SpaceClaim（无头模式）
-            # SpaceClaim 在 /RunScript 模式下会自动在脚本执行完毕后退出
             sc_creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
             process = subprocess.Popen(
                 cmd,
@@ -1469,51 +1542,40 @@ class TaskRunner:
                 env=sc_env,
             )
 
-            # ★ 使用轮询循环替代 process.communicate(timeout=300)，
-            # 以便在 SC 执行期间响应暂停/停止指令。
-            # 否则 pause 发出后 worker 线程仍阻塞在 communicate() 中，
-            # 直到 300s 超时到期 → 状态被错误标记为 Error → 触发 retry → 重新 running。
             timeout = ENGINE_CONFIG["sc_timeout"]
             deadline = time.time() + timeout
-            poll_interval = 2.0  # 每 2 秒检查一次
+            poll_interval = 2.0
 
             while True:
                 retcode = process.poll()
                 if retcode is not None:
-                    # 进程已退出，读取剩余 stdout/stderr
                     stdout, stderr = process.communicate(timeout=None)
-                    # 记录脚本标准输出（用于诊断脚本内部错误）
                     if stdout:
-                        logger.info(f"SC 脚本 stdout:\n{stdout.strip()}")
+                        logger.info(f"{label} stdout:\n{stdout.strip()}")
                     if retcode != 0:
                         stderr_msg = stderr.strip() if stderr else "(无 stderr 输出)"
                         logger.error(
-                            f"SC 脚本执行失败 (exit={retcode}):\n"
+                            f"{label} 执行失败 (exit={retcode}):\n"
                             f"  stderr: {stderr_msg[:500]}"
                         )
                         self.state.set_step_status(
                             config_name, "SC", STATUS_ERROR,
-                            f"SC 退出码={retcode}: {stderr_msg[:200]}"
+                            f"{label} 退出码={retcode}: {stderr_msg[:200]}"
                         )
                         return False
-                    break  # 成功退出，跳转到输出文件验证
+                    break
 
-                # ---- 暂停检查：终止 SC 进程（不修改状态，由调度器 _execute_with_retry 统一处理） ----
+                # ---- 暂停检查 ----
                 if self._paused_event is not None and self._paused_event.is_set():
                     try:
                         process.kill()
                     except (ProcessLookupError, OSError):
                         pass
                     try:
-                        process.communicate(timeout=5)  # 回收子进程资源
+                        process.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.warning("SC 进程在 pause-kill 后未及时退出")
-                    logger.info(
-                        f"SC 脚本因暂停被终止: 构型{config_name}"
-                    )
-                    # 不在此处设置步骤状态（交由 _execute_with_retry 根据 _paused 标志统一决定），
-                    # 避免 resume() 的 set_all_paused_to_running() 将状态改为 RUNNING 后
-                    # _process_single_config 跳过 SC 步骤
+                        logger.warning(f"{label} 进程在 pause-kill 后未及时退出")
+                    logger.info(f"{label} 因暂停被终止: 构型{config_name}")
                     return False
 
                 # ---- 停止检查 ----
@@ -1526,9 +1588,7 @@ class TaskRunner:
                         process.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
-                    logger.info(
-                        f"SC 脚本因停止被终止: 构型{config_name}"
-                    )
+                    logger.info(f"{label} 因停止被终止: 构型{config_name}")
                     return False
 
                 # ---- 超时检查 ----
@@ -1538,16 +1598,15 @@ class TaskRunner:
                     except ProcessLookupError:
                         pass
                     except OSError as e:
-                        logger.error(f"无法终止 SC 进程: {e}")
+                        logger.error(f"无法终止 {label} 进程: {e}")
                     try:
-                        process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
+                        process.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.warning("SC 进程在 kill 后未及时退出")
-                    # ★ 超时后强制清理所有残留 SC 进程
+                        logger.warning(f"{label} 进程在 kill 后未及时退出")
                     self._cleanup_sc_processes()
-                    logger.error(f"SC 脚本执行超时 ({timeout}s)")
+                    logger.error(f"{label} 执行超时 ({timeout}s)")
                     self.state.set_step_status(
-                        config_name, "SC", STATUS_ERROR, "SC 执行超时"
+                        config_name, "SC", STATUS_ERROR, f"{label} 执行超时"
                     )
                     return False
 
@@ -1564,25 +1623,25 @@ class TaskRunner:
             else:
                 logger.error(
                     f"SC 输出文件未生成: {scdoc_file}\n"
-                    f"  脚本可能执行失败但返回了零退出码。请检查上面的 stdout 输出。"
+                    f"  脚本可能执行失败但 {label} 返回了零退出码"
                 )
                 self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
                 return False
 
         except OSError as e:
-            logger.error(f"SC 执行失败 (IO错误): {e}")
+            logger.error(f"{label} 执行失败 (IO错误): {e}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"IO错误: {e}")
             return False
         except ValueError as e:
-            logger.error(f"SC 执行失败 (配置错误): {e}")
+            logger.error(f"{label} 执行失败 (配置错误): {e}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"配置错误: {e}")
             return False
         except RuntimeError as e:
-            logger.error(f"SC 执行失败 (运行时错误): {e}")
+            logger.error(f"{label} 执行失败 (运行时错误): {e}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"运行时错误: {e}")
             return False
         except Exception as e:
-            logger.error(f"SC 执行失败 (未知错误): {e}", exc_info=True)
+            logger.error(f"{label} 执行失败 (未知错误): {e}", exc_info=True)
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"未知错误: {e}")
             return False
 

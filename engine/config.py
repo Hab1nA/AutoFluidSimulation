@@ -62,6 +62,12 @@ LOCAL_PATHS = {
         "AUTOFLUID_SC_SCRIPT",
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "executor", "spaceclaim_transit.py"),
     ),
+    # C# 桥接程序（SpaceClaimBridge.exe）
+    # 通过 Application.RunScript API 可靠调用 SpaceClaim 脚本
+    "sc_bridge": _env_override(
+        "AUTOFLUID_SC_BRIDGE",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge", "SpaceClaimBridge.exe"),
+    ),
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
@@ -278,6 +284,7 @@ def _apply_env_overrides():
         ("step_dir", "AUTOFLUID_STEP_DIR"),
         ("sc_exe", "AUTOFLUID_SC_EXE"),
         ("sc_script", "AUTOFLUID_SC_SCRIPT"),
+        ("sc_bridge", "AUTOFLUID_SC_BRIDGE"),
         ("scdoc_dir", "AUTOFLUID_SCDOC_DIR"),
         ("log_dir", "AUTOFLUID_LOG_DIR"),
         ("data_dir", "AUTOFLUID_DATA_DIR"),
