@@ -1,4 +1,3 @@
-import pytest
 from ipc import protocol
 
 

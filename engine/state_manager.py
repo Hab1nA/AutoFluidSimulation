@@ -44,7 +44,7 @@ class StateManager:
         self._lock = threading.Lock()  # 线程安全锁
         self._config_pragmas()  # 首次初始化 PRAGMA 配置
         self._init_database()
-    
+
     def _config_pragmas(self):
         """配置数据库 PRAGMA 设置（仅初始化一次）。"""
         conn = sqlite3.connect(self.db_path, timeout=10)

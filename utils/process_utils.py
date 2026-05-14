@@ -23,7 +23,7 @@ def is_process_alive(pid: int) -> bool:
     """
     if pid < MIN_VALID_PID:
         return False
-    
+
     if sys.platform == "win32":
         try:
             import ctypes
@@ -97,10 +97,10 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
     """
     if pid < MIN_VALID_PID:
         return False
-    
+
     if sys.platform != "win32":
         return False
-    
+
     try:
         result = subprocess.run(
             ["taskkill", "/pid", str(pid), "/f"],

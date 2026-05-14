@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List
 
-from engine.config import LOCAL_PATHS, ENGINE_CONFIG, get_step_filename, STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED
+from engine.config import LOCAL_PATHS, ENGINE_CONFIG, get_step_filename
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)

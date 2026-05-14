@@ -28,7 +28,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from utils.tui_launcher import find_rust_tui_binary, check_rust_tui_source, print_rust_tui_not_found_help
+from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
 from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill
 from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
@@ -105,7 +105,7 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
     try:
         # 打开日志文件
         log_fo = open(daemon_log_file, "w", encoding="utf-8")
-        
+
         proc = subprocess.Popen(
             [sys.executable, daemon_script],
             cwd=PROJECT_DIR,

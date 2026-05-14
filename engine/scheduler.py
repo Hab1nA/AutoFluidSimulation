@@ -31,7 +31,6 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
 from engine.task_runner import TaskRunner
-from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)

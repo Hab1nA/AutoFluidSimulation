@@ -18,7 +18,7 @@ import subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import init_session
-from utils.tui_launcher import find_rust_tui_binary, check_rust_tui_source, print_rust_tui_not_found_help
+from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 session_log_dir = init_session("client")
