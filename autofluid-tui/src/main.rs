@@ -249,10 +249,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     if ipc.is_connected() {
                         log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                     } else {
-                        let project_dir = std::env::current_dir()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
                         match daemon.launch(&project_dir) {
                             Ok(pid) => {
                                 log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
@@ -379,11 +375,7 @@ fn process_event(
                             if ipc.is_connected() {
                                 log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                             } else {
-                                let project_dir = std::env::current_dir()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string();
-                                match daemon.launch(&project_dir) {
+                                match daemon.launch(project_dir) {
                                     Ok(pid) => {
                                         log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
                                         reconnect_ipc_after_daemon_launch(&rt, ipc, state, log_buffer);

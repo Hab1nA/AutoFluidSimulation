@@ -45,6 +45,14 @@ from engine.config import (
 from engine.state_manager import StateManager
 
 
+class _MockSCPool:
+    def do_first_cleanup(self): pass
+    def do_final_cleanup(self): pass
+    def reset(self): pass
+    def shutdown_all(self): pass
+    def run_config(self, *args, **kwargs): return True
+
+
 class MockTaskRunner:
     def __init__(self, state_manager: StateManager):
         self.state = state_manager
@@ -52,6 +60,7 @@ class MockTaskRunner:
         self._sw_delay = 0.0
         self._sw_call_count = 0
         self._pause_check_callback = None
+        self._sc_pool = _MockSCPool()
 
     def execute_sw_macro(self) -> bool:
         self._sw_call_count += 1

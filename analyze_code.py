@@ -53,7 +53,7 @@ def analyze_python_file(file_path):
                         self.defined_names.add(target.id)
                     elif isinstance(target, ast.Attribute):
                         pass  # 不处理属性赋值
-                    elif isinstance(target, ast.Tuple) or isinstance(target, ast.List):
+                    elif isinstance(target, (ast.Tuple, ast.List)):
                         # 简单处理解包
                         for elt in ast.walk(target):
                             if isinstance(elt, ast.Name):

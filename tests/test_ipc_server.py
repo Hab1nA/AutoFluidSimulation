@@ -1,5 +1,7 @@
 import socket
 import threading
+import time
+
 from ipc.server import IPCServer
 from ipc.protocol import serialize, create_request, deserialize
 
@@ -70,8 +72,6 @@ def test_end_to_end_in_memory_socket():
     def echo(params):
         return True, params, ""
     srv.register_handler("echo", echo)
-    # 等待服务器线程就绪
-    import time
     time.sleep(0.05)
 
     try:

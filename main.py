@@ -345,29 +345,23 @@ def _run_all_mode():
     sp_logger.info("准备启动 TUI Client")
 
     # 注册退出清理
-    _daemon_proc_ref = [daemon_proc]
-
     def _cleanup_on_exit(signum=None, frame=None):
         sp_logger.info("收到退出信号，正在清理...")
-        proc = _daemon_proc_ref[0]
-        if proc is not None:
-            # 关闭日志文件句柄（若存在）
-            if hasattr(proc, "_log_file_handle"):
+        if daemon_proc is not None:
+            if hasattr(daemon_proc, "_log_file_handle"):
                 try:
-                    proc._log_file_handle.close()  # type: ignore[attr-defined]
+                    daemon_proc._log_file_handle.close()  # type: ignore[attr-defined]
                 except (OSError, AttributeError):
                     pass
-            
-            # 终止进程
-            if proc.poll() is None:
+            if daemon_proc.poll() is None:
                 try:
-                    proc.terminate()
+                    daemon_proc.terminate()
                     try:
-                        proc.wait(timeout=5)
+                        daemon_proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
-                    sp_logger.info(f"Daemon 子进程已终止 (PID: {proc.pid})")
+                        daemon_proc.kill()
+                        daemon_proc.wait()
+                    sp_logger.info(f"Daemon 子进程已终止 (PID: {daemon_proc.pid})")
                 except (OSError, subprocess.SubprocessError):
                     pass
         remove_pid_file(DAEMON_PID_FILE)

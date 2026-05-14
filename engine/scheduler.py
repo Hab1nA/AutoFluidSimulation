@@ -1291,17 +1291,15 @@ class PipelineScheduler:
                     continue
 
             # SCDOC 不存在 → 重新推入队列，由 worker 池按并发限制处理
-            # ★ 使用 appendleft 插入队列前端，确保暂停的构型优先于新扫描到的构型被恢复
             sw_filename = get_step_filename("SW", cn)
             if sw_filename:
                 step_file = os.path.join(step_dir, sw_filename)
                 # 仅当 STEP 文件存在时才入队（防止无效任务堆积）
                 if os.path.exists(step_file):
-                    with self._sc_queue.mutex:
-                        self._sc_queue.queue.appendleft((cn, step_file))
+                    self._sc_queue.put((cn, step_file))
                     re_enqueued_count += 1
                     logger.info(
-                        f"[恢复] 构型{cn} SC: 无输出文件，优先重新入队等待处理"
+                        f"[恢复] 构型{cn} SC: 无输出文件，重新入队等待处理"
                     )
                 else:
                     # STEP 文件缺失 → 上游异常，标记 Error

@@ -24,7 +24,8 @@ impl DaemonManager {
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000);
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+            cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
         match cmd.spawn() {
