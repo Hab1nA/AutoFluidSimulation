@@ -1,7 +1,7 @@
 # AutoFluid 仿真流水线总控系统 — Code Wiki
 
 > **项目全称**：液氧甲烷火箭发动机仿真自动化流水线总控程序
-> **版本**：v2.4.0
+> **版本**：v2.5.0
 > **语言栈**：Python（后端引擎） + Rust（TUI 客户端）
 > **目标平台**：本地 Windows PC + 远程 Windows 工作站
 
@@ -34,7 +34,7 @@ AutoFluid 是一套**液氧甲烷火箭发动机仿真自动化流水线**控制
 | 阶段 | 名称 | 执行位置 | 说明 |
 |------|------|----------|------|
 | SW | SolidWorks 导出 | 本地 PC | 通过 COM 自动化驱动 SolidWorks，按构型批量导出 STEP 文件 |
-| SC | SpaceClaim 转换 | 本地 PC | 无头调用 SpaceClaim，将 STEP 转换为 SCDOC 格式 |
+| SC | SpaceClaim 转换 | 本地 PC | C# Bridge 进程检测模式：SCProcessPool → SpaceClaimBridge.exe → SpaceClaim + transit.py 脚本，参数由环境变量传递，三相 GUI 就绪检测后自动转换 STEP 为 SCDOC |
 | Transfer | 文件传输 | 本地 → 远程 | 通过 SSH/SFTP 将 SCDOC 上传到远程工作站 |
 | Meshing | 网格划分 | 远程工作站 | 通过 SSH 启动远程 Fluent Meshing 后台任务 |
 | Solver | 仿真求解 | 远程工作站 | 全局屏障通过后，并行启动所有构型的 Fluent Solver |
@@ -83,6 +83,16 @@ AutoFluid 是一套**液氧甲烷火箭发动机仿真自动化流水线**控制
 │                    │  (Meshing/Solver) │                      │
 │                    └──────────────────┘                      │
 │                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  本地 Windows 执行环境                                  │   │
+│  │  ┌───────────┐  ┌─────────────────────────────────┐  │   │
+│  │  │SolidWorks │  │  SCProcessPool (3槽位进程池)      │  │   │
+│  │  │win32com   │  │  └─ SpaceClaimBridge.exe (C#)   │  │   │
+│  │  │COM API    │  │      └─ SpaceClaim /RunScript   │  │   │
+│  │  └───────────┘  │          └─ transit.py (V23)    │  │   │
+│  │                 └─────────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
 │                   后台引擎进程 (Daemon)                        │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -92,6 +102,7 @@ AutoFluid 是一套**液氧甲烷火箭发动机仿真自动化流水线**控制
 - **Daemon-TUI 分离**：引擎与界面独立运行，TUI 崩溃不影响仿真任务
 - **SQLite WAL 模式**：支持多进程并发读取状态，Daemon 独占写入
 - **Producer-Consumer 模式**：文件监控器（Producer）检测 STEP 文件 → 推入队列 → Worker 线程（Consumer）执行下游步骤
+- **SCProcessPool 进程池**：C# `SpaceClaimBridge.exe` 纯进程检测模式管理 SpaceClaim 并发调用（3 槽位 + 等待队列 + 断点续传 + 暂停/停止响应）
 - **全局屏障同步**：所有构型 Meshing 完成后才解锁 Solver 阶段
 - **断点续传**：状态持久化到 SQLite，重启后自动从断点恢复
 
@@ -116,10 +127,18 @@ autofluid/
 │   ├── scheduler.py         # DAG 任务调度器（PipelineScheduler）
 │   ├── task_runner.py       # 任务执行器（TaskRunner）
 │   ├── state_manager.py     # 共享状态管理器（SQLite WAL）
+│   ├── sc_process_pool.py   # SpaceClaim 进程并发池（SCProcessPool）
 │   └── file_monitor.py      # STEP 文件目录监控器
 │
 ├── executor/                # 🚀 外部执行器脚本
 │   └── spaceclaim_transit.py # SpaceClaim 脚本：STEP → SCDOC 转换（V23 API）
+│
+├── bridge/                  # 🌉 C# SpaceClaim 桥接程序
+│   └── SpaceClaimBridge/
+│       ├── Program.cs       # .NET 4.8 主程序（纯进程检测模式）
+│       ├── Program.NoRef.cs # C# 5 兼容版（免 ANSYS 引用编译）
+│       ├── compile.bat      # 官方编译脚本
+│       └── compile_noref.bat# 免引用编译脚本
 │
 ├── ipc/                     # 🔌 进程间通信协议
 │   ├── __init__.py
@@ -146,8 +165,13 @@ autofluid/
 │       │   ├── log_buffer.rs# 日志环形缓冲区（LogBuffer）
 │       │   └── filter.rs    # 日志过滤器
 │       ├── event_handler.rs # 事件处理模块入口
-│       │   ├── key_handler.rs # 键盘事件处理
+│       │   ├── key_handler.rs # 键盘事件处理（含 settings 页面快捷键）
 │       │   └── command.rs   # 命令分发与执行
+│       ├── settings.rs       # 设置页面模块入口
+│       │   ├── mod.rs       # SettingCategory 枚举 & SettingsState 状态管理（5分类38字段）
+│       │   ├── settings_ui.rs# 设置对话框渲染（字段编辑、按钮、滚动条）
+│       │   ├── config_io.rs  # TOML/ .env 配置文件读写
+│       │   └── validation.rs # 配置字段验证（路径、端口、模板占位符等）
 │       └── ui.rs            # UI 渲染模块入口
 │           ├── layout.rs    # 布局管理（AppLayout）
 │           ├── header.rs    # 标题栏 & 信息栏渲染
@@ -239,7 +263,7 @@ start_pipeline()
     │
     ├─ Worker 线程池（Consumer）：3 个工作线程从队列取任务
     │   └─ _worker_loop() → _process_single_config()
-    │       ├─ SC 阶段：execute_spaceclaim(config)
+    │       ├─ SC 阶段：通过 SCProcessPool 进程池执行 SpaceClaim 转换
     │       ├─ Transfer 阶段：execute_transfer(config)
     │       └─ Meshing 阶段：execute_meshing(config) + wait_meshing_completion()
     │
@@ -278,7 +302,7 @@ start_pipeline()
 | 方法 | 阶段 | 执行方式 |
 |------|------|----------|
 | `execute_sw_macro()` | SW | 三层降级连接 SW（GetActiveObject → Dispatch → subprocess），COM 直接导出 STEP |
-| `execute_spaceclaim(config)` | SC | subprocess 无头调用 SpaceClaim |
+| `execute_spaceclaim(config)` | SC | 通过 SCProcessPool 进程池管理 SpaceClaim 调用（3 槽位并发 + 等待队列、暂停/停止响应），优先 C# Bridge 降级 subprocess |
 | `execute_transfer(config)` | Transfer | paramiko SFTP 上传 SCDOC |
 | `execute_meshing(config)` | Meshing | SSH + PowerShell Start-Process 启动远程后台任务 |
 | `wait_meshing_completion(config)` | Meshing | 轮询远程标志文件 |
@@ -350,6 +374,94 @@ engine_state (key TEXT PK, value TEXT)
 - `pause()`：设置 `_paused` 事件，监控循环进入等待
 - `resume_and_reset()`：清除暂停标志 + 标记重置 + 唤醒监控线程
 - 恢复后自动重置已处理文件集合并执行完整扫描
+
+#### 4.1.7 sc_process_pool.py — SpaceClaim 进程并发池
+
+`SCProcessPool` 管理 SpaceClaim 子进程的并发执行，替换了原先 task_runner.py 中内联的 SC 调用逻辑。
+
+**设计动机**：
+
+SpaceClaim 不向外部暴露 out-of-process COM 自动化接口（与 AutoCAD/SolidWorks 不同），因此只能通过命令行 `/RunScript` 驱动。同一时刻只能有一个 SpaceClaim 进程处理 `/RunScript` 命令（后启动的实例仅传递参数给首个实例），因此需要进程池统一管理并发。
+
+**架构**：
+
+```
+                    ┌──────────────────────┐
+                    │    SCProcessPool     │
+                    │  ┌────────────────┐  │
+                    │  │  JSON 持久化池   │  │
+                    │  │  文件状态恢复    │  │
+                    │  └──────┬─────────┘  │
+                    │         │             │
+                    │  ┌──────▼─────────┐  │
+                    │  │  3 槽位进程池    │  │
+                    │  │  (Slot/Idle)   │  │
+                    │  └──────┬─────────┘  │
+                    │         │             │
+                    │  ┌──────▼─────────┐  │
+                    │  │  等待队列       │  │
+                    │  │  (Condition)   │  │
+                    │  └────────────────┘  │
+                    └──────────────────────┘
+                              │
+               ┌──────────────┼──────────────┐
+               ▼              ▼              ▼
+     ┌─────────────────┐ ┌──────────────┐ ┌─────────────────┐
+     │SpaceClaimBridge │ │SpaceClaimBridge│ │SpaceClaimBridge │
+     │.exe (C#)        │ │.exe (C#)      │ │.exe (C#)       │
+     └────────┬────────┘ └──────┬───────┘ └────────┬────────┘
+              │                  │                  │
+              ▼                  ▼                  ▼
+         SpaceClaim         SpaceClaim          SpaceClaim
+         /RunScript         /RunScript          /RunScript
+```
+
+**C# Bridge 调用约定**：
+
+```
+SpaceClaimBridge.exe
+  --script   <transit.py 路径>    # 必需：SpaceClaim IronPython 脚本
+  --config   <构型编号>            # 必需：如 5
+  --stepdir  <STEP 目录>          # 必需：STEP 输入文件目录
+  --scdocdir <SCDOC 输出目录>      # 必需：SCDOC 输出目录
+  [--timeout <秒数>]              # 可选：默认 300s
+  [--sc-exe  <SpaceClaim.exe路径>] # 可选：自动检测
+
+返回值: 0=成功 1=脚本失败 2=启动失败 3=输出验证失败 4=参数错误 5=超时
+```
+
+**核心流程**：
+
+1. `acquire(config_name)` — 获取空闲槽位，若无则加入等待队列（Condition Variable 唤醒）
+2. `_execute_in_slot(slot_id, config_name)` — 在槽位中执行任务：
+   - 构建 Bridge 命令行参数
+   - 通过环境变量传递配置参数（`AUTOFLUID_SC_CONFIG`/`AUTOFLUID_SC_STEP_DIR`/`AUTOFLUID_SC_SCDOC_DIR`）
+   - 以 `CREATE_NO_WINDOW` 启动 `SpaceClaimBridge.exe` 子进程
+   - 轮询 Bridge 退出 + 超时/暂停/停止检测
+   - 验证 SCDOC 输出文件
+3. `release(slot_id)` — 释放槽位，唤醒等待队列中的下一任务
+
+**降级方案**：若 `sc_bridge` 路径无效或 `SpaceClaimBridge.exe` 不存在，直接以 subprocess 形式启动 `SpaceClaim.exe /RunScript="<script>" /Splash=False /Welcome=False /ExitAfterScript=True` 完成转换。
+
+**Bridge 内部流程**（Program.cs）：
+
+1. 参数解析 → 验证 STEP 输入文件存在
+2. `FindSpaceClaimExe()` — 自动搜索多个 ANSYS 版本路径（v231/v232/v241）
+3. 以 `/RunScript` + 环境变量传参模式启动 SpaceClaim
+4. **三相 GUI 就绪检测**：
+   - Phase 1：轮询 `MainWindowHandle` 和 `MainWindowTitle`，最长 120 秒等待进程出现
+   - Phase 2：`WaitForInputIdle(15s)` 等待 WPF Dispatcher 消息泵空闲
+   - Phase 3：固定延时 15 秒等待 SpaceClaim 完全加载稳定
+5. 轮询 SCDOC 输出文件，2 秒间隔，直至超时或文件出现
+6. 若 SpaceClaim 进程提前退出，进行最终输出验证
+7. 返回 exit code
+
+**池状态持久化**：槽位状态保存到 `{data_dir}/sc_process_pool.json`，支持 Daemon 重启后的进程存活检查与状态恢复。
+
+**全量清理**：
+- `do_first_cleanup()` — 首次进入 SC 阶段前 `taskkill /f /im SpaceClaim.exe` 清理所有残留进程
+- `do_final_cleanup()` — 所有 SC 任务完成后再次清理
+- `shutdown_all()` — 全量清理并重置所有槽位为 idle
 
 ---
 
@@ -467,13 +579,13 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
     → run_app():
         ├─ 创建 AppState / LogBuffer / IpcClient / DaemonManager
         ├─ 主循环：
-        │   ├─ 点击动画超时检测（按钮/对话框/详细日志行 120ms 后清除）
+        │   ├─ 点击动画超时检测（按钮/对话框/详细日志行/设置字段 120ms 后清除）
         │   ├─ pending_command 处理（StartDaemon / StopDaemon / FullQuit 等）
         │   ├─ crossterm 事件轮询（50ms 首次 + 0ms 批量排空）
-        │   │   ├─ 键盘事件 → key_handler::handle_key()
-        │   │   ├─ 鼠标事件 → handle_mouse()（悬停/点击/拖拽/滚轮）
+        │   │   ├─ 键盘事件 → key_handler::handle_key()（按 UiMode 路由：Normal / ConfirmDialog / CheckResult / Settings）
+        │   │   ├─ 鼠标事件 → handle_mouse()（悬停/点击/拖拽/滚轮；Settings 模式下双击字段编辑）
         │   │   └─ 终端大小变化 → update_terminal_size()
-        │   ├─ 条件重绘（needs_redraw 时执行 do_redraw，含信息面板/详细日志自动滚动逻辑）
+        │   ├─ 条件重绘（needs_redraw 时执行 do_redraw，UiMode::Settings 时渲染设置对话框）
         │   ├─ IPC 定时轮询（1 秒间隔：状态 + 增量日志；5 秒间隔：引擎状态）
         │   └─ 时钟刷新（500ms 间隔触发重绘更新标题栏时间）
         └─ 退出清理：disconnect IPC + stop Daemon
@@ -493,16 +605,19 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 
 | 结构体 | 说明 |
 |--------|------|
-| `AppState` | 全局状态（连接、构型数据、引擎信息、UI 模式、焦点、滚动位置、悬停/点击状态、滚动条拖拽状态、信息面板/详细日志自动滚动状态等） |
+| `AppState` | 全局状态（连接、构型数据、引擎信息、UI 模式、焦点、滚动位置、悬停/点击状态、滚动条拖拽状态、信息面板/详细日志自动滚动状态、设置页面状态 `SettingsState`） |
 | `EngineInfo` | 引擎状态信息（engine_status / sw_macro_started / barrier_passed） |
 | `LogBuffer` | 日志环形缓冲区（detail_buffer: 2000 条 / info_messages: 200 条 / info_generation: 新消息计数器） |
 | `LogEntry` | 结构化日志条目（id / timestamp / level / source / message） |
 | `FocusZone` | 焦点区域枚举（CommandInput / Table / InfoLog / DetailLog） |
-| `UiMode` | UI 模式枚举（Normal / ConfirmDialog / CheckResult） |
+| `UiMode` | UI 模式枚举（Normal / ConfirmDialog / CheckResult / **Settings**） |
 | `ConfirmAction` | 确认操作枚举（ResetStep / CleanStep / FullQuit / StopDaemon） |
 | `ScrollbarDragZone` | 滚动条拖拽区域枚举（TableVertical / InfoVertical / InfoHorizontal / DetailVertical / DetailHorizontal / DialogVertical） |
 | `ScrollbarRenderedInfo` | 渲染后的滚动条位置信息（6 个可选的 (area, total, visible, scroll) 元组） |
 | `FilterType` | 过滤类型枚举（Level / Source） |
+| `SettingCategory` | 设置分类枚举（LocalPaths / RemoteConnection / RemoteDirs / StepPatterns / EngineConfig） |
+| `SettingsState` | 设置页面状态（config / focus / scroll / dirty / edit_buffer / undo_stack / validation_errors / path_status / hovered_field 等），支持 TOML 持久化、Ctrl+Z 撤销、实时路径校验 |
+| `SettingsFocus` | 设置焦点（category_index / field_index / editing） |
 
 #### 4.4.3 ipc/ — IPC 通信
 
@@ -516,8 +631,8 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 
 | 模块 | 说明 |
 |------|------|
-| `key_handler` | 键盘事件分发（按 UiMode 和 FocusZone 路由，含信息面板/详细日志自动滚动切换） |
-| `command` | 命令解析与执行（help/start/pause/check/status/reset/clean/daemon/quit/filter/export） |
+| `key_handler` | 键盘事件分发（按 UiMode 和 FocusZone 路由，含设置页面快捷键：Tab/↑↓ 导航、Enter 编辑、←→ 光标移动、Ctrl+S 保存、Ctrl+Z 撤销） |
+| `command` | 命令解析与执行（help/start/pause/check/status/reset/clean/daemon/quit/filter/export/settings） |
 
 #### 4.4.5 ui/ — UI 渲染
 
@@ -527,9 +642,10 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `header` | 标题栏 + 信息栏渲染 |
 | `table` | 构型状态表格渲染（含垂直滚动条、悬停高亮） |
 | `logs` | 信息面板 + 详细日志面板渲染（含 Unicode 宽度感知换行、水平滚动偏移、自动滚动状态指示器） |
-| `command_bar` | 命令输入栏 + 8 个快捷按钮 |
-| `dialogs` | 确认对话框 + 自检结果弹窗（居中弹出层，支持内容滚动、按钮鼠标交互、自检结果自动换行与对称边距） |
+| `command_bar` | 命令输入栏 + 9 个快捷按钮（含 ⚙ Settings） |
+| `dialogs` | 确认对话框 + 自检结果弹窗 + 设置页面全局背景遮罩（居中弹出层，支持内容滚动、按钮鼠标交互、自检结果自动换行与对称边距） |
 | `scrollbar` | 通用滚动条组件（`VerticalScrollbar` / `HorizontalScrollbar`），支持 thumb 计算和拖拽定位 |
+| `SettingsRenderInfo` | 设置对话框渲染结果（content_total_lines / content_visible_lines / scrollbar_area / button_bar_y / field_positions） |
 
 #### 4.4.6 daemon_mgr.rs — Daemon 进程管理
 
@@ -552,6 +668,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `StateManager` | engine/state_manager.py | SQLite 持久化状态管理 |
 | `StepFileMonitor` | engine/file_monitor.py | STEP 文件目录监控 |
 | `FileStableDetector` | engine/file_monitor.py | 文件写入完成检测 |
+| `SCProcessPool` | engine/sc_process_pool.py | SpaceClaim 进程并发池（3 槽位 + 等待队列 + 断点续传） |
 | `IPCServer` | ipc/server.py | IPC 服务器 |
 | `RemoteWorkstation` | utils/ssh_client.py | SSH/SFTP 客户端 |
 | `LogBroadcastHandler` | utils/logger.py | 日志广播处理器 |
@@ -571,6 +688,14 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `HorizontalScrollbar` | ui/scrollbar.rs | 水平滚动条（渲染 + thumb 计算 + 拖拽定位） |
 | `ScrollbarThumbInfo` | ui/scrollbar.rs | 滚动条 thumb 位置/尺寸信息 |
 | `ScrollbarRenderedInfo` | state/app_state.rs | 渲染后各区域滚动条位置缓存 |
+| `SettingCategory` | settings/mod.rs | 设置分类枚举（LocalPaths / RemoteConnection / RemoteDirs / StepPatterns / EngineConfig），5 分类共 38 字段 |
+| `SettingsState` | settings/mod.rs | 设置页面状态管理（TOML 持久化、Ctrl+Z 撤销、路径存在性校验、密码双格式存储） |
+| `SettingsFocus` | settings/mod.rs | 设置焦点状态（category_index / field_index / editing） |
+| `SettingsRenderInfo` | settings/settings_ui.rs | 设置对话框渲染结果信息（内容行数、滚动条区域、字段位置映射） |
+| `LocalPaths` | settings/mod.rs | 本地路径配置结构体（9 个字段，TOML deserialize） |
+| `RemoteConfig` | settings/mod.rs | 远程配置结构体（13 个字段，TOML deserialize） |
+| `StepFilePatterns` | settings/mod.rs | 步骤文件模板结构体（4 个字段，含 `{config}` 占位符校验） |
+| `EngineConfig` | settings/mod.rs | 引擎配置结构体（12 个字段，含布尔/数值类型解析） |
 
 ### 关键函数
 
@@ -637,7 +762,8 @@ PipelineScheduler
     │                                   _sc_queue
     │                                        │
     ├─► Worker 线程 ◄────────────────────────┘
-    │   ├─ execute_spaceclaim() ──► SCDOC 文件
+    │   ├─ SCProcessPool → SpaceClaimBridge.exe
+    │   │   └─ SpaceClaim (环境变量 /RunScript) ──► SCDOC 文件
     │   ├─ execute_transfer() ──► 远程工作站 (SFTP)
     │   └─ execute_meshing() ──► 远程后台任务 (SSH)
     │
@@ -836,6 +962,14 @@ cargo build --release
 ---
 
 ## 11. 配置与环境变量
+
+### 配置方式
+
+项目支持两种配置方式：
+
+**方式一：TUI 设置页面（推荐）** — 在 TUI 界面中输入 `settings` 命令或点击 `⚙ Settings` 按钮，以可视化对话框编辑 5 大分类 38 个配置字段，实时校验路径存在性，`Ctrl+S` 保存到 `autofluid_config.toml`，SSH 密码自动写入 `.env` 文件。
+
+**方式二：直接编辑配置文件** — 手动编辑项目根目录的 `autofluid_config.toml`（TOML 格式）和 `.env` 文件（SSH 密码）。TUI 设置页面的修改结果也保存在这两个文件中。
 
 ### 环境变量覆盖
 
