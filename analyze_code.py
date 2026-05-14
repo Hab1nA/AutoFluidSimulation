@@ -53,7 +53,7 @@ def analyze_python_file(file_path):
                         self.defined_names.add(target.id)
                     elif isinstance(target, ast.Attribute):
                         pass  # 不处理属性赋值
-                    elif isinstance(target, ast.Tuple) or isinstance(target, ast.List):
+                    elif isinstance(target, (ast.Tuple, ast.List)):
                         # 简单处理解包
                         for elt in ast.walk(target):
                             if isinstance(elt, ast.Name):
@@ -82,8 +82,6 @@ def analyze_python_file(file_path):
                 if not node.type:
                     issues.append(f"裸 except 子句在第 {node.lineno} 行")
                 elif isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-                    pass  # 捕获所有异常是可以的
-                else:
                     pass
 
         return issues

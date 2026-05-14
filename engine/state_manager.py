@@ -42,7 +42,20 @@ class StateManager:
         """
         self.db_path = db_path or IPC_CONFIG["db_path"]
         self._lock = threading.Lock()  # 线程安全锁
+        self._config_pragmas()  # 首次初始化 PRAGMA 配置
         self._init_database()
+    
+    def _config_pragmas(self):
+        """配置数据库 PRAGMA 设置（仅初始化一次）。"""
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------
     # 数据库初始化
@@ -50,21 +63,26 @@ class StateManager:
 
     @contextmanager
     def _get_connection(self):
-        """获取数据库连接（上下文管理器，自动提交/关闭）。"""
+        """获取数据库连接（上下文管理器，自动提交/关闭）。
+        
+        注：PRAGMA 设置在 __init__ 中一次颒配置，此处不重复设置。
+        """
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
         try:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception as e:
+                logger.error(f"数据库回滚异常: {e}")
             raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as e:
+                logger.error(f"数据库连接关闭异常: {e}")
 
     def _init_database(self):
         """初始化数据库表结构。"""
@@ -325,11 +343,25 @@ class StateManager:
                         SET status = ?, retry_count = 0, error_message = '', updated_at = strftime('%s','now')
                         WHERE config_name = ? AND step_name = ?
                     """, (STATUS_WAITING, config_name, step_name))
-                # 如果重置了 SW，需要同时重置 sw_macro_started 标志
+                # 如果重置了 SW，需谨慎处理 sw_macro_started 标志：
+                # 仅当数据库中不再有任何 SW=Completed 的构型时才清除该标志。
+                # 这样可以避免部分重置（仅重置单个构型）时意外允许全部重跑 SW。
                 if from_step == "SW" or from_step is None:
-                    conn.execute(
-                        "UPDATE engine_state SET value = 'false' WHERE key = 'sw_macro_started'"
-                    )
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM steps "
+                        "WHERE step_name = 'SW' AND status = ?",
+                        (STATUS_COMPLETED,)
+                    ).fetchone()
+                    if not remaining or remaining["cnt"] == 0:
+                        conn.execute(
+                            "UPDATE engine_state SET value = ? WHERE key = ?",
+                            ("false", "sw_macro_started")
+                        )
+                    else:
+                        logger.debug(
+                            "仍有 %d 个构型的 SW=Completed，保持 sw_macro_started=true",
+                            remaining["cnt"] if remaining else 0,
+                        )
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")
 
@@ -337,11 +369,14 @@ class StateManager:
         """重置所有构型的所有步骤（含引擎全局状态）。"""
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ''",
-                           (STATUS_WAITING,))
-                conn.execute("UPDATE engine_state SET value = 'false' WHERE key = 'sw_macro_started'")
-                conn.execute("UPDATE engine_state SET value = 'false' WHERE key = 'global_barrier_met'")
-                conn.execute("UPDATE engine_state SET value = '0' WHERE key = 'error_count'")
+                conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ?",
+                           (STATUS_WAITING, ""))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("false", "sw_macro_started"))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("false", "global_barrier_met"))
+                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
+                           ("0", "error_count"))
         logger.warning("已重置所有构型的所有步骤！")
 
     # ------------------------------------------------------------------
@@ -380,16 +415,31 @@ class StateManager:
                 )
         logger.info("已将所有运行中/重试中步骤切换为 Paused")
 
-    def set_all_paused_to_running(self):
-        """将所有 Paused 状态的步骤恢复为 Running。"""
+    def set_all_paused_to_running(self, exclude_steps: list[str] | None = None):
+        """将所有 Paused 状态的步骤恢复为 Running。
+
+        Args:
+            exclude_steps: 可选的步骤名列表，这些步骤的 Paused 状态不会被修改
+        """
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute(
-                    "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                    "WHERE status = ?",
-                    (STATUS_RUNNING, STATUS_PAUSED)
-                )
-        logger.info("已将所有 Paused 步骤恢复为 Running")
+                if exclude_steps:
+                    placeholders = ','.join(['?'] * len(exclude_steps))
+                    conn.execute(
+                        f"UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                        f"WHERE status = ? AND step_name NOT IN ({placeholders})",
+                        (STATUS_RUNNING, STATUS_PAUSED, *exclude_steps)
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
+                        "WHERE status = ?",
+                        (STATUS_RUNNING, STATUS_PAUSED)
+                    )
+        if exclude_steps:
+            logger.info(f"已将所有 Paused 步骤恢复为 Running（排除步骤: {exclude_steps}）")
+        else:
+            logger.info("已将所有 Paused 步骤恢复为 Running")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""

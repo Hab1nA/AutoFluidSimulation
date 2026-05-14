@@ -94,14 +94,48 @@ except ImportError as e:
 # ============================================================================
 # 脚本参数获取
 # ============================================================================
-# SpaceClaim 在 /RunScript 模式下会将 /ScriptArgs 中每个参数注入为独立的
-# 命令行参数或在 args 全局变量中。若交互式测试或其他模式运行，则回退到 sys.argv。
+# SpaceClaim 支持多种脚本调用方式，参数传递格式各不相同：
+#
+# 方式A: /RunScript + /ScriptArgs（命令行模式）
+#   args 被注入为列表 ["config", "stepdir", "scdocdir"]
+#
+# 方式B: Application.RunScript(scriptPath, argDictionary)（API 模式，C# 桥接）
+#   args 被注入为字典 {"config_name": "6", "step_dir": "...", "scdoc_dir": "..."}
+#
+# 方式C: sys.argv（交互式测试）
+#   sys.argv = ["script.py", "6", step_dir, scdoc_dir]
+#
+# 方式D: 环境变量（后备方案）
+#   AUTOFLUID_SC_CONFIG, AUTOFLUID_SC_STEP_DIR, AUTOFLUID_SC_SCDOC_DIR
 def _get_script_args():
-    """获取脚本参数列表。优先使用 SpaceClaim 注入的全局 args。"""
-    # 方式1: SpaceClaim 注入的全局 args（/RunScript + /ScriptArgs）
+    """获取脚本参数列表。兼容多种调用模式。"""
+    # 方式1: SpaceClaim 注入的全局 args
     g = globals()
-    if 'args' in g and isinstance(g['args'], (list, tuple)):
-        return list(g['args'])
+    if 'args' in g:
+        raw_args = g['args']
+
+        # 方式1a: Dictionary 形式（Application.RunScript API 模式）
+        #   argDictionary = {"config_name": ..., "step_dir": ..., "scdoc_dir": ...}
+        if isinstance(raw_args, dict) or hasattr(raw_args, 'get'):
+            # ★ 不可使用 "or" 短路求值：config_name 可能是整数 0（falsy），
+            #    会被 "or" 错误跳过。应显式检查 None。
+            config = raw_args.get('config_name')
+            if config is None:
+                config = raw_args.get('configName')
+            if config is None:
+                config = raw_args.get('config')
+            step_dir = raw_args.get('step_dir') or raw_args.get('stepDir')
+            scdoc_dir = raw_args.get('scdoc_dir') or raw_args.get('scdocDir')
+            if config is not None and step_dir and scdoc_dir:
+                _log("[INFO] 参数来源: Application.RunScript Dictionary")
+                return [str(config), str(step_dir), str(scdoc_dir)]
+            _log("[WARN] Dictionary args 缺少必要字段: keys={}".format(
+                list(raw_args.keys()) if hasattr(raw_args, 'keys') else 'N/A'))
+
+        # 方式1b: List/Tuple 形式（/RunScript + /ScriptArgs 命令行模式）
+        elif isinstance(raw_args, (list, tuple)):
+            _log("[INFO] 参数来源: /RunScript List")
+            return list(raw_args)
 
     # 方式2: 检查内置作用域（IronPython 兼容）
     try:
@@ -112,8 +146,6 @@ def _get_script_args():
         pass
 
     # 方式3: 通过 sys.argv（去掉脚本路径本身）
-    #   - 交互式执行：sys.argv = ["script.py", "6", step_dir, scdoc_dir]
-    #   - /RunScript 模式：sys.argv 可能只含脚本路径，不含自定义参数
     if len(sys.argv) > 1:
         return sys.argv[1:]
 

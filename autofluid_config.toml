@@ -1,0 +1,45 @@
+[local_paths]
+sw_exe = 'C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe'
+sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT'
+excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx'
+step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
+sc_exe = 'C:\Program Files\ANSYS Inc\v231\scdm\SpaceClaim.exe'
+sc_script = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\spaceclaim_transit.py'
+scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
+log_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\logs'
+data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
+
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "abc@123"
+root_dir = 'D:\xkz_1020'
+scdoc_dir = 'D:\xkz_1020\scdoc'
+msh_dir = 'D:\xkz_1020\msh'
+result_dir = 'D:\xkz_1020\case'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+meshing_script = 'D:\xkz_1020\batch_meshing_gen4.py'
+solver_script = 'D:\xkz_1020\batch_solver_gen4.py'
+flag_dir = 'D:\xkz_1020\flags'
+
+[step_file_patterns]
+SW = "model_gen4.SLDPRT_{config}.step"
+SC = "model_gen4_{config}.scdoc"
+Meshing = "model_gen4_{config}.msh.h5"
+Solver = "model_gen4_{config}.cas.h5"
+
+[engine_config]
+watchdog_interval = 1.0
+sw_macro_timeout = 3600
+sw_close_doc_on_finish = true
+sw_exit_on_finish = true
+sw_visible = true
+sw_max_retries = 2
+sc_timeout = 300
+transfer_timeout = 120
+meshing_timeout = 600
+solver_timeout = 7200
+max_retries = 3
+state_refresh_interval = 0.5

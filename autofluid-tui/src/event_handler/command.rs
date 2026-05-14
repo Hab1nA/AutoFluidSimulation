@@ -12,6 +12,7 @@ pub enum CommandResult {
     FullQuit,
     StartDaemon,
     StopDaemon,
+    RestartDaemon,
 }
 
 pub async fn dispatch_command(
@@ -210,7 +211,7 @@ pub async fn dispatch_command(
         }
         "daemon" => {
             if parts.len() < 2 {
-                log_buffer.push_info("用法: daemon start  或 daemon stop".to_string());
+                log_buffer.push_info("用法: daemon start | daemon stop | daemon restart".to_string());
                 return CommandResult::None;
             }
             match parts[1].to_lowercase().as_str() {
@@ -222,11 +223,16 @@ pub async fn dispatch_command(
                     state.ui_mode = UiMode::ConfirmDialog;
                     CommandResult::None
                 }
+                "restart" => CommandResult::RestartDaemon,
                 _ => {
-                    log_buffer.push_info("用法: daemon start  或 daemon stop".to_string());
+                    log_buffer.push_info("用法: daemon start | daemon stop | daemon restart".to_string());
                     CommandResult::None
                 }
             }
+        }
+        "settings" => {
+            state.open_settings();
+            CommandResult::None
         }
         "filter" => {
             if parts.len() < 2 {
@@ -360,12 +366,14 @@ fn show_help(log_buffer: &mut LogBuffer) {
         "  help                       - 显示此帮助",
         "  start                      - 启动或继续流水线",
         "  pause                      - 暂停流水线",
+        "  settings                   - 打开程序设置页面",
         "  check                      - 系统自检",
         "  status                     - 显示状态摘要",
         "  reset <XX|all> <step|all>  - 重置构型步骤状态",
         "  clean <XX|all> <step|all>  - 清理构型步骤文件",
         "  daemon start               - 启动后台引擎并自动连接",
         "  daemon stop                - 停止后台引擎（TUI 继续运行）",
+        "  daemon restart             - 重启后台引擎（等同于 stop + start）",
         "  quit                       - 退出界面（引擎继续运行）",
         "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
         "",
@@ -388,5 +396,32 @@ fn show_help(log_buffer: &mut LogBuffer) {
     ];
     for line in help_lines {
         log_buffer.push_info(line.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_daemon_restart_dispatch() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command("daemon restart", &mut ipc, &mut state, &mut log_buffer).await;
+        assert!(matches!(result, CommandResult::RestartDaemon));
+    }
+
+    #[tokio::test]
+    async fn test_daemon_help_mentions_restart() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command("help", &mut ipc, &mut state, &mut log_buffer).await;
+        assert!(matches!(result, CommandResult::None));
+
+        assert!(log_buffer.info_messages.iter().any(|line| line.contains("daemon restart")));
     }
 }

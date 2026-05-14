@@ -46,8 +46,14 @@ def check_rust_tui_source(project_dir: str) -> bool:
             os.path.isfile(main_rs))
 
 
-def print_rust_tui_not_found_help(project_dir: str):
-    """打印 Rust TUI 未找到时的帮助信息。"""
+def print_rust_tui_not_found_help(project_dir: str) -> None:
+    """打印 Rust TUI 未找到时的诊断和帮助信息。
+    
+    检查源码是否完整，为用户提供编译指导。
+    
+    Args:
+        project_dir: 项目根目录绝对路径
+    """
     print("[错误] 未找到 Rust TUI 二进制文件。", file=sys.stderr)
     if check_rust_tui_source(project_dir):
         print(file=sys.stderr)

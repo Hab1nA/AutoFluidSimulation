@@ -1,4 +1,5 @@
 mod ipc;
+mod settings;
 mod state;
 mod ui;
 mod event_handler;
@@ -16,8 +17,9 @@ use ratatui::Terminal;
 use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::{FocusZone, UiMode, ScrollbarDragZone};
+use settings::SettingsState;
 use ui::layout::AppLayout;
-use ui::command_bar::BUTTON_DEFS;
+use ui::command_bar::{self, BUTTON_DEFS};
 use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
 use event_handler::key_handler;
 use event_handler::command;
@@ -31,6 +33,83 @@ pub fn format_local_time(fmt: &str) -> String {
         .replace("%H", &format!("{:02}", st.wHour))
         .replace("%M", &format!("{:02}", st.wMinute))
         .replace("%S", &format!("{:02}", st.wSecond))
+}
+
+fn reconnect_ipc_after_daemon_launch(
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let timeout = Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + timeout;
+
+    while std::time::Instant::now() < deadline {
+        if ipc.is_connected() {
+            state.connected = true;
+            return;
+        }
+
+        match rt.block_on(ipc.connect()) {
+            Ok(()) => {
+                state.connected = true;
+                log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+                return;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+
+    state.connected = false;
+    log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
+}
+
+fn stop_daemon_process(
+    daemon: &mut daemon_mgr::DaemonManager,
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    project_dir: &str,
+) {
+    if ipc.is_connected() {
+        let _ = rt.block_on(ipc.full_quit());
+        rt.block_on(ipc.disconnect());
+    }
+
+    let _ = daemon.stop(project_dir);
+    state.connected = false;
+    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+}
+
+fn restart_daemon_process(
+    daemon: &mut daemon_mgr::DaemonManager,
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    project_dir: &str,
+) {
+    stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
+
+    match daemon.launch(project_dir) {
+        Ok(pid) => {
+            log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
+            reconnect_ipc_after_daemon_launch(rt, ipc, state, log_buffer);
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
+        }
+    }
+}
+
+fn close_daemon_menu(state: &mut AppState) {
+    state.daemon_menu_open = false;
+    state.hovered_daemon_menu_item = None;
+    state.clicked_daemon_menu_item = None;
+    state.daemon_menu_click_time = None;
 }
 
 pub fn generate_request_id() -> String {
@@ -71,6 +150,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let project_dir = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     let mut ipc = IpcClient::new(None, None);
     let mut state = AppState::new();
@@ -97,6 +180,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
     }
 
+    let mut full_quit = false;
     let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = std::time::Instant::now();
@@ -115,6 +199,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 state.needs_redraw = true;
             }
         }
+        if let Some(ct) = state.daemon_menu_click_time {
+            if state.clicked_daemon_menu_item.is_some() && ct.elapsed() > Duration::from_millis(120) {
+                state.clicked_daemon_menu_item = None;
+                state.daemon_menu_click_time = None;
+                state.needs_redraw = true;
+            }
+        }
         if let Some(ct) = state.dialog_click_time {
             if state.clicked_dialog_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
                 state.clicked_dialog_button = None;
@@ -129,6 +220,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 state.needs_redraw = true;
             }
         }
+        // 设置页面字段点击动画超时
+        if let Some(ref mut ss) = state.settings_state {
+            if let Some(ct) = ss.field_click_time {
+                if ss.clicked_field.is_some() && ct.elapsed() > Duration::from_millis(20) {
+                    ss.clicked_field = None;
+                    ss.field_click_time = None;
+                    state.needs_redraw = true;
+                }
+            }
+        }
 
         if let Some(cmd) = state.pending_command.take() {
             let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
@@ -137,6 +238,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     state.should_quit = true;
                 }
                 command::CommandResult::FullQuit => {
+                    full_quit = true;
                     if ipc.is_connected() {
                         let _ = rt.block_on(ipc.full_quit());
                     }
@@ -147,13 +249,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     if ipc.is_connected() {
                         log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                     } else {
-                        let project_dir = std::env::current_dir()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
                         match daemon.launch(&project_dir) {
                             Ok(pid) => {
                                 log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                reconnect_ipc_after_daemon_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
                             }
                             Err(e) => {
                                 log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -161,14 +260,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                         }
                     }
                 }
+                command::CommandResult::RestartDaemon => {
+                    restart_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                }
                 command::CommandResult::StopDaemon => {
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
-                        rt.block_on(ipc.disconnect());
-                    }
-                    let _ = daemon.stop();
-                    state.connected = false;
-                    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                    stop_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 _ => {}
             }
@@ -177,11 +273,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         let first_poll_timeout = Duration::from_millis(50);
         if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
             let event = crossterm_event::read().map_err(|e| e.to_string())?;
-            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
+            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
 
             while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
                 let event = crossterm_event::read().map_err(|e| e.to_string())?;
-                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt);
+                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
             }
         }
 
@@ -236,7 +332,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     rt.block_on(ipc.disconnect());
-    let _ = daemon.stop();
+    if full_quit {
+        let _ = daemon.stop(&project_dir);
+    }
 
     Ok(())
 }
@@ -248,6 +346,8 @@ fn process_event(
     ipc: &mut IpcClient,
     daemon: &mut daemon_mgr::DaemonManager,
     rt: &tokio::runtime::Runtime,
+    project_dir: &str,
+    full_quit: &mut bool,
 ) {
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
@@ -264,6 +364,7 @@ fn process_event(
                             state.should_quit = true;
                         }
                         command::CommandResult::FullQuit => {
+                            *full_quit = true;
                             if ipc.is_connected() {
                                 let _ = rt.block_on(ipc.full_quit());
                             }
@@ -274,13 +375,10 @@ fn process_event(
                             if ipc.is_connected() {
                                 log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                             } else {
-                                let project_dir = std::env::current_dir()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string();
-                                match daemon.launch(&project_dir) {
+                                match daemon.launch(project_dir) {
                                     Ok(pid) => {
                                         log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                        reconnect_ipc_after_daemon_launch(&rt, ipc, state, log_buffer);
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -288,14 +386,11 @@ fn process_event(
                                 }
                             }
                         }
+                        command::CommandResult::RestartDaemon => {
+                            restart_daemon_process(daemon, ipc, &rt, state, log_buffer, project_dir);
+                        }
                         command::CommandResult::StopDaemon => {
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                                rt.block_on(ipc.disconnect());
-                            }
-                            let _ = daemon.stop();
-                            state.connected = false;
-                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                            stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
                         }
                         _ => {}
                     }
@@ -305,27 +400,47 @@ fn process_event(
                         let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
+                                *full_quit = true;
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
-                                if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.full_quit());
-                                    rt.block_on(ipc.disconnect());
-                                }
-                                let _ = daemon.stop();
-                                state.connected = false;
-                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                                stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
                             }
                             _ => {}
                         }
                     }
                 }
                 key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
+                key_handler::AppAction::DiscardSettings => {
+                    state.close_settings();
+                }
+                key_handler::AppAction::SaveSettings => {
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.validation_errors.clear();
+                        ss.save_error = None;
+                        match ss.save() {
+                            Ok(()) => {
+                                ss.saved = true;
+                                // Notify daemon via IPC
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.reload_config());
+                                }
+                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                            }
+                            Err(errors) => {
+                                ss.validation_errors = errors;
+                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
                 key_handler::AppAction::None => {}
             }
         }
         CrosstermEvent::Mouse(mouse) => {
-            handle_mouse(mouse, state, log_buffer, ipc, rt);
+            handle_mouse(mouse, state, log_buffer, ipc, rt, full_quit);
         }
         CrosstermEvent::Resize(w, h) => {
             state.update_terminal_size(w, h);
@@ -486,20 +601,20 @@ fn do_redraw(
         ui::table::render_table(frame, layout.status_table, state);
         ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll);
         ui::logs::render_detail_panel(
-            frame,
-            layout.detail_panel,
-            &ui::logs::DetailPanelParams {
-                log_buffer,
-                level_filter: &state.log_filter_level,
-                source_filter: &state.log_filter_source,
-                scroll_offset: state.detail_log_scroll,
-                auto_scroll: state.detail_log_auto_scroll,
-                focus_zone: state.focus_zone,
-                hovered_detail_row: state.hovered_detail_row,
-                clicked_detail_row: state.clicked_detail_row,
-                hscroll: state.detail_log_hscroll,
-            },
-        );
+        frame,
+        layout.detail_panel,
+        &ui::logs::DetailPanelParams {
+            log_buffer,
+            level_filter: &state.log_filter_level,
+            source_filter: &state.log_filter_source,
+            scroll_offset: state.detail_log_scroll,
+            auto_scroll: state.detail_log_auto_scroll,
+            focus_zone: state.focus_zone,
+            hovered_detail_row: state.hovered_detail_row,
+            clicked_detail_row: state.clicked_detail_row,
+            hscroll: state.detail_log_hscroll,
+        },
+    );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);
 
         match state.ui_mode {
@@ -524,6 +639,29 @@ fn do_redraw(
                     };
                     state.dialog_button_bar_y = Some(info.button_bar_y);
                     state.clamp_dialog_scroll(info.content_total_lines, info.content_visible_lines);
+                }
+            }
+            UiMode::Settings => {
+                if let Some(ref mut ss) = state.settings_state {
+                    let info = settings::settings_ui::render_settings_dialog(
+                        frame,
+                        area,
+                        ss,
+                        state.hovered_dialog_button,
+                        state.clicked_dialog_button,
+                    );
+                    ss.field_positions = info.field_positions;
+                    state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
+                        Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, ss.scroll as usize))
+                    } else {
+                        None
+                    };
+                    state.dialog_button_bar_y = Some(info.button_bar_y);
+                    // Clamp settings scroll
+                    let max_scroll = info.content_total_lines.saturating_sub(info.content_visible_lines) as u16;
+                    if ss.scroll > max_scroll {
+                        ss.scroll = max_scroll;
+                    }
                 }
             }
             UiMode::Normal => {
@@ -626,7 +764,7 @@ fn sb_horizontal_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, vi
     }
 }
 
-fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime) {
+fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuffer, ipc: &mut IpcClient, rt: &tokio::runtime::Runtime, full_quit: &mut bool) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
         return;
@@ -646,62 +784,95 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
         MouseEventKind::Moved => {
             let prev_hover_row = state.hovered_table_row;
             let prev_hover_btn = state.hovered_button;
+            let prev_hover_daemon_menu = state.hovered_daemon_menu_item;
             let prev_hover_detail = state.hovered_detail_row;
             let prev_hover_dialog_btn = state.hovered_dialog_button;
 
-            if in_table {
-                let inner_y = row.saturating_sub(layout.status_table.y + 1);
-                if inner_y > 0 {
-                    let data_row = state.table_scroll_offset + inner_y - 1;
-                    if (data_row as usize) < state.configs.len() {
-                        state.hovered_table_row = Some(data_row);
+            // 对话框激活时跳过背景面板的 hover 检测，只处理对话框内按钮
+            if state.ui_mode == UiMode::Normal {
+                if in_table {
+                    let inner_y = row.saturating_sub(layout.status_table.y + 1);
+                    if inner_y > 0 {
+                        let data_row = state.table_scroll_offset + inner_y - 1;
+                        if (data_row as usize) < state.configs.len() {
+                            state.hovered_table_row = Some(data_row);
+                        } else {
+                            state.hovered_table_row = None;
+                        }
                     } else {
                         state.hovered_table_row = None;
                     }
                 } else {
                     state.hovered_table_row = None;
                 }
-            } else {
-                state.hovered_table_row = None;
-            }
 
-            if in_detail {
-                let inner_top = layout.detail_panel.y + 1;
-                let inner_bottom = layout.detail_panel.y + layout.detail_panel.height.saturating_sub(1);
-                if row >= inner_top && row < inner_bottom {
-                    let inner_y = row - inner_top;
-                    let visual_line = state.detail_log_scroll + inner_y;
-                    state.hovered_detail_row = Some(visual_line);
+                if in_detail {
+                    let inner_top = layout.detail_panel.y + 1;
+                    let inner_bottom = layout.detail_panel.y + layout.detail_panel.height.saturating_sub(1);
+                    if row >= inner_top && row < inner_bottom {
+                        let inner_y = row - inner_top;
+                        let visual_line = state.detail_log_scroll + inner_y;
+                        state.hovered_detail_row = Some(visual_line);
+                    } else {
+                        state.hovered_detail_row = None;
+                    }
                 } else {
                     state.hovered_detail_row = None;
                 }
-            } else {
-                state.hovered_detail_row = None;
-            }
 
-            if in_buttons {
-                state.hovered_button = detect_button(col, row, &layout);
-            } else {
-                state.hovered_button = None;
-            }
+                if state.daemon_menu_open {
+                    state.hovered_daemon_menu_item = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons);
+                    if let Some(btn_idx) = command_bar::daemon_button_index() {
+                        state.hovered_button = command_bar::button_bounds(layout.quick_buttons, btn_idx)
+                            .and_then(|rect| if point_in_rect(col, row, rect) { Some(btn_idx as u8) } else { None });
+                    } else {
+                        state.hovered_button = None;
+                    }
+                } else {
+                    state.hovered_daemon_menu_item = None;
+                    if in_buttons {
+                        state.hovered_button = detect_button(col, row, &layout);
+                    } else {
+                        state.hovered_button = None;
+                    }
+                }
+            } // end Normal-mode-only hover detection
 
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
                 state.hovered_dialog_button = detect_dialog_button(col, row, area, state);
             } else {
                 state.hovered_dialog_button = None;
             }
 
+            // Settings 模式下检测字段 hover
+            let prev_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+            if state.ui_mode == UiMode::Settings {
+                if let Some(ref mut ss) = state.settings_state {
+                    ss.hovered_field = detect_settings_field(col, row, area, ss);
+                }
+            }
+            let new_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+
             if state.hovered_table_row != prev_hover_row
                 || state.hovered_button != prev_hover_btn
+                || state.hovered_daemon_menu_item != prev_hover_daemon_menu
                 || state.hovered_detail_row != prev_hover_detail
                 || state.hovered_dialog_button != prev_hover_dialog_btn
+                || prev_hovered_field != new_hovered_field
             {
                 state.needs_redraw = true;
             }
         }
         MouseEventKind::ScrollUp => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
-                if state.dialog_scroll > 0 {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+                if state.ui_mode == UiMode::Settings {
+                    if let Some(ref mut ss) = state.settings_state {
+                        if ss.scroll > 0 {
+                            ss.scroll = ss.scroll.saturating_sub(1);
+                            state.needs_redraw = true;
+                        }
+                    }
+                } else if state.dialog_scroll > 0 {
                     state.dialog_scroll = state.dialog_scroll.saturating_sub(1);
                     state.needs_redraw = true;
                 }
@@ -735,9 +906,16 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 }
         }
         MouseEventKind::ScrollDown => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
-                state.dialog_scroll = state.dialog_scroll.saturating_add(1);
-                state.needs_redraw = true;
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+                if state.ui_mode == UiMode::Settings {
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.scroll = ss.scroll.saturating_add(1);
+                        state.needs_redraw = true;
+                    }
+                } else {
+                    state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+                    state.needs_redraw = true;
+                }
             } else if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                 if in_info {
                     state.info_log_hscroll = state.info_log_hscroll.saturating_add(5);
@@ -802,7 +980,14 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                         InfoHorizontal => state.info_log_hscroll = new_scroll,
                         DetailVertical => { state.detail_log_scroll = new_scroll; state.detail_log_auto_scroll = false; }
                         DetailHorizontal => state.detail_log_hscroll = new_scroll,
-                        DialogVertical => state.dialog_scroll = new_scroll,
+                        DialogVertical => {
+                            state.dialog_scroll = new_scroll;
+                            if let Some(ref mut ss) = state.settings_state {
+                                if state.ui_mode == UiMode::Settings {
+                                    ss.scroll = new_scroll;
+                                }
+                            }
+                        }
                     }
                     state.focus_zone = focus;
                     state.needs_redraw = true;
@@ -810,7 +995,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             }
         }
         MouseEventKind::Down(_button) => {
-            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult {
+            if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
                 if let Some(btn_idx) = detect_dialog_button(col, row, area, state) {
                     state.clicked_dialog_button = Some(btn_idx);
                     state.dialog_click_time = Some(std::time::Instant::now());
@@ -823,6 +1008,24 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 let sb_info = state.scrollbar_info.clone();
                 let mut sb_detected = false;
 
+                // Settings 模式下仅检测对话框滚动条，跳过背景面板滚动条
+                if state.ui_mode == UiMode::Settings {
+                    if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
+                        if sb_vertical_track_hit(area, col, row) {
+                            let current_scroll = state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16);
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                            } else {
+                                let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                if let Some(ref mut ss) = state.settings_state {
+                                    ss.scroll = new_scroll;
+                                }
+                            }
+                            state.needs_redraw = true;
+                            sb_detected = true;
+                        }
+                    }
+                } else {
                 if let Some((area, total, visible, scroll)) = &sb_info.table_v {
                     if sb_vertical_track_hit(area, col, row) {
                         if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
@@ -896,19 +1099,94 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 if !sb_detected {
                     if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
                         if sb_vertical_track_hit(area, col, row) {
-                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, state.dialog_scroll));
+                            let current_scroll = if state.ui_mode == UiMode::Settings {
+                                state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16)
                             } else {
-                                state.dialog_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                state.dialog_scroll
+                            };
+                            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                                state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                            } else {
+                                let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                                if state.ui_mode == UiMode::Settings {
+                                    if let Some(ref mut ss) = state.settings_state {
+                                        ss.scroll = new_scroll;
+                                    }
+                                } else {
+                                    state.dialog_scroll = new_scroll;
+                                }
                             }
                             state.needs_redraw = true;
                             sb_detected = true;
                         }
                     }
                 }
+                } // end else (non-Settings scrollbar detection)
                 if sb_detected {
                     return;
                 }
+            }
+
+            // Settings 模式下检测字段点击（双击触发编辑）
+            if state.ui_mode == UiMode::Settings {
+                if let Some(ref mut ss) = state.settings_state {
+                    // 编辑模式下阻止鼠标对其他行进行双击/单击操作
+                    if !ss.focus.editing {
+                        if let Some((cat_idx, fi)) = detect_settings_field(col, row, area, ss) {
+                            let now = std::time::Instant::now();
+                            // Double-click: same field clicked within 400ms
+                            let is_double = ss.last_clicked_field == Some((cat_idx, fi))
+                                && ss.last_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+                            if is_double {
+                                ss.focus.category_index = cat_idx;
+                                ss.focus.field_index = fi;
+                                ss.begin_edit_current_field();
+                                ss.clicked_field = None;
+                                ss.field_click_time = None;
+                                ss.last_clicked_field = None;
+                                ss.last_click_time = None;
+                            } else {
+                                // Single click: select field + animation + track for double-click
+                                ss.focus.category_index = cat_idx;
+                                ss.focus.field_index = fi;
+                                ss.clicked_field = Some((cat_idx, fi));
+                                ss.field_click_time = Some(now);
+                                ss.last_clicked_field = Some((cat_idx, fi));
+                                ss.last_click_time = Some(now);
+                            }
+                            state.needs_redraw = true;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if state.ui_mode == UiMode::Normal && state.daemon_menu_open {
+                if let Some(menu_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+                    state.clicked_daemon_menu_item = Some(menu_idx);
+                    state.daemon_menu_click_time = Some(std::time::Instant::now());
+                    state.needs_redraw = true;
+                    return;
+                }
+
+                if let Some(btn_idx) = command_bar::daemon_button_index() {
+                    if let Some(button_rect) = command_bar::button_bounds(layout.quick_buttons, btn_idx) {
+                        if point_in_rect(col, row, button_rect) {
+                            close_daemon_menu(state);
+                            state.needs_redraw = true;
+                            return;
+                        }
+                    }
+                }
+
+                close_daemon_menu(state);
+                state.needs_redraw = true;
+                return;
+            }
+
+            // 当对话框覆盖层激活时，阻止鼠标事件穿透到背景面板
+            if state.ui_mode != UiMode::Normal {
+                return;
             }
 
             if in_buttons {
@@ -965,10 +1243,27 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
             if let Some(btn_idx) = state.clicked_dialog_button {
                 if let Some(hover_idx) = detect_dialog_button(col, row, area, state) {
                     if hover_idx == btn_idx {
-                        handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt);
+                        handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt, full_quit);
                     }
                 }
                 state.clicked_dialog_button = None;
+                state.needs_redraw = true;
+                return;
+            }
+            if let Some(menu_idx) = state.clicked_daemon_menu_item {
+                if state.daemon_menu_open {
+                    if let Some(hover_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+                        if hover_idx == menu_idx {
+                            if let Some(cmd) = command_bar::daemon_menu_command(menu_idx) {
+                                state.pending_command = Some(cmd.to_string());
+                                state.focus_zone = FocusZone::CommandInput;
+                            }
+                        }
+                    }
+                }
+                close_daemon_menu(state);
+                state.clicked_daemon_menu_item = None;
+                state.daemon_menu_click_time = None;
                 state.needs_redraw = true;
                 return;
             }
@@ -977,8 +1272,17 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                     if let Some(hover_idx) = detect_button(col, row, &layout) {
                         if hover_idx == btn_idx {
                             let cmd = BUTTON_DEFS[btn_idx as usize].1;
-                            state.pending_command = Some(cmd.to_string());
-                            state.focus_zone = FocusZone::CommandInput;
+                            if cmd == "daemon" {
+                                state.daemon_menu_open = !state.daemon_menu_open;
+                                if state.daemon_menu_open {
+                                    state.hovered_daemon_menu_item = None;
+                                } else {
+                                    close_daemon_menu(state);
+                                }
+                            } else {
+                                state.pending_command = Some(cmd.to_string());
+                                state.focus_zone = FocusZone::CommandInput;
+                            }
                         }
                     }
                 }
@@ -1019,7 +1323,8 @@ fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
 fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: &AppState) -> Option<u8> {
     let dialog_area = match state.ui_mode {
         UiMode::ConfirmDialog => ui::dialogs::centered_rect(80, 40, area),
-        UiMode::CheckResult => ui::dialogs::centered_rect(80, 70, area),
+        UiMode::CheckResult => ui::dialogs::centered_rect(90, 90, area),
+        UiMode::Settings => ui::dialogs::centered_rect(90, 90, area),
         UiMode::Normal => return None,
     };
 
@@ -1075,8 +1380,53 @@ fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: 
             }
             None
         }
+        UiMode::Settings => {
+            let save_label = " 保存更改 (Ctrl+S) ";
+            let cancel_label = " 取消 (Esc) ";
+            let save_w = unicode_width::UnicodeWidthStr::width(save_label) as u16;
+            let cancel_w = unicode_width::UnicodeWidthStr::width(cancel_label) as u16;
+            let gap: u16 = 4;
+            let total_w = save_w + cancel_w + gap;
+            let start_x = inner.x + (inner.width.saturating_sub(total_w)) / 2;
+
+            if col >= start_x && col < start_x + save_w {
+                return Some(0);
+            }
+            if col >= start_x + save_w + gap && col < start_x + save_w + gap + cancel_w {
+                return Some(1);
+            }
+            None
+        }
         UiMode::Normal => None,
     }
+}
+
+/// 检测鼠标是否悬停在 Settings 对话框的某一行字段上。
+/// 返回 (category_index, field_index)
+fn detect_settings_field(col: u16, row: u16, area: ratatui::layout::Rect, ss: &SettingsState) -> Option<(usize, usize)> {
+    let dialog_area = ui::dialogs::centered_rect(90, 90, area);
+    if !point_in_rect(col, row, dialog_area) {
+        return None;
+    }
+    let inner_y = dialog_area.y + 1;
+    let top_height: u16 = 2; // title + separator
+    let content_y = inner_y + top_height;
+    let bottom_height: u16 = 2;
+    let content_height = (dialog_area.height as u16).saturating_sub(2).saturating_sub(top_height).saturating_sub(bottom_height);
+    let content_bottom = content_y + content_height;
+
+    if row < content_y || row >= content_bottom {
+        return None;
+    }
+    let rel_row = row - content_y;
+    let visual_line = ss.scroll + rel_row;
+
+    for (cat_idx, fi, y) in &ss.field_positions {
+        if *y == visual_line {
+            return Some((*cat_idx, *fi));
+        }
+    }
+    None
 }
 
 fn handle_dialog_button_click(
@@ -1085,6 +1435,7 @@ fn handle_dialog_button_click(
     log_buffer: &mut LogBuffer,
     ipc: &mut IpcClient,
     rt: &tokio::runtime::Runtime,
+    full_quit: &mut bool,
 ) {
     match state.ui_mode {
         UiMode::ConfirmDialog => {
@@ -1094,6 +1445,7 @@ fn handle_dialog_button_click(
                         let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
+                                *full_quit = true;
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
@@ -1125,6 +1477,37 @@ fn handle_dialog_button_click(
                 state.ui_mode = UiMode::Normal;
                 state.check_data = None;
                 state.dialog_scroll = 0;
+            }
+        }
+        UiMode::Settings => {
+            match btn_idx {
+                0 => {
+                    // Save
+                    if let Some(ref mut ss) = state.settings_state {
+                        ss.validation_errors.clear();
+                        ss.save_error = None;
+                        match ss.save() {
+                            Ok(()) => {
+                                ss.saved = true;
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.reload_config());
+                                }
+                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                            }
+                            Err(errors) => {
+                                ss.validation_errors = errors;
+                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
+                                state.needs_redraw = true;
+                            }
+                        }
+                    }
+                }
+                1 => {
+                    // Cancel
+                    state.close_settings();
+                }
+                _ => {}
             }
         }
         UiMode::Normal => {}

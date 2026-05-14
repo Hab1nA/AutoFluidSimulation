@@ -4,7 +4,8 @@
 负责执行每个阶段的具体操作：
 
 1. SW 阶段：通过 win32com 唤醒 SolidWorks，执行 Macro1.swp 宏
-2. SC 阶段：通过 subprocess 无头调用 SpaceClaim
+2. SC 阶段：通过 C# 桥接程序 (SpaceClaimBridge.exe) 调用 SpaceClaim API
+   降级方案：subprocess 直接启动 /RunScript
 3. Transfer 阶段：通过 paramiko SSH 上传 scdoc 文件
 4. Meshing 阶段：通过 SSH 远程启动网格划分后台任务
 5. Solver 阶段：通过 SSH 远程启动仿真求解后台任务（全局屏障后）
@@ -25,6 +26,7 @@ from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     STATUS_COMPLETED, STATUS_ERROR, STEP_NAMES, STEP_FILE_PATTERNS, get_step_filename,
 )
+from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
 
@@ -48,16 +50,10 @@ class TaskRunner:
         """
         self.state = state_manager
         self._ssh: Optional[RemoteWorkstation] = None
-        self._ssh_lock = threading.RLock()  # 可重入锁：SSH 操作需串行化，get_ssh() 内部也需加锁
+        self._ssh_lock = threading.RLock()
 
-        # SpaceClaim 并发控制
-        # _sc_cleanup_done: 确保整个 SC 阶段只清理一次旧残留进程
-        # _sc_cleanup_lock: 保护 _sc_cleanup_done 的读写和首次清理的原子性
-        self._sc_cleanup_done = False
-        self._sc_cleanup_lock = threading.Lock()
+        self._sc_pool = SCProcessPool()
 
-        # 调度器控制事件引用（由 PipelineScheduler 注入）
-        # 用于在长时间阻塞操作（如 SC 的 process.communicate）中响应暂停/停止指令
         self._paused_event: Optional[threading.Event] = None
         self._stopped_event: Optional[threading.Event] = None
 
@@ -147,7 +143,11 @@ class TaskRunner:
                     if sw_app is not None:
                         logger.info(f"SolidWorks COM 接口已就绪 (等待了 {attempt + 1} 秒)")
                         return True
-                except Exception:
+                except (AttributeError, TypeError):
+                    # SW COM 对象尚未就绪，继续等待
+                    pass
+                except Exception as e:
+                    logger.debug(f"获取 SolidWorks COM 对象异常: {e}")
                     pass  # SW 还没完全启动，继续等
             logger.error(f"等待 SolidWorks 启动超时 ({max_wait} 秒)")
             return False
@@ -651,6 +651,7 @@ class TaskRunner:
         # 读取 Excel 参数名
         import openpyxl
         excel_params = []
+        wb = None
         try:
             wb = openpyxl.load_workbook(excel_path, data_only=True)
             ws = wb.active
@@ -660,9 +661,11 @@ class TaskRunner:
                 excel_params = [
                     str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
                 ]
-            wb.close()
         except Exception:
             pass
+        finally:
+            if wb is not None:
+                wb.close()
 
         # 获取模型参数 — 逐个测试 Excel 参数名
         model_param_names = []
@@ -808,6 +811,16 @@ class TaskRunner:
 
             filepath = os.path.join(step_dir, filename)
 
+            # ★ 跳过已完成的构型（防御性优化：避免重复导出已存在的 STEP 文件）
+            if cn_int is not None:
+                _sw_st = self.state.get_step_status(cn_int, "SW")
+                if _sw_st == STATUS_COMPLETED and os.path.exists(filepath):
+                    logger.info(
+                        f"  ✓ 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
+                    )
+                    success_configs.append(cn_int)
+                    continue
+
             # ---- 切换配置 ----
             try:
                 doc.ShowConfiguration2(cn_str)
@@ -951,6 +964,26 @@ class TaskRunner:
         # ---- 清理残留 SW 进程（仅在连接失败时作为备选方案的辅助） ----
         # 注意：不在此处无条件清理，避免误杀用户正在运行的 SW 实例。
         # _launch_solidworks_via_subprocess 会在启动新的 SW 进程前自行处理。
+
+        # ★ 防御性优化：若所有构型的 SW 步骤已完成且 STEP 文件存在，跳过 SolidWorks 启动
+        _all_cfgs = self.state.get_all_configs()
+        if _all_cfgs:
+            _all_done = True
+            for _cn in _all_cfgs:
+                if self.state.get_step_status(_cn, "SW") != STATUS_COMPLETED:
+                    _all_done = False
+                    break
+                _fn = get_step_filename("SW", _cn)
+                if _fn and not os.path.exists(os.path.join(step_dir, _fn)):
+                    _all_done = False
+                    break
+            if _all_done:
+                logger.info(
+                    "所有 %d 个构型的 SW 步骤已完成且 STEP 文件存在，"
+                    "跳过 SolidWorks 启动",
+                    len(_all_cfgs),
+                )
+                return True
 
         try:
             import win32com.client
@@ -1281,60 +1314,7 @@ class TaskRunner:
     # 阶段 3: SpaceClaim 脚本执行
     # ------------------------------------------------------------------
 
-    def _cleanup_sc_processes(self):
-        """
-        清理可能残留的 SpaceClaim 进程。
-
-        在启动新 SC 实例前调用，避免多个 SC 实例冲突或 /RunScript 被忽略。
-        仅在 Windows 平台生效。
-
-        关键问题：如果 SpaceClaim 已经运行（例如上次启动因超时/崩溃残留），
-        新的 SpaceClaim.exe /RunScript=... 命令只会打开新窗口但不会执行脚本，
-        因为 /RunScript 参数只会被首个进程实例处理。
-        """
-        if os.name != "nt":
-            return
-        try:
-            result = subprocess.run(
-                ["tasklist", "/fi", "IMAGENAME eq SpaceClaim.exe", "/fo", "csv", "/nh"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "SpaceClaim.exe" in result.stdout:
-                logger.info("[SC清理] 检测到残留 SpaceClaim 进程，正在终止...")
-                kill_result = subprocess.run(
-                    ["taskkill", "/f", "/im", "SpaceClaim.exe"],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if kill_result.returncode == 0:
-                    logger.info("[SC清理] ✓ 残留 SpaceClaim 进程已终止，等待 5 秒确保完全退出...")
-                    time.sleep(5)
-                else:
-                    logger.warning(
-                        f"[SC清理] taskkill 返回非零码 {kill_result.returncode}: "
-                        f"{kill_result.stderr.strip()}"
-                    )
-        except (subprocess.TimeoutExpired, OSError) as e:
-            logger.warning(f"[SC清理] 检查/终止 SC 进程时异常: {e}")
-
     def execute_spaceclaim(self, config_name: int) -> bool:
-        """
-        通过 subprocess 无头调用 SpaceClaim，将 STEP 转换为 SCDOC。
-
-        调用格式：
-        SpaceClaim.exe /RunScript=<脚本路径> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>
-
-        每个 ScriptArg 作为独立的命令行参数传递，确保 SpaceClaim 正确解析。
-        同时通过环境变量 AUTOFLUID_SC_* 传递参数作为后备方案。
-
-        脚本通过 args[0]=构型名, args[1]=STEP目录, args[2]=SCDOC目录 三个参数
-        定位输入 STEP 文件并保存输出 SCDOC 文件。
-
-        Args:
-            config_name: 构型名称（整数）
-
-        Returns:
-            True 表示 SC 脚本执行成功
-        """
         _sw_step_name = get_step_filename("SW", config_name)
         if not _sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
@@ -1349,17 +1329,9 @@ class TaskRunner:
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
         step_file = os.path.join(step_dir, _sw_step_name)
-        scdoc_file = os.path.join(scdoc_dir, _scdoc_name)
 
-        # 确保输出目录存在
-        try:
-            os.makedirs(scdoc_dir, exist_ok=True)
-        except OSError as e:
-            logger.error(f"无法创建 SCDOC 输出目录: {scdoc_dir}: {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"无法创建输出目录: {e}")
-            return False
+        os.makedirs(scdoc_dir, exist_ok=True)
 
-        # 检查输入文件
         if not os.path.exists(step_file):
             logger.error(f"STEP 文件不存在: {step_file}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件不存在")
@@ -1367,7 +1339,6 @@ class TaskRunner:
 
         sc_exe = LOCAL_PATHS["sc_exe"]
         sc_script = LOCAL_PATHS["sc_script"]
-
         if not os.path.exists(sc_exe):
             logger.error(f"SpaceClaim 可执行文件不存在: {sc_exe}")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 程序不存在")
@@ -1377,172 +1348,11 @@ class TaskRunner:
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
             return False
 
-        # ★ SC阶段首次调用时清理一次旧残留进程（线程安全）
-        # 设计原则：SC阶段开始前统一清理旧残留，运行中不再杀进程，
-        # 允许3个Worker并行启动独立的SpaceClaim实例，避免互杀导致exit=1。
-        # 超时/崩溃残留：超时分支仍会调用 _cleanup_sc_processes()；
-        # 崩溃残留不影响新SC实例（新进程独立PID，/RunScript正常生效）。
-        with self._sc_cleanup_lock:
-            if not self._sc_cleanup_done:
-                self._cleanup_sc_processes()
-                self._sc_cleanup_done = True
-
-        # 构建命令行：传递三个参数给脚本
-        # ScriptArgs 格式：每个参数独立传递给 SpaceClaim
-        #   args[0] = config_name   (构型编号)
-        #   args[1] = step_dir      (STEP 文件所在目录)
-        #   args[2] = scdoc_dir     (SCDOC 输出目录)
-        #
-        # 注意：不同版本的 SpaceClaim 对命令行的解析方式不同。
-        # 将每个 ScriptArg 作为独立的命令行参数传递（而非空格分隔的引用字符串），
-        # 确保 SpaceClaim 正确解析每个参数，同时避免路径中括号等特殊字符干扰。
-        cmd = [
-            sc_exe,
-            f"/RunScript={sc_script}",
-            "/ScriptArgs=" + str(config_name),
-            step_dir,
-            scdoc_dir,
-        ]
-
-        logger.info(f"SpaceClaim 启动: 构型{config_name}")
-        logger.debug(f"命令: {' '.join(cmd)}")
-
-        # ★ 同时通过环境变量传递参数（双重保障）
-        # 即使 /ScriptArgs 解析失败，脚本也能通过 os.environ 获取参数
-        sc_env = os.environ.copy()
-        sc_env["AUTOFLUID_SC_CONFIG"] = str(config_name)
-        sc_env["AUTOFLUID_SC_STEP_DIR"] = step_dir
-        sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
-
-        try:
-            # 使用 subprocess 启动 SpaceClaim（无头模式）
-            # SpaceClaim 在 /RunScript 模式下会自动在脚本执行完毕后退出
-            sc_creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                creationflags=sc_creation_flags,
-                env=sc_env,
-            )
-
-            # ★ 使用轮询循环替代 process.communicate(timeout=300)，
-            # 以便在 SC 执行期间响应暂停/停止指令。
-            # 否则 pause 发出后 worker 线程仍阻塞在 communicate() 中，
-            # 直到 300s 超时到期 → 状态被错误标记为 Error → 触发 retry → 重新 running。
-            timeout = ENGINE_CONFIG["sc_timeout"]
-            deadline = time.time() + timeout
-            poll_interval = 2.0  # 每 2 秒检查一次
-
-            while True:
-                retcode = process.poll()
-                if retcode is not None:
-                    # 进程已退出，读取剩余 stdout/stderr
-                    stdout, stderr = process.communicate(timeout=None)
-                    # 记录脚本标准输出（用于诊断脚本内部错误）
-                    if stdout:
-                        logger.info(f"SC 脚本 stdout:\n{stdout.strip()}")
-                    if retcode != 0:
-                        stderr_msg = stderr.strip() if stderr else "(无 stderr 输出)"
-                        logger.error(
-                            f"SC 脚本执行失败 (exit={retcode}):\n"
-                            f"  stderr: {stderr_msg[:500]}"
-                        )
-                        self.state.set_step_status(
-                            config_name, "SC", STATUS_ERROR,
-                            f"SC 退出码={retcode}: {stderr_msg[:200]}"
-                        )
-                        return False
-                    break  # 成功退出，跳转到输出文件验证
-
-                # ---- 暂停检查：终止 SC 进程（不修改状态，由调度器 _execute_with_retry 统一处理） ----
-                if self._paused_event is not None and self._paused_event.is_set():
-                    try:
-                        process.kill()
-                    except (ProcessLookupError, OSError):
-                        pass
-                    try:
-                        process.communicate(timeout=5)  # 回收子进程资源
-                    except subprocess.TimeoutExpired:
-                        logger.warning("SC 进程在 pause-kill 后未及时退出")
-                    logger.info(
-                        f"SC 脚本因暂停被终止: 构型{config_name}"
-                    )
-                    # 不在此处设置步骤状态（交由 _execute_with_retry 根据 _paused 标志统一决定），
-                    # 避免 resume() 的 set_all_paused_to_running() 将状态改为 RUNNING 后
-                    # _process_single_config 跳过 SC 步骤
-                    return False
-
-                # ---- 停止检查 ----
-                if self._stopped_event is not None and self._stopped_event.is_set():
-                    try:
-                        process.kill()
-                    except (ProcessLookupError, OSError):
-                        pass
-                    try:
-                        process.communicate(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    logger.info(
-                        f"SC 脚本因停止被终止: 构型{config_name}"
-                    )
-                    return False
-
-                # ---- 超时检查 ----
-                if time.time() >= deadline:
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    except OSError as e:
-                        logger.error(f"无法终止 SC 进程: {e}")
-                    try:
-                        process.communicate(timeout=5)  # 回收子进程资源，避免僵尸进程
-                    except subprocess.TimeoutExpired:
-                        logger.warning("SC 进程在 kill 后未及时退出")
-                    # ★ 超时后强制清理所有残留 SC 进程
-                    self._cleanup_sc_processes()
-                    logger.error(f"SC 脚本执行超时 ({timeout}s)")
-                    self.state.set_step_status(
-                        config_name, "SC", STATUS_ERROR, "SC 执行超时"
-                    )
-                    return False
-
-                time.sleep(poll_interval)
-
-            # 验证输出文件
-            if os.path.exists(scdoc_file):
-                file_size = os.path.getsize(scdoc_file)
-                logger.info(
-                    f"SC 转换完成: model_gen4_{config_name}.scdoc "
-                    f"({file_size} bytes)"
-                )
-                return True
-            else:
-                logger.error(
-                    f"SC 输出文件未生成: {scdoc_file}\n"
-                    f"  脚本可能执行失败但返回了零退出码。请检查上面的 stdout 输出。"
-                )
-                self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件未生成")
-                return False
-
-        except OSError as e:
-            logger.error(f"SC 执行失败 (IO错误): {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"IO错误: {e}")
-            return False
-        except ValueError as e:
-            logger.error(f"SC 执行失败 (配置错误): {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"配置错误: {e}")
-            return False
-        except RuntimeError as e:
-            logger.error(f"SC 执行失败 (运行时错误): {e}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"运行时错误: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"SC 执行失败 (未知错误): {e}", exc_info=True)
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, f"未知错误: {e}")
-            return False
+        return self._sc_pool.run_config(
+            config_name,
+            paused_event=self._paused_event,
+            stopped_event=self._stopped_event,
+        )
 
     # ------------------------------------------------------------------
     # 阶段 4: 文件传输 (SCDOC -> 远程工作站)
@@ -1636,12 +1446,18 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
                 return False
 
-    def wait_meshing_completion(self, config_name: int) -> bool:
+    def wait_meshing_completion(
+        self, config_name: int,
+        paused_event: Optional[threading.Event] = None,
+        stopped_event: Optional[threading.Event] = None,
+    ) -> bool:
         """
         轮询等待网格划分完成。
 
         Args:
             config_name: 构型名称
+            paused_event: 暂停事件（可选，用于响应暂停指令）
+            stopped_event: 停止事件（可选，用于响应停止指令）
 
         Returns:
             True 表示网格划分成功完成
@@ -1654,7 +1470,9 @@ class TaskRunner:
                 success = ssh.wait_for_flag(
                     flag_file,
                     timeout=ENGINE_CONFIG["meshing_timeout"],  # type: ignore[arg-type]
-                    poll_interval=10
+                    poll_interval=10,
+                    paused_event=paused_event,
+                    stopped_event=stopped_event,
                 )
                 return success
             except (OSError, ConnectionError) as e:
@@ -1702,8 +1520,18 @@ class TaskRunner:
                 self.state.set_step_status(config_name, "Solver", STATUS_ERROR, str(e))
                 return False
 
-    def wait_solver_completion(self, config_name: int) -> bool:
-        """轮询等待仿真求解完成。"""
+    def wait_solver_completion(
+        self, config_name: int,
+        paused_event: Optional[threading.Event] = None,
+        stopped_event: Optional[threading.Event] = None,
+    ) -> bool:
+        """轮询等待仿真求解完成。
+
+        Args:
+            config_name: 构型名称
+            paused_event: 暂停事件（可选，用于响应暂停指令）
+            stopped_event: 停止事件（可选，用于响应停止指令）
+        """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
         with self._ssh_lock:
@@ -1712,7 +1540,9 @@ class TaskRunner:
                 success = ssh.wait_for_flag(
                     flag_file,
                     timeout=ENGINE_CONFIG["solver_timeout"],  # type: ignore[arg-type]
-                    poll_interval=30  # 求解时间较长，轮询间隔加大
+                    poll_interval=30,  # 求解时间较长，轮询间隔加大
+                    paused_event=paused_event,
+                    stopped_event=stopped_event,
                 )
                 return success
             except (OSError, ConnectionError) as e:
@@ -1736,13 +1566,15 @@ class TaskRunner:
         }
 
         checks = {
-            "SW模型": LOCAL_PATHS["sw_model"],
+            "SW可执行文件": LOCAL_PATHS["sw_exe"],
+            "SW模型文件": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
-            "STEP目录": LOCAL_PATHS["step_dir"],
-            "SC程序": LOCAL_PATHS["sc_exe"],
-            "SC脚本": LOCAL_PATHS["sc_script"],
-            "SCDOC目录": LOCAL_PATHS["scdoc_dir"],
+            "STEP输出目录": LOCAL_PATHS["step_dir"],
+            "SC可执行文件": LOCAL_PATHS["sc_exe"],
+            "SC脚本文件": LOCAL_PATHS["sc_script"],
+            "SCDOC输出目录": LOCAL_PATHS["scdoc_dir"],
             "日志目录": LOCAL_PATHS["log_dir"],
+            "数据目录": LOCAL_PATHS["data_dir"],
         }
         for name, path in checks.items():
             exists = os.path.exists(path)

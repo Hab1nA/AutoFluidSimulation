@@ -93,7 +93,7 @@ SW → SC → Transfer → Meshing → Solver
 | 阶段 | 执行位置 | 技术手段 | 并发模型 |
 |------|---------|---------|---------|
 | SW | 本地 PC | win32com COM API | 批量串行（一次宏导出所有构型） |
-| SC | 本地 PC | subprocess 无头调用 SpaceClaim | 流水线并发（3 Worker） |
+| SC | 本地 PC | C# SpaceClaimBridge.exe 进程检测模式（SCProcessPool 3 槽位池） | 流水线并发（3 Worker + 等待队列） |
 | Transfer | 本地 PC → 工作站 | paramiko SFTP | 流水线并发（3 Worker） |
 | Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（3 Worker） |
 | Solver | 远程工作站 | SSH + PowerShell Start-Process | 全局屏障后并行启动 |
@@ -221,7 +221,7 @@ SW → SC → Transfer → Meshing → Solver → PostProcess → Collect
 LocalWorker 是本地 PC 上的独立进程，负责：
 
 1. 执行 SW 阶段（win32com COM API）
-2. 执行 SC 阶段（subprocess 无头调用 SpaceClaim）
+2. 执行 SC 阶段（C# SpaceClaimBridge.exe 进程检测模式，SCProcessPool 管理）
 3. 运行 StepFileMonitor，检测 STEP 文件写入完成
 4. 上传 SCDOC 文件到服务器 A
 5. 上线后拉取后处理结果

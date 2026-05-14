@@ -14,7 +14,7 @@ from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
-    CMD_GET_LOG_ENTRIES,
+    CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -87,6 +87,9 @@ class IPCServer:
         # 清理
         self.register_handler(CMD_CLEAN_STEP, lambda p: daemon.handle_clean_step(p))
 
+        # 配置重载
+        self.register_handler(CMD_RELOAD_CONFIG, lambda p: daemon.handle_reload_config(p))
+
     # ------------------------------------------------------------------
     # 服务器生命周期
     # ------------------------------------------------------------------
@@ -158,9 +161,12 @@ class IPCServer:
         处理单个客户端连接。
 
         持续读取命令直到连接断开，每条命令返回一个响应。
+        记录是否有过有效消息交互——从未发送有效消息的连接视为探测连接，
+        断开时不写入 INFO 日志，避免端口探测工具造成日志噪音。
         """
         client_sock.settimeout(30.0)
         buffer = b""
+        has_sent_valid_message = False  # 是否曾处理过有效 IPC 消息
 
         try:
             while self._running:
@@ -175,6 +181,7 @@ class IPCServer:
                         line, buffer = buffer.split(b"\n", 1)
                         response = self._process_message(line)
                         if response:
+                            has_sent_valid_message = True
                             client_sock.sendall(serialize(response))
                 except socket.timeout:
                     continue
@@ -186,7 +193,10 @@ class IPCServer:
                 client_sock.close()
             except OSError:
                 pass
-            logger.info(f"IPC 客户端断开: {addr}")
+            if has_sent_valid_message:
+                logger.info(f"IPC 客户端断开: {addr}")
+            else:
+                logger.debug(f"IPC 客户端断开 (探测连接): {addr}")
 
     def _process_message(self, data: bytes) -> Optional[dict]:
         """

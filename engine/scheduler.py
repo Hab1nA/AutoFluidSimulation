@@ -26,11 +26,12 @@ from typing import Optional
 from engine.config import (
     STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, LOCAL_PATHS, get_step_filename,
+    ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
 from engine.task_runner import TaskRunner
+from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -87,6 +88,179 @@ class PipelineScheduler:
             self._barrier_passed.set()
 
         logger.info("流水线调度器初始化完成")
+
+    # ------------------------------------------------------------------
+    # 暂停感知的 sleep 辅助方法
+    # ------------------------------------------------------------------
+
+    def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
+        """
+        可响应暂停/停止的 sleep 替代方法。
+
+        将 sleep 切分为 check_interval 粒度的小段，每段检查
+        _paused 和 _stopped 标志。若检测到 stopped 则立即返回。
+
+        Args:
+            duration: 总等待时长（秒）
+            check_interval: 每次检查的间隔（秒）
+
+        Returns:
+            True 表示 sleep 完整结束，False 表示因 stopped 提前退出
+        """
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            if self._stopped.is_set():
+                return False
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return False
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(check_interval, remaining))
+        return True
+
+    # ------------------------------------------------------------------
+    # 输出文件预扫描（断点续传核心）
+    # ------------------------------------------------------------------
+
+    def _prescan_downstream_outputs(self):
+        """
+        在启动下游工作线程之前，扫描所有构型各步骤的输出文件。
+
+        若输出文件已存在于磁盘但数据库中该步骤仍为未完成状态，
+        则直接标记为 Completed，避免重复启动程序执行该步骤。
+
+        覆盖范围：
+        - SC: 本地 SCDOC 文件
+        - Transfer: 远程 SCDOC 文件（需 SSH）
+        - Meshing: 远程标志文件 + 网格输出文件（需 SSH）
+        - Solver: 远程标志文件 + 求解输出文件（需 SSH）
+        """
+        all_configs = self.state.get_all_configs()
+        if not all_configs:
+            return
+
+        prescan_count = 0
+        ssh_available = False
+        ssh = None
+
+        # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
+        try:
+            ssh = self.runner.get_ssh()
+            ssh_available = ssh.is_connected()
+        except Exception:
+            pass
+
+        for cn in all_configs:
+            # ---- SC: 检查本地 SCDOC 文件 ----
+            sc_status = self.state.get_step_status(cn, "SC")
+            if sc_status not in (STATUS_COMPLETED,):
+                scdoc_name = get_step_filename("SC", cn)
+                if scdoc_name:
+                    scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                    if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                        self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
+                        logger.info(
+                            f"[预扫描] 构型{cn} SC: SCDOC 文件已存在，"
+                            f"标记为 Completed"
+                        )
+                        prescan_count += 1
+
+            # ---- Transfer: 检查远程 SCDOC 文件 ----
+            transfer_status = self.state.get_step_status(cn, "Transfer")
+            if transfer_status not in (STATUS_COMPLETED,) and ssh_available:
+                # Transfer 依赖 SC 输出，SC Completed 后才检查远程文件
+                if self.state.get_step_status(cn, "SC") == STATUS_COMPLETED:
+                    scdoc_name = get_step_filename("SC", cn)
+                    if scdoc_name:
+                        remote_scdoc = (
+                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
+                            f"/{scdoc_name}"
+                        )
+                        try:
+                            if ssh.check_remote_file(remote_scdoc):
+                                self.state.set_step_status(
+                                    cn, "Transfer", STATUS_COMPLETED
+                                )
+                                logger.info(
+                                    f"[预扫描] 构型{cn} Transfer: "
+                                    f"远程 SCDOC 已存在，标记为 Completed"
+                                )
+                                prescan_count += 1
+                        except Exception:
+                            pass
+
+            # ---- Meshing: 检查远程标志文件 + 网格输出文件 ----
+            meshing_status = self.state.get_step_status(cn, "Meshing")
+            if meshing_status not in (STATUS_COMPLETED,) and ssh_available:
+                if self.state.get_step_status(cn, "Transfer") == STATUS_COMPLETED:
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/meshing_done_{cn}.txt"
+                    )
+                    mesh_name = get_step_filename("Meshing", cn)
+                    mesh_file = None
+                    if mesh_name:
+                        mesh_file = (
+                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
+                            f"/{mesh_name}"
+                        )
+                    try:
+                        # 标志文件存在 → 网格划分刚完成但状态未更新
+                        # 网格文件存在 → 上一次运行已完成
+                        if ssh.check_remote_file(flag_file) or (
+                            mesh_file and ssh.check_remote_file(mesh_file)
+                        ):
+                            self.state.set_step_status(
+                                cn, "Meshing", STATUS_COMPLETED
+                            )
+                            logger.info(
+                                f"[预扫描] 构型{cn} Meshing: "
+                                f"远程输出已存在，标记为 Completed"
+                            )
+                            prescan_count += 1
+                    except Exception:
+                        pass
+
+            # ---- Solver: 检查远程标志文件 + 求解输出文件 ----
+            solver_status = self.state.get_step_status(cn, "Solver")
+            if solver_status not in (STATUS_COMPLETED,) and ssh_available:
+                if self.state.get_step_status(cn, "Meshing") == STATUS_COMPLETED:
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/solver_done_{cn}.txt"
+                    )
+                    result_name = get_step_filename("Solver", cn)
+                    result_file = None
+                    if result_name:
+                        result_file = (
+                            f"{REMOTE_CONFIG['result_dir'].replace(chr(92), '/')}"
+                            f"/{result_name}"
+                        )
+                    try:
+                        if ssh.check_remote_file(flag_file) or (
+                            result_file and ssh.check_remote_file(result_file)
+                        ):
+                            self.state.set_step_status(
+                                cn, "Solver", STATUS_COMPLETED
+                            )
+                            logger.info(
+                                f"[预扫描] 构型{cn} Solver: "
+                                f"远程输出已存在，标记为 Completed"
+                            )
+                            prescan_count += 1
+                    except Exception:
+                        pass
+
+        if prescan_count > 0:
+            logger.info(
+                f"[预扫描] 共标记 {prescan_count} 个步骤为 Completed"
+                f"（输出文件已存在）"
+            )
+        else:
+            logger.info("[预扫描] 未发现可跳过的步骤")
 
     # ------------------------------------------------------------------
     # 主调度入口
@@ -170,7 +344,37 @@ class PipelineScheduler:
         self._paused.clear()
 
         # ---- 步骤 1: SW 阶段 ----
-        if not self.state.is_sw_macro_started():
+        # ★ 诊断日志：记录 SW 步骤状态分布，便于排查断点续传问题
+        _all_configs_diag = self.state.get_all_configs()
+        _sw_status_dist: dict[str, list[int]] = {}
+        for _cn in _all_configs_diag:
+            _st = self.state.get_step_status(_cn, "SW")
+            _sw_status_dist.setdefault(_st, []).append(_cn)
+        logger.info(
+            "SW 步骤状态分布: %s；sw_macro_started=%s",
+            {k: len(v) for k, v in _sw_status_dist.items()},
+            self.state.is_sw_macro_started(),
+        )
+
+        # ★ 计算是否应执行 SW 宏：综合 sw_macro_started 标志和实际步骤状态
+        _should_run_sw = not self.state.is_sw_macro_started()
+        if _should_run_sw:
+            # 防御性交叉校验：若所有 SW 步骤已实际完成，自愈跳过
+            _sw_all_completed = (
+                len(_sw_status_dist.get(STATUS_COMPLETED, [])) == len(_all_configs_diag)
+                and len(_all_configs_diag) > 0
+            )
+            if _sw_all_completed:
+                logger.warning(
+                    "检测到 sw_macro_started=false 但所有 %d 个构型的 "
+                    "SW 步骤均为 Completed。自愈：设置 sw_macro_started=true，"
+                    "跳过 SW 宏执行，直接进入下游初始化。",
+                    len(_all_configs_diag),
+                )
+                self.state.set_sw_macro_started(True)
+                _should_run_sw = False
+
+        if _should_run_sw:
             logger.info("SW 宏尚未启动，准备执行...")
             all_configs = self.state.get_all_configs()
 
@@ -210,7 +414,16 @@ class PipelineScheduler:
             sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
             success = False
             for sw_attempt in range(1, int(sw_max_retries) + 1):
+                # ★ 检查停止标志
+                if self._stopped.is_set():
+                    return
+
                 if sw_attempt > 1:
+                    # ★ 重试前先等待暂停恢复（若有），然后立即设置重试状态
+                    #    注意：不在此处长时间等待暂停，而是在 _pause_aware_sleep 中
+                    #    合并等待，以避免重复消耗时间
+                    if self._paused.is_set():
+                        logger.info("SW 宏重试前检测到暂停标志，将在重试延迟中等待继续...")
                     # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
                     for cn in all_configs:
                         sw_st = self.state.get_step_status(cn, "SW")
@@ -223,7 +436,13 @@ class PipelineScheduler:
                         f"SW 宏重试 {sw_attempt}/{sw_max_retries}，"
                         f"等待 10 秒并清理残留进程..."
                     )
-                    time.sleep(10)
+                    # ★ 使用暂停感知 sleep 替代原始 time.sleep：
+                    #    若已暂停，则在此 sleep 期间等待恢复；
+                    #    若在 sleep 期间被暂停，状态会被 set_all_running_to_paused() 改为 Paused，
+                    #    恢复后 sleep 继续计时
+                    if not self._pause_aware_sleep(10):
+                        return
+                    # ★ kill SW 进程（暂停期间跳过，恢复后继续）
                     try:
                         subprocess.run(
                             ["taskkill", "/f", "/im", "SLDWORKS.exe"],
@@ -234,7 +453,8 @@ class PipelineScheduler:
                     # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
                     logger.info("等待 SolidWorks 进程完全退出...")
                     for _ in range(10):
-                        time.sleep(1)
+                        if not self._pause_aware_sleep(1):
+                            return
                         try:
                             check = subprocess.run(
                                 ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
@@ -247,7 +467,8 @@ class PipelineScheduler:
                         except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
                             break
                     # 额外冷却确保 COM 子系统完全释放
-                    time.sleep(5)
+                    if not self._pause_aware_sleep(5):
+                        return
                     # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
                     #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
                     if self._file_monitor is not None:
@@ -257,8 +478,10 @@ class PipelineScheduler:
                         self._file_monitor._detector._first_seen.clear()
                         logger.info("文件监控器状态已重置（准备 SW 宏重试）")
                     # 恢复为 Running 后执行宏
+                    # ★ 仅将 RETRYING 状态的步骤恢复为 Running（Paused 保持不变）
                     for cn in all_configs:
-                        if self.state.get_step_status(cn, "SW") == STATUS_RETRYING:
+                        current_sw = self.state.get_step_status(cn, "SW")
+                        if current_sw == STATUS_RETRYING:
                             self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
                 logger.info(
@@ -384,6 +607,14 @@ class PipelineScheduler:
                 # 递归调用自身以重新进入 SW 阶段
                 self.start_pipeline(_recursion_depth + 1)
                 return
+
+        # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
+        # ★ 首次 SC 全体清理：进入 SC 阶段前清理所有旧残留 SpaceClaim 进程
+        self.runner._sc_pool.do_first_cleanup()
+
+        # 在启动工作线程之前扫描各步骤输出目录，若文件已存在则直接标记 Completed，
+        # 避免重复启动 SpaceClaim/传输/网格划分/求解程序。
+        self._prescan_downstream_outputs()
 
         # ---- 步骤 2: 启动文件监控 ----
         if self._file_monitor is None or not self._file_monitor._running:
@@ -560,32 +791,145 @@ class PipelineScheduler:
         # 此时需重新执行 SC（进程已被终止，不可恢复）。
         sc_status = self.state.get_step_status(config_name, "SC")
         if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "SC",
-                                             self.runner.execute_spaceclaim):
-                return  # 失败则中止此构型的后续处理
+            # ★ 执行前检查暂停标志
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return
+            # ★ 执行前检查输出文件：若 SCDOC 已存在则直接标记完成，避免重复启动 SC
+            scdoc_name = get_step_filename("SC", config_name)
+            if scdoc_name:
+                scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                    logger.info(
+                        f"构型{config_name} SC: SCDOC 文件已存在，跳过执行"
+                    )
+                    self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
+                elif not self._execute_with_retry(config_name, "SC",
+                                                   self.runner.execute_spaceclaim):
+                    return
+            elif not self._execute_with_retry(config_name, "SC",
+                                               self.runner.execute_spaceclaim):
+                return
+
+        # ★ SC 完成后检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
 
         # ---- Transfer 阶段 ----
         transfer_status = self.state.get_step_status(config_name, "Transfer")
         if transfer_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "Transfer",
-                                             self.runner.execute_transfer):
-                return
+            # ★ 执行前检查远程输出文件：若远程 SCDOC 已存在则跳过上传
+            transfer_skip = False
+            scdoc_name = get_step_filename("SC", config_name)
+            if scdoc_name:
+                try:
+                    ssh = self.runner.get_ssh()
+                    if ssh.is_connected():
+                        remote_scdoc = (
+                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
+                            f"/{scdoc_name}"
+                        )
+                        if ssh.check_remote_file(remote_scdoc):
+                            logger.info(
+                                f"构型{config_name} Transfer: "
+                                f"远程 SCDOC 已存在，跳过执行"
+                            )
+                            self.state.set_step_status(
+                                config_name, "Transfer", STATUS_COMPLETED
+                            )
+                            transfer_skip = True
+                except Exception:
+                    pass
+            if not transfer_skip:
+                if not self._execute_with_retry(config_name, "Transfer",
+                                                 self.runner.execute_transfer):
+                    return
+
+        # ★ Transfer 完成后检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
 
         # ---- Meshing 阶段 ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
         if meshing_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            if not self._execute_with_retry(config_name, "Meshing",
-                                             self.runner.execute_meshing):
-                return
+            # ★ 执行前检查远程输出：若标志文件或网格文件已存在则跳过
+            meshing_skip = False
+            try:
+                ssh = self.runner.get_ssh()
+                if ssh.is_connected():
+                    flag_file = (
+                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                        f"/meshing_done_{config_name}.txt"
+                    )
+                    mesh_name = get_step_filename("Meshing", config_name)
+                    if ssh.check_remote_file(flag_file):
+                        logger.info(
+                            f"构型{config_name} Meshing: "
+                            f"标志文件已存在，跳过执行"
+                        )
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_COMPLETED
+                        )
+                        meshing_skip = True
+                    elif mesh_name:
+                        mesh_file = (
+                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
+                            f"/{mesh_name}"
+                        )
+                        if ssh.check_remote_file(mesh_file):
+                            logger.info(
+                                f"构型{config_name} Meshing: "
+                                f"网格文件已存在，跳过执行"
+                            )
+                            self.state.set_step_status(
+                                config_name, "Meshing", STATUS_COMPLETED
+                            )
+                            meshing_skip = True
+            except Exception:
+                pass
 
-            # 启动远程网格划分后，轮询等待完成
-            logger.info(f"等待构型{config_name} 网格划分完成...")
-            if self.runner.wait_meshing_completion(config_name):
-                self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
-                logger.info(f"构型{config_name} 网格划分完成 ✓")
-            else:
-                self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "网格划分超时")
-                return
+            if not meshing_skip:
+                if not self._execute_with_retry(config_name, "Meshing",
+                                                 self.runner.execute_meshing):
+                    return
+
+                # ★ 启动远程网格划分后检查暂停标志
+                while self._paused.is_set() and not self._stopped.is_set():
+                    time.sleep(1)
+                if self._stopped.is_set():
+                    return
+
+                # 启动远程网格划分后，轮询等待完成
+                logger.info(f"等待构型{config_name} 网格划分完成...")
+                if self.runner.wait_meshing_completion(
+                    config_name,
+                    paused_event=self._paused,
+                    stopped_event=self._stopped,
+                ):
+                    self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
+                    logger.info(f"构型{config_name} 网格划分完成 ✓")
+                else:
+                    # ★ 区分暂停和真正的超时
+                    if self._paused.is_set():
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_PAUSED,
+                            "等待网格划分期间暂停"
+                        )
+                    elif self._stopped.is_set():
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_PAUSED,
+                            "引擎已停止"
+                        )
+                    else:
+                        self.state.set_step_status(
+                            config_name, "Meshing", STATUS_ERROR, "网格划分超时"
+                        )
+                    return
 
         logger.info(f"构型{config_name} SC→Transfer→Meshing 全部完成 ✓")
 
@@ -668,7 +1012,11 @@ class PipelineScheduler:
                             f"重试 {attempt + 1}/{max_retries}（已重试 {retry_count} 次）"
                         )
                         logger.info(f"将在 {5 * attempt}s 后重试 (已重试 {retry_count} 次)")
-                        time.sleep(5 * attempt)  # 递增等待时间
+                        # ★ 使用暂停感知 sleep：若暂停被触发，sleep 期间状态
+                        #    会被 set_all_running_to_paused() 改为 Paused，
+                        #    恢复后下一轮迭代会检测 _paused 并正确等待
+                        if not self._pause_aware_sleep(5 * attempt):
+                            return False  # stopped
             except (RuntimeError, ValueError, OSError) as e:
                 logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
                 if attempt < max_retries:
@@ -676,7 +1024,8 @@ class PipelineScheduler:
                         config_name, step_name, STATUS_RETRYING,
                         f"异常重试 {attempt + 1}/{max_retries}: {e}"
                     )
-                    time.sleep(5 * attempt)
+                    if not self._pause_aware_sleep(5 * attempt):
+                        return False  # stopped
 
         # 所有重试均失败
         self.state.set_step_status(config_name, step_name, STATUS_ERROR,
@@ -744,6 +1093,9 @@ class PipelineScheduler:
                 self._barrier_passed.set()
                 self.state.set_global_barrier_met(True)
 
+                # ★ 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理
+                self.runner._sc_pool.do_final_cleanup()
+
                 # 启动 Solver 调度
                 self._dispatch_solver_tasks()
                 break
@@ -784,7 +1136,9 @@ class PipelineScheduler:
                 _last_error_report = meshing_error_configs
 
             # 轮询间隔：网格划分通常耗时较长，不需要高频检查
-            time.sleep(5.0)
+            # ★ 使用暂停感知 sleep，避免暂停期间无谓轮询消耗 CPU
+            if not self._pause_aware_sleep(5.0):
+                break
 
         logger.info("[BarrierMonitor] 全局屏障监控退出")
 
@@ -797,7 +1151,15 @@ class PipelineScheduler:
         全局屏障通过后，统一启动所有构型的仿真求解。
 
         所有构型的 Solver 在屏障通过后并行启动。
+        若暂停标志已置位，则等待恢复后再分发。
         """
+        # ★ 分发前检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            logger.warning("Solver 分发前检测到停止标志，取消分发")
+            return
+
         logger.info("=" * 60)
         logger.info("开始统一调度仿真求解任务...")
         logger.info("=" * 60)
@@ -828,17 +1190,47 @@ class PipelineScheduler:
         Args:
             config_name: 构型名称
         """
+        # ★ 执行前检查暂停标志
+        while self._paused.is_set() and not self._stopped.is_set():
+            time.sleep(1)
+        if self._stopped.is_set():
+            return
+
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
 
         # 启动远程求解后台任务
         if self._execute_with_retry(config_name, "Solver",
                                      self.runner.execute_solver):
+            # ★ 启动远程求解后检查暂停标志
+            while self._paused.is_set() and not self._stopped.is_set():
+                time.sleep(1)
+            if self._stopped.is_set():
+                return
+
             # 轮询等待求解完成
-            if self.runner.wait_solver_completion(config_name):
+            if self.runner.wait_solver_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
                 self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
                 logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
             else:
-                self.state.set_step_status(config_name, "Solver", STATUS_ERROR, "求解超时")
+                # ★ 区分暂停和真正的超时
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_PAUSED,
+                        "等待求解期间暂停"
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_PAUSED,
+                        "引擎已停止"
+                    )
+                else:
+                    self.state.set_step_status(
+                        config_name, "Solver", STATUS_ERROR, "求解超时"
+                    )
 
     # ------------------------------------------------------------------
     # 控制接口
@@ -863,9 +1255,85 @@ class PipelineScheduler:
         """公共只读属性：主调度线程是否存活（供外部模块查询）。"""
         return self._pipeline_thread is not None and self._pipeline_thread.is_alive()
 
+    def _resume_paused_steps(self):
+        """
+        恢复暂停的步骤：检查输出文件，决定标记完成或重新入队。
+
+        设计原则：
+        - SC 步骤的并发数受 _num_workers 限制。若暂停前有 N 个 SC 进程
+          正在运行，恢复时不应将所有 PAUSED 直接改为 RUNNING（会导致
+          超过并发限制的进程同时显示为 Running）。
+        - 对 PAUSED 的 SC 步骤：先检查 SCDOC 输出文件是否已生成。
+          若已生成 → 标记 Completed，后续 Transfer/Meshing 由 worker 自动衔接。
+          若未生成 → 重新推入 _sc_queue，由 worker 池按并发限制逐个处理。
+        - 其他步骤（Transfer/Meshing/Solver）的 PAUSED 状态由
+          set_all_paused_to_running(exclude_steps=["SC"]) 统一恢复。
+        """
+        paused_sc = self.state.get_configs_at_step("SC", STATUS_PAUSED)
+        if not paused_sc:
+            return
+
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        completed_count = 0
+        re_enqueued_count = 0
+
+        for cn in paused_sc:
+            scdoc_name = get_step_filename("SC", cn)
+            if scdoc_name:
+                scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                    # SCDOC 已生成 → 标记完成，worker 会自动处理后续 Transfer
+                    self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
+                    logger.info(
+                        f"[恢复] 构型{cn} SC: SCDOC 已存在，标记为 Completed"
+                    )
+                    completed_count += 1
+                    continue
+
+            # SCDOC 不存在 → 重新推入队列，由 worker 池按并发限制处理
+            sw_filename = get_step_filename("SW", cn)
+            if sw_filename:
+                step_file = os.path.join(step_dir, sw_filename)
+                # 仅当 STEP 文件存在时才入队（防止无效任务堆积）
+                if os.path.exists(step_file):
+                    self._sc_queue.put((cn, step_file))
+                    re_enqueued_count += 1
+                    logger.info(
+                        f"[恢复] 构型{cn} SC: 无输出文件，重新入队等待处理"
+                    )
+                else:
+                    # STEP 文件缺失 → 上游异常，标记 Error
+                    self.state.set_step_status(
+                        cn, "SC", STATUS_ERROR,
+                        "暂停恢复: STEP 文件缺失，无法重新入队"
+                    )
+                    logger.warning(
+                        f"[恢复] 构型{cn} SC: STEP 文件缺失，标记为 Error"
+                    )
+            else:
+                self.state.set_step_status(
+                    cn, "SC", STATUS_ERROR,
+                    "暂停恢复: 无法生成 SW 文件名"
+                )
+
+        if completed_count or re_enqueued_count:
+            logger.info(
+                f"[恢复] SC 步骤处理完成: {completed_count} 个标记完成, "
+                f"{re_enqueued_count} 个重新入队"
+            )
+
     def resume(self):
         logger.info("收到继续指令")
-        self.state.set_all_paused_to_running()
+
+        # ★ 第一步：智能恢复暂停的 SC 步骤（检查输出、重新入队）
+        #    避免 set_all_paused_to_running() 将 SC 步骤全部改为 Running，
+        #    导致超过 _num_workers 并发限制的进程同时显示为 Running
+        self._resume_paused_steps()
+
+        # ★ 第二步：其他步骤（Transfer/Meshing/Solver）的 PAUSED → RUNNING
+        #    SC 步骤已在上一步处理完毕，此处排除 SC 避免覆盖
+        self.state.set_all_paused_to_running(exclude_steps=["SC"])
+
         self._paused.clear()
         self.state.set_engine_status("running")
 
@@ -937,6 +1405,12 @@ class PipelineScheduler:
         self._stopped.set()
         self._paused.clear()  # 解除暂停以便线程退出
 
+        # 清理所有 SC 进程
+        try:
+            self.runner._sc_pool.shutdown_all()
+        except Exception as e:
+            logger.debug(f"SCPool 停止清理异常: {e}")
+
         # 等待关键线程退出
         for t in self._worker_threads:
             if t.is_alive():
@@ -980,17 +1454,20 @@ class PipelineScheduler:
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
+            self.runner._sc_pool.reset()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
+                self.runner._sc_pool.reset()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
+                self.runner._sc_pool.reset()
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

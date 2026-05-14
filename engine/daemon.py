@@ -23,6 +23,7 @@
 import os
 import sys
 import signal
+import socket
 import threading
 import time
 from typing import Any, Tuple
@@ -40,69 +41,21 @@ from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
 from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
+from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file
 
 logger = setup_logger("PipelineDaemon")
 
 # PID 文件路径（与 main.py 保持一致）
 _PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
-_MIN_VALID_PID = 1
 
 
 # ------------------------------------------------------------------
 # 进程锁工具
 # ------------------------------------------------------------------
 
-def _is_process_alive(pid: int) -> bool:
-    """检测指定 PID 的进程是否存活（跨平台）。"""
-    if pid < _MIN_VALID_PID:
-        return False
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(0x100000, False, pid)
-            if handle:
-                kernel32.CloseHandle(handle)
-                return True
-            return False
-        except Exception:
-            return False
-    else:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-
-
-def _read_pid_file() -> int | None:
-    """读取 PID 文件中的 PID。"""
-    try:
-        with open(_DAEMON_PID_FILE, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def _write_pid_file(pid: int):
-    """写入 PID 文件。"""
-    os.makedirs(_PID_DIR, exist_ok=True)
-    with open(_DAEMON_PID_FILE, "w", encoding="utf-8") as f:
-        f.write(str(pid))
-
-
-def _remove_pid_file():
-    """删除 PID 文件。"""
-    try:
-        os.remove(_DAEMON_PID_FILE)
-    except FileNotFoundError:
-        pass
-
-
 def _check_ipc_ready(host: str = None, port: int = None) -> bool:
     """检测 IPC 端口是否已被监听。"""
-    import socket
     h = host or IPC_CONFIG["host"]
     p = port or IPC_CONFIG["port"]
     try:
@@ -129,10 +82,10 @@ def acquire_process_lock() -> bool:
         True:  成功获取锁（可以启动）
         False: 已有另一个 Daemon 在运行（拒绝启动）
     """
-    stale_pid = _read_pid_file()
+    stale_pid = read_pid_file(_DAEMON_PID_FILE)
 
     if stale_pid is not None:
-        if _is_process_alive(stale_pid):
+        if is_process_alive(stale_pid):
             if _check_ipc_ready():
                 logger.warning(
                     f"已有 Daemon 实例运行中 (PID: {stale_pid})，"
@@ -147,10 +100,10 @@ def acquire_process_lock() -> bool:
         else:
             logger.info(f"PID 文件中的进程已退出 (PID: {stale_pid})，清理残留 PID 文件")
 
-        _remove_pid_file()
+        remove_pid_file(_DAEMON_PID_FILE)
 
     current_pid = os.getpid()
-    _write_pid_file(current_pid)
+    write_pid_file(_DAEMON_PID_FILE, current_pid)
     logger.info(f"进程锁已获取 (PID: {current_pid})")
     return True
 
@@ -158,9 +111,9 @@ def acquire_process_lock() -> bool:
 def release_process_lock():
     """释放进程锁（删除 PID 文件）。"""
     current_pid = os.getpid()
-    stale_pid = _read_pid_file()
+    stale_pid = read_pid_file(_DAEMON_PID_FILE)
     if stale_pid == current_pid:
-        _remove_pid_file()
+        remove_pid_file(_DAEMON_PID_FILE)
         logger.info(f"进程锁已释放 (PID: {current_pid})")
     else:
         logger.debug(f"PID 文件不属于当前进程 (文件PID: {stale_pid}, 当前PID: {current_pid})，跳过清理")
@@ -499,6 +452,13 @@ class PipelineDaemon:
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
         return True, None, msg
+
+    def handle_reload_config(self, params: dict = None) -> Tuple[bool, Any, str]:
+        """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
+        from engine.config import reload_config_from_toml
+        if reload_config_from_toml():
+            return True, None, "配置已从 autofluid_config.toml 重新加载"
+        return True, None, "TOML 配置文件不存在，使用默认配置"
 
     def handle_get_log_entries(self, params: dict) -> Tuple[bool, Any, str]:
         """处理 get_log_entries 命令（增量拉取日志条目）。

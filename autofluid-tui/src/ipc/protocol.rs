@@ -13,6 +13,7 @@ pub const CMD_GET_ALL_STATUS: &str = "get_all_status";
 pub const CMD_GET_STATISTICS: &str = "get_statistics";
 pub const CMD_GET_ENGINE_STATUS: &str = "get_engine_status";
 pub const CMD_GET_LOG_ENTRIES: &str = "get_log_entries";
+pub const CMD_RELOAD_CONFIG: &str = "reload_config";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequest {
