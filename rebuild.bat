@@ -147,7 +147,7 @@ exit /b 1
 
 :found_msbuild
 echo     使用 MSBuild: !MSBUILD!
-"!MSBUILD!" SpaceClaimBridge.csproj -restore /p:Configuration=Release /p:Platform=x64 /v:minimal
+"!MSBUILD!" SpaceClaimBridge.csproj -restore /p:Configuration=Release /v:minimal
 if !errorlevel! neq 0 (
     echo [错误] C# Bridge 编译失败！
     pause

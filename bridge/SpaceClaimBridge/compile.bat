@@ -52,7 +52,7 @@ if not exist "%SC_API_DLL%" (
 
 REM 编译
 echo [BUILD] 正在编译...
-%MSBUILD% SpaceClaimBridge.csproj -restore /p:Configuration=Release /p:Platform=x64 /v:minimal
+%MSBUILD% SpaceClaimBridge.csproj -restore /p:Configuration=Release /v:minimal
 
 if errorlevel 1 (
     echo.
