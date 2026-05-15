@@ -188,7 +188,7 @@ autofluid/
 │   └── test_sw_export_workflow.py # SW 导出工作流测试
 │
 ├── ROADMAP.md               # 📋 分布式架构改造路线图
-├── rebuild_tui.bat          # Rust TUI 一键构建脚本（含选择性清理）
+├── rebuild.bat              # 全项目一键构建脚本（Rust TUI + C# Bridge + 自动清理）
 ├── analyze_code.py          # 代码分析工具
 ├── logs/                    # 运行时日志输出目录
 └── data/                    # SQLite 状态数据库目录

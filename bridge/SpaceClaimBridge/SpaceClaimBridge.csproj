@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Program.NoRef.cs" />
     <Reference Include="SpaceClaim.Api.V23">
       <HintPath>C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.Api.V23.dll</HintPath>
       <Private>false</Private>

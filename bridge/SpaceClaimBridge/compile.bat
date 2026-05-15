@@ -13,16 +13,18 @@ setlocal enabledelayedexpansion
 echo [BUILD] SpaceClaimBridge 编译脚本
 echo.
 
-REM 尝试多种方式定位 MSBuild
+REM 仅使用 MSBuild（VS 2019+）编译
+REM 找不到 MSBuild 则直接报错退出
+
 set MSBUILD=
 for %%p in (
     "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
     "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe"
     "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+    "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
     "C:\Program Files\Microsoft Visual Studio\2019\Community\MSBuild\Current\Bin\MSBuild.exe"
     "C:\Program Files\Microsoft Visual Studio\2019\Professional\MSBuild\Current\Bin\MSBuild.exe"
     "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
-    "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\MSBuild.exe"
 ) do (
     if exist %%p (
         set MSBUILD=%%~p
@@ -30,13 +32,9 @@ for %%p in (
     )
 )
 
-echo [ERROR] 无法找到 MSBuild.exe
+echo [ERROR] 未找到 MSBuild
 echo.
-echo 备选方案: 使用 dotnet CLI 编译 (需要 .NET SDK 6.0+)
-echo   尝试运行: dotnet build -c Release
-echo.
-echo 备选方案: 手动使用 csc.exe 编译 (纯 COM 版本，无需 SpaceClaim API 引用)
-echo   请运行: compile_noref.bat
+echo 请安装 Visual Studio 2019+ 或 VS Build Tools 2022
 exit /b 1
 
 :found_msbuild
@@ -54,7 +52,7 @@ if not exist "%SC_API_DLL%" (
 
 REM 编译
 echo [BUILD] 正在编译...
-%MSBUILD% SpaceClaimBridge.csproj /p:Configuration=Release /p:Platform=x64 /v:minimal
+%MSBUILD% SpaceClaimBridge.csproj -restore /p:Configuration=Release /p:Platform=x64 /v:minimal
 
 if errorlevel 1 (
     echo.
@@ -77,4 +75,5 @@ if exist "..\SpaceClaimBridge.exe" (
     echo [INFO] 已复制到: ..\SpaceClaimBridge.exe
 )
 
+:done
 endlocal
