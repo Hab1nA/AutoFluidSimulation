@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::state::app_state::{AppState, FocusZone, UiMode};
+use crate::utils::char_to_byte_index;
 
 pub enum AppAction {
     None,
@@ -49,13 +50,6 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             FocusZone::DetailLog => handle_detail_log_scroll(key, state),
         },
     }
-}
-
-fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
 }
 
 fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {

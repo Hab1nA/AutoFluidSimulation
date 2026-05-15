@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::ui::scrollbar::VerticalScrollbar;
+use crate::utils::{truncate_for_display, pad_label_by_display_width};
 
 const BTN_NORMAL: Style = Style::new()
     .fg(Color::Rgb(224, 224, 224))
@@ -327,38 +328,6 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize) ->
     }
 
     raw_lines
-}
-
-fn pad_label_by_display_width(label: &str, target_width: u16) -> String {
-    let dw = unicode_width::UnicodeWidthStr::width(label);
-    let pad = (target_width as usize).saturating_sub(dw);
-    format!("{}{}", label, " ".repeat(pad))
-}
-
-fn truncate_for_display(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let width = unicode_width::UnicodeWidthStr::width(s);
-    if width <= max_width {
-        return s.to_string();
-    }
-    let mut result = String::new();
-    let mut current_width = 0;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + cw + 3 > max_width {
-            result.push_str("...");
-            break;
-        }
-        result.push(c);
-        current_width += cw;
-    }
-    if result.is_empty() {
-        result = s.chars().take(3).collect();
-        result.push_str("...");
-    }
-    result
 }
 
 pub fn render_check_result(

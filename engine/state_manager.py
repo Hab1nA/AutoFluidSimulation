@@ -46,13 +46,14 @@ class StateManager:
         self._init_database()
 
     def _config_pragmas(self):
-        """配置数据库 PRAGMA 设置（仅初始化一次）。"""
+        """配置数据库级 PRAGMA 设置（仅初始化一次）。
+
+        注：仅 journal_mode 是数据库级持久化的，其他 PRAGMA（synchronous、
+        busy_timeout、foreign_keys）是每连接设置，需在 _get_connection() 中重复。
+        """
         conn = sqlite3.connect(self.db_path, timeout=10)
         try:
-            conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA foreign_keys=ON")    # 启用外键约束
+            conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式：读写并发（数据库级持久化）
             conn.commit()
         finally:
             conn.close()
@@ -64,11 +65,15 @@ class StateManager:
     @contextmanager
     def _get_connection(self):
         """获取数据库连接（上下文管理器，自动提交/关闭）。
-        
-        注：PRAGMA 设置在 __init__ 中一次颒配置，此处不重复设置。
+
+        每个新连接设置必要的 per-connection PRAGMA（journal_mode 由
+        _config_pragmas() 在数据库级持久化，无需重复设置）。
         """
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()

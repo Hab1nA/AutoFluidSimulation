@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::app_state::AppState;
-use crate::format_local_time;
+use crate::utils::format_local_time;
 
 pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, _state: &AppState) {
     let time_str = format_local_time("%H:%M:%S");

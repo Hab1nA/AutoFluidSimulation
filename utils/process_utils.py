@@ -6,6 +6,7 @@
 """
 import os
 import sys
+import socket
 import subprocess
 
 
@@ -111,4 +112,24 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
         )
         return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def check_ipc_ready(host: str = "127.0.0.1", port: int = 9527) -> bool:
+    """检测 IPC 端口是否已被监听。
+
+    Args:
+        host: IPC 服务器地址
+        port: IPC 服务器端口
+
+    Returns:
+        True 表示端口已就绪可连接，False 表示未就绪
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect((host, port))
+        s.close()
+        return True
+    except (ConnectionRefusedError, socket.timeout, OSError):
         return False

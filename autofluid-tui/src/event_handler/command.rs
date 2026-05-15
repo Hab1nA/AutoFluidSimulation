@@ -4,7 +4,7 @@ use crate::ipc::client::IpcClient;
 use crate::state::app_state::{AppState, UiMode, ConfirmAction, STEP_NAMES};
 use crate::state::log_buffer::LogBuffer;
 use crate::state::filter;
-use crate::format_local_time;
+use crate::utils::format_local_time;
 
 pub enum CommandResult {
     None,

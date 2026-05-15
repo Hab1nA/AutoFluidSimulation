@@ -5,6 +5,7 @@ pub mod validation;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::validation::{validate_config, ValidationError};
+use crate::utils::char_to_byte_index;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalPaths {
@@ -717,11 +718,4 @@ impl SettingsState {
         let _ = config_io::write_env_password(&self.config.remote_config.password);
         Ok(())
     }
-}
-
-fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
-    s.char_indices()
-        .nth(char_idx)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len())
 }

@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use super::{SettingCategory, SettingsState};
 use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
+use crate::utils::{truncate_for_display, pad_label_by_display_width};
 
 const DIALOG_BG: Color = Color::Rgb(22, 33, 62);
 const ACCENT_RED: Color = Color::Rgb(233, 69, 96);
@@ -333,12 +334,6 @@ fn make_field_name(cat: SettingCategory, fi: usize) -> String {
     }
 }
 
-fn pad_label_by_display_width(label: &str, target_width: u16) -> String {
-    let dw = unicode_width::UnicodeWidthStr::width(label);
-    let pad = (target_width as usize).saturating_sub(dw);
-    format!("{}{}", label, " ".repeat(pad))
-}
-
 fn build_edit_display(buffer: &str, cursor: usize, max_width: usize) -> String {
     let display = if buffer.is_empty() {
         "▎".to_string()
@@ -349,30 +344,4 @@ fn build_edit_display(buffer: &str, cursor: usize, max_width: usize) -> String {
         format!("{}│{}", before, format!("{}{}", cursor_char, after))
     };
     truncate_for_display(&display, max_width)
-}
-
-fn truncate_for_display(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let width = unicode_width::UnicodeWidthStr::width(s);
-    if width <= max_width {
-        return s.to_string();
-    }
-    let mut result = String::new();
-    let mut current_width = 0;
-    for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if current_width + cw + 3 > max_width {
-            result.push_str("...");
-            break;
-        }
-        result.push(c);
-        current_width += cw;
-    }
-    if result.is_empty() {
-        result = s.chars().take(3).collect();
-        result.push_str("...");
-    }
-    result
 }

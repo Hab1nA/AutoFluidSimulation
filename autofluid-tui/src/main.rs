@@ -4,6 +4,7 @@ mod state;
 mod ui;
 mod event_handler;
 mod daemon_mgr;
+mod utils;
 
 use std::io;
 use std::time::Duration;
@@ -24,16 +25,7 @@ use ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
 use event_handler::key_handler;
 use event_handler::command;
 
-pub fn format_local_time(fmt: &str) -> String {
-    let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
-    fmt.replace("%Y", &format!("{:04}", st.wYear))
-        .replace("%m", &format!("{:02}", st.wMonth))
-        .replace("%d", &format!("{:02}", st.wDay))
-        .replace("%H", &format!("{:02}", st.wHour))
-        .replace("%M", &format!("{:02}", st.wMinute))
-        .replace("%S", &format!("{:02}", st.wSecond))
-}
+pub use utils::format_local_time;
 
 fn reconnect_ipc_after_daemon_launch(
     rt: &tokio::runtime::Runtime,
@@ -487,9 +479,9 @@ fn do_redraw(
             }
         }
 
-        if log_buffer.info_generation != state.last_info_generation {
+        if log_buffer.log_generation != state.last_log_generation {
             state.info_log_auto_scroll = true;
-            state.last_info_generation = log_buffer.info_generation;
+            state.last_log_generation = log_buffer.log_generation;
         }
 
         apply_auto_scroll(&mut state.info_log_auto_scroll, &mut state.info_log_scroll, info_visual_count, info_content_height);

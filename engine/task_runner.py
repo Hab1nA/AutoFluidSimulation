@@ -488,6 +488,7 @@ class TaskRunner:
         logger.info("[SW-COM-Param] 正在读取 Excel 参数表...")
         import openpyxl
 
+        config_data = {}  # {config_name: [param_values]}
         wb = None
         try:
             wb = openpyxl.load_workbook(excel_path, data_only=True)
@@ -512,7 +513,6 @@ class TaskRunner:
             )
 
             # --- 提取行3+构型数据 ---
-            config_data = {}  # {config_name: [param_values]}
             for row in ws.iter_rows(min_row=3, values_only=True):
                 if row[0] is None:
                     break

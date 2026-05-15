@@ -23,7 +23,6 @@
 import os
 import sys
 import signal
-import socket
 import threading
 import time
 from typing import Any, Tuple
@@ -41,7 +40,7 @@ from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
 from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
-from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file
+from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file, check_ipc_ready
 
 logger = setup_logger("PipelineDaemon")
 
@@ -53,20 +52,6 @@ _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
 # ------------------------------------------------------------------
 # 进程锁工具
 # ------------------------------------------------------------------
-
-def _check_ipc_ready(host: str = None, port: int = None) -> bool:
-    """检测 IPC 端口是否已被监听。"""
-    h = host or IPC_CONFIG["host"]
-    p = port or IPC_CONFIG["port"]
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect((h, p))
-        s.close()
-        return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
-        return False
-
 
 def acquire_process_lock() -> bool:
     """
@@ -86,7 +71,7 @@ def acquire_process_lock() -> bool:
 
     if stale_pid is not None:
         if is_process_alive(stale_pid):
-            if _check_ipc_ready():
+            if check_ipc_ready(IPC_CONFIG["host"], IPC_CONFIG["port"]):
                 logger.warning(
                     f"已有 Daemon 实例运行中 (PID: {stale_pid})，"
                     f"IPC {IPC_CONFIG['host']}:{IPC_CONFIG['port']} 已监听，拒绝重复启动"

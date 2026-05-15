@@ -4,6 +4,7 @@
 >
 > 以下问题已审查确认但**本次未修复**，建议在未来迭代中按优先级处理。
 > 优先级标注：🔴 高 / 🟡 中 / 🟢 低
+> 已修复标注：✅ 已修复
 
 ---
 
@@ -37,31 +38,31 @@
 
 ### 🟡 代码重复（DRY）
 
-#### 5. `char_to_byte_index` 重复实现
+#### 5. `char_to_byte_index` 重复实现 ✅ 已修复
 
 - **文件**: [settings/mod.rs:L650-L655](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/settings/mod.rs#L650-L655) + [event_handler/key_handler.rs:L54-L59](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/event_handler/key_handler.rs#L54-L59)
 - **描述**: 完全相同的 `char_to_byte_index` 函数在两个文件中各定义一次。
-- **建议**: 提取到共享工具模块
+- **修复**: 提取到 `utils.rs` 共享模块
 
-#### 6. `truncate_for_display` 重复实现
+#### 6. `truncate_for_display` 重复实现 ✅ 已修复
 
 - **文件**: [ui/dialogs.rs:L338-L361](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/ui/dialogs.rs#L338-L361) + [settings/settings_ui.rs:L353-L377](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/settings/settings_ui.rs#L353-L377)
 - **描述**: 字符串截断逻辑完全一致地重复。
-- **建议**: 提取到 `ui/` 模块的共享工具函数
+- **修复**: 提取到 `utils.rs` 共享模块
 
-#### 7. `pad_label_by_display_width` 重复实现
+#### 7. `pad_label_by_display_width` 重复实现 ✅ 已修复
 
 - **文件**: [ui/dialogs.rs:L332-L336](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/ui/dialogs.rs#L332-L336) + [settings/settings_ui.rs:L335-L339](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/settings/settings_ui.rs#L335-L339)
 - **描述**: 标签填充逻辑重复。
-- **建议**: 提取到共享工具函数
+- **修复**: 提取到 `utils.rs` 共享模块
 
 ### 🟡 架构耦合
 
-#### 8. `format_local_time` 定义位置不当
+#### 8. `format_local_time` 定义位置不当 ✅ 已修复
 
 - **文件**: [main.rs:L27-L36](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/main.rs#L27-L36)
 - **描述**: `format_local_time` 在 crate 根目录（main.rs）中定义，但被 `ui/header.rs` 和 `event_handler/command.rs` 引用，创建了从 UI 层到入口点的反向依赖。
-- **建议**: 移动到独立的 `utils` 或 `time` 模块
+- **修复**: 移动到 `utils.rs` 模块，main.rs 通过 `pub use` 重导出
 
 ### 🟢 可维护性
 
@@ -83,11 +84,11 @@
 - **描述**: 多处出现含义不明确的魔术数字。
 - **建议**: 提取为命名常量并添加注释
 
-#### 12. `info_generation` 命名不一致
+#### 12. `info_generation` 命名不一致 ✅ 已修复
 
 - **文件**: [state/log_buffer.rs:L61-L74](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/autofluid-tui/src/state/log_buffer.rs#L61-L74)
 - **描述**: `push_detail` 不会递增 `info_generation`，但 `info_generation` 在 `do_redraw` 中用于触发信息面板的自动滚动。仅向详情日志推送数据时自动滚动不会触发。
-- **建议**: 重命名为 `log_generation` 或拆分两个计数器
+- **修复**: 重命名为 `log_generation`，`push_detail` 和 `push_info` 均递增
 
 ### 🟢 微小优化
 
@@ -121,11 +122,11 @@
 - **描述**: SSH 密码在内存中以明文存储，并且可通过环境变量 `AUTOFLUID_SSH_PASSWORD` 暴露。
 - **建议**: 考虑使用操作系统密钥链（Windows Credential Manager）或 SSH 密钥认证替代密码认证
 
-#### 17. `StateManager._config_pragmas` 与 `_get_connection` 未在锁保护下
+#### 17. `StateManager._config_pragmas` 与 `_get_connection` 未在锁保护下 ✅ 已修复
 
 - **文件**: [engine/state_manager.py:L48-L58](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/engine/state_manager.py#L48-L58)
 - **描述**: `_config_pragmas` 方法在 `__init__` 中创建独立连接来设置 WAL 模式，而 `_get_connection` 每次创建新连接但不重复设置 PRAGMA。如果多个 `StateManager` 实例操作同一数据库文件，PRAGMA 可能未正确设置。
-- **建议**: 将 PRAGMA 设置移到 `_get_connection` 中，或使用连接池
+- **修复**: `_config_pragmas` 仅设置数据库级持久化的 `journal_mode=WAL`；per-connection PRAGMA（`busy_timeout`、`synchronous`、`foreign_keys`）移到 `_get_connection` 中
 
 ### 🟢 可维护性
 
@@ -135,11 +136,11 @@
 - **描述**: 闭包直接捕获外部变量 `daemon_proc`，在 `_run_all_mode` 执行完毕后 `daemon_proc` 可能失效（函数作用域已结束），存在闭包陷阱风险（已替换 list 反模式，但 Python 闭包捕获的是变量名而非值，for 循环中仍然存在风险）。
 - **建议**: 使用 `nonlocal` 声明或函数工厂模式
 
-#### 19. `_stop_all_processes` 中使用 `wmic`
+#### 19. `_stop_all_processes` 中使用 `wmic` ✅ 已修复
 
 - **文件**: [main.py:L171-L195](file:///c:/Users/XKZ/Documents/VSCode%20Projects/AutoFluidSimulation/main.py#L171-L195)
 - **描述**: `wmic` 命令在 Windows 11 24H2+ 中被弃用，未来可能被移除。
-- **建议**: 替换为 `Get-CimInstance` PowerShell 命令或 `tasklist.exe` + `taskkill.exe` 的组合
+- **修复**: 替换为 `Get-CimInstance` PowerShell 命令
 
 #### 20. `openpyxl.load_workbook` 未使用上下文管理器
 

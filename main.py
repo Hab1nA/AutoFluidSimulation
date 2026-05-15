@@ -22,14 +22,13 @@ import argparse
 import subprocess
 import signal
 import time
-import socket
 import logging
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
-from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill
+from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill, check_ipc_ready
 from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -45,21 +44,10 @@ def _ensure_dirs():
     os.makedirs(PID_DIR, exist_ok=True)
 
 
-def _check_ipc_ready() -> bool:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1.0)
-        s.connect((IPC_CONFIG["host"], IPC_CONFIG["port"]))
-        s.close()
-        return True
-    except (ConnectionRefusedError, socket.timeout, OSError):
-        return False
-
-
 def _wait_for_ipc(timeout: int = IPC_READY_TIMEOUT) -> bool:
     start = time.monotonic()
     while time.monotonic() - start < timeout:
-        if _check_ipc_ready():
+        if check_ipc_ready(IPC_CONFIG["host"], IPC_CONFIG["port"]):
             return True
         time.sleep(0.5)
     return False
@@ -161,36 +149,36 @@ def _stop_all_processes():
     print("=" * 60)
 
     if sys.platform == "win32":
-
+        # 使用 Get-CimInstance 替代已弃用的 wmic（Windows 11 24H2+）
         for pattern, label in [
             ("start_daemon.py", "后台引擎"),
             ("start_client.py", "TUI 客户端"),
             ("main.py --all", "总控程序(--all)"),
         ]:
             try:
+                ps_filter = (
+                    f"Name='python.exe' AND CommandLine LIKE '%{pattern}%'"
+                )
+                ps_cmd = (
+                    f"Get-CimInstance Win32_Process -Filter \"{ps_filter}\" "
+                    f"| Select-Object -ExpandProperty ProcessId"
+                )
                 result = subprocess.run(
-                    ['wmic', 'process', 'where',
-                     f"commandline like '%{pattern}%' and name='python.exe'",
-                     'get', 'processid', '/format:csv'],
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
                     capture_output=True, text=True, timeout=10,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                pids = []
                 for line in result.stdout.strip().splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("Node"):
-                        continue
-                    parts = line.split(",")
-                    if len(parts) >= 2 and parts[-1].strip().isdigit():
-                        pids.append(int(parts[-1].strip()))
-                for p in pids:
-                    try:
-                        if run_taskkill(p):
-                            print(f"  {label}进程已终止 (PID: {p})")
-                        else:
-                            print(f"  [警告] 无法终止 {label} 进程 (PID: {p})")
-                    except OSError:
-                        pass
+                    pid_str = line.strip()
+                    if pid_str.isdigit():
+                        p = int(pid_str)
+                        try:
+                            if run_taskkill(p):
+                                print(f"  {label}进程已终止 (PID: {p})")
+                            else:
+                                print(f"  [警告] 无法终止 {label} 进程 (PID: {p})")
+                        except OSError:
+                            pass
             except (subprocess.SubprocessError, OSError):
                 pass
 

@@ -53,12 +53,11 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
 
+    configs: Dict[int, List[float]] = {}
     wb = None
     try:
         wb = openpyxl.load_workbook(excel_path, data_only=True)
         ws = wb.active
-
-        configs: Dict[int, List[float]] = {}
 
         # 从第3行开始读取（openpyxl 行号从1开始）
         for row in ws.iter_rows(min_row=3, values_only=True):
