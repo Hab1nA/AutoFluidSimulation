@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "autofluid-tui"
-version = "2.5.0"
+version = "2.5.1"
 dependencies = [
  "arboard",
  "crossterm",

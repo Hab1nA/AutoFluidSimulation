@@ -5,6 +5,7 @@ excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidwork
 step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
 sc_exe = 'C:\Program Files\ANSYS Inc\v231\scdm\SpaceClaim.exe'
 sc_script = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\spaceclaim_transit.py'
+sc_bridge = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\bridge\SpaceClaimBridge.exe'
 scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
 log_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\logs'
 data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
@@ -43,3 +44,12 @@ meshing_timeout = 600
 solver_timeout = 7200
 max_retries = 3
 state_refresh_interval = 0.5
+
+[operation_timeouts]
+sw_startup = 60
+sw_dispatch_startup_delay = 8
+sw_exit_wait_seconds = 15
+sc_poll_interval = 2.0
+ssh_connection = 10
+dir_recursion_limit = 32
+ssh_upload_max_retries = 3

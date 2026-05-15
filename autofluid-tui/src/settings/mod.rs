@@ -14,6 +14,7 @@ pub struct LocalPaths {
     pub step_dir: String,
     pub sc_exe: String,
     pub sc_script: String,
+    pub sc_bridge: String,
     pub scdoc_dir: String,
     pub log_dir: String,
     pub data_dir: String,
@@ -28,6 +29,7 @@ impl Default for LocalPaths {
             step_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step".to_string(),
             sc_exe: r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe".to_string(),
             sc_script: String::new(), // computed at runtime relative to project dir
+            sc_bridge: String::new(),  // computed at runtime relative to project dir
             scdoc_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc".to_string(),
             log_dir: String::new(),   // computed at runtime
             data_dir: String::new(),  // computed at runtime
@@ -133,6 +135,31 @@ impl Default for EngineConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationTimeouts {
+    pub sw_startup: u64,
+    pub sw_dispatch_startup_delay: u64,
+    pub sw_exit_wait_seconds: u64,
+    pub sc_poll_interval: f64,
+    pub ssh_connection: u64,
+    pub dir_recursion_limit: u32,
+    pub ssh_upload_max_retries: u32,
+}
+
+impl Default for OperationTimeouts {
+    fn default() -> Self {
+        Self {
+            sw_startup: 60,
+            sw_dispatch_startup_delay: 8,
+            sw_exit_wait_seconds: 15,
+            sc_poll_interval: 2.0,
+            ssh_connection: 10,
+            dir_recursion_limit: 32,
+            ssh_upload_max_retries: 3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SettingsConfig {
     #[serde(default)]
@@ -143,6 +170,8 @@ pub struct SettingsConfig {
     pub step_file_patterns: StepFilePatterns,
     #[serde(default)]
     pub engine_config: EngineConfig,
+    #[serde(default)]
+    pub operation_timeouts: OperationTimeouts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,15 +181,17 @@ pub enum SettingCategory {
     RemoteDirs,
     StepPatterns,
     EngineConfig,
+    OperationTimeouts,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 5] = [
+    pub const ALL: [SettingCategory; 6] = [
         SettingCategory::LocalPaths,
         SettingCategory::RemoteConnection,
         SettingCategory::RemoteDirs,
         SettingCategory::StepPatterns,
         SettingCategory::EngineConfig,
+        SettingCategory::OperationTimeouts,
     ];
 
     pub fn display_name(self) -> &'static str {
@@ -170,16 +201,18 @@ impl SettingCategory {
             SettingCategory::RemoteDirs => "远程执行目录",
             SettingCategory::StepPatterns => "步骤文件模板",
             SettingCategory::EngineConfig => "引擎配置",
+            SettingCategory::OperationTimeouts => "操作超时参数",
         }
     }
 
     pub fn field_count(self) -> usize {
         match self {
-            SettingCategory::LocalPaths => 9,
+            SettingCategory::LocalPaths => 10,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 9,
             SettingCategory::StepPatterns => 4,
             SettingCategory::EngineConfig => 12,
+            SettingCategory::OperationTimeouts => 7,
         }
     }
 
@@ -187,7 +220,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => match idx {
                 0 => "sw_exe", 1 => "sw_model", 2 => "excel", 3 => "step_dir",
-                4 => "sc_exe", 5 => "sc_script", 6 => "scdoc_dir", 7 => "log_dir", 8 => "data_dir",
+                4 => "sc_exe", 5 => "sc_script", 6 => "sc_bridge", 7 => "scdoc_dir", 8 => "log_dir", 9 => "data_dir",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
@@ -210,6 +243,11 @@ impl SettingCategory {
                 9 => "solver_timeout", 10 => "max_retries", 11 => "state_refresh_interval",
                 _ => "",
             },
+            SettingCategory::OperationTimeouts => match idx {
+                0 => "sw_startup", 1 => "sw_dispatch_startup_delay", 2 => "sw_exit_wait_seconds",
+                3 => "sc_poll_interval", 4 => "ssh_connection", 5 => "dir_recursion_limit", 6 => "ssh_upload_max_retries",
+                _ => "",
+            },
         }
     }
 
@@ -217,7 +255,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => match idx {
                 0 => "SW可执行文件", 1 => "SW模型文件", 2 => "Excel参数表", 3 => "STEP输出目录",
-                4 => "SC可执行文件", 5 => "SC脚本文件", 6 => "SCDOC输出目录", 7 => "日志目录", 8 => "数据目录",
+                4 => "SC可执行文件", 5 => "SC脚本文件", 6 => "SC桥接程序", 7 => "SCDOC输出目录", 8 => "日志目录", 9 => "数据目录",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
@@ -237,6 +275,11 @@ impl SettingCategory {
                 0 => "看门狗间隔(秒)", 1 => "SW宏超时(秒)", 2 => "SW关闭文档", 3 => "SW退出",
                 4 => "SW显示窗口", 5 => "SW最大重试", 6 => "SC超时(秒)", 7 => "传输超时(秒)",
                 8 => "网格超时(秒)", 9 => "求解超时(秒)", 10 => "最大重试", 11 => "状态刷新间隔(秒)",
+                _ => "",
+            },
+            SettingCategory::OperationTimeouts => match idx {
+                0 => "SW启动超时(秒)", 1 => "SW Dispatch启动延迟(秒)", 2 => "SW退出等待(秒)",
+                3 => "SC轮询间隔(秒)", 4 => "SSH连接超时(秒)", 5 => "目录递归深度限制", 6 => "SSH上传最大重试",
                 _ => "",
             },
         }
@@ -316,6 +359,13 @@ impl SettingsState {
                 .to_string_lossy()
                 .to_string();
         }
+        if config.local_paths.sc_bridge.is_empty() {
+            config.local_paths.sc_bridge = project_dir
+                .join("bridge")
+                .join("SpaceClaimBridge.exe")
+                .to_string_lossy()
+                .to_string();
+        }
         if config.local_paths.log_dir.is_empty() {
             config.local_paths.log_dir = project_dir
                 .join("logs")
@@ -366,9 +416,10 @@ impl SettingsState {
                 3 => self.config.local_paths.step_dir.clone(),
                 4 => self.config.local_paths.sc_exe.clone(),
                 5 => self.config.local_paths.sc_script.clone(),
-                6 => self.config.local_paths.scdoc_dir.clone(),
-                7 => self.config.local_paths.log_dir.clone(),
-                8 => self.config.local_paths.data_dir.clone(),
+                6 => self.config.local_paths.sc_bridge.clone(),
+                7 => self.config.local_paths.scdoc_dir.clone(),
+                8 => self.config.local_paths.log_dir.clone(),
+                9 => self.config.local_paths.data_dir.clone(),
                 _ => String::new(),
             },
             SettingCategory::RemoteConnection => match idx {
@@ -412,6 +463,16 @@ impl SettingsState {
                 11 => self.config.engine_config.state_refresh_interval.to_string(),
                 _ => String::new(),
             },
+            SettingCategory::OperationTimeouts => match idx {
+                0 => self.config.operation_timeouts.sw_startup.to_string(),
+                1 => self.config.operation_timeouts.sw_dispatch_startup_delay.to_string(),
+                2 => self.config.operation_timeouts.sw_exit_wait_seconds.to_string(),
+                3 => self.config.operation_timeouts.sc_poll_interval.to_string(),
+                4 => self.config.operation_timeouts.ssh_connection.to_string(),
+                5 => self.config.operation_timeouts.dir_recursion_limit.to_string(),
+                6 => self.config.operation_timeouts.ssh_upload_max_retries.to_string(),
+                _ => String::new(),
+            },
         }
     }
 
@@ -424,9 +485,10 @@ impl SettingsState {
                 3 => self.config.local_paths.step_dir = value.to_string(),
                 4 => self.config.local_paths.sc_exe = value.to_string(),
                 5 => self.config.local_paths.sc_script = value.to_string(),
-                6 => self.config.local_paths.scdoc_dir = value.to_string(),
-                7 => self.config.local_paths.log_dir = value.to_string(),
-                8 => self.config.local_paths.data_dir = value.to_string(),
+                6 => self.config.local_paths.sc_bridge = value.to_string(),
+                7 => self.config.local_paths.scdoc_dir = value.to_string(),
+                8 => self.config.local_paths.log_dir = value.to_string(),
+                9 => self.config.local_paths.data_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::RemoteConnection => match idx {
@@ -472,6 +534,16 @@ impl SettingsState {
                 9 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.solver_timeout = v; }
                 10 => if let Ok(v) = value.parse::<u32>() { self.config.engine_config.max_retries = v; }
                 11 => if let Ok(v) = value.parse::<f64>() { self.config.engine_config.state_refresh_interval = v; }
+                _ => {}
+            },
+            SettingCategory::OperationTimeouts => match idx {
+                0 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_startup = v; }
+                1 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_dispatch_startup_delay = v; }
+                2 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_exit_wait_seconds = v; }
+                3 => if let Ok(v) = value.parse::<f64>() { self.config.operation_timeouts.sc_poll_interval = v; }
+                4 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.ssh_connection = v; }
+                5 => if let Ok(v) = value.parse::<u32>() { self.config.operation_timeouts.dir_recursion_limit = v; }
+                6 => if let Ok(v) = value.parse::<u32>() { self.config.operation_timeouts.ssh_upload_max_retries = v; }
                 _ => {}
             },
         }

@@ -184,6 +184,12 @@ PROCESS_MANAGEMENT = {
 OPERATION_TIMEOUTS = {
     # SolidWorks 启动超时（秒）
     "sw_startup": 60,
+    # SW COM Dispatch 后等待窗口加载的延迟（秒）
+    "sw_dispatch_startup_delay": 8,
+    # SW ExitApp 后等待进程退出的最大秒数
+    "sw_exit_wait_seconds": 15,
+    # SC 进程轮询间隔（秒）
+    "sc_poll_interval": 2.0,
     # SSH 连接超时（秒）
     "ssh_connection": 10,
     # 远程目录递归创建的深度限制
@@ -347,6 +353,8 @@ def reload_config_from_toml() -> bool:
             STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
         if "engine_config" in toml_data:
             ENGINE_CONFIG.update(toml_data["engine_config"])
+        if "operation_timeouts" in toml_data:
+            OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
         _apply_env_overrides()
         return True
     return False

@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, List
 
-from engine.config import LOCAL_PATHS, ENGINE_CONFIG, get_step_filename
+from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -54,15 +54,15 @@ class SCProcessPool:
                     self._slots[slot.slot_id] = slot
                 self._next_slot_id = data.get("next_slot_id", 1)
                 logger.info(
-                    f"[SCPool] 已加载 {len(self._slots)} 个槽位 "
+                    f"[SC-Pool] 已加载 {len(self._slots)} 个槽位 "
                     f"(max={self.MAX_SLOTS})"
                 )
             except (json.JSONDecodeError, TypeError, KeyError) as e:
-                logger.warning(f"[SCPool] 池文件损坏，使用空池: {e}")
+                logger.warning(f"[SC-Pool] 池文件损坏，使用空池: {e}")
                 self._slots = {}
                 self._next_slot_id = 1
         else:
-            logger.info("[SCPool] 池文件不存在，初始化空池")
+            logger.info("[SC-Pool] 池文件不存在，初始化空池")
 
     def _save_pool(self):
         try:
@@ -73,7 +73,7 @@ class SCProcessPool:
             with open(self._pool_file, "w") as f:
                 json.dump(data, f, indent=2, default=str)
         except OSError as e:
-            logger.error(f"[SCPool] 写入池文件失败: {e}")
+            logger.error(f"[SC-Pool] 写入池文件失败: {e}")
 
     def _check_process_alive(self, slot: SCSlot):
         if slot.pid is None or slot.status == "idle":
@@ -82,7 +82,7 @@ class SCProcessPool:
             os.kill(slot.pid, 0)
         except (OSError, ProcessLookupError):
             logger.info(
-                f"[SCPool] 槽位{slot.slot_id} PID={slot.pid} "
+                f"[SC-Pool] 槽位{slot.slot_id} PID={slot.pid} "
                 f"已不存在，重置为 idle"
             )
             slot.pid = None
@@ -96,7 +96,7 @@ class SCProcessPool:
 
     def shutdown_all(self):
         with self._lock:
-            logger.info("[SCPool] 执行全量 SpaceClaim 进程清理...")
+            logger.info("[SC-Pool] 执行全量 SpaceClaim 进程清理...")
             self._kill_all_sc_processes()
             for slot in self._slots.values():
                 slot.pid = None
@@ -104,7 +104,7 @@ class SCProcessPool:
                 slot.config_name = None
                 slot.completed_at = time.time()
             self._save_pool()
-            logger.info("[SCPool] 全量清理完成，所有槽位重置为 idle")
+            logger.info("[SC-Pool] 全量清理完成，所有槽位重置为 idle")
 
     def _kill_all_sc_processes(self):
         if os.name != "nt":
@@ -116,19 +116,19 @@ class SCProcessPool:
             )
             time.sleep(3)
         except (subprocess.TimeoutExpired, OSError) as e:
-            logger.warning(f"[SCPool] taskkill 异常: {e}")
+            logger.warning(f"[SC-Pool] taskkill 异常: {e}")
 
     def do_first_cleanup(self):
         with self._lock:
             if not self._first_cleanup_done:
-                logger.info("[SCPool] === 首次全体 SC 进程清理（进入 SC 阶段前）===")
+                logger.info("[SC-Pool] === 首次全体 SC 进程清理（进入 SC 阶段前）===")
                 self.shutdown_all()
                 self._first_cleanup_done = True
 
     def do_final_cleanup(self):
         with self._lock:
             if not self._final_cleanup_done:
-                logger.info("[SCPool] === 末次全体 SC 进程清理（SC 阶段全部完成后）===")
+                logger.info("[SC-Pool] === 末次全体 SC 进程清理（SC 阶段全部完成后）===")
                 self.shutdown_all()
                 self._final_cleanup_done = True
 
@@ -140,7 +140,7 @@ class SCProcessPool:
             self._slots.clear()
             self._next_slot_id = 1
             self._save_pool()
-            logger.info("[SCPool] 已重置：清理标志/等待队列/槽位全部归零")
+            logger.info("[SC-Pool] 已重置：清理标志/等待队列/槽位全部归零")
 
     # ==================================================================
     # 槽位获取与释放
@@ -161,7 +161,7 @@ class SCProcessPool:
 
             self._wait_queue.append(config_name)
             logger.info(
-                f"[SCPool] 构型{config_name} 加入等待队列 "
+                f"[SC-Pool] 构型{config_name} 加入等待队列 "
                 f"(当前等待: {len(self._wait_queue)}人, "
                 f"活跃槽位: {len(self._slots)}/{self.MAX_SLOTS})"
             )
@@ -183,7 +183,7 @@ class SCProcessPool:
         slot.config_name = config_name
         self._save_pool()
         logger.info(
-            f"[SCPool] 槽位{slot.slot_id} 分配给构型{config_name}"
+            f"[SC-Pool] 槽位{slot.slot_id} 分配给构型{config_name}"
         )
         return slot.slot_id
 
@@ -197,7 +197,7 @@ class SCProcessPool:
         self._next_slot_id += 1
         self._save_pool()
         logger.info(
-            f"[SCPool] 创建新槽位{slot.slot_id} → 构型{config_name} "
+            f"[SC-Pool] 创建新槽位{slot.slot_id} → 构型{config_name} "
             f"(池:{len(self._slots)}/{self.MAX_SLOTS})"
         )
         return slot.slot_id
@@ -211,7 +211,7 @@ class SCProcessPool:
                     if config_name in self._wait_queue:
                         self._wait_queue.remove(config_name)
                         self._save_pool()
-                logger.info(f"[SCPool] 构型{config_name} 因引擎停止取消等待")
+                logger.info(f"[SC-Pool] 构型{config_name} 因引擎停止取消等待")
                 return None
 
             if paused_event is not None and paused_event.is_set():
@@ -232,7 +232,7 @@ class SCProcessPool:
         with self._lock:
             slot = self._slots.get(slot_id)
             if slot is None:
-                logger.warning(f"[SCPool] 释放失败: 槽位{slot_id} 不存在")
+                logger.warning(f"[SC-Pool] 释放失败: 槽位{slot_id} 不存在")
                 return
 
             config_name = slot.config_name
@@ -243,13 +243,13 @@ class SCProcessPool:
             self._save_pool()
 
             logger.info(
-                f"[SCPool] 槽位{slot_id} 已释放 (构型{config_name})"
+                f"[SC-Pool] 槽位{slot_id} 已释放 (构型{config_name})"
             )
 
             if self._wait_queue:
                 next_config = self._wait_queue[0]
                 logger.info(
-                    f"[SCPool] 等待队列首位 构型{next_config} "
+                    f"[SC-Pool] 等待队列首位 构型{next_config} "
                     f"将被唤醒 (剩余等待: {len(self._wait_queue)-1}人)"
                 )
 
@@ -263,7 +263,7 @@ class SCProcessPool:
                 slot.pid = pid
                 slot.started_at = time.time()
                 self._save_pool()
-                logger.info(f"[SCPool] 槽位{slot_id} PID={pid}")
+                logger.info(f"[SC-Pool] 槽位{slot_id} PID={pid}")
 
     # ==================================================================
     # 执行入口：一体化 launch + monitor + release
@@ -289,7 +289,7 @@ class SCProcessPool:
 
         scdoc_name = get_step_filename("SC", config_name)
         if not scdoc_name:
-            logger.error(f"[SCPool] 无法生成构型{config_name} SCDOC 文件名")
+            logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
             return False
         scdoc_file = os.path.join(scdoc_dir, scdoc_name)
 
@@ -306,9 +306,9 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
 
         logger.info(
-            f"[SCPool] 启动 Bridge: 构型{config_name} 槽位{slot_id}"
+            f"[SC-Pool] 启动 Bridge: 构型{config_name} 槽位{slot_id}"
         )
-        logger.debug(f"[SCPool]   命令: {' '.join(cmd)}")
+        logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
 
         try:
             creation_flags = (
@@ -328,14 +328,14 @@ class SCProcessPool:
 
             timeout = ENGINE_CONFIG["sc_timeout"]
             deadline = time.time() + timeout
-            poll_interval = 2.0
+            poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
 
             while True:
                 retcode = process.poll()
                 if retcode is not None:
                     if retcode != 0:
                         logger.error(
-                            f"[SCPool] Bridge 失败 构型{config_name} "
+                            f"[SC-Pool] Bridge 失败 构型{config_name} "
                             f"(exit={retcode})"
                         )
                         return False
@@ -343,21 +343,21 @@ class SCProcessPool:
 
                 if paused_event is not None and paused_event.is_set():
                     logger.info(
-                        f"[SCPool] 构型{config_name} 因暂停被终止"
+                        f"[SC-Pool] 构型{config_name} 因暂停被终止"
                     )
                     self._terminate_bridge_and_sc(process, config_name)
                     return False
 
                 if stopped_event is not None and stopped_event.is_set():
                     logger.info(
-                        f"[SCPool] 构型{config_name} 因停止被终止"
+                        f"[SC-Pool] 构型{config_name} 因停止被终止"
                     )
                     self._terminate_bridge_and_sc(process, config_name)
                     return False
 
                 if time.time() >= deadline:
                     logger.error(
-                        f"[SCPool] 构型{config_name} Bridge 超时 ({timeout}s)"
+                        f"[SC-Pool] 构型{config_name} Bridge 超时 ({timeout}s)"
                     )
                     self._terminate_bridge_and_sc(process, config_name)
                     return False
@@ -367,21 +367,21 @@ class SCProcessPool:
             if os.path.exists(scdoc_file):
                 file_size = os.path.getsize(scdoc_file)
                 logger.info(
-                    f"[SCPool] ✓ 构型{config_name} SCDOC: "
+                    f"[SC-Pool] ✓ 构型{config_name} SCDOC: "
                     f"{os.path.basename(scdoc_file)} ({file_size} bytes)"
                 )
                 return True
             else:
                 logger.error(
-                    f"[SCPool] ✗ 构型{config_name} SCDOC 未生成"
+                    f"[SC-Pool] ✗ 构型{config_name} SCDOC 未生成"
                 )
                 return False
 
         except OSError as e:
-            logger.error(f"[SCPool] 构型{config_name} IO错误: {e}")
+            logger.error(f"[SC-Pool] 构型{config_name} IO错误: {e}")
             return False
         except Exception as e:
-            logger.error(f"[SCPool] 构型{config_name} 未知错误: {e}", exc_info=True)
+            logger.error(f"[SC-Pool] 构型{config_name} 未知错误: {e}", exc_info=True)
             return False
 
     def _terminate_bridge_and_sc(self, bridge_process, config_name: int):
@@ -395,7 +395,7 @@ class SCProcessPool:
             pass
 
         self._kill_all_sc_processes()
-        logger.info(f"[SCPool] 已终止 构型{config_name} 的 Bridge 及关联 SC 进程")
+        logger.info(f"[SC-Pool] 已终止 构型{config_name} 的 Bridge 及关联 SC 进程")
 
     def _build_command(self, config_name: int, step_dir: str, scdoc_dir: str):
         if self._bridge_path and os.path.exists(self._bridge_path):
@@ -416,7 +416,7 @@ class SCProcessPool:
                 "/ExitAfterScript=True",
             ]
 
-        logger.error("[SCPool] 无可用的 SC 调用方式 (Bridge/SC exe 均缺失)")
+        logger.error("[SC-Pool] 无可用的 SC 调用方式 (Bridge/SC exe 均缺失)")
         return None
 
     # ==================================================================

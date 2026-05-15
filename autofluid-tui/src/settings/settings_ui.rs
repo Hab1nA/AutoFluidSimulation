@@ -329,6 +329,7 @@ fn make_field_name(cat: SettingCategory, fi: usize) -> String {
         }
         SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
         SettingCategory::EngineConfig => format!("engine_config.{}", cat.field_name(fi)),
+        SettingCategory::OperationTimeouts => format!("operation_timeouts.{}", cat.field_name(fi)),
     }
 }
 
