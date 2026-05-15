@@ -267,8 +267,13 @@ pub fn render_settings_dialog(
 
             // Edit indicator
             if is_focused && !ss.focus.editing {
+                let hint = if cat.is_bool_field(fi) {
+                    "  [Enter 切换]"
+                } else {
+                    "  [Enter 编辑]"
+                };
                 spans.push(Span::styled(
-                    "  [Enter 编辑]",
+                    hint,
                     Style::default().fg(HINT_COLOR).bg(row_bg),
                 ));
             }

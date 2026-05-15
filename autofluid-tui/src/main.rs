@@ -1119,7 +1119,7 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                 }
             }
 
-            // Settings 模式下检测字段点击（双击触发编辑）
+            // Settings 模式下检测字段点击（双击触发编辑，布尔字段单击即切换）
             if state.ui_mode == UiMode::Settings {
                 if let Some(ref mut ss) = state.settings_state {
                     // 编辑模式下阻止鼠标对其他行进行双击/单击操作
@@ -1132,7 +1132,13 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, log_buffer: &mut LogBuf
                             if is_double {
                                 ss.focus.category_index = cat_idx;
                                 ss.focus.field_index = fi;
-                                ss.begin_edit_current_field();
+                                let cat = ss.current_category();
+                                if cat.is_bool_field(fi) {
+                                    // Boolean fields: toggle directly, don't enter text editing
+                                    ss.toggle_boolean();
+                                } else {
+                                    ss.begin_edit_current_field();
+                                }
                                 ss.clicked_field = None;
                                 ss.field_click_time = None;
                                 ss.last_clicked_field = None;
