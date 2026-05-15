@@ -208,11 +208,238 @@ watchdog≥3.0.0         # 文件监控
 
 ### 前置条件
 
-1. SolidWorks 2020+ 已安装并注册 COM 接口
-2. ANSYS SpaceClaim 2023 R1 已安装
-3. 远程 Windows 工作站已启用 OpenSSH Server
-4. 远程工作站已安装 Fluent + Conda 环境 `pyfluent`
-5. Excel 参数表和 SW 模型已就位
+> 以下所有条件必须在首次启动 AutoFluid 前满足。建议逐项检查，避免运行时出现难以排查的环境问题。
+
+---
+
+#### 1. 操作系统
+
+| 要求 | 说明 |
+|------|------|
+| **Windows 10/11 x64** 或 **Windows Server 2019+** | 本地控制机与远程工作站均需 Windows。SolidWorks COM 自动化、.NET Framework 4.8、Rust Windows 目标均依赖 Windows 平台 |
+| **管理员权限**（推荐） | SolidWorks COM 注册、防火墙规则修改、SSH Server 安装可能需要管理员权限 |
+| **PowerShell 5.1+** | 远程任务通过 PowerShell `Start-Process` 启动，系统自带无需额外安装 |
+
+---
+
+#### 2. Python 运行环境
+
+| 要求 | 说明 |
+|------|------|
+| **Python 3.10 ~ 3.12** | 推荐 3.11（`toml` 标准库可替代第三方包） |
+| **pip 23.0+** | 用于安装依赖 |
+
+**依赖包清单**（`pip install -r requirements.txt` 一键安装）：
+
+| 包名 | 最低版本 | 用途 |
+|------|----------|------|
+| `openpyxl` | ≥3.1.0 | 读取 Excel 参数表（`model_gen4.xlsx`） |
+| `toml` | ≥0.10.0 | TOML 配置文件解析（Python < 3.11 必需） |
+| `python-dotenv` | ≥1.0.0 | 加载 `.env` 敏感信息（SSH 密码等） |
+| `pywin32` | ≥305 | SolidWorks COM 自动化接口 |
+| `paramiko` | ≥3.0.0 | SSH/SFTP 远程连接与文件传输 |
+| `watchdog` | ≥3.0.0 | 文件系统事件监控（STEP 文件稳定性检测） |
+| `sqlite3` | — | Python 标准库自带，SQLite WAL 状态持久化 |
+
+```powershell
+# 创建虚拟环境（推荐）
+python -m venv .venv
+.venv\Scripts\activate
+
+# 安装依赖
+pip install -r requirements.txt
+```
+
+---
+
+#### 3. Rust 编译工具链（编译 TUI 前端）
+
+| 要求 | 说明 |
+|------|------|
+| **Rust 稳定版**（MSVC 工具链） | 1.70+，推荐最新 stable |
+| **Cargo** | 随 Rust 一起安装 |
+| **Windows MSVC Build Tools** | Visual Studio 2022 生成工具（含 Windows SDK） |
+
+**安装方式**：
+
+```powershell
+# 方式一：rustup 一键安装（推荐）
+winget install Rustlang.Rustup
+# 或访问 https://rustup.rs 下载安装器
+
+# 方式二：如果已有 VS 2022，确认 MSVC 工具链
+rustup default stable-msvc
+rustup target add x86_64-pc-windows-msvc
+```
+
+**TUI 依赖的 Rust crate**（`cargo build` 自动拉取，无需手动安装）：
+
+| Crate | 版本 | 用途 |
+|-------|------|------|
+| `ratatui` | 0.29 | 终端 UI 框架 |
+| `crossterm` | 0.28 | 跨平台终端控制 |
+| `tokio` | 1 | 异步运行时（含 net / io-util / time） |
+| `serde` + `serde_json` | 1 | JSON 序列化（IPC 协议） |
+| `toml` | 0.8 | TOML 配置解析 |
+| `arboard` | 3 | 剪贴板访问 |
+| `unicode-width` | 0.2 | 中文字符宽度计算 |
+
+---
+
+#### 4. .NET Framework / C# 编译工具（编译 SpaceClaim Bridge）
+
+| 要求 | 说明 |
+|------|------|
+| **.NET Framework 4.8 SDK**（含 Targeting Pack） | 编译 C# 桥接程序 `SpaceClaimBridge.exe` |
+| **MSBuild**（随 VS 或 Build Tools 安装） | 命令行编译器，`rebuild.bat` 自动检测以下路径 |
+
+MSBuild 自动检测路径（按优先级）：
+- VS 2022 Community / Professional / Enterprise
+- VS 2022 Build Tools
+- VS 2019 Community / Professional / Build Tools
+
+**安装方式**：
+
+```powershell
+# 安装 Visual Studio 2022 Community（免费）
+winget install Microsoft.VisualStudio.2022.Community
+# 安装时勾选：".NET Framework 4.8 目标包" + "MSBuild"
+
+# 或仅安装 Build Tools（无 IDE，体积较小）
+winget install Microsoft.VisualStudio.2022.BuildTools
+```
+
+> **注意**：`SpaceClaimBridge` 是 SDK 风格 `.csproj` 项目，目标框架 `net48`，平台 `x64`。如只需编译免 API 引用版本，运行 `compile_noref.bat` 即可，无需安装 SpaceClaim。
+
+---
+
+#### 5. SolidWorks（本地 CAD 建模）
+
+| 要求 | 说明 |
+|------|------|
+| **SolidWorks 2020 或更高版本** | COM 自动化接口 `SldWorks.Application` 需注册 |
+| **SolidWorks API 类型库** | 随 SolidWorks 安装，`pywin32` 通过 `win32com.client.Dispatch()` 调用 |
+| **SW 模型及 Excel 参数表** | `.SLDPRT` 文件 + 对应 `.xlsx` 设计表 |
+
+**系统自检**（TUI 内执行 `check` 命令或手动验证）：
+
+```powershell
+# 验证 COM 注册
+python -c "import win32com.client; sw = win32com.client.Dispatch('SldWorks.Application'); print(sw.RevisionNumber())"
+```
+
+**配置**（`autofluid_config.toml` → `[local_paths]`）：
+- `sw_exe`: SolidWorks 可执行文件完整路径
+- `sw_model`: `.SLDPRT` 模型文件路径
+- `excel`: Excel 参数表路径
+- `step_dir`: STEP 导出目录
+
+---
+
+#### 6. ANSYS SpaceClaim（本地几何转换）
+
+| 要求 | 说明 |
+|------|------|
+| **ANSYS SpaceClaim 2023 R1 (v231)** | 命令行模式 `/RunScript` 执行 Python 转换脚本 |
+| **IronPython 解释器**（随 SpaceClaim 内置） | SpaceClaim 内嵌的脚本引擎，非系统 Python |
+| **SpaceClaim API V23 DLL**（可选） | 仅强类型编译需要；纯进程检测模式无需此 DLL |
+
+**支持的版本**（`bridge/SpaceClaimBridge/Program.cs` 自动探测）：
+- v231（2023 R1）
+- v232（2023 R2）
+- v241（2024 R1）
+
+**配置**（`autofluid_config.toml` → `[local_paths]`）：
+- `sc_exe`: `SpaceClaim.exe` 完整路径（如 `C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe`）
+- `sc_script`: 转换脚本路径（`executor/spaceclaim_transit.py`）
+- `sc_bridge`: C# 桥接程序路径（`bridge/SpaceClaimBridge.exe`）
+- `scdoc_dir`: SCDOC 输出目录
+
+---
+
+#### 7. 远程工作站环境
+
+| 要求 | 说明 |
+|------|------|
+| **Windows 10/11 x64** 或 **Windows Server 2019+** | 远程计算节点，运行 Fluent 网格划分与求解 |
+| **OpenSSH Server 已启用并运行** | 用于 SFTP 传输和远程命令执行 |
+| **网络连通** | 本地与远程之间 TCP 22 端口可达，防火墙放行 |
+| **Conda 环境 `pyfluent`** | 包含 PyFluent 的 Conda 虚拟环境，用于网格划分和求解 |
+| **ANSYS Fluent 2023 R1+** | CFD 求解器，需通过 `pyfluent` Conda 环境调用 |
+
+**远程 SSH 配置检查清单**：
+
+```powershell
+# 1. 远程：安装 OpenSSH Server
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+
+# 2. 远程：启动并设为自动运行
+Start-Service sshd
+Set-Service -Name sshd -StartupType 'Automatic'
+
+# 3. 远程：防火墙放行 22 端口
+New-NetFirewallRule -Name 'OpenSSH-Server' -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+
+# 4. 本地：测试 SSH 连接
+ssh ps@172.17.135.240
+```
+
+**远程 Conda + Fluent 环境搭建**：
+
+```powershell
+# 安装 Anaconda / Miniconda
+winget install Anaconda.Miniconda3
+
+# 创建 pyfluent 环境并安装 PyFluent
+conda create -n pyfluent python=3.10 -y
+conda activate pyfluent
+pip install ansys-fluent-core
+```
+
+**配置**（`autofluid_config.toml` → `[remote_config]`）：
+- `host` / `port` / `username`: SSH 连接参数
+- `conda_env` / `conda_exe`: Conda 环境名和可执行文件路径
+- 远程目录映射（`scdoc_dir` / `msh_dir` / `result_dir` / `flags_dir`）
+- `meshing_script` / `solver_script`: 远程 Python 脚本路径
+
+敏感信息通过项目根目录 `.env` 文件注入：
+```
+AUTOFLUID_SSH_PASSWORD=your_password
+```
+
+---
+
+#### 8. 其他系统设置
+
+| 设置项 | 说明 |
+|--------|------|
+| **PowerShell 执行策略** | 远程脚本调用需要 `RemoteSigned` 或更高 |
+
+```powershell
+# 本地和远程均需执行（管理员终端）
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+| **文件路径与权限** | 所有 `autofluid_config.toml` 中的目录需预先创建，程序不会自动创建顶层目录 |
+| **防病毒软件** | 部分杀软可能拦截 `win32com` COM 调用或 TCP 127.0.0.1:9527 通信，如遇异常请添加白名单 |
+| **端口 9527 可用** | Daemon ↔ TUI IPC 通信端口，确保未被其他程序占用 |
+
+---
+
+#### 环境自检速查表
+
+| # | 检查项 | 验证命令 |
+|---|--------|----------|
+| 1 | Python ≥ 3.10 | `python --version` |
+| 2 | pip 依赖完整 | `pip check` |
+| 3 | Rust 工具链 | `rustc --version` && `cargo --version` |
+| 4 | MSBuild 可用 | 运行 `rebuild.bat`（自动探测） |
+| 5 | SolidWorks COM | `python -c "from win32com.client import Dispatch; Dispatch('SldWorks.Application')"` |
+| 6 | SpaceClaim 路径存在 | `Test-Path 'C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe'` |
+| 7 | SSH 远程可达 | `ssh ps@<remote-host> "echo OK"` |
+| 8 | 端口 9527 空闲 | `netstat -ano \| findstr :9527`（应为空） |
+| 9 | 目录结构就位 | 确认 `step_dir` / `scdoc_dir` / `.env` / `Excel` / `.SLDPRT` 均已存在 |
+| 10 | TOML 配置正确 | TUI 启动后执行 `check` 命令或进入 `settings` 页面验证 |
 
 ### 编译（首次使用）
 
@@ -237,7 +464,7 @@ python start_client.py
 
 ```powershell
 python start_client.py
-# 进入 TUI 后点击 "Daemon Start" 或输入 daemon start
+# 进入 TUI 后点击 "😈 Daemon" 按钮 → 选择 "start" 或输入 daemon start
 ```
 
 **其他方式**
@@ -252,42 +479,167 @@ python main.py --all           # 同时启动
 
 ## TUI 操作指南
 
+### 界面布局
+
+```
+┌──────────────────────────────────────────────────────┐
+│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.5.1    HH:MM:SS  │  ← 标题栏
+├──────────────────────────────────────────────────────┤
+│  引擎: 运行中  │  构型数: 72  │  屏障: 未通过          │  ← 信息栏
+├──────────────────────────────────────────────────────┤
+│  构型  │ SW导出  │ SC转换  │ 传输 │ 网格 │ 求解      │  ← 状态表格 (3/5 屏高)
+│   1    │ ✅ ...  │ ⏳ ...  │ ...  │ ...  │ ...       │
+│  ...   │  ...    │  ...    │ ...  │ ...  │ ...       │
+├───────────────────────────┬──────────────────────────┤
+│  📋 信息提示              │  📜 详细日志              │  ← 双栏日志 (2/5 屏高)
+│  ✅ 流水线已启动           │  [INFO] 开始处理构型 1...  │
+│  ...                      │  [DEBUG] COM 调用...     │
+├───────────────────────────┴──────────────────────────┤
+│  > start                                           ▎ │  ← 命令输入行
+│  ▶ Start │⏸ Pause │⚙ Settings│🔧 Check│...│⏹ Full │  ← 快捷按钮栏
+└──────────────────────────────────────────────────────┘
+```
+
+### 键盘快捷键
+
+| 快捷键 | 作用 |
+|--------|------|
+| `Tab` | 焦点区正向轮换：命令输入 → 状态表格 → 信息日志 → 详细日志 |
+| `Shift+Tab` | 焦点区反向轮换 |
+| `Ctrl+C` / `Ctrl+Q` | 退出 TUI（后台引擎继续运行） |
+| `↑` `↓` | 当前焦点区滚动（表格/日志行移动） |
+| `PageUp` `PageDown` | 整页滚动（表格/日志 ±10 行） |
+| `Home` | 跳转到顶部 |
+| `End` | 跳转到底部（日志区：启用自动跟随） |
+| `Enter` | 提交命令（焦点在命令输入时）；或激活输入（焦点在表格/日志时） |
+| `Esc` | 关闭对话框 / 退出设置页面 / 取消编辑 |
+
+### 鼠标交互
+
+| 操作 | 说明 |
+|------|------|
+| **点击按钮** | 触发对应命令（Start / Pause / Settings / Check / Status / Quit / Quit Full） |
+| **点击 😈 Daemon 按钮** | 展开下拉菜单（start / stop / restart），再次点击选项执行 |
+| **点击表格行** | 高亮当前行 |
+| **点击日志行** | 高亮当前行 |
+| **滚轮滚动** | 在表格、信息日志、详细日志区域各自独立滚动 |
+| **拖拽滚动条** | 所有带滚动条区域均支持鼠标拖拽 |
+| **双击设置字段** | 快速进入编辑模式 |
+| **点击对话框按钮** | 确认 / 取消 操作 |
+
 ### 快捷按钮
 
-| 按钮 | 命令 | 说明 |
-|------|------|------|
-| **Start** | `start` | 启动/继续流水线 |
-| **Pause** | `pause` | 暂停流水线 |
-| **Check** | `check` | 系统自检 |
-| **Status** | `status` | 统计摘要 |
-| **Daemon Start** | `daemon start` | 启动后台引擎 |
-| **Daemon Stop** | `daemon stop` | 停止后台引擎 |
-| **⚙ Settings** | `settings` | 可视化配置（6 分类 52 字段） |
-| **Quit** | `quit` | 退出 TUI |
-| **Quit Full** | `quit full` | 停止引擎 + 退出 |
+| 按钮 | 对应命令 | 说明 |
+|------|----------|------|
+| **▶ Start** | `start` | 启动/继续流水线 |
+| **⏸ Pause** | `pause` | 暂停流水线 |
+| **⚙ Settings** | `settings` | 可视化配置（6 分类 46 字段在线编辑） |
+| **🔧 Check** | `check` | 系统自检（弹出结果对话框） |
+| **📊 Status** | `status` | 统计摘要（引擎状态/各步骤完成数） |
+| **😈 Daemon** | 下拉菜单 | 展开子菜单：`daemon start` / `daemon stop` / `daemon restart` |
+| **🚪 Quit** | `quit` | 退出 TUI（后台引擎继续运行） |
+| **⏹ Quit Full** | `quit full` | 完全退出（停止引擎 + 关闭 TUI，弹出确认对话框） |
 
-### TUI 命令
+### 完整命令列表
+
+#### 流水线控制
 
 | 命令 | 说明 | 示例 |
 |------|------|------|
 | `start` | 启动/继续流水线 | `start` |
 | `pause` | 暂停流水线 | `pause` |
-| `check` | 系统自检 | `check` |
-| `status` | 统计信息 | `status` |
-| `reset <构型\|all> <步骤\|all>` | 重置状态 | `reset 5 SW`、`reset all all` |
-| `clean <构型\|all> <步骤\|all>` | 清理文件 | `clean 5 all` |
-| `settings` | 打开设置 | `settings` |
-| `quit full` | 完全退出 | `quit full` |
+| `check` | 系统自检（本地路径 + 远程连通性） | `check` |
+| `status` | 显示引擎状态和各步骤统计摘要 | `status` |
+| `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（弹出确认对话框） | `reset 5 SW`、`reset all all` |
+| `clean <构型\|all> <步骤\|all>` | 清理步骤产生的中间文件（弹出确认对话框） | `clean 5 all`、`clean all Meshing` |
+| `settings` | 打开可视化设置页面 | `settings` |
+
+#### Daemon 生命周期
+
+| 命令 | 说明 |
+|------|------|
+| `daemon start` | 启动后台引擎并自动建立 IPC 连接（最多等待 10 秒） |
+| `daemon stop` | 停止后台引擎（弹出确认对话框，TUI 继续运行） |
+| `daemon restart` | 重启后台引擎（先 stop 再 start，自动重连） |
+
+#### 退出
+
+| 命令 | 说明 |
+|------|------|
+| `quit` | 退出 TUI，后台引擎继续运行（可通过 `start_client.py` 重新连接） |
+| `quit full` | 完全退出：停止引擎 + 关闭 TUI（弹出确认对话框） |
+
+#### 日志过滤
+
+| 命令 | 说明 |
+|------|------|
+| `filter debug` | 仅显示 DEBUG 级别日志 |
+| `filter info` | 仅显示 INFO 级别日志 |
+| `filter warning` | 仅显示 WARNING 级别日志 |
+| `filter error` | 仅显示 ERROR 级别日志 |
+| `filter critical` | 仅显示 CRITICAL 级别日志 |
+| `filter remote` | 仅显示远程命令执行日志（`remote_ps` 来源） |
+| `filter local` | 仅显示本地命令执行日志（`local_ps` 来源） |
+| `filter com` | 仅显示 COM 自动化日志 |
+| `filter scheduler` | 仅显示调度器日志 |
+| `filter system` | 仅显示系统日志 |
+| `filter ipc` | 仅显示 IPC 通信日志 |
+| `filter clear` | 清除过滤条件，显示全部日志 |
+| `filter status` | 查看当前过滤状态 |
+
+#### 日志导出
+
+| 命令 | 说明 |
+|------|------|
+| `export` | 导出当前日志到 `logs/export_YYYYMMDD_HHMMSS.log` |
+| `export <文件名>` | 导出日志为指定文件名（自动追加 `.log` 后缀） |
+
+> **注意**：日志导出受当前 `filter` 影响——只导出符合过滤条件的条目。
+
+#### 其他
+
+| 命令 | 说明 |
+|------|------|
+| `help` | 显示完整帮助信息 |
 
 ### 状态图标
 
 | 图标 | 状态 | 含义 |
 |------|------|------|
-| ✓ | Completed | 已完成 |
-| ⏳ | Running | 执行中 |
-| 🔄 | Retrying | 重试中 |
-| ⏸ | Waiting / Paused | 等待 / 已暂停 |
-| ✗ | Error | 出错 |
+| ✅ | `Completed` | 已完成 |
+| ⏳ | `Running` | 执行中 |
+| 🔄 | `Retrying` | 重试中 |
+| ⏸️ | `Waiting` / `Paused` | 等待执行 / 已暂停 |
+| ❌ | `Error` | 出错 |
+
+### 设置页面（Settings）
+
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **6 大分类 46 个字段**：
+
+| 分类 | 字段数 | 内容 |
+|------|--------|------|
+| **本地文件路径** | 10 | SW/SpaceClaim 可执行文件、模型/Excel/脚本/桥接程序/输出目录/日志/数据路径 |
+| **远程工作站连接** | 4 | 主机地址、SSH 端口、用户名、密码（密码字段掩码显示，写入 `.env` 文件） |
+| **远程执行目录** | 9 | 工程根目录、SCDOC/网格/结果/标志文件目录、Conda 环境名/路径、网格/求解脚本 |
+| **步骤文件模板** | 4 | SW / SC / Meshing / Solver 各步骤输出文件命名模式（`{config}` 占位） |
+| **引擎配置** | 12 | 看门狗间隔、SW 宏超时、SW 关闭/退出/显示开关、各阶段超时、最大重试、状态刷新 |
+| **操作超时参数** | 7 | SW 启动/退出等待、Dispatch 延迟、SC 轮询间隔、SSH 连接/上传重试、目录递归深度 |
+
+**设置页面操作**：
+
+| 操作 | 快捷键/方式 |
+|------|-------------|
+| 切换分类 | `Tab`（下一分类）/ `Shift+Tab`（上一分类） |
+| 切换字段 | `↑` `↓` 或鼠标滚轮 |
+| 编辑字段 | `Enter`（进入编辑模式） |
+| 确认编辑 | `Enter`（提交修改） |
+| 取消编辑 | `Esc` |
+| 光标移动 | `←` `→` / `Home` / `End` |
+| 撤销修改 | `Ctrl+Z`（仅限本次编辑的字段，不可跨字段） |
+| 保存全部更改 | `Ctrl+S` 或点击 **保存更改** 按钮 |
+| 放弃更改 | `Esc` 或点击 **取消** 按钮 |
+| 路径存在性检测 | 文件/目录路径字段自动展示 ✅（存在）或 ❌（不存在） |
+| 字段校验 | 保存时自动校验（错误 ❌ 阻止保存，警告 ⚠ 可忽略） |
 
 ***
 

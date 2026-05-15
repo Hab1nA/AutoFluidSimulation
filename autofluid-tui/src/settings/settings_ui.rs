@@ -76,7 +76,7 @@ pub fn render_settings_dialog(
 
     // Title bar: title left-aligned, hint centered in remaining space
     let hint_text = if ss.focus.editing {
-        "Enter 提交 | Esc 取消 | ←→ 移动光标 | Home/End 跳转"
+        "Enter 提交 | Esc 取消 | ←→ 移动光标 | Home/End 跳转 | Ctrl+A/X/C/V"
     } else {
         "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Esc 关闭 | Ctrl+S 保存"
     };
@@ -180,20 +180,7 @@ pub fn render_settings_dialog(
             let is_clicked = ss.clicked_field == Some((cat_idx, fi));
             let is_current_field = is_focused && ss.focus.editing;
 
-            let display_value = if cat.is_password_field(fi) && !is_current_field {
-                if value.is_empty() {
-                    "(未设置)".to_string()
-                } else {
-                    "*".repeat(value.len().min(12))
-                }
-            } else if is_current_field {
-                build_edit_display(&ss.edit_buffer, ss.edit_cursor, field_content_width)
-            } else if cat.is_bool_field(fi) {
-                if value == "true" { "是".to_string() } else { "否".to_string() }
-            } else {
-                truncate_for_display(&value, field_content_width.saturating_sub(3))
-            };
-
+            // Pre-compute row background
             let row_bg = if is_clicked {
                 Color::Rgb(15, 52, 96)
             } else if is_hovered {
@@ -218,14 +205,45 @@ pub fn render_settings_dialog(
                 Style::default().fg(FIELD_VALUE).bg(row_bg)
             };
 
-            let mut spans = vec![
+            // Selection highlight style (inverted: bright bg, dark fg)
+            let sel_style = Style::default()
+                .fg(Color::Rgb(22, 33, 62))
+                .bg(Color::Rgb(0, 255, 136));
+
+            let mut spans: Vec<Span<'_>> = vec![
                 Span::styled("  ", Style::default().bg(row_bg)),
                 Span::styled(
                     pad_label_by_display_width(label, label_width),
                     label_style,
                 ),
-                Span::styled(display_value, value_style),
             ];
+
+            if is_current_field {
+                // Editing mode – use styled spans with selection highlight
+                let edit_spans = build_edit_spans(
+                    &ss.edit_buffer,
+                    ss.edit_cursor,
+                    ss.selection_anchor,
+                    field_content_width,
+                    value_style,
+                    sel_style,
+                );
+                spans.extend(edit_spans);
+            } else {
+                // Non-editing: plain string
+                let display_value = if cat.is_password_field(fi) {
+                    if value.is_empty() {
+                        "(未设置)".to_string()
+                    } else {
+                        "*".repeat(value.len().min(12))
+                    }
+                } else if cat.is_bool_field(fi) {
+                    if value == "true" { "是".to_string() } else { "否".to_string() }
+                } else {
+                    truncate_for_display(&value, field_content_width.saturating_sub(3))
+                };
+                spans.push(Span::styled(display_value, value_style));
+            }
 
             // Path status check
             if let Some(exists) = ss.path_status.get(&field_name) {
@@ -334,6 +352,75 @@ fn make_field_name(cat: SettingCategory, fi: usize) -> String {
     }
 }
 
+/// Build styled spans for the edit field display.
+///
+/// When a selection is active (`selection_anchor` is Some and differs from
+/// `cursor`), the selected region is rendered with an inverted style
+/// (background highlight).  The cursor is shown as a `│` character between
+/// the spans.
+fn build_edit_spans(
+    buffer: &str,
+    cursor: usize,
+    selection_anchor: Option<usize>,
+    max_width: usize,
+    base_style: Style,
+    sel_style: Style,
+) -> Vec<Span<'static>> {
+    if buffer.is_empty() {
+        return vec![Span::styled("▎".to_string(), base_style)];
+    }
+
+    // Determine selection range (start <= end)
+    let sel: Option<(usize, usize)> = selection_anchor.and_then(|anchor| {
+        if anchor == cursor {
+            None
+        } else if anchor < cursor {
+            Some((anchor, cursor))
+        } else {
+            Some((cursor, anchor))
+        }
+    });
+
+    let chars: Vec<char> = buffer.chars().collect();
+    let len = chars.len();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+
+    // We need to truncate to max_width display-wise.  Build spans first,
+    // then we'll truncate if needed.
+    for i in 0..=len {
+        // Insert cursor marker before character i (or at end)
+        if i == cursor {
+            spans.push(Span::styled("│".to_string(), base_style));
+        }
+        if i == len {
+            break;
+        }
+        let ch = chars[i];
+        let style = match sel {
+            Some((s, e)) if i >= s && i < e => sel_style,
+            _ => base_style,
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+
+    // Truncate to max_width by measuring display width of spans
+    let mut total_w: usize = 0;
+    let mut keep: usize = 0;
+    for (idx, span) in spans.iter().enumerate() {
+        let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref() as &str);
+        if total_w + w > max_width {
+            break;
+        }
+        total_w += w;
+        keep = idx + 1;
+    }
+    spans.truncate(keep);
+    spans
+}
+
+/// Legacy helper – returns a plain string version for cases that still use
+/// String (should be phased out once all callers use `build_edit_spans`).
+#[allow(dead_code)]
 fn build_edit_display(buffer: &str, cursor: usize, max_width: usize) -> String {
     let display = if buffer.is_empty() {
         "▎".to_string()

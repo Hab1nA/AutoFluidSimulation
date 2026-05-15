@@ -577,6 +577,24 @@ fn handle_settings_text_input(key: KeyEvent, ss: &mut crate::settings::SettingsS
             ss.commit_edit_current_field();
             AppAction::None
         }
+        // ── Clipboard shortcuts ──────────────────────────────────────
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ss.select_all();
+            AppAction::None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ss.copy_selection();
+            AppAction::None
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ss.cut_selection();
+            AppAction::None
+        }
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ss.paste_from_clipboard();
+            AppAction::None
+        }
+        // ── Regular editing ──────────────────────────────────────────
         KeyCode::Char(c) => {
             ss.input_char(c);
             AppAction::None

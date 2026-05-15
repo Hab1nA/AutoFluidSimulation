@@ -324,6 +324,10 @@ pub struct SettingsState {
     pub validation_errors: Vec<ValidationError>,
     pub edit_buffer: String,
     pub edit_cursor: usize,
+    /// Selection anchor for Shift+arrow / Ctrl+A. When Some, selection spans
+    /// from `selection_anchor` (inclusive) to `edit_cursor` (exclusive if
+    /// cursor > anchor, inclusive otherwise). The two may be in either order.
+    pub selection_anchor: Option<usize>,
     pub undo_stack: Vec<UndoEntry>,
     pub saved: bool,
     pub save_error: Option<String>,
@@ -387,6 +391,7 @@ impl SettingsState {
             validation_errors: Vec::new(),
             edit_buffer: String::new(),
             edit_cursor: 0,
+            selection_anchor: None,
             undo_stack: Vec::new(),
             saved: false,
             save_error: None,
@@ -600,12 +605,14 @@ impl SettingsState {
         self.edit_buffer = self.get_field_value(self.current_category(), self.focus.field_index);
         let char_count = self.edit_buffer.chars().count();
         self.edit_cursor = char_count;
+        self.selection_anchor = None;
         self.focus.editing = true;
     }
 
     pub fn cancel_edit_current_field(&mut self) {
         self.edit_buffer.clear();
         self.edit_cursor = 0;
+        self.selection_anchor = None;
         self.focus.editing = false;
     }
 
@@ -653,12 +660,17 @@ impl SettingsState {
     }
 
     pub fn input_char(&mut self, c: char) {
+        self.delete_selection(); // replaces selection if any
         let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
         self.edit_buffer.insert(byte_pos, c);
         self.edit_cursor += 1;
+        self.selection_anchor = None;
     }
 
     pub fn input_backspace(&mut self) {
+        if self.delete_selection().is_some() {
+            return;
+        }
         if self.edit_cursor > 0 {
             self.edit_cursor -= 1;
             let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
@@ -667,6 +679,9 @@ impl SettingsState {
     }
 
     pub fn input_delete(&mut self) {
+        if self.delete_selection().is_some() {
+            return;
+        }
         if self.edit_cursor < self.edit_buffer.chars().count() {
             let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
             self.edit_buffer.remove(byte_pos);
@@ -674,22 +689,26 @@ impl SettingsState {
     }
 
     pub fn move_cursor_left(&mut self) {
+        self.selection_anchor = None;
         if self.edit_cursor > 0 {
             self.edit_cursor -= 1;
         }
     }
 
     pub fn move_cursor_right(&mut self) {
+        self.selection_anchor = None;
         if self.edit_cursor < self.edit_buffer.chars().count() {
             self.edit_cursor += 1;
         }
     }
 
     pub fn move_cursor_home(&mut self) {
+        self.selection_anchor = None;
         self.edit_cursor = 0;
     }
 
     pub fn move_cursor_end(&mut self) {
+        self.selection_anchor = None;
         self.edit_cursor = self.edit_buffer.chars().count();
     }
 
@@ -717,5 +736,99 @@ impl SettingsState {
         // Write password to .env (always write to allow clearing)
         let _ = config_io::write_env_password(&self.config.remote_config.password);
         Ok(())
+    }
+
+    // ── Selection helpers ──────────────────────────────────────────────
+
+    /// Returns (start, end) char indices of the current selection, where
+    /// start <= end.  Returns None when there is no active selection.
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.selection_anchor?;
+        let cursor = self.edit_cursor;
+        if anchor == cursor {
+            return None;
+        }
+        let (s, e) = if anchor < cursor { (anchor, cursor) } else { (cursor, anchor) };
+        Some((s, e))
+    }
+
+    /// Select all text in the edit buffer.
+    pub fn select_all(&mut self) {
+        let len = self.edit_buffer.chars().count();
+        if len == 0 {
+            self.selection_anchor = None;
+            return;
+        }
+        self.selection_anchor = Some(0);
+        self.edit_cursor = len;
+    }
+
+    /// Delete the currently selected text (if any) and return it.
+    pub fn delete_selection(&mut self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let selected: String = self.edit_buffer.chars().skip(start).take(end - start).collect();
+        let byte_start = char_to_byte_index(&self.edit_buffer, start);
+        let byte_end = char_to_byte_index(&self.edit_buffer, end);
+        self.edit_buffer.drain(byte_start..byte_end);
+        self.edit_cursor = start;
+        self.selection_anchor = None;
+        Some(selected)
+    }
+
+    /// Copy the selected text to the system clipboard.  Returns true on
+    /// success.
+    pub fn copy_selection(&self) -> bool {
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+        let text: String = self.edit_buffer.chars().skip(start).take(end - start).collect();
+        if text.is_empty() {
+            return false;
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => cb.set_text(text).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    /// Cut: copy to clipboard then delete selection.
+    pub fn cut_selection(&mut self) -> bool {
+        if self.selection_range().is_none() {
+            return false;
+        }
+        // Copy first
+        let copied = self.copy_selection();
+        if copied {
+            self.delete_selection();
+        }
+        copied
+    }
+
+    /// Paste from system clipboard, replacing any current selection.
+    pub fn paste_from_clipboard(&mut self) -> bool {
+        let text = match arboard::Clipboard::new() {
+            Ok(mut cb) => cb.get_text().unwrap_or_default(),
+            Err(_) => return false,
+        };
+        if text.is_empty() {
+            return false;
+        }
+        // Remove newlines – settings fields are single-line
+        let cleaned: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+        if cleaned.is_empty() {
+            return false;
+        }
+        // Delete any existing selection first
+        self.delete_selection();
+        let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
+        self.edit_buffer.insert_str(byte_pos, &cleaned);
+        self.edit_cursor += cleaned.chars().count();
+        true
+    }
+
+    /// Clear the selection anchor (e.g. when cursor moves without Shift).
+    #[allow(dead_code)]
+    pub fn clear_selection(&mut self) {
+        self.selection_anchor = None;
     }
 }
