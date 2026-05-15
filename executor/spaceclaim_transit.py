@@ -17,7 +17,8 @@
 # 说明：args 是 SpaceClaim 在 /RunScript 模式下自动注入的全局变量，
 #       包含 /ScriptArgs 中以空格分隔的参数列表。
 #
-# 调试：诊断日志写入 <项目根>/logs/executor/spaceclaim_transit_debug.log
+# 调试：诊断日志写入 <项目根>/logs/executor/spaceclaim_transit_<PID>.log
+#       每个 SpaceClaim 进程按 PID 独立记录日志，便于多进程并行时区分。
 #       SpaceClaim 是 GUI 程序，print() 输出可能不会显示在终端，
 #       请查看该日志文件获取脚本执行详情。
 # ============================================================================
@@ -56,7 +57,7 @@ try:
 except (OSError, IOError):
     _candidate_log_dir = os.environ.get("TEMP", _SCRIPT_DIR)
 
-_LOG_FILE = os.path.join(_candidate_log_dir, "spaceclaim_transit_debug.log")
+_LOG_FILE = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
 
 def _log(msg):
     """同时写入日志文件和 print（print 在 SpaceClaim GUI 下可能不可见）。"""
