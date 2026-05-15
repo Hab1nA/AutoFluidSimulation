@@ -279,7 +279,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::OperationTimeouts => match idx {
-                0 => "SW启动超时(秒)", 1 => "SW Dispatch启动延迟(秒)", 2 => "SW退出等待(秒)",
+                0 => "SW启动超时(秒)", 1 => "SW调度启动延迟(秒)", 2 => "SW退出等待(秒)",
                 3 => "SC轮询间隔(秒)", 4 => "SSH连接超时(秒)", 5 => "目录递归深度限制", 6 => "SSH上传最大重试",
                 _ => "",
             },

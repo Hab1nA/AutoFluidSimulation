@@ -60,7 +60,8 @@ obj/Debug/net48/
 Program.cs
 
 [metadataReferences]
-../../../../../../../Program Files (x86)/Reference Assemblies/Microsoft/Framework/.NETFramework/v4.8/
+../../../../../../../Program Files/ANSYS Inc/v231/SCDM/SpaceClaim.Api.V23.dll
+<NETFXREF>/v4.8/
  mscorlib.dll
  System.Core.dll
  System.Data.dll
@@ -71,7 +72,6 @@ Program.cs
  System.Runtime.Serialization.dll
  System.Xml.dll
  System.Xml.Linq.dll
-../../../../../../../Program Files/ANSYS Inc/v231/SCDM/SpaceClaim.Api.V23.dll
 
 [analyzerConfigFiles]
 obj/Debug/net48/SpaceClaimBridge.GeneratedMSBuildEditorConfig.editorconfig
