@@ -220,7 +220,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0, 200.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table_excel(excel_path)
+        warnings = runner._validate_design_table(excel_path)
         self.assertEqual(warnings, [], f"Expected no warnings, got: {warnings}")
 
     def test_missing_design_table_header(self):
@@ -230,7 +230,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table_excel(excel_path)
+        warnings = runner._validate_design_table(excel_path)
         self.assertTrue(any("Design Table" in w or "设计表" in w for w in warnings),
                         f"Expected warning about missing design table header, got: {warnings}")
 
@@ -241,7 +241,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table_excel(excel_path)
+        warnings = runner._validate_design_table(excel_path)
         warning_texts = [str(w) for w in warnings]
         has_warning = any("参数列头" in w or "参数" in w for w in warning_texts)
         self.assertTrue(has_warning or len(warnings) == 0,
@@ -249,7 +249,7 @@ class TestDesignTableValidation(unittest.TestCase):
 
     def test_nonexistent_excel(self):
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table_excel(r"C:\nonexistent\file.xlsx")
+        warnings = runner._validate_design_table(r"C:\nonexistent\file.xlsx")
         self.assertTrue(len(warnings) > 0, "Expected warnings for nonexistent file")
 
     def test_empty_excel(self):
@@ -259,7 +259,7 @@ class TestDesignTableValidation(unittest.TestCase):
         wb.save(filepath)
 
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table_excel(filepath)
+        warnings = runner._validate_design_table(filepath)
         self.assertTrue(any("缺失" in w for w in warnings),
                         f"Expected row-missing warning for empty workbook, got: {warnings}")
 
@@ -399,7 +399,7 @@ class TestSwExitAndCleanup(unittest.TestCase):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_cleanup_sw_processes_taskkill_logic(self):
-        """测试 _cleanup_sw_processes 的 taskkill 调用逻辑（模拟）。"""
+        """测试 _terminate_sw_processes 的 taskkill 调用逻辑（模拟）。"""
         from engine.task_runner import TaskRunner
 
         runner = TaskRunner(self.state)
@@ -408,7 +408,7 @@ class TestSwExitAndCleanup(unittest.TestCase):
              patch("os.name", "nt"):
             mock_run.return_value = MagicMock(stdout="SLDWORKS.exe", returncode=0)
 
-            runner._cleanup_sw_processes()
+            runner._terminate_sw_processes()
 
             self.assertGreaterEqual(mock_run.call_count, 2,
                                     "Should call tasklist + taskkill")
@@ -422,7 +422,7 @@ class TestSwExitAndCleanup(unittest.TestCase):
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", returncode=0)
 
-            runner._cleanup_sw_processes()
+            runner._terminate_sw_processes()
 
             kill_calls = [
                 c for c in mock_run.call_args_list
@@ -797,7 +797,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, _ = runner._export_configs_to_step(mock_doc, "C:\\step")
+        success, fail, _ = runner._export_all_configs_to_step(mock_doc, "C:\\step")
         self.assertEqual(success, 0)
         self.assertEqual(fail, 0)
 
@@ -811,7 +811,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, fail_list = runner._export_configs_to_step(mock_doc, "C:\\step")
+        success, fail, fail_list = runner._export_all_configs_to_step(mock_doc, "C:\\step")
 
         self.assertEqual(success, 1, "Only config 0 should succeed")
         self.assertEqual(fail, 1, "Default should be in fail_list")
@@ -974,7 +974,7 @@ class TestComBindingCompatibility(unittest.TestCase):
     """测试 pywin32 动态 Dispatch 的 property/method 兼容性处理。
 
     注意：_safe_com_call / _com_rebuild / _com_get_config_names 已重构为内联代码，
-    此处改为测试 _export_configs_to_step 和 _apply_params_via_com 中的内联逻辑。
+    此处改为测试 _export_all_configs_to_step 和 _apply_params_via_com 中的内联逻辑。
     """
 
     def setUp(self):
@@ -990,10 +990,10 @@ class TestComBindingCompatibility(unittest.TestCase):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    # ---- GetConfigurationNames 兼容性（内联于 _export_configs_to_step） ----
+    # ---- GetConfigurationNames 兼容性（内联于 _export_all_configs_to_step） ----
 
     def test_com_get_config_names_tuple(self):
-        """GetConfigurationNames 返回正常 tuple（通过 _export_configs_to_step 内联逻辑）。"""
+        """GetConfigurationNames 返回正常 tuple（通过 _export_all_configs_to_step 内联逻辑）。"""
         mock_doc = MagicMock()
         mock_doc.GetConfigurationNames.return_value = ("0", "1", "2")
         mock_doc._FlagAsMethod = MagicMock()
@@ -1124,7 +1124,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         mock_obj = MagicMock(spec=[])
         self.assertFalse(self.runner._verify_com_object(mock_obj, "DeadObj"))
 
-    # ---- SaveAs 后置文件验证测试（_export_configs_to_step 行为） ----
+    # ---- SaveAs 后置文件验证测试（_export_all_configs_to_step 行为） ----
 
     @patch("os.path.exists", return_value=True)
     @patch("os.path.getsize", return_value=2048)
@@ -1138,7 +1138,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._export_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._export_all_configs_to_step(mock_doc, step_dir)
 
         self.assertGreater(success, 0)
         self.assertEqual(fail, 0)
@@ -1155,7 +1155,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._export_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._export_all_configs_to_step(mock_doc, step_dir)
 
         self.assertEqual(success, 0)
         self.assertGreater(fail, 0)

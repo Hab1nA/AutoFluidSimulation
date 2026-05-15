@@ -25,7 +25,7 @@ from engine.daemon import main
 if __name__ == "__main__":
     print("=" * 60)
     print("  液氧甲烷火箭发动机仿真 - 后台调度引擎")
-    print("  Pipeline Daemon Engine v2.5.0")
+    print("  Pipeline Daemon Engine v2.5.1")
     print("=" * 60)
     print()
     print(f"  日志目录: {session_log_dir}")

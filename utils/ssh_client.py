@@ -137,7 +137,7 @@ class RemoteWorkstation:
                         time.sleep(0.5 * (2 ** attempt))  # 指数退避
                         continue
                     return False
-                
+
                 remote_dir = os.path.dirname(remote_path)
                 self._ensure_remote_dir(remote_dir)
 

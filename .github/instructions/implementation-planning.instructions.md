@@ -1,18 +1,17 @@
 ---
 description: "Use when: implementing features, making code changes, refactoring, fixing bugs, adding new functionality, or any modification to the AutoFluid codebase. Enforces a structured implementation workflow with planning, incremental delivery, testing gates, and quality assurance."
 applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
----
+----------------------------------------------------------
+
 # AutoFluid 项目实施与质量保障规范
 
 > 适用于本项目的所有代码改动：新功能开发、Bug 修复、重构优化等。
-
 ---
-
 ## 实施前置条件
 
 ### 1. 架构理解（必须）
 
-在进行任何代码改动之前，必须先阅读 `CODE_WIKI.md`，全面理解：
+在进行任何代码改动之前，必须先阅读 `docs\code-wiki.md`，全面理解：
 
 - **项目整体架构**：Daemon ↔ IPC (TCP :9527) ↔ Rust TUI 的三层结构
 - **核心模块职责**：engine（调度引擎）、ipc（进程间通信）、utils（工具模块）、autofluid-tui（Rust TUI）
@@ -43,7 +42,7 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ### 阶段二：逐项实施与单元验证
 
-按照计划**逐个**实施子任务：
+在此阶段，你必须先阅读 `docs\code-style-guide.md`，理解代码编写规范，然后遵循规范，按照计划**逐个**实施子任务：
 
 1. **一次只改一项**：完成一个子任务后再开始下一个
 2. **每项完成后立即验证**：
@@ -83,15 +82,15 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ## 质量保障硬性要求
 
-| 检查项 | 标准 | 必须通过 |
-|--------|------|----------|
-| ruff linting | 无新增 E/F/W 告警 | ✅ |
-| mypy 类型检查 | 无新增类型错误 | ✅ |
-| cargo check | Rust 编译通过 | ✅ |
-| 现有单元测试 | 全部通过，无回归 | ✅ |
-| 新增代码覆盖率 | 核心逻辑被测试覆盖 | ✅ |
-| IPC 兼容性 | 协议不变或向后兼容 | ✅ |
-| 状态机一致性 | SQLite 状态转换正确 | ✅ |
+| 检查项         | 标准                | 必须通过 |
+| -------------- | ------------------- | -------- |
+| ruff linting   | 无新增 E/F/W 告警   | ✅       |
+| mypy 类型检查  | 无新增类型错误      | ✅       |
+| cargo check    | Rust 编译通过       | ✅       |
+| 现有单元测试   | 全部通过，无回归    | ✅       |
+| 新增代码覆盖率 | 核心逻辑被测试覆盖  | ✅       |
+| IPC 兼容性     | 协议不变或向后兼容  | ✅       |
+| 状态机一致性   | SQLite 状态转换正确 | ✅       |
 
 ---
 
@@ -108,10 +107,10 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ## 项目技术栈速查
 
-| 层级 | 语言 | 关键依赖 |
-|------|------|----------|
-| 调度引擎 | Python 3.10 | SQLite WAL, threading, queue, paramiko |
-| IPC | Python → Rust | JSON over TCP (port 9527) |
-| TUI 前端 | Rust | tokio, ratatui, serde |
-| 测试 | Python | pytest |
-| 代码质量 | Python + Rust | ruff, mypy, cargo clippy |
+| 层级     | 语言           | 关键依赖                               |
+| -------- | -------------- | -------------------------------------- |
+| 调度引擎 | Python 3.10    | SQLite WAL, threading, queue, paramiko |
+| IPC      | Python → Rust | JSON over TCP (port 9527)              |
+| TUI 前端 | Rust           | tokio, ratatui, serde                  |
+| 测试     | Python         | pytest                                 |
+| 代码质量 | Python + Rust  | ruff, mypy, cargo clippy               |

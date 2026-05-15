@@ -22,6 +22,7 @@ pub fn validate_config(config: &SettingsConfig) -> Vec<ValidationError> {
     validate_remote_dirs(config, &mut errors);
     validate_step_patterns(config, &mut errors);
     validate_engine_config(config, &mut errors);
+    validate_operation_timeouts(config, &mut errors);
     errors
 }
 
@@ -32,6 +33,7 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         ("local_paths.excel", &config.local_paths.excel, true),
         ("local_paths.sc_exe", &config.local_paths.sc_exe, false),
         ("local_paths.sc_script", &config.local_paths.sc_script, false),
+        ("local_paths.sc_bridge", &config.local_paths.sc_bridge, false),
     ];
 
     for (name, path, is_required) in &required_executables {
@@ -187,6 +189,48 @@ fn validate_engine_config(config: &SettingsConfig, errors: &mut Vec<ValidationEr
         errors.push(ValidationError {
             field_name: "engine_config.state_refresh_interval".to_string(),
             message: "必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+}
+
+fn validate_operation_timeouts(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    let timeouts: [(&str, u64); 4] = [
+        ("operation_timeouts.sw_startup", config.operation_timeouts.sw_startup),
+        ("operation_timeouts.sw_dispatch_startup_delay", config.operation_timeouts.sw_dispatch_startup_delay),
+        ("operation_timeouts.sw_exit_wait_seconds", config.operation_timeouts.sw_exit_wait_seconds),
+        ("operation_timeouts.ssh_connection", config.operation_timeouts.ssh_connection),
+    ];
+    for (name, val) in &timeouts {
+        if *val == 0 {
+            errors.push(ValidationError {
+                field_name: name.to_string(),
+                message: "超时值必须大于 0".to_string(),
+                severity: Severity::Error,
+            });
+        }
+    }
+
+    if config.operation_timeouts.sc_poll_interval <= 0.0 {
+        errors.push(ValidationError {
+            field_name: "operation_timeouts.sc_poll_interval".to_string(),
+            message: "轮询间隔必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+
+    if config.operation_timeouts.dir_recursion_limit == 0 {
+        errors.push(ValidationError {
+            field_name: "operation_timeouts.dir_recursion_limit".to_string(),
+            message: "递归深度限制必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+
+    if config.operation_timeouts.ssh_upload_max_retries == 0 {
+        errors.push(ValidationError {
+            field_name: "operation_timeouts.ssh_upload_max_retries".to_string(),
+            message: "上传重试次数至少为 1".to_string(),
             severity: Severity::Error,
         });
     }

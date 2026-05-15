@@ -62,9 +62,9 @@ class MockTaskRunner:
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
 
-    def execute_sw_macro(self) -> bool:
+    def execute_sw_step(self) -> bool:
         self._sw_call_count += 1
-        print(f"  [MockTaskRunner] execute_sw_macro() 第{self._sw_call_count}次调用"
+        print(f"  [MockTaskRunner] execute_sw_step() 第{self._sw_call_count}次调用"
               f" (delay={self._sw_delay}s, fail={self._sw_should_fail})")
 
         if self._sw_delay > 0:
@@ -89,7 +89,7 @@ class MockTaskRunner:
         print(f"  [MockTaskRunner] SW 宏模拟成功 ({len(all_configs)} 个构型)")
         return True
 
-    def execute_spaceclaim(self, config_name: int) -> bool:
+    def execute_sc_step(self, config_name: int) -> bool:
         time.sleep(0.1)
         self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
         return True

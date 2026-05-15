@@ -1,7 +1,7 @@
 # AutoFluid 仿真流水线总控系统 — Code Wiki
 
 > **项目全称**：液氧甲烷火箭发动机仿真自动化流水线总控程序
-> **版本**：v2.5.0
+> **版本**：v2.5.1
 > **语言栈**：Python（后端引擎） + Rust（TUI 客户端）
 > **目标平台**：本地 Windows PC + 远程 Windows 工作站
 
@@ -255,7 +255,7 @@ autofluid/
 ```
 start_pipeline()
     │
-    ├─ SW 阶段：execute_sw_macro() → 批量导出 STEP
+    ├─ SW 阶段：execute_sw_step() → 批量导出 STEP
     │   └─ 提前启动文件监控器和工作线程池（边导出边处理）
     │
     ├─ 文件监控器（Producer）：StepFileMonitor 检测 STEP 文件写入完成
@@ -301,8 +301,8 @@ start_pipeline()
 
 | 方法 | 阶段 | 执行方式 |
 |------|------|----------|
-| `execute_sw_macro()` | SW | 三层降级连接 SW（GetActiveObject → Dispatch → subprocess），COM 直接导出 STEP |
-| `execute_spaceclaim(config)` | SC | 通过 SCProcessPool 进程池管理 SpaceClaim 调用（3 槽位并发 + 等待队列、暂停/停止响应），优先 C# Bridge 降级 subprocess |
+| `execute_sw_step()` | SW | 三层降级连接 SW（GetActiveObject → Dispatch → subprocess），COM 直接导出 STEP |
+| `execute_sc_step(config)` | SC | 通过 SCProcessPool 进程池管理 SpaceClaim 调用（3 槽位并发 + 等待队列、暂停/停止响应），优先 C# Bridge 降级 subprocess |
 | `execute_transfer(config)` | Transfer | paramiko SFTP 上传 SCDOC |
 | `execute_meshing(config)` | Meshing | SSH + PowerShell Start-Process 启动远程后台任务 |
 | `wait_meshing_completion(config)` | Meshing | 轮询远程标志文件 |
@@ -311,13 +311,17 @@ start_pipeline()
 | `run_system_check()` | — | 本地路径检查 + SSH 连通性 + 远程系统状态 |
 | `clean_step_files(step, config)` | — | 清理本地和远程步骤文件 |
 
-**SW 宏执行的特殊设计**：
+**SW 步骤的特殊设计**：
 
-- 三层降级连接策略：GetActiveObject → COM Dispatch → subprocess 启动 exe
-- 设计表导入带容错重试：InsertFamilyTableOpen → COM 直接设参降级
-- 逐构型导出 STEP 并实时更新状态
-- 完成后安全网校验：逐构型检查 STEP 文件是否实际存在
-- COM 资源清理：CloseDoc → ExitApp → del + gc.collect → CoFreeUnusedLibraries
+- 方法结构（薄入口 + 子方法编排）：
+  - `execute_sw_step()` — 入口（校验参数 → 编排子步骤）
+  - `_connect_sw()` — 三层降级连接：GetActiveObject → COM Dispatch → subprocess 启动 exe
+  - `_open_sw_model()` — OpenDoc6 打开模型文件
+  - `_import_design_table_with_retry()` — 设计表导入带容错重试：InsertFamilyTableOpen → COM 直接设参降级
+  - `_rebuild_all_configs()` — ForceRebuildAll 重建所有构型（降级为逐个 EditRebuild3）
+  - `_export_all_configs_to_step()` — 逐构型 ShowConfiguration2 → SaveAs 导出 STEP
+  - `_verify_step_exports()` — 完成后安全网校验：逐构型检查 STEP 文件是否实际存在
+  - `_disconnect_sw()` — COM 资源清理：CloseDoc → ExitApp → del + gc.collect → CoFreeUnusedLibraries
 
 #### 4.1.5 state_manager.py — 共享状态管理器
 
@@ -615,7 +619,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `ScrollbarDragZone` | 滚动条拖拽区域枚举（TableVertical / InfoVertical / InfoHorizontal / DetailVertical / DetailHorizontal / DialogVertical） |
 | `ScrollbarRenderedInfo` | 渲染后的滚动条位置信息（6 个可选的 (area, total, visible, scroll) 元组） |
 | `FilterType` | 过滤类型枚举（Level / Source） |
-| `SettingCategory` | 设置分类枚举（LocalPaths / RemoteConnection / RemoteDirs / StepPatterns / EngineConfig） |
+| `SettingCategory` | 设置分类枚举（LocalPaths / RemoteConnection / RemoteDirs / StepPatterns / EngineConfig / OperationTimeouts） |
 | `SettingsState` | 设置页面状态（config / focus / scroll / dirty / edit_buffer / undo_stack / validation_errors / path_status / hovered_field 等），支持 TOML 持久化、Ctrl+Z 撤销、实时路径校验 |
 | `SettingsFocus` | 设置焦点（category_index / field_index / editing） |
 
@@ -753,7 +757,7 @@ StateManager (SQLite) ◄──── TUI 读取（IPC 查询）
     ▼
 PipelineScheduler
     │
-    ├─► TaskRunner.execute_sw_macro() ──► STEP 文件目录
+    ├─► TaskRunner.execute_sw_step() ──► STEP 文件目录
     │                                        │
     │                                   StepFileMonitor
     │                                        │
@@ -967,7 +971,7 @@ cargo build --release
 
 项目支持两种配置方式：
 
-**方式一：TUI 设置页面（推荐）** — 在 TUI 界面中输入 `settings` 命令或点击 `⚙ Settings` 按钮，以可视化对话框编辑 5 大分类 38 个配置字段，实时校验路径存在性，`Ctrl+S` 保存到 `autofluid_config.toml`，SSH 密码自动写入 `.env` 文件。
+**方式一：TUI 设置页面（推荐）** — 在 TUI 界面中输入 `settings` 命令或点击 `⚙ Settings` 按钮，以可视化对话框编辑 6 大分类 52 个配置字段，实时校验路径存在性，`Ctrl+S` 保存到 `autofluid_config.toml`，SSH 密码自动写入 `.env` 文件。
 
 **方式二：直接编辑配置文件** — 手动编辑项目根目录的 `autofluid_config.toml`（TOML 格式）和 `.env` 文件（SSH 密码）。TUI 设置页面的修改结果也保存在这两个文件中。
 
@@ -983,6 +987,7 @@ cargo build --release
 | `AUTOFLUID_STEP_DIR` | STEP 文件输出目录 |
 | `AUTOFLUID_SC_EXE` | SpaceClaim 可执行文件路径 |
 | `AUTOFLUID_SC_SCRIPT` | SpaceClaim 脚本路径 |
+| `AUTOFLUID_SC_BRIDGE` | SpaceClaim 桥接程序（SpaceClaimBridge.exe）路径 |
 | `AUTOFLUID_SCDOC_DIR` | SCDOC 文件输出目录 |
 | `AUTOFLUID_LOG_DIR` | 日志目录 |
 | `AUTOFLUID_DATA_DIR` | 数据目录 |
@@ -1011,6 +1016,18 @@ cargo build --release
 | `solver_timeout` | 7200s | 求解超时 |
 | `max_retries` | 3 | 通用最大重试次数 |
 | `state_refresh_interval` | 0.5s | 状态刷新间隔 |
+
+### 操作超时参数（OPERATION_TIMEOUTS）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `sw_startup` | 60s | SW 启动超时 |
+| `sw_dispatch_startup_delay` | 8s | SW COM Dispatch 后等待窗口加载的延迟 |
+| `sw_exit_wait_seconds` | 15s | SW ExitApp 后等待进程退出的最大秒数 |
+| `sc_poll_interval` | 2.0s | SC 进程轮询间隔 |
+| `ssh_connection` | 10s | SSH 连接超时 |
+| `dir_recursion_limit` | 32 | 远程目录递归创建的深度限制 |
+| `ssh_upload_max_retries` | 3 | 文件上传重试的最大次数 |
 
 ### IPC 配置（IPC_CONFIG）
 

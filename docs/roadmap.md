@@ -248,18 +248,18 @@ LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC
 
 **TaskRunner 本地部分替换**：
 
-原来 `TaskRunner.execute_sw_macro()` 和 `TaskRunner.execute_spaceclaim()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。新增 `LocalWorkerAdapter` 类：
+原来 `TaskRunner.execute_sw_step()` 和 `TaskRunner.execute_sc_step()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。新增 `LocalWorkerAdapter` 类：
 
 ```python
 class LocalWorkerAdapter:
     """替代 TaskRunner 中直接调用 SW/SC 的逻辑，改为 RPC 下发"""
 
-    def execute_sw_macro(self) -> bool:
+    def execute_sw_step(self) -> bool:
         # 向 LocalWorker 发送 worker_execute 命令
         # 等待 worker_step_complete 回调
         ...
 
-    def execute_spaceclaim(self, config_name: int) -> bool:
+    def execute_sc_step(self, config_name: int) -> bool:
         # 同上
         ...
 ```

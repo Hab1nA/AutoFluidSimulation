@@ -184,6 +184,12 @@ PROCESS_MANAGEMENT = {
 OPERATION_TIMEOUTS = {
     # SolidWorks 启动超时（秒）
     "sw_startup": 60,
+    # SW COM Dispatch 后等待窗口加载的延迟（秒）
+    "sw_dispatch_startup_delay": 8,
+    # SW ExitApp 后等待进程退出的最大秒数
+    "sw_exit_wait_seconds": 15,
+    # SC 进程轮询间隔（秒）
+    "sc_poll_interval": 2.0,
     # SSH 连接超时（秒）
     "ssh_connection": 10,
     # 远程目录递归创建的深度限制
@@ -309,23 +315,6 @@ def _apply_env_overrides():
                 REMOTE_CONFIG[key] = env_val
 
 
-def reload_config_from_toml() -> bool:
-    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。"""
-    toml_data = load_toml_config()
-    if toml_data:
-        if "local_paths" in toml_data:
-            LOCAL_PATHS.update(toml_data["local_paths"])
-        if "remote_config" in toml_data:
-            REMOTE_CONFIG.update(toml_data["remote_config"])
-        if "step_file_patterns" in toml_data:
-            STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
-        if "engine_config" in toml_data:
-            ENGINE_CONFIG.update(toml_data["engine_config"])
-        _apply_env_overrides()
-        return True
-    return False
-
-
 def load_toml_config(toml_path: str = None) -> dict:
     """
     从 autofluid_config.toml 加载配置。
@@ -350,6 +339,25 @@ def load_toml_config(toml_path: str = None) -> dict:
             return toml.load(toml_path)
     except Exception:
         return {}
+
+
+def reload_config_from_toml() -> bool:
+    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。"""
+    toml_data = load_toml_config()
+    if toml_data:
+        if "local_paths" in toml_data:
+            LOCAL_PATHS.update(toml_data["local_paths"])
+        if "remote_config" in toml_data:
+            REMOTE_CONFIG.update(toml_data["remote_config"])
+        if "step_file_patterns" in toml_data:
+            STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
+        if "engine_config" in toml_data:
+            ENGINE_CONFIG.update(toml_data["engine_config"])
+        if "operation_timeouts" in toml_data:
+            OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
+        _apply_env_overrides()
+        return True
+    return False
 
 
 # 启动时尝试加载 TOML 配置，合并到默认值中

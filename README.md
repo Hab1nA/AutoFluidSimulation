@@ -1,6 +1,6 @@
 # 🚀 液氧甲烷火箭发动机仿真总控程序
 
-> **Pipeline Daemon Engine v2.5.0** — 全自动流水线式 CFD 仿真调度系统
+> **Pipeline Daemon Engine v2.5.1** — 全自动流水线式 CFD 仿真调度系统
 
 ***
 
@@ -43,7 +43,7 @@
 - **递归深度安全限制**: 对 SW 宏自动重试设置递归上限（3层），超限时优雅降级并给出详细诊断
 - **错误重试机制**: 每个步骤支持可配置的重试次数，SW 宏支持独立的重试策略，失败时自动清理残留进程
 - **优雅关闭**: 支持 `Ctrl+C` 信号处理和 `quit full` 安全退出，自动断开 SSH、停止文件监控、关闭 SW 进程
-- **TUI 设置页面**: 内置可视化配置面板（通过 `settings` 命令或按钮打开），支持 5 大分类 38 个字段的在线编辑，TOML 文件持久化，实时文件路径存在性校验，SSH 密码双格式存储（TOML + .env），Ctrl+S 保存、Ctrl+Z 撤销
+- **TUI 设置页面**: 内置可视化配置面板（通过 `settings` 命令或按钮打开），支持 6 大分类 52 个字段的在线编辑，TOML 文件持久化，实时文件路径存在性校验，SSH 密码双格式存储（TOML + .env），Ctrl+S 保存、Ctrl+Z 撤销
 - **配置预验证**: 启动时校验 Excel 设计表格式、本地文件路径、远程 SSH 连通性，提前发现部署问题
 
 ***
@@ -52,7 +52,8 @@
 
 | 版本         | 日期      | 主要变更                                                                                                                                                                                                                                                                             |
 | ---------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **v2.5.0** | 2026-05 | **新增 SCProcessPool 并发池模块**：SpaceClaim 进程管理重构为统一进程池（3 槽位并发 + 等待队列 + 断点续传）；**新增 TUI 设置页面**（`settings/` 模块，5 分类 38 字段可视化配置，TOML 持久化，实时路径验证，双格式密码存储）；C# SpaceClaimBridge 重构为纯进程检测模式，添加 WPF Dispatcher 延迟以避免启动死锁；模块导出全面重构（所有 `__init__.py` 加入合理导出）；清理约 246 行死代码（已迁移至 SCProcessPool 的旧 SC 调用方法）；`scheduler.py` 修复 `queue.mutex` 私有属性访问；`main.py` 消除 list 闭包反模式 |
+| **v2.5.1** | 2026-05 | **代码结构优化与命名规范化**：SW 与 SC 步骤方法命名统一（`execute_sw_macro`→`execute_sw_step`、`execute_spaceclaim`→`execute_sc_step` 等）；日志前缀统一（中文→英文 `[SW-DesignTable]`/`[SC-Pool]` 等）；拆分 `execute_sw_step()` 单体方法为 6 个独立子方法（`_connect_sw`/`_open_sw_model`/`_rebuild_all_configs`/`_verify_step_exports`/`_disconnect_sw`）；提取 `_prepare_sw_retry()` 封装 SW 重试准备逻辑；断点续传预扫描与暂停恢复逻辑统一覆盖全部 5 步骤；TUI 设置页面新增 `OperationTimeouts` 配置节（7 字段）+ `sc_bridge` 路径字段（共 6 分类 52 字段）；超时与轮询间隔常量统一至 `OPERATION_TIMEOUTS`；文档迁移至 `docs/` 目录并同步更新；新增 `docs/code-style-guide.md` 代码写作规范 |
+| **v2.5.0** | 2026-05 | **新增 SCProcessPool 并发池模块**：SpaceClaim 进程管理重构为统一进程池（3 槽位并发 + 等待队列 + 断点续传）；**新增 TUI 设置页面**（`settings/` 模块，6 分类 52 字段可视化配置，TOML 持久化，实时路径验证，双格式密码存储）；C# SpaceClaimBridge 重构为纯进程检测模式，添加 WPF Dispatcher 延迟以避免启动死锁；模块导出全面重构（所有 `__init__.py` 加入合理导出）；清理约 246 行死代码（已迁移至 SCProcessPool 的旧 SC 调用方法）；`scheduler.py` 修复 `queue.mutex` 私有属性访问；`main.py` 消除 list 闭包反模式 |
 | **v2.4.0** | 2026-05 | SpaceClaim 步骤全面修复：脚本路径重构并移至 executor/ 目录、修复参数传递与错误处理、新增并发进程清理逻辑防止冲突；注入调度器控制事件以支持长时间阻塞操作的暂停/停止响应；移除 chrono 依赖改用本地时间实现；Rust TUI 二进制查找工具重构                                                                                                                                          |
 | **v2.3.0** | 2026-05 | TUI 交互体验优化：信息面板/详细日志面板智能自动滚动（新消息自动滚到底端、向上滚动暂停、滚回底端自动恢复）；详细日志每次单击高亮反馈；自检弹窗自动换行与对称边距；焦点提示信息统一                                                                                                                                                                                      |
 | **v2.2.0** | 2026-05 | 移除 Python Textual TUI，统一使用 Rust ratatui TUI；新增滚动条拖拽（垂直/水平）；信息面板和详细日志面板支持水平滚动；对话框支持内容滚动和鼠标按钮交互；双击详细日志行复制到剪贴板；Rust TUI 编译状态检查与友好错误提示；新增分布式架构改造路线图（ROADMAP.md）                                                                                                                      |
@@ -185,8 +186,8 @@ AutoFluidSimulation/
 ├── rebuild_tui.bat          # Rust TUI 一键构建脚本（含选择性清理）
 ├── requirements.txt         # Python 依赖清单
 ├── README.md                # 本文件
-├── CODE_WIKI.md             # 项目代码 Wiki 文档
-├── ROADMAP.md               # 分布式架构改造路线图
+├── CODE_WIKI.md             # 项目代码 Wiki 文档（已移至 docs/）
+├── ROADMAP.md               # 分布式架构改造路线图（已移至 docs/）
 ├── .gitignore               # Git 忽略规则
 │
 ├── engine/                  # 后台引擎模块
@@ -197,6 +198,12 @@ AutoFluidSimulation/
 │   ├── state_manager.py     # StateManager：SQLite 共享状态管理器
 │   ├── sc_process_pool.py   # SCProcessPool：SpaceClaim 进程并发池（3 槽位 + 等待队列）
 │   └── file_monitor.py      # StepFileMonitor：STEP 文件监控与稳定检测
+│
+├── docs/                    # 项目文档
+│   ├── code-style-guide.md  # 代码写作规范（命名、日志、配置体系）
+│   ├── code-wiki.md         # 项目代码 Wiki 文档（原 CODE_WIKI.md）
+│   ├── roadmap.md           # 分布式架构改造路线图（原 ROADMAP.md）
+│   └── remaining_issues.md  # 已知待解决问题
 │
 ├── ipc/                     # 进程间通信模块
 │   ├── protocol.py          # IPC 协议定义（命令常量、消息序列化）
@@ -227,7 +234,7 @@ AutoFluidSimulation/
 │       ├── state/           # 应用状态模块
 │       ├── event_handler/   # 事件处理模块
 │       ├── settings/        # 设置页面模块
-│       │   ├── mod.rs       # SettingCategory 枚举 & SettingsState 状态管理（5 分类 38 字段）
+│       │   ├── mod.rs       # SettingCategory 枚举 & SettingsState 状态管理（6 分类 52 字段）
 │       │   ├── settings_ui.rs # 设置对话框渲染（字段编辑、按钮、滚动条）
 │       │   ├── config_io.rs # TOML/.env 配置文件读写
 │       │   └── validation.rs# 配置字段验证（路径、端口、模板占位符等）
@@ -522,7 +529,7 @@ python start_daemon.py
 ```
 ============================================================
   液氧甲烷火箭发动机仿真 - 后台调度引擎
-  Pipeline Daemon Engine v2.5.0
+  Pipeline Daemon Engine v2.5.1
 ============================================================
 
 启动后将监听 IPC 连接，等待 TUI 客户端...
@@ -626,7 +633,7 @@ ENGINE_CONFIG = {
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.5.0         │  ← 标题栏
+│  🚀 液氧甲烷火箭发动机仿真总控程序 v2.5.1         │  ← 标题栏
 │  引擎: 运行中  |  构型数: 12  |  屏障: 未通过      │  ← 信息栏
 ├──────────────────────────────────────────────────┤
 │  构型  │ SW导出  │ SC转换  │ 文件传输│ 网格划分│ 仿真求解│  ← 状态表格
@@ -643,7 +650,7 @@ ENGINE_CONFIG = {
 └──────────────────────────────────────────────────┘
 ```
 
-**设置页面**（通过输入 `settings` 命令或点击 `⚙ Settings` 按钮打开）：以 90% × 90% 大小的居中弹出层展示，上部分类标题栏，中部分 5 分类 38 个配置字段（本地路径/远程连接/远程目录/步骤模板/引擎配置），底部保存/取消按钮。支持键盘（Tab/↑↓ 导航、Enter 编辑、←→ 移动光标、Ctrl+S 保存、Ctrl+Z 撤销）和鼠标（字段悬停高亮、双击编辑、滚动条拖拽）交互。密码字段以 `********` 掩码显示。路径编辑提交后自动检测文件存在性并标记 ✅/❌。
+**设置页面**（通过输入 `settings` 命令或点击 `⚙ Settings` 按钮打开）：以 90% × 90% 大小的居中弹出层展示，上部分类标题栏，中部分 6 分类 52 个配置字段（本地路径/远程连接/远程目录/步骤模板/引擎配置/操作超时参数），底部保存/取消按钮。支持键盘（Tab/↑↓ 导航、Enter 编辑、←→ 移动光标、Ctrl+S 保存、Ctrl+Z 撤销）和鼠标（字段悬停高亮、双击编辑、滚动条拖拽）交互。密码字段以 `********` 掩码显示。路径编辑提交后自动检测文件存在性并标记 ✅/❌。
 
 ### 状态图标
 
@@ -698,7 +705,7 @@ ENGINE_CONFIG = {
 | `clean <构型\|all> <步骤\|all>` | 清理输出文件（需确认，显示影响目录）  | `clean 5 SW`、`clean all all` |
 | `daemon start`              | 从 TUI 启动后台引擎并自动连接   | `daemon start`               |
 | `daemon stop`               | 停止后台引擎（TUI 继续运行）    | `daemon stop`                |
-| `settings`                  | 打开程序设置页面（可视化编辑 5 分类 38 个配置参数） | `settings`                   |
+| `settings`                  | 打开程序设置页面（可视化编辑 6 分类 52 个配置参数） | `settings`                   |
 | `quit`                      | 退出 TUI（Daemon 继续运行） | `quit`                       |
 | `quit full`                 | 完全停止后台引擎并退出         | `quit full`                  |
 
@@ -887,7 +894,7 @@ AUTOFLUID_SSH_PASSWORD=your_password
 
 ***
 
-> **当前版本**: v2.5.0
+> **当前版本**: v2.5.1
 > **开发周期**: 2025-04 — 2026-05
 > **适用场景**: 液氧甲烷火箭发动机喷注器构型批量 CFD 仿真
 

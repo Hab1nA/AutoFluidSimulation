@@ -31,7 +31,6 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.file_monitor import StepFileMonitor
 from engine.task_runner import TaskRunner
-from engine.sc_process_pool import SCProcessPool
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -133,6 +132,7 @@ class PipelineScheduler:
         则直接标记为 Completed，避免重复启动程序执行该步骤。
 
         覆盖范围：
+        - SW: 本地 STEP 文件
         - SC: 本地 SCDOC 文件
         - Transfer: 远程 SCDOC 文件（需 SSH）
         - Meshing: 远程标志文件 + 网格输出文件（需 SSH）
@@ -154,6 +154,20 @@ class PipelineScheduler:
             pass
 
         for cn in all_configs:
+            # ---- SW: 检查本地 STEP 文件 ----
+            sw_status = self.state.get_step_status(cn, "SW")
+            if sw_status not in (STATUS_COMPLETED,):
+                sw_filename = get_step_filename("SW", cn)
+                if sw_filename:
+                    sw_filepath = os.path.join(LOCAL_PATHS["step_dir"], sw_filename)
+                    if os.path.exists(sw_filepath) and os.path.getsize(sw_filepath) > 0:
+                        self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                        logger.info(
+                            f"[Prescan] 构型{cn} SW: STEP 文件已存在，"
+                            f"标记为 Completed"
+                        )
+                        prescan_count += 1
+
             # ---- SC: 检查本地 SCDOC 文件 ----
             sc_status = self.state.get_step_status(cn, "SC")
             if sc_status not in (STATUS_COMPLETED,):
@@ -344,38 +358,35 @@ class PipelineScheduler:
         self._paused.clear()
 
         # ---- 步骤 1: SW 阶段 ----
-        # ★ 诊断日志：记录 SW 步骤状态分布，便于排查断点续传问题
-        _all_configs_diag = self.state.get_all_configs()
-        _sw_status_dist: dict[str, list[int]] = {}
-        for _cn in _all_configs_diag:
-            _st = self.state.get_step_status(_cn, "SW")
-            _sw_status_dist.setdefault(_st, []).append(_cn)
+        all_configs = self.state.get_all_configs()
+        sw_status_dist: dict[str, list[int]] = {}
+        for cn in all_configs:
+            st = self.state.get_step_status(cn, "SW")
+            sw_status_dist.setdefault(st, []).append(cn)
         logger.info(
-            "SW 步骤状态分布: %s；sw_macro_started=%s",
-            {k: len(v) for k, v in _sw_status_dist.items()},
+            "[SW] 步骤状态分布: %s；sw_macro_started=%s",
+            {k: len(v) for k, v in sw_status_dist.items()},
             self.state.is_sw_macro_started(),
         )
 
-        # ★ 计算是否应执行 SW 宏：综合 sw_macro_started 标志和实际步骤状态
-        _should_run_sw = not self.state.is_sw_macro_started()
-        if _should_run_sw:
-            # 防御性交叉校验：若所有 SW 步骤已实际完成，自愈跳过
-            _sw_all_completed = (
-                len(_sw_status_dist.get(STATUS_COMPLETED, [])) == len(_all_configs_diag)
-                and len(_all_configs_diag) > 0
+        # 综合 sw_macro_started 标志和实际步骤状态判断是否执行 SW
+        should_run_sw = not self.state.is_sw_macro_started()
+        if should_run_sw:
+            sw_all_completed = (
+                len(sw_status_dist.get(STATUS_COMPLETED, [])) == len(all_configs)
+                and len(all_configs) > 0
             )
-            if _sw_all_completed:
+            if sw_all_completed:
                 logger.warning(
-                    "检测到 sw_macro_started=false 但所有 %d 个构型的 "
-                    "SW 步骤均为 Completed。自愈：设置 sw_macro_started=true，"
-                    "跳过 SW 宏执行，直接进入下游初始化。",
-                    len(_all_configs_diag),
+                    "[SW] 检测到 sw_macro_started=false 但所有 %d 个构型的 "
+                    "SW 步骤均为 Completed。自愈：设置 sw_macro_started=true",
+                    len(all_configs),
                 )
                 self.state.set_sw_macro_started(True)
-                _should_run_sw = False
+                should_run_sw = False
 
-        if _should_run_sw:
-            logger.info("SW 宏尚未启动，准备执行...")
+        if should_run_sw:
+            logger.info("[SW] SW 步骤尚未启动，准备执行...")
             all_configs = self.state.get_all_configs()
 
             # 将所有构型的 SW 状态设为 Running（仅限 Waiting/Paused/Error/Retrying 状态）
@@ -384,9 +395,9 @@ class PipelineScheduler:
                 if current_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
                     self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
-            # ---- SW 宏前暂停检查 ----
+            # ---- SW 步骤前暂停检查 ----
             if self._paused.is_set():
-                logger.info("SW 宏启动前检测到暂停标志，等待继续指令...")
+                logger.info("[SW] SW 步骤启动前检测到暂停标志，等待继续指令...")
                 self.state.set_engine_status("paused")
                 while self._paused.is_set() and not self._stopped.is_set():
                     time.sleep(1)
@@ -406,115 +417,52 @@ class PipelineScheduler:
                     on_file_ready=self._on_step_file_ready
                 )
                 self._file_monitor.start()
-                logger.info("文件监控已提前启动（在 SW 宏执行前）")
+                logger.info("[SW] 文件监控已提前启动（在 SW 步骤执行前）")
             self._start_worker_pool_if_needed()
 
-            # 启动 SW 宏（批量导出所有构型）—— RunMacro2 是同步阻塞 COM 调用，不可中断
-            # 增加重试机制：SW 启动/COM 调用可能因瞬时问题失败
+            # 执行 SW 步骤（含重试机制）
             sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
-            success = False
+            sw_success = False
             for sw_attempt in range(1, int(sw_max_retries) + 1):
-                # ★ 检查停止标志
                 if self._stopped.is_set():
                     return
 
                 if sw_attempt > 1:
-                    # ★ 重试前先等待暂停恢复（若有），然后立即设置重试状态
-                    #    注意：不在此处长时间等待暂停，而是在 _pause_aware_sleep 中
-                    #    合并等待，以避免重复消耗时间
-                    if self._paused.is_set():
-                        logger.info("SW 宏重试前检测到暂停标志，将在重试延迟中等待继续...")
-                    # 将所有 SW 步骤标记为 Retrying，TUI 可显示 🔄 状态
-                    for cn in all_configs:
-                        sw_st = self.state.get_step_status(cn, "SW")
-                        if sw_st not in (STATUS_COMPLETED, STATUS_PAUSED):
-                            self.state.set_step_status(
-                                cn, "SW", STATUS_RETRYING,
-                                f"SW 宏重试 {sw_attempt}/{sw_max_retries}"
-                            )
-                    logger.info(
-                        f"SW 宏重试 {sw_attempt}/{sw_max_retries}，"
-                        f"等待 10 秒并清理残留进程..."
-                    )
-                    # ★ 使用暂停感知 sleep 替代原始 time.sleep：
-                    #    若已暂停，则在此 sleep 期间等待恢复；
-                    #    若在 sleep 期间被暂停，状态会被 set_all_running_to_paused() 改为 Paused，
-                    #    恢复后 sleep 继续计时
-                    if not self._pause_aware_sleep(10):
+                    self._prepare_sw_retry(all_configs, sw_attempt, sw_max_retries)
+                    if self._stopped.is_set():
                         return
-                    # ★ kill SW 进程（暂停期间跳过，恢复后继续）
-                    try:
-                        subprocess.run(
-                            ["taskkill", "/f", "/im", "SLDWORKS.exe"],
-                            capture_output=True, timeout=30,
-                        )
-                    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-                        pass
-                    # 等待 SW 进程完全退出后再重试（防止 COM 注册残留）
-                    logger.info("等待 SolidWorks 进程完全退出...")
-                    for _ in range(10):
-                        if not self._pause_aware_sleep(1):
-                            return
-                        try:
-                            check = subprocess.run(
-                                ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
-                                 "/fo", "csv", "/nh"],
-                                capture_output=True, text=True, timeout=5,
-                            )
-                            if "SLDWORKS.exe" not in check.stdout:
-                                logger.info("✓ SolidWorks 进程已退出")
-                                break
-                        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-                            break
-                    # 额外冷却确保 COM 子系统完全释放
-                    if not self._pause_aware_sleep(5):
-                        return
-                    # ★ 重置文件监控器状态，避免上次尝试的已处理文件集合
-                    #    导致重试时同名 STEP 文件被跳过（_processed_files 命中）
-                    if self._file_monitor is not None:
-                        self._file_monitor._processed_files.clear()
-                        self._file_monitor._known_files.clear()
-                        self._file_monitor._detector._history.clear()
-                        self._file_monitor._detector._first_seen.clear()
-                        logger.info("文件监控器状态已重置（准备 SW 宏重试）")
-                    # 恢复为 Running 后执行宏
-                    # ★ 仅将 RETRYING 状态的步骤恢复为 Running（Paused 保持不变）
-                    for cn in all_configs:
-                        current_sw = self.state.get_step_status(cn, "SW")
-                        if current_sw == STATUS_RETRYING:
-                            self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
                 logger.info(
-                    f"SW 宏执行 (尝试 {sw_attempt}/{sw_max_retries})..."
+                    f"[SW] 执行 SW 步骤 (尝试 {sw_attempt}/{sw_max_retries})..."
                 )
-                success = self.runner.execute_sw_macro()
-                if success:
+                sw_success = self.runner.execute_sw_step()
+                if sw_success:
                     break
 
             # 若最终仍失败，将仍为 Running/Retrying 的构型标记为 Error
-            if not success and not self._paused.is_set():
+            if not sw_success and not self._paused.is_set():
                 for cn in all_configs:
                     sw_st = self.state.get_step_status(cn, "SW")
                     if sw_st not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
                         self.state.set_step_status(
                             cn, "SW", STATUS_ERROR,
-                            f"SW 宏失败（重试 {sw_max_retries} 次后）"
+                            f"SW 步骤失败（重试 {sw_max_retries} 次后）"
                         )
                 self.state.set_engine_status("stopped")
-                logger.error("SW 宏启动失败，流水线中止")
+                logger.error("[SW] SW 步骤失败，流水线中止")
                 return
 
-            if not success:
-                # SW 宏失败且处于暂停状态
+            if not sw_success:
+                # SW 步骤失败且处于暂停状态
                 if self._paused.is_set():
-                    logger.warning("SW 宏在暂停期间失败，保留 Paused 状态以供恢复后重试")
+                    logger.warning("[SW] SW 步骤在暂停期间失败，保留 Paused 状态以供恢复后重试")
                     for cn in all_configs:
                         if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
                             self.state.set_step_status(cn, "SW", STATUS_PAUSED)
                     self.state.set_engine_status("paused")
                 return
             else:
-                # SW 宏成功执行，但 execute_sw_macro 内部可能已标记部分构型为 Error
+                # SW 步骤成功执行，但 execute_sw_step 内部可能已标记部分构型为 Error
                 # （例如某些构型的 STEP 文件缺失）
                 # 若此时暂停标志已置位，将这些 Error 步骤回退为 Paused
                 if self._paused.is_set():
@@ -527,10 +475,10 @@ class PipelineScheduler:
                             paused_count += 1
                     if paused_count > 0:
                         logger.info(
-                            f"暂停标志已置位，已将 {paused_count} 个 SW Error 构型回退为 Paused"
+                            f"[SW] 暂停标志已置位，已将 {paused_count} 个 SW Error 构型回退为 Paused"
                         )
 
-            # ★ SW 阶段导出汇总（部分成功场景的诊断日志）
+            # SW 阶段导出汇总
             if not self._paused.is_set():
                 sw_completed = [cn for cn in all_configs
                                 if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED]
@@ -540,12 +488,11 @@ class PipelineScheduler:
                               if self.state.get_step_status(cn, "SW") == STATUS_RUNNING]
                 if sw_completed:
                     logger.info(
-                        f"SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
+                        f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
                     )
                 if sw_errors:
                     logger.warning(
-                        f"SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败，"
-                        f"将跳过其下游步骤"
+                        f"[SW] SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败"
                     )
                     # 阻断失败构型的下游步骤（避免 worker 线程误处理）
                     for cn in sw_errors:
@@ -557,11 +504,11 @@ class PipelineScheduler:
                                 )
                 if sw_running:
                     logger.warning(
-                        f"SW 阶段: {len(sw_running)} 个构型仍为 Running 状态 "
+                        f"[SW] {len(sw_running)} 个构型仍为 Running 状态 "
                         f"(可能导出中断): {sorted(sw_running)}"
                     )
         else:
-            logger.info("SW 宏已执行过，跳过（断点续传模式）")
+            logger.info("[SW] SW 步骤已执行过，跳过（断点续传模式）")
             # 断点续传时，检查是否有 SW 步骤处于 Paused 或 Error 状态
             # Paused：恢复后需重新校验 STEP 文件
             # Error：清除 sw_macro_started 标志以允许重试 SW 宏
@@ -577,7 +524,7 @@ class PipelineScheduler:
 
             if has_paused_sw:
                 # 暂停恢复：重新校验 STEP 文件
-                logger.info("检测到 SW Paused 构型，重新校验 STEP 文件...")
+                logger.info("[SW] 检测到 SW Paused 构型，重新校验 STEP 文件...")
                 step_dir = LOCAL_PATHS.get("step_dir", "")
                 for cn in all_configs:
                     if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
@@ -590,18 +537,16 @@ class PipelineScheduler:
                         expected_file = os.path.join(step_dir, filename)
                         if os.path.exists(expected_file):
                             self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
-                            logger.info(f"  构型{cn} ✓ STEP 文件已存在，标记为完成")
+                            logger.info(f"[SW]   构型{cn} ✓ STEP 文件已存在，标记为完成")
                         else:
-                            # STEP 仍缺失，保持 Error（需要重跑 SW 宏）
                             self.state.set_step_status(cn, "SW", STATUS_ERROR,
                                                        "暂停恢复后 STEP 文件仍缺失")
                             has_error_sw = True
-                            logger.warning(f"  构型{cn} ✗ STEP 文件缺失")
+                            logger.warning(f"[SW]   构型{cn} ✗ STEP 文件缺失")
 
             if has_error_sw:
-                # 有 SW Error 构型，清除 sw_macro_started 标志以允许重新运行
                 logger.warning(
-                    "检测到 SW Error 构型，将清除 sw_macro_started 标志以允许重新执行 SW 宏"
+                    "[SW] 检测到 SW Error 构型，将清除 sw_macro_started 标志以允许重新执行 SW 步骤"
                 )
                 self.state.set_sw_macro_started(False)
                 # 递归调用自身以重新进入 SW 阶段
@@ -806,10 +751,10 @@ class PipelineScheduler:
                     )
                     self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
                 elif not self._execute_with_retry(config_name, "SC",
-                                                   self.runner.execute_spaceclaim):
+                                                   self.runner.execute_sc_step):
                     return
             elif not self._execute_with_retry(config_name, "SC",
-                                               self.runner.execute_spaceclaim):
+                                               self.runner.execute_sc_step):
                 return
 
         # ★ SC 完成后检查暂停标志
@@ -989,7 +934,7 @@ class PipelineScheduler:
                     return True
                 else:
                     # ★ 检查是否因暂停/停止导致执行失败
-                    # （例如 execute_spaceclaim 在轮询中检测到暂停标志，终止了 SC 进程）
+                    # （例如 execute_sc_step 在轮询中检测到暂停标志，终止了 SC 进程）
                     if self._paused.is_set():
                         self.state.set_step_status(
                             config_name, step_name, STATUS_PAUSED,
@@ -1233,6 +1178,81 @@ class PipelineScheduler:
                     )
 
     # ------------------------------------------------------------------
+    # SW 重试准备
+    # ------------------------------------------------------------------
+
+    def _prepare_sw_retry(self, all_configs: list[int], attempt: int, max_retries: int):
+        """
+        为 SW 步骤重试做准备：清理残留进程、重置监控器状态、设置 Retrying 状态。
+
+        Args:
+            all_configs: 所有构型列表
+            attempt: 当前重试次数 (1-based)
+            max_retries: 最大重试次数
+        """
+        if self._paused.is_set():
+            logger.info("[SW] SW 步骤重试前检测到暂停标志，将在重试延迟中等待继续...")
+
+        # 将所有 SW 步骤标记为 Retrying
+        for cn in all_configs:
+            sw_status = self.state.get_step_status(cn, "SW")
+            if sw_status not in (STATUS_COMPLETED, STATUS_PAUSED):
+                self.state.set_step_status(
+                    cn, "SW", STATUS_RETRYING,
+                    f"SW 步骤重试 {attempt}/{max_retries}"
+                )
+
+        logger.info(
+            f"[SW] SW 步骤重试 {attempt}/{max_retries}，等待 10 秒并清理残留进程..."
+        )
+        if not self._pause_aware_sleep(10):
+            return
+
+        # 终止残留 SW 进程
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", "SLDWORKS.exe"],
+                capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            pass
+
+        # 等待 SW 进程完全退出
+        logger.info("[SW-Cleanup] 等待 SolidWorks 进程完全退出...")
+        for _ in range(10):
+            if not self._pause_aware_sleep(1):
+                return
+            try:
+                check = subprocess.run(
+                    ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
+                     "/fo", "csv", "/nh"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "SLDWORKS.exe" not in check.stdout:
+                    logger.info("[SW-Cleanup] ✓ SolidWorks 进程已退出")
+                    break
+            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+                break
+
+        # 额外冷却确保 COM 子系统完全释放
+        if not self._pause_aware_sleep(5):
+            return
+
+        # 重置文件监控器状态，避免重试时同名文件被跳过
+        if self._file_monitor is not None:
+            self._file_monitor._processed_files.clear()
+            self._file_monitor._known_files.clear()
+            self._file_monitor._detector._history.clear()
+            self._file_monitor._detector._first_seen.clear()
+            logger.info("[SW] 文件监控器状态已重置（准备 SW 步骤重试）")
+
+        # 仅将 RETRYING 状态恢复为 Running（Paused 保持不变）
+        for cn in all_configs:
+            current_status = self.state.get_step_status(cn, "SW")
+            if current_status == STATUS_RETRYING:
+                self.state.set_step_status(cn, "SW", STATUS_RUNNING)
+
+    # ------------------------------------------------------------------
     # 控制接口
     # ------------------------------------------------------------------
 
@@ -1260,6 +1280,8 @@ class PipelineScheduler:
         恢复暂停的步骤：检查输出文件，决定标记完成或重新入队。
 
         设计原则：
+        - SW 步骤的 PAUSED 状态：检查 STEP 文件是否已生成。
+          若已生成 → 标记 Completed。若缺失 → 标记 Error 并清除 sw_macro_started。
         - SC 步骤的并发数受 _num_workers 限制。若暂停前有 N 个 SC 进程
           正在运行，恢复时不应将所有 PAUSED 直接改为 RUNNING（会导致
           超过并发限制的进程同时显示为 Running）。
@@ -1267,48 +1289,85 @@ class PipelineScheduler:
           若已生成 → 标记 Completed，后续 Transfer/Meshing 由 worker 自动衔接。
           若未生成 → 重新推入 _sc_queue，由 worker 池按并发限制逐个处理。
         - 其他步骤（Transfer/Meshing/Solver）的 PAUSED 状态由
-          set_all_paused_to_running(exclude_steps=["SC"]) 统一恢复。
+          set_all_paused_to_running(exclude_steps=["SW", "SC"]) 统一恢复。
         """
-        paused_sc = self.state.get_configs_at_step("SC", STATUS_PAUSED)
-        if not paused_sc:
-            return
-
         step_dir = LOCAL_PATHS.get("step_dir", "")
-        completed_count = 0
-        re_enqueued_count = 0
+        sw_completed_count = 0
+        sw_error_count = 0
+        sc_completed_count = 0
+        sc_enqueued_count = 0
 
+        # ---- SW 步骤：检查 STEP 文件 ----
+        paused_sw = self.state.get_configs_at_step("SW", STATUS_PAUSED)
+        for cn in paused_sw:
+            sw_filename = get_step_filename("SW", cn)
+            if sw_filename:
+                step_file = os.path.join(step_dir, sw_filename)
+                if os.path.exists(step_file) and os.path.getsize(step_file) > 0:
+                    self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                    logger.info(
+                        f"[Resume] 构型{cn} SW: STEP 文件已存在，标记为 Completed"
+                    )
+                    sw_completed_count += 1
+                else:
+                    self.state.set_step_status(
+                        cn, "SW", STATUS_ERROR,
+                        "暂停恢复: STEP 文件缺失"
+                    )
+                    sw_error_count += 1
+                    logger.warning(
+                        f"[Resume] 构型{cn} SW: STEP 文件缺失，标记为 Error"
+                    )
+            else:
+                self.state.set_step_status(
+                    cn, "SW", STATUS_ERROR,
+                    "暂停恢复: 无法生成 SW 文件名"
+                )
+                sw_error_count += 1
+
+        if sw_error_count > 0:
+            # 有 SW Error 构型 → 清除 sw_macro_started 标志以允许重新运行 SW
+            self.state.set_sw_macro_started(False)
+            logger.warning(
+                f"[Resume] SW 步骤: {sw_completed_count} 个完成, "
+                f"{sw_error_count} 个 Error，已清除 sw_macro_started 标志"
+            )
+        elif sw_completed_count > 0:
+            logger.info(
+                f"[Resume] SW 步骤处理完成: {sw_completed_count} 个标记完成"
+            )
+
+        # ---- SC 步骤：检查 SCDOC 文件 ----
+        paused_sc = self.state.get_configs_at_step("SC", STATUS_PAUSED)
         for cn in paused_sc:
             scdoc_name = get_step_filename("SC", cn)
             if scdoc_name:
                 scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
                 if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
-                    # SCDOC 已生成 → 标记完成，worker 会自动处理后续 Transfer
                     self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
                     logger.info(
-                        f"[恢复] 构型{cn} SC: SCDOC 已存在，标记为 Completed"
+                        f"[Resume] 构型{cn} SC: SCDOC 已存在，标记为 Completed"
                     )
-                    completed_count += 1
+                    sc_completed_count += 1
                     continue
 
-            # SCDOC 不存在 → 重新推入队列，由 worker 池按并发限制处理
+            # SCDOC 不存在 → 重新推入队列
             sw_filename = get_step_filename("SW", cn)
             if sw_filename:
                 step_file = os.path.join(step_dir, sw_filename)
-                # 仅当 STEP 文件存在时才入队（防止无效任务堆积）
                 if os.path.exists(step_file):
                     self._sc_queue.put((cn, step_file))
-                    re_enqueued_count += 1
+                    sc_enqueued_count += 1
                     logger.info(
-                        f"[恢复] 构型{cn} SC: 无输出文件，重新入队等待处理"
+                        f"[Resume] 构型{cn} SC: 无输出文件，重新入队等待处理"
                     )
                 else:
-                    # STEP 文件缺失 → 上游异常，标记 Error
                     self.state.set_step_status(
                         cn, "SC", STATUS_ERROR,
                         "暂停恢复: STEP 文件缺失，无法重新入队"
                     )
                     logger.warning(
-                        f"[恢复] 构型{cn} SC: STEP 文件缺失，标记为 Error"
+                        f"[Resume] 构型{cn} SC: STEP 文件缺失，标记为 Error"
                     )
             else:
                 self.state.set_step_status(
@@ -1316,10 +1375,10 @@ class PipelineScheduler:
                     "暂停恢复: 无法生成 SW 文件名"
                 )
 
-        if completed_count or re_enqueued_count:
+        if sc_completed_count or sc_enqueued_count:
             logger.info(
-                f"[恢复] SC 步骤处理完成: {completed_count} 个标记完成, "
-                f"{re_enqueued_count} 个重新入队"
+                f"[Resume] SC 步骤处理完成: {sc_completed_count} 个标记完成, "
+                f"{sc_enqueued_count} 个重新入队"
             )
 
     def resume(self):
@@ -1331,8 +1390,8 @@ class PipelineScheduler:
         self._resume_paused_steps()
 
         # ★ 第二步：其他步骤（Transfer/Meshing/Solver）的 PAUSED → RUNNING
-        #    SC 步骤已在上一步处理完毕，此处排除 SC 避免覆盖
-        self.state.set_all_paused_to_running(exclude_steps=["SC"])
+        #    SW 和 SC 步骤已在上一步处理完毕，此处排除避免覆盖
+        self.state.set_all_paused_to_running(exclude_steps=["SW", "SC"])
 
         self._paused.clear()
         self.state.set_engine_status("running")

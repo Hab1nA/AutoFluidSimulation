@@ -46,7 +46,7 @@ impl LogEntry {
 pub struct LogBuffer {
     pub detail_buffer: VecDeque<LogEntry>,
     pub info_messages: VecDeque<String>,
-    pub info_generation: u64,
+    pub log_generation: u64,
 }
 
 impl LogBuffer {
@@ -54,7 +54,7 @@ impl LogBuffer {
         Self {
             detail_buffer: VecDeque::with_capacity(MAX_DETAIL_BUFFER),
             info_messages: VecDeque::with_capacity(MAX_INFO_BUFFER),
-            info_generation: 0,
+            log_generation: 0,
         }
     }
 
@@ -63,6 +63,7 @@ impl LogBuffer {
             self.detail_buffer.pop_front();
         }
         self.detail_buffer.push_back(entry);
+        self.log_generation += 1;
     }
 
     pub fn push_info(&mut self, message: String) {
@@ -70,7 +71,7 @@ impl LogBuffer {
             self.info_messages.pop_front();
         }
         self.info_messages.push_back(message);
-        self.info_generation += 1;
+        self.log_generation += 1;
     }
 
     #[allow(dead_code)]
