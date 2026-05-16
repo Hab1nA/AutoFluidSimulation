@@ -57,6 +57,11 @@ class SCProcessPool:
                     f"[SC-Pool] 已加载 {len(self._slots)} 个槽位 "
                     f"(max={self.MAX_SLOTS})"
                 )
+            except FileNotFoundError:
+                # 防御：os.path.exists 可能因 mock/TOCTOU 返回 True 但文件实际不存在
+                logger.info("[SC-Pool] 池文件不存在，初始化空池")
+                self._slots = {}
+                self._next_slot_id = 1
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logger.warning(f"[SC-Pool] 池文件损坏，使用空池: {e}")
                 self._slots = {}

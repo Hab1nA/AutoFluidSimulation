@@ -46,23 +46,28 @@ impl IpcClient {
     }
 
     pub async fn send_request(&mut self, request: &IpcRequest) -> Result<IpcResponse, String> {
-        let stream = match self.stream.take() {
+        let mut stream = match self.stream.take() {
             Some(s) => s,
             None => return Err("未连接".to_string()),
         };
 
-        let mut stream = stream;
         let data = request.serialize();
         if let Err(e) = stream.write_all(&data).await {
-            // Stream may be broken; discard and let caller re-connect
+            // 发送失败：stream 可能已损坏，丢弃连接
             return Err(format!("发送失败: {}", e));
         }
 
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
 
-        match tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_until(b'\n', &mut buffer)).await {
-            Ok(Ok(0)) => Err("连接已断开".to_string()),
+        // ★ 使用独立的 result 变量暂存结果，
+        //    以便在所有路径上都能将 stream 归还给 self.stream
+        let result = match tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_until(b'\n', &mut buffer)).await {
+            Ok(Ok(0)) => {
+                // 对端关闭连接 → stream 已不可用，丢弃
+                self.stream = None;
+                Err("连接已断开".to_string())
+            }
             Ok(Ok(_)) => {
                 let stream = reader.into_inner();
                 self.stream = Some(stream);
@@ -72,14 +77,19 @@ impl IpcClient {
                 }
             }
             Ok(Err(e)) => {
+                // 读取 I/O 错误：stream 可能已损坏
+                self.stream = None;
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
-                // Timeout: stream is consumed by BufReader and dropped.
-                // Clear self.stream so the caller can detect disconnection and re-connect.
+                // 读取超时：stream 仍然完好，归还以便下次重试
+                let stream = reader.into_inner();
+                self.stream = Some(stream);
                 Err("请求超时".to_string())
             }
-        }
+        };
+
+        result
     }
 
     pub async fn start_pipeline(&mut self) -> Result<IpcResponse, String> {
