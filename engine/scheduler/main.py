@@ -36,6 +36,7 @@ from .worker_pool import WorkerPoolManager
 from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
+from .utils import pause_aware_sleep
 
 logger = setup_logger(__name__)
 
@@ -123,32 +124,11 @@ class PipelineScheduler:
     # ------------------------------------------------------------------
 
     def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
+        """可响应暂停/停止的 sleep 替代方法。
+
+        委托给共享函数 pause_aware_sleep。
         """
-        可响应暂停/停止的 sleep 替代方法。
-
-        将 sleep 切分为 check_interval 粒度的小段，每段检查
-        _paused 和 _stopped 标志。若检测到 stopped 则立即返回。
-
-        Args:
-            duration: 总等待时长（秒）
-            check_interval: 每次检查的间隔（秒）
-
-        Returns:
-            True 表示 sleep 完整结束，False 表示因 stopped 提前退出
-        """
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            if self._stopped.is_set():
-                return False
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
-                return False
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            time.sleep(min(check_interval, remaining))
-        return True
+        return pause_aware_sleep(duration, self._paused, self._stopped, check_interval)
 
     # ------------------------------------------------------------------
     # 主调度入口
@@ -169,8 +149,8 @@ class PipelineScheduler:
         """
         if _recursion_depth >= 3:
             logger.error(
-                "start_pipeline 递归深度超过上限 (%d)，可能存在无法自动恢复的错误，"
-                "流水线中止。", _recursion_depth
+                f"start_pipeline 递归深度超过上限 ({_recursion_depth})，"
+                f"可能存在无法自动恢复的错误，流水线中止。"
             )
             self._handle_recursion_limit_exceeded(_recursion_depth)
             return
@@ -248,11 +228,8 @@ class PipelineScheduler:
                     )
 
         logger.error(
-            "已标记 %d/%d 个构型的 SW 步骤为 Error，"
-            "%d 个构型的下游步骤亦已阻断",
-            error_count, len(all_configs),
-            sum(1 for cn in all_configs
-                if self.state.get_step_status(cn, "SC") == STATUS_ERROR)
+            f"已标记 {error_count}/{len(all_configs)} 个构型的 SW 步骤为 Error，"
+            f"{sum(1 for cn in all_configs if self.state.get_step_status(cn, 'SC') == STATUS_ERROR)} 个构型的下游步骤亦已阻断"
         )
 
         # 3) 清除 sw_macro_started 标志 → 允许用户直接 start 重试
@@ -268,7 +245,7 @@ class PipelineScheduler:
 
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。"""
-        if self._file_monitor is None or not self._file_monitor._running:
+        if self._file_monitor is None or not self._file_monitor.is_running:
             self._file_monitor = StepFileMonitor(
                 step_dir=None,
                 on_file_ready=self._on_step_file_ready

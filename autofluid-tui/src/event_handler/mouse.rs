@@ -608,10 +608,8 @@ fn handle_detail_click(
             max_width,
             visual_line as usize,
         ) {
-            if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                if clipboard.set_text(&msg).is_ok() {
-                    log_buffer.push_info(format!("已复制到剪贴板: {}", if msg.chars().count() > 60 { let s: String = msg.chars().take(60).collect(); format!("{}...", s) } else { msg.clone() }));
-                }
+            if clipboard_win::set_clipboard_string(&msg).is_ok() {
+                log_buffer.push_info(format!("已复制到剪贴板: {}", if msg.chars().count() > 60 { let s: String = msg.chars().take(60).collect(); format!("{}...", s) } else { msg.clone() }));
             }
         }
         state.last_detail_click_time = None;

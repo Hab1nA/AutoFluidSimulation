@@ -364,8 +364,7 @@ class StateManager:
                         )
                     else:
                         logger.debug(
-                            "仍有 %d 个构型的 SW=Completed，保持 sw_macro_started=true",
-                            remaining["cnt"] if remaining else 0,
+                            f"仍有 {remaining['cnt'] if remaining else 0} 个构型的 SW=Completed，保持 sw_macro_started=true"
                         )
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")

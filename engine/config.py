@@ -22,9 +22,11 @@ except ImportError:
 # ============================================================================
 
 def _env_override(key: str, default: str) -> str:
-    """读取环境变量覆盖值；若未设置或为空则返回默认值。"""
+    """读取环境变量覆盖值；若未设置、为空字符串或仅含空白则返回默认值。"""
     val = os.environ.get(key)
-    return val if val else default
+    if val is not None and val.strip():
+        return val
+    return default
 
 
 # ============================================================================
@@ -164,6 +166,8 @@ IPC_CONFIG = {
     "db_path": os.path.join(LOCAL_PATHS["data_dir"], "pipeline_state.db"),
     # Socket 超时（秒）
     "timeout": 5.0,
+    # IPC 服务器最大同时连接数（防止资源耗尽）
+    "max_connections": 10,
 }
 
 # ============================================================================

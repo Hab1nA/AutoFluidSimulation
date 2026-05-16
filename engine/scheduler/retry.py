@@ -14,6 +14,8 @@ from engine.config import (
 from engine.state_manager import StateManager
 from utils.logger import setup_logger
 
+from .utils import pause_aware_sleep
+
 logger = setup_logger(__name__)
 
 
@@ -144,29 +146,8 @@ class RetryManager:
         return False
 
     def pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
+        """可响应暂停/停止的 sleep 替代方法。
+
+        委托给共享函数 pause_aware_sleep。
         """
-        可响应暂停/停止的 sleep 替代方法。
-
-        将 sleep 切分为 check_interval 粒度的小段，每段检查
-        _paused 和 _stopped 标志。若检测到 stopped 则立即返回。
-
-        Args:
-            duration: 总等待时长（秒）
-            check_interval: 每次检查的间隔（秒）
-
-        Returns:
-            True 表示 sleep 完整结束，False 表示因 stopped 提前退出
-        """
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            if self._stopped.is_set():
-                return False
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
-                return False
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            time.sleep(min(check_interval, remaining))
-        return True
+        return pause_aware_sleep(duration, self._paused, self._stopped, check_interval)

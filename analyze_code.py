@@ -88,7 +88,7 @@ def analyze_python_file(file_path):
 
     except SyntaxError as e:
         return [f"语法错误: {e}"]
-    except Exception as e:
+    except (RecursionError, ValueError, TypeError, AttributeError) as e:
         return [f"分析失败: {e}"]
 
 def check_all_python_files(root_dir):

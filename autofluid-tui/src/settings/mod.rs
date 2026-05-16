@@ -785,10 +785,7 @@ impl SettingsState {
         if text.is_empty() {
             return false;
         }
-        match arboard::Clipboard::new() {
-            Ok(mut cb) => cb.set_text(text).is_ok(),
-            Err(_) => false,
-        }
+        clipboard_win::set_clipboard_string(&text).is_ok()
     }
 
     /// Cut: copy to clipboard then delete selection.
@@ -806,8 +803,8 @@ impl SettingsState {
 
     /// Paste from system clipboard, replacing any current selection.
     pub fn paste_from_clipboard(&mut self) -> bool {
-        let text = match arboard::Clipboard::new() {
-            Ok(mut cb) => cb.get_text().unwrap_or_default(),
+        let text = match clipboard_win::get_clipboard_string() {
+            Ok(s) => s,
             Err(_) => return false,
         };
         if text.is_empty() {
@@ -824,11 +821,5 @@ impl SettingsState {
         self.edit_buffer.insert_str(byte_pos, &cleaned);
         self.edit_cursor += cleaned.chars().count();
         true
-    }
-
-    /// Clear the selection anchor (e.g. when cursor moves without Shift).
-    #[allow(dead_code)]
-    pub fn clear_selection(&mut self) {
-        self.selection_anchor = None;
     }
 }

@@ -87,9 +87,8 @@ class SWPhaseHandler:
             st = self.state.get_step_status(cn, "SW")
             sw_status_dist.setdefault(st, []).append(cn)
         logger.info(
-            "[SW] 步骤状态分布: %s；sw_macro_started=%s",
-            {k: len(v) for k, v in sw_status_dist.items()},
-            self.state.is_sw_macro_started(),
+            f"[SW] 步骤状态分布: { {k: len(v) for k, v in sw_status_dist.items()} }；"
+            f"sw_macro_started={self.state.is_sw_macro_started()}"
         )
 
         # 综合 sw_macro_started 标志和实际步骤状态判断是否执行 SW
@@ -101,9 +100,8 @@ class SWPhaseHandler:
             )
             if sw_all_completed:
                 logger.warning(
-                    "[SW] 检测到 sw_macro_started=false 但所有 %d 个构型的 "
-                    "SW 步骤均为 Completed。自愈：设置 sw_macro_started=true",
-                    len(all_configs),
+                    f"[SW] 检测到 sw_macro_started=false 但所有 {len(all_configs)} 个构型的 "
+                    f"SW 步骤均为 Completed。自愈：设置 sw_macro_started=true"
                 )
                 self.state.set_sw_macro_started(True)
                 should_run_sw = False

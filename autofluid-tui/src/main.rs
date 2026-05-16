@@ -15,6 +15,7 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use daemon_mgr::DaemonManager;
 use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::UiMode;
@@ -24,75 +25,10 @@ use event_handler::command;
 
 pub use utils::format_local_time;
 
-fn reconnect_ipc_after_daemon_launch(
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-) {
-    let timeout = Duration::from_secs(10);
-    let deadline = std::time::Instant::now() + timeout;
-
-    while std::time::Instant::now() < deadline {
-        if ipc.is_connected() {
-            state.connected = true;
-            return;
-        }
-
-        match rt.block_on(ipc.connect()) {
-            Ok(()) => {
-                state.connected = true;
-                log_buffer.push_info("✅ 已连接到后台引擎".to_string());
-                return;
-            }
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-    }
-
-    state.connected = false;
-    log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
-}
-
-fn stop_daemon_process(
-    daemon: &mut daemon_mgr::DaemonManager,
-    ipc: &mut IpcClient,
-    rt: &tokio::runtime::Runtime,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    project_dir: &str,
-) {
-    if ipc.is_connected() {
-        let _ = rt.block_on(ipc.full_quit());
-        rt.block_on(ipc.disconnect());
-    }
-
-    let _ = daemon.stop(project_dir);
-    state.connected = false;
-    log_buffer.push_info("✅ 后台引擎已停止".to_string());
-}
-
-fn restart_daemon_process(
-    daemon: &mut daemon_mgr::DaemonManager,
-    ipc: &mut IpcClient,
-    rt: &tokio::runtime::Runtime,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    project_dir: &str,
-) {
-    stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
-
-    match daemon.launch(project_dir) {
-        Ok(pid) => {
-            log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
-            reconnect_ipc_after_daemon_launch(rt, ipc, state, log_buffer);
-        }
-        Err(e) => {
-            log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
-        }
-    }
-}
+// Daemon 生命周期函数已迁入 daemon_mgr::DaemonManager:
+//   DaemonManager::reconnect_ipc_after_launch()
+//   daemon.stop_with_ipc()
+//   daemon.restart_with_ipc()
 
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
@@ -131,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
-    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let project_dir = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
@@ -234,7 +170,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                         match daemon.launch(&project_dir) {
                             Ok(pid) => {
                                 log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                reconnect_ipc_after_daemon_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
+                                DaemonManager::reconnect_ipc_after_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
                             }
                             Err(e) => {
                                 log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -243,10 +179,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     }
                 }
                 command::CommandResult::RestartDaemon => {
-                    restart_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    daemon.restart_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 command::CommandResult::StopDaemon => {
-                    stop_daemon_process(&mut daemon, &mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    daemon.stop_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 _ => {}
             }
@@ -360,7 +296,7 @@ fn process_event(
                                 match daemon.launch(project_dir) {
                                     Ok(pid) => {
                                         log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                        reconnect_ipc_after_daemon_launch(&rt, ipc, state, log_buffer);
+                                        DaemonManager::reconnect_ipc_after_launch(&rt, ipc, state, log_buffer);
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -369,10 +305,10 @@ fn process_event(
                             }
                         }
                         command::CommandResult::RestartDaemon => {
-                            restart_daemon_process(daemon, ipc, &rt, state, log_buffer, project_dir);
+                            daemon.restart_with_ipc(ipc, &rt, state, log_buffer, project_dir);
                         }
                         command::CommandResult::StopDaemon => {
-                            stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
+                            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
                         }
                         _ => {}
                     }
@@ -386,7 +322,7 @@ fn process_event(
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
-                                stop_daemon_process(daemon, ipc, rt, state, log_buffer, project_dir);
+                                daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
                             }
                             _ => {}
                         }

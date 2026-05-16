@@ -86,6 +86,10 @@ class RemoteExecutor:
 
     def execute_meshing(self, config_name: int) -> bool:
         """在远程工作站启动网格划分后台任务。"""
+        # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
+        if not isinstance(config_name, int):
+            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            return False
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
 
         conda_env = REMOTE_CONFIG["conda_env"]
@@ -140,6 +144,10 @@ class RemoteExecutor:
 
     def execute_solver(self, config_name: int) -> bool:
         """在远程工作站启动仿真求解后台任务（全局屏障后调用）。"""
+        # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
+        if not isinstance(config_name, int):
+            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            return False
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
         conda_env = REMOTE_CONFIG["conda_env"]

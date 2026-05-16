@@ -23,6 +23,14 @@ class SCSlot:
 
 
 class SCProcessPool:
+    """SpaceClaim 进程池，管理最多 MAX_SLOTS 个并发 SC 实例。
+
+    设计说明：
+    - 控制事件（paused_event / stopped_event）通过方法参数传递，
+      而非实例属性存储。这避免了与 TaskRunner.set_control_events
+      的状态同步问题——SCProcessPool 是无状态的工具类，每次调用
+      都从调用方获取最新的控制事件。
+    """
     MAX_SLOTS = 3
 
     def __init__(self):
