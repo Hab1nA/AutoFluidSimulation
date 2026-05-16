@@ -143,6 +143,9 @@ class SWPhaseHandler:
                 if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
                     self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
+        # ★ 首次 SC 全体清理：在任何构型进入 SC 步骤前清理所有旧残留 SpaceClaim 进程
+        self.runner._sc_pool.do_first_cleanup()
+
         # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
         #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
         #    实现边导出边处理的并行流水线）
