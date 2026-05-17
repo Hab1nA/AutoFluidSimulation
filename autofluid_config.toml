@@ -1,6 +1,6 @@
 [local_paths]
 sw_exe = 'C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe'
-sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT'
+sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model.SLDPRT'
 excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx'
 step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
 sc_exe = 'C:\Program Files\ANSYS Inc\v231\scdm\SpaceClaim.exe'
@@ -14,7 +14,7 @@ data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
 host = "172.17.135.240"
 port = 22
 username = "ps"
-password = ""  # 密码通过 .env 文件 (AUTOFLUID_SSH_PASSWORD) 或环境变量注入，勿在此处硬编码
+password = "abc@123"
 root_dir = 'D:\xkz_1020'
 scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'

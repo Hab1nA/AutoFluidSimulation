@@ -77,6 +77,8 @@ class TaskRunner:
         """
         self._paused_event = paused_event
         self._stopped_event = stopped_event
+        # 将控制事件传递给 SW 执行器，使其逐构型循环可响应 pause/stop
+        self._sw_executor.set_control_events(paused_event, stopped_event)
 
     # ------------------------------------------------------------------
     # SSH 连接管理

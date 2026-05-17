@@ -100,11 +100,30 @@ def _resolve_base_log_dir() -> str:
     return base
 
 
+def _infer_log_category(name: str) -> str:
+    """根据 logger 名称推断日志分类子目录。
+
+    当 init_session() 尚未被调用时，setup_logger() 的回退路径
+    需要知道日志应写入哪个分类目录。此函数根据模块名前缀进行推断：
+
+    - ``executor.*`` → ``"executor"``
+    - ``engine.*``、``ipc.*``、``PipelineDaemon`` → ``"daemon"``
+    - 其他（含 ``utils.*``）→ ``"daemon"``（默认兜底）
+    """
+    if name.startswith("executor."):
+        return "executor"
+    if name.startswith(("engine.", "ipc.")) or name == "PipelineDaemon":
+        return "daemon"
+    # utils.* 及其他模块默认归入 daemon
+    return "daemon"
+
+
 def setup_logger(name: str, log_file: str = None) -> logging.Logger:
     """创建并配置一个 logger 实例。
 
     若已通过 init_session() 初始化会话，日志文件将存放在会话目录下，
-    文件名为 {name}.log；否则回退到旧的扁平目录结构，
+    文件名为 {name}.log；否则根据模块名称自动推断分类，
+    回退到 ``logs/{category}/`` 目录，
     文件名为 {name}_{时间戳}_{PID}.log。
     """
 
@@ -128,7 +147,8 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
         if _session_log_dir is not None:
             log_file = os.path.join(_session_log_dir, f"{name}.log")
         else:
-            log_dir = _resolve_base_log_dir()
+            category = _infer_log_category(name)
+            log_dir = os.path.join(_resolve_base_log_dir(), category)
             os.makedirs(log_dir, exist_ok=True)
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
             pid = os.getpid()

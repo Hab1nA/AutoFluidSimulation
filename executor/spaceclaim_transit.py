@@ -29,11 +29,70 @@ import traceback
 from datetime import datetime
 
 # --------------------------------------------------------------------------
-# 0. 尽早建立日志文件（在任何可能失败的导入之前）
+# 0. 尽早建立日志器（在任何可能失败的导入之前）
 # --------------------------------------------------------------------------
+# 与 utils.logger.setup_logger 保持一致的 API 和日志格式，
+# 但不依赖 logging 模块，确保 IronPython 兼容。
 # 智能定位项目根目录：
 #   优先从脚本所在路径上溯（executor/ → 项目根 → logs/executor/）
 #   若 __file__ 不可用（IronPython /RunScript 模式可能缺失），回退到当前工作目录
+
+class _SpaceClaimLogger(object):
+    """轻量级日志器，API 与 utils.logger 保持一致。
+
+    日志格式: ``[timestamp] [LEVEL] [name] message``
+    同时输出到文件和 stdout（print 在 SpaceClaim GUI 下可能不可见）。
+    """
+
+    _LEVEL_NAMES = {
+        10: "DEBUG",
+        20: "INFO",
+        30: "WARNING",
+        40: "ERROR",
+        50: "CRITICAL",
+    }
+
+    def __init__(self, name, log_file):
+        self._name = name
+        self._log_file = log_file
+
+    @property
+    def log_file(self):
+        """日志文件路径。"""
+        return self._log_file
+
+    def _write(self, level, msg):
+        """格式化并写入一条日志。"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        level_name = self._LEVEL_NAMES.get(level, "INFO")
+        line = "[{}] [{}] [{}] {}".format(timestamp, level_name, self._name, msg)
+        try:
+            with io.open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except (IOError, OSError):
+            pass
+        print(line)
+
+    def debug(self, msg):
+        """记录 DEBUG 级别日志。"""
+        self._write(10, msg)
+
+    def info(self, msg):
+        """记录 INFO 级别日志。"""
+        self._write(20, msg)
+
+    def warning(self, msg):
+        """记录 WARNING 级别日志。"""
+        self._write(30, msg)
+
+    def error(self, msg):
+        """记录 ERROR 级别日志。"""
+        self._write(40, msg)
+
+    def critical(self, msg):
+        """记录 CRITICAL 级别日志。"""
+        self._write(50, msg)
+
 
 def _get_script_dir():
     """获取脚本所在目录，兼容 IronPython /RunScript 模式下 __file__ 缺失的情况。"""
@@ -57,23 +116,13 @@ try:
 except (OSError, IOError):
     _candidate_log_dir = os.environ.get("TEMP", _SCRIPT_DIR)
 
-_LOG_FILE = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
+_log_path = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
+logger = _SpaceClaimLogger("spaceclaim_transit", _log_path)
 
-def _log(msg):
-    """同时写入日志文件和 print（print 在 SpaceClaim GUI 下可能不可见）。"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = "[{}] {}".format(timestamp, msg)
-    try:
-        with io.open(_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except (IOError, OSError):
-        pass
-    print(line)
-
-_log("=== SpaceClaim Transit Script 启动 ===")
-_log("日志文件: {}".format(_LOG_FILE))
-_log("Python: {}".format(sys.version))
-_log("sys.argv: {}".format(sys.argv))
+logger.info("=== SpaceClaim Transit Script 启动 ===")
+logger.info("日志文件: {}".format(logger.log_file))
+logger.info("Python: {}".format(sys.version))
+logger.info("sys.argv: {}".format(sys.argv))
 
 # --------------------------------------------------------------------------
 # 1. 导入 SpaceClaim API V23
@@ -85,10 +134,10 @@ _log("sys.argv: {}".format(sys.argv))
 try:
     import SpaceClaim.Api.V23 as _sc_api
     from SpaceClaim.Api.V23 import *
-    _log("[OK] SpaceClaim.Api.V23 导入成功")
+    logger.info("SpaceClaim.Api.V23 导入成功")
 except ImportError as e:
-    _log("[FATAL] 无法导入 SpaceClaim.Api.V23: {}".format(e))
-    _log("请确认 SpaceClaim 2023 R1 已正确安装，且脚本在 SpaceClaim 内部运行")
+    logger.critical("无法导入 SpaceClaim.Api.V23: {}".format(e))
+    logger.critical("请确认 SpaceClaim 2023 R1 已正确安装，且脚本在 SpaceClaim 内部运行")
     sys.exit(1)
 
 
@@ -128,14 +177,14 @@ def _get_script_args():
             step_dir = raw_args.get('step_dir') or raw_args.get('stepDir')
             scdoc_dir = raw_args.get('scdoc_dir') or raw_args.get('scdocDir')
             if config is not None and step_dir and scdoc_dir:
-                _log("[INFO] 参数来源: Application.RunScript Dictionary")
+                logger.info("参数来源: Application.RunScript Dictionary")
                 return [str(config), str(step_dir), str(scdoc_dir)]
-            _log("[WARN] Dictionary args 缺少必要字段: keys={}".format(
+            logger.warning("Dictionary args 缺少必要字段: keys={}".format(
                 list(raw_args.keys()) if hasattr(raw_args, 'keys') else 'N/A'))
 
         # 方式1b: List/Tuple 形式（/RunScript + /ScriptArgs 命令行模式）
         elif isinstance(raw_args, (list, tuple)):
-            _log("[INFO] 参数来源: /RunScript List")
+            logger.info("参数来源: /RunScript List")
             return list(raw_args)
 
     # 方式2: 检查内置作用域（IronPython 兼容）
@@ -179,31 +228,31 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     step_filename = "model_gen4.SLDPRT_{}.step".format(file_index)
     step_path = os.path.join(step_dir, step_filename)
 
-    _log("[INFO] 正在处理构型 {}".format(file_index))
-    _log("[INFO]   输入文件: {}".format(step_path))
+    logger.info("正在处理构型 {}".format(file_index))
+    logger.info("  输入文件: {}".format(step_path))
 
     # ------------------------------------------------------------------
     # 1. 检查输入文件
     # ------------------------------------------------------------------
     if not os.path.exists(step_path):
-        _log("[ERROR] 输入文件不存在: {}".format(step_path))
+        logger.error("输入文件不存在: {}".format(step_path))
         return False
 
     file_size = os.path.getsize(step_path)
-    _log("[INFO]   文件大小: {} bytes".format(file_size))
+    logger.info("  文件大小: {} bytes".format(file_size))
 
     # ------------------------------------------------------------------
     # 2. 打开文档
     # ------------------------------------------------------------------
-    _log("[INFO] 正在打开文档...")
+    logger.info("正在打开文档...")
     try:
         doc = Document.Open(step_path, None)
         if doc is None:
-            _log("[ERROR] Document.Open 返回 None")
+            logger.error("Document.Open 返回 None")
             return False
-        _log("[INFO] ✓ 文档已打开")
+        logger.info("文档已打开")
     except Exception as e:
-        _log("[ERROR] 打开文档失败: {}: {}".format(type(e).__name__, e))
+        logger.error("打开文档失败: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
         return False
 
@@ -213,11 +262,11 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     try:
         part = doc.MainPart
         if part is None:
-            _log("[ERROR] 无法获取文档主部件 (MainPart 为 None)")
+            logger.error("无法获取文档主部件 (MainPart 为 None)")
             return False
-        _log("[INFO] 已获取主部件")
+        logger.info("已获取主部件")
     except Exception as e:
-        _log("[ERROR] 获取 MainPart 失败: {}: {}".format(type(e).__name__, e))
+        logger.error("获取 MainPart 失败: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
         return False
 
@@ -229,12 +278,12 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         bodies = list(part.Bodies)
         if bodies:
             body_selection = Selection.Create(bodies[0])
-            _log("[INFO] 已构造体选择集 (Bodies[0])")
+            logger.info("已构造体选择集 (Bodies[0])")
     except Exception as e:
-        _log("[WARN] 构造体选择集失败: {}: {}".format(type(e).__name__, e))
+        logger.warning("构造体选择集失败: {}: {}".format(type(e).__name__, e))
 
     if body_selection is None:
-        _log("[WARN] 无体选择集，PowerSelectOptions 将不传第二参数（全选）")
+        logger.warning("无体选择集，PowerSelectOptions 将不传第二参数（全选）")
 
     # ------------------------------------------------------------------
     # 4. 几何处理 — 创建命名选择集
@@ -242,7 +291,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # 说明：通过面面积范围自动选择面，创建命名选择集。
     # 面积单位为 mm²，MM2() 将数值转换为 API 内部单位。
     # 选择集自动命名：组1~组N；合并后重命名为英文名。
-    _log("[INFO] 正在创建命名选择集...")
+    logger.info("正在创建命名选择集...")
 
     def _create_named_selection(min_area_mm2, max_area_mm2):
         """创建一个基于面面积的命名选择集。
@@ -267,7 +316,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
             )
             return result
         except Exception as e:
-            _log("[WARN] 创建选择集失败 (面积 {}-{}): {}: {}".format(min_area_mm2, max_area_mm2, type(e).__name__, e))
+            logger.warning("创建选择集失败 (面积 {}-{}): {}: {}".format(min_area_mm2, max_area_mm2, type(e).__name__, e))
             return None
 
     # 按原始脚本顺序创建选择集
@@ -282,20 +331,20 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for i, (lo, hi) in enumerate(selection_specs, 1):
         result = _create_named_selection(lo, hi)
         if result is not None:
-            _log("[INFO]   ✓ 组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.info("  组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
         else:
-            _log("[ERROR]   组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.error("  组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
 
     # ------------------------------------------------------------------
     # 4b. 合并组4和组5（wall_chamber 和 wall_throat 的过渡段合并）
     # ------------------------------------------------------------------
-    _log("[INFO] 正在合并 组4 和 组5...")
+    logger.info("正在合并 组4 和 组5...")
     try:
         merge_result = NamedSelection.Merge("组4", "组5")
-        _log("[INFO]   ✓ 组4+组5 合并成功")
+        logger.info("  组4+组5 合并成功")
     except Exception as e:
-        _log("[WARN] 合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
-        _log("[WARN] 将跳过合并，这可能导致后续重命名映射偏移")
+        logger.warning("合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
+        logger.warning("将跳过合并，这可能导致后续重命名映射偏移")
 
     # ------------------------------------------------------------------
     # 4c. 继续创建剩余选择集
@@ -310,16 +359,16 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for lo, hi in remaining_specs:
         result = _create_named_selection(lo, hi)
         if result is not None:
-            _log("[INFO]   选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
+            logger.info("  选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
         else:
-            _log("[ERROR]   选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
+            logger.error("  选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
 
     # ------------------------------------------------------------------
     # 5. 重命名选择集为英文名
     # ------------------------------------------------------------------
     # 说明：Merge 后 组5 被移除，下一个创建的选择集自动填补为 组5。
     #       因此重命名映射维持原始顺序即可。
-    _log("[INFO] 正在重命名选择集...")
+    logger.info("正在重命名选择集...")
     rename_map = {
         "组1": "inlet_oxidizer",
         "组2": "inlet_fuel",
@@ -336,14 +385,14 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for old_name, new_name in rename_map.items():
         try:
             result = NamedSelection.Rename(old_name, new_name)
-            _log("[INFO]   {} → {}".format(old_name, new_name))
+            logger.info("  {} → {}".format(old_name, new_name))
             rename_success += 1
         except Exception as e:
-            _log("[WARN]   重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
+            logger.warning("  重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
             rename_fail += 1
 
     if rename_fail > 0:
-        _log("[WARN] {} 个选择集重命名失败，将以默认名称保存".format(rename_fail))
+        logger.warning("{} 个选择集重命名失败，将以默认名称保存".format(rename_fail))
 
     # ------------------------------------------------------------------
     # 6. 保存文档为 SCDOC
@@ -358,12 +407,12 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     except (OSError, IOError):
         pass
 
-    _log("[INFO] 正在保存文档: {}".format(out_path))
+    logger.info("正在保存文档: {}".format(out_path))
     try:
         doc.SaveAs(out_path)
-        _log("[INFO] 文档已保存")
+        logger.info("文档已保存")
     except Exception as e:
-        _log("[ERROR] 保存文档失败: {}: {}".format(type(e).__name__, e))
+        logger.error("保存文档失败: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
         return False
 
@@ -372,26 +421,26 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # ------------------------------------------------------------------
     if os.path.exists(out_path):
         out_size = os.path.getsize(out_path)
-        _log("[INFO] 输出文件验证通过: {} ({} bytes)".format(out_path, out_size))
+        logger.info("输出文件验证通过: {} ({} bytes)".format(out_path, out_size))
     else:
-        _log("[ERROR] 输出文件未生成: {}".format(out_path))
+        logger.error("输出文件未生成: {}".format(out_path))
         return False
 
     # ------------------------------------------------------------------
     # 8. 关闭文档
     # ------------------------------------------------------------------
-    _log("[INFO] 正在关闭文档...")
+    logger.info("正在关闭文档...")
     try:
         window = Window.ActiveWindow
         if window is not None:
             window.Close()
-            _log("[INFO] 文档已关闭")
+            logger.info("文档已关闭")
         else:
-            _log("[INFO] 无活动窗口（可能已自动关闭）")
+            logger.info("无活动窗口（可能已自动关闭）")
     except Exception as e:
-        _log("[INFO] 关闭窗口时异常（可忽略）: {}: {}".format(type(e).__name__, e))
+        logger.info("关闭窗口时异常（可忽略）: {}: {}".format(type(e).__name__, e))
 
-    _log("[SUCCESS] 构型 {} 处理完成: {}".format(file_index, out_filename))
+    logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
     return True
 
 
@@ -409,34 +458,34 @@ def Main():
         script_args = _get_script_args()
 
         if not script_args or len(script_args) < 3:
-            _log("=" * 60)
-            _log("[ERROR] 参数不足！")
-            _log("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
-            _log("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
-            _log("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
-            _log("=" * 60)
+            logger.error("=" * 60)
+            logger.error("参数不足！")
+            logger.info("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
+            logger.info("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
+            logger.error("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
+            logger.error("=" * 60)
             return
 
         config_name = script_args[0]
         step_dir = script_args[1]
         scdoc_dir = script_args[2]
 
-        _log("=" * 60)
-        _log("SpaceClaim Transit Script V23")
-        _log("  构型编号: {}".format(config_name))
-        _log("  STEP 目录: {}".format(step_dir))
-        _log("  SCDOC 目录: {}".format(scdoc_dir))
-        _log("=" * 60)
+        logger.info("=" * 60)
+        logger.info("SpaceClaim Transit Script V23")
+        logger.info("  构型编号: {}".format(config_name))
+        logger.info("  STEP 目录: {}".format(step_dir))
+        logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+        logger.info("=" * 60)
 
         success = process_step_file(config_name, step_dir, scdoc_dir)
 
         if success:
-            _log("\n[DONE] 构型 {} 转换成功".format(config_name))
+            logger.info("构型 {} 转换成功".format(config_name))
         else:
-            _log("\n[FAILED] 构型 {} 转换失败".format(config_name))
+            logger.error("构型 {} 转换失败".format(config_name))
 
     except Exception as e:
-        _log("\n[FATAL] 脚本执行异常: {}: {}".format(type(e).__name__, e))
+        logger.critical("脚本执行异常: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
 
     finally:
@@ -446,13 +495,13 @@ def Main():
         # 若设置了环境变量 AUTOFLUID_SC_NOEXIT=1，则跳过退出（用于交互式调试）
         if os.environ.get("AUTOFLUID_SC_NOEXIT", "") != "1":
             try:
-                _log("[INFO] 正在退出 SpaceClaim...")
+                logger.info("正在退出 SpaceClaim...")
                 Command.Execute("Exit")
             except Exception as e_exit:
-                _log("[WARN] 退出 SpaceClaim 时异常（可能已在关闭中）: {}: {}".format(
+                logger.warning("退出 SpaceClaim 时异常（可能已在关闭中）: {}: {}".format(
                     type(e_exit).__name__, e_exit))
         else:
-            _log("[INFO] AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
+            logger.info("AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
 
 
 # 显式调用 Main() —— SpaceClaim 不会自动调用，此处确保脚本执行

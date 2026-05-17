@@ -18,12 +18,13 @@ import subprocess
 import tempfile
 import time
 import gc
-from typing import List
+import threading
+from typing import List, Optional
 
 from engine.config import (
     LOCAL_PATHS, ENGINE_CONFIG,
     OPERATION_TIMEOUTS,
-    STATUS_COMPLETED, STATUS_ERROR, get_step_filename,
+    STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED, get_step_filename,
 )
 from utils.logger import setup_logger
 
@@ -56,6 +57,22 @@ class SWExecutor:
             state_manager: StateManager 实例
         """
         self.state = state_manager
+        self._paused_event: Optional[threading.Event] = None
+        self._stopped_event: Optional[threading.Event] = None
+
+    def set_control_events(
+        self,
+        paused_event: threading.Event,
+        stopped_event: threading.Event,
+    ) -> None:
+        """注入调度器的暂停/停止事件，使逐构型循环可响应 pause/stop。
+
+        Args:
+            paused_event: 调度器的 _paused 事件
+            stopped_event: 调度器的 _stopped 事件
+        """
+        self._paused_event = paused_event
+        self._stopped_event = stopped_event
 
     # ------------------------------------------------------------------
     # 入口
@@ -68,9 +85,10 @@ class SWExecutor:
         1. _connect_sw()           — 三层降级连接/启动 SolidWorks
         2. _open_sw_model()        — OpenDoc6 打开模型文件
         3. _import_design_table_with_retry() — 导入 Excel 设计表
-        4. _rebuild_all_configs()  — ForceRebuildAll 重建所有构型
-        5. _export_all_configs_to_step() — 逐构型 SaveAs 导出 STEP
-        6. _verify_step_exports()  — 安全网校验输出文件
+        4. _rebuild_and_export_per_config() — 逐构型重建 + 即时导出 STEP
+           （替代旧的 _rebuild_all_configs + _export_all_configs_to_step 两步模式，
+             每个构型独立重建后立即导出，支持 pause/stop 指令）
+        5. _verify_step_exports()  — 安全网校验输出文件
 
         Returns:
             True 表示至少有一个构型导出成功
@@ -154,25 +172,27 @@ class SWExecutor:
                 ):
                     return False
 
-                # 4. 重建所有构型（非致命）
-                self._rebuild_all_configs(doc)
-
-                # 5. 导出 STEP
-                logger.info("[SW] 正在通过 COM 直接导出各构型 STEP 文件...")
-                success_cnt, fail_cnt, failed_cfgs = self._export_all_configs_to_step(doc, step_dir)
+                # 4. 逐构型重建 + 即时导出 STEP（支持 pause/stop）
+                logger.info("[SW] 正在逐构型重建 + 导出 STEP 文件...")
+                success_cnt, fail_cnt, failed_cfgs = (
+                    self._rebuild_and_export_per_config(doc, step_dir)
+                )
                 logger.info(
-                    f"[SW] COM 直接导出完成: {success_cnt} 成功, {fail_cnt} 失败"
+                    f"[SW] 逐构型重建+导出完成: {success_cnt} 成功, "
+                    f"{fail_cnt} 失败"
                     f"{f' (失败构型: {failed_cfgs})' if failed_cfgs else ''}"
                 )
-                if success_cnt == 0:
-                    logger.error("[SW] 所有构型 STEP 导出均失败，无法继续")
+                if success_cnt == 0 and fail_cnt > 0:
+                    logger.error(
+                        "[SW] 所有构型 STEP 导出均失败，无法继续"
+                    )
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
                     except Exception:
                         pass
                     return False
 
-                # 6. 安全网校验
+                # 5. 安全网校验
                 total_found = self._verify_step_exports(step_dir)
                 if total_found > 0:
                     self.state.set_sw_macro_started(True)
@@ -1113,3 +1133,240 @@ class SWExecutor:
                 f"— 可能原因: 构型重建失败 / 设计表参数错误"
             )
         return total_found
+
+    # ------------------------------------------------------------------
+    # 逐构型重建 + 即时导出（支持暂停/停止）
+    # ------------------------------------------------------------------
+
+    def _rebuild_and_export_per_config(self, doc, step_dir: str):
+        """逐构型重建 + 即时导出 STEP，每个构型独立重建后再导出。
+
+        与旧的 _rebuild_all_configs + _export_all_configs_to_step 两步分离
+        模式不同，本方法将重建与导出合并到同一个 per-config 循环中，
+        使得构型 STEP 文件在重建后立即写入磁盘，StepFileMonitor 可立即
+        检测到并推入 SC 队列，实现边重建边导出边处理的流水线效果。
+
+        每个构型处理前检查暂停/停止事件，支持用户中途 pause。
+
+        Args:
+            doc: 已打开的 IModelDoc2 COM 对象
+            step_dir: STEP 输出目录
+
+        Returns:
+            (success_count, fail_count, fail_configs)
+        """
+        import pythoncom
+        import win32com.client
+
+        # ---- 获取配置列表 ----
+        conf_names = []
+        try:
+            doc._FlagAsMethod('GetConfigurationNames')
+            raw = doc.GetConfigurationNames()
+        except TypeError:
+            raw = doc.GetConfigurationNames
+        if isinstance(raw, (tuple, list)):
+            conf_names = [str(c) for c in raw]
+        elif raw is not None:
+            conf_names = [str(raw)]
+
+        if not conf_names:
+            logger.error("[SW] 无法获取模型配置名称列表")
+            return 0, 0, []
+
+        logger.info(
+            f"[SW] 开始逐构型重建+导出（共 {len(conf_names)} 个配置）"
+        )
+
+        success_configs: list = []
+        fail_configs: list = []
+        paused_configs: list = []  # 因暂停而未处理的构型
+
+        # 获取 Extension 对象用于重建（IModelDocExtension::Rebuild）
+        # 不使用 doc.EditRebuild3()——它在设计表驱动的多构型模型上会卡死。
+        # 原始代码的 EditRebuild3 降级路径从未真正成功：未调用 _FlagAsMethod
+        # 导致 COM dispatch 将其误识别为属性，TypeError 被 except 静默吞掉。
+        # 一旦用 _FlagAsMethod 使其真正执行，EditRebuild3 对未构建配置会阻塞。
+        # 改用 Extension.Rebuild / doc.Rebuild，走不同 dispatch 路径。
+        ext = doc.Extension
+
+        for cn_str in conf_names:
+            # ---- 暂停检查 ----
+            if self._paused_event is not None and self._paused_event.is_set():
+                logger.info(
+                    f"[SW] 暂停标志已置位，构型 {cn_str} 及后续构型暂停"
+                )
+                paused_configs.append(cn_str)
+                continue
+
+            # ---- 停止检查 ----
+            if self._stopped_event is not None and self._stopped_event.is_set():
+                logger.info(
+                    f"[SW] 停止标志已置位，构型 {cn_str} 及后续构型中止"
+                )
+                break
+
+            # ---- 解析构型编号 ----
+            try:
+                cn_int = int(cn_str)
+            except ValueError:
+                cn_int = None
+
+            filename = (
+                get_step_filename("SW", cn_int) if cn_int is not None else None
+            )
+            if not filename:
+                logger.warning(f"  构型{cn_str}: 无法生成 STEP 文件名，跳过")
+                fail_configs.append(cn_int if cn_int is not None else cn_str)
+                continue
+
+            filepath = os.path.join(step_dir, filename)
+
+            # ---- 跳过已完成构型 ----
+            if cn_int is not None:
+                sw_st = self.state.get_step_status(cn_int, "SW")
+                if sw_st == STATUS_COMPLETED and os.path.exists(filepath):
+                    logger.info(
+                        f"  ✓ 构型{cn_str}: 已完成且 STEP 存在，跳过"
+                    )
+                    success_configs.append(cn_int)
+                    continue
+
+            # ---- 步骤 A: 切换到目标构型 ----
+            try:
+                doc.ShowConfiguration2(cn_str)
+            except Exception as e:
+                logger.error(
+                    f"  构型{cn_str}: ShowConfiguration2 失败 "
+                    f"({type(e).__name__}: {e})"
+                )
+                if cn_int is not None:
+                    self.state.set_step_status(
+                        cn_int, "SW", STATUS_ERROR,
+                        f"ShowConfiguration2 失败: {type(e).__name__}: {e}"
+                    )
+                    fail_configs.append(cn_int)
+                continue
+
+            # ---- 步骤 B: 重建当前构型 ----
+            # 使用 Extension.Rebuild / doc.Rebuild 替代 EditRebuild3
+            # （EditRebuild3 通过 _FlagAsMethod 后会卡死在未构建的配置上）
+            rebuild_ok = False
+            try:
+                ext.Rebuild(0)
+                rebuild_ok = True
+                logger.debug(f"  构型{cn_str}: Extension.Rebuild 完成")
+            except TypeError:
+                # ext.Rebuild 可能被 dispatch 误识别为属性
+                try:
+                    rebuild_fn = ext.Rebuild
+                    if callable(rebuild_fn):
+                        rebuild_fn(0)
+                        rebuild_ok = True
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.debug(
+                    f"  构型{cn_str}: Extension.Rebuild 失败 "
+                    f"({type(e).__name__}: {e})"
+                )
+
+            if not rebuild_ok:
+                try:
+                    doc.Rebuild(0)
+                    rebuild_ok = True
+                    logger.debug(f"  构型{cn_str}: doc.Rebuild 完成")
+                except Exception:
+                    logger.debug(
+                        f"  构型{cn_str}: doc.Rebuild 也失败，依赖 SaveAs 隐式重建"
+                    )
+
+            # ---- 步骤 C: 导出 STEP ----
+            try:
+                save_errors = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+                )
+                save_warnings = win32com.client.VARIANT(
+                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+                )
+                export_data = win32com.client.VARIANT(
+                    pythoncom.VT_DISPATCH, None
+                )
+                status = doc.Extension.SaveAs(
+                    filepath,
+                    self._SW_SAVE_AS_CURRENT_VERSION,
+                    self._SW_SAVE_AS_OPTIONS_SILENT,
+                    export_data,
+                    save_errors,
+                    save_warnings,
+                )
+
+                if status:
+                    save_ok = True
+                    if not os.path.exists(filepath):
+                        logger.warning(
+                            f"  ✗ 构型{cn_str}: SaveAs 返回 True 但文件不存在"
+                            f"（{os.path.basename(filepath)}）"
+                        )
+                        save_ok = False
+                    if save_ok:
+                        logger.info(
+                            f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                            f"(Errors={save_errors.value}, "
+                            f"Warnings={save_warnings.value})"
+                        )
+                        if cn_int is not None:
+                            self.state.set_step_status(
+                                cn_int, "SW", STATUS_COMPLETED
+                            )
+                            success_configs.append(cn_int)
+                    else:
+                        if cn_int is not None:
+                            self.state.set_step_status(
+                                cn_int, "SW", STATUS_ERROR,
+                                "SaveAs 返回 True 但 STEP 文件未写入磁盘"
+                            )
+                            fail_configs.append(cn_int)
+                else:
+                    logger.warning(
+                        f"  ✗ 构型{cn_str}: SaveAs 返回 False "
+                        f"(Errors={save_errors.value}, "
+                        f"Warnings={save_warnings.value})"
+                    )
+                    if cn_int is not None:
+                        self.state.set_step_status(
+                            cn_int, "SW", STATUS_ERROR,
+                            f"SaveAs 返回 False "
+                            f"(Errors={save_errors.value})"
+                        )
+                        fail_configs.append(cn_int)
+            except Exception as e:
+                logger.error(
+                    f"  ✗ 构型{cn_str}: SaveAs 异常 "
+                    f"({type(e).__name__}: {e})"
+                )
+                if cn_int is not None:
+                    self.state.set_step_status(
+                        cn_int, "SW", STATUS_ERROR,
+                        f"SaveAs 异常: {type(e).__name__}: {e}"
+                    )
+                    fail_configs.append(cn_int)
+
+        # ---- 将暂停/停止的构型标记为 Paused ----
+        for cn_str in paused_configs:
+            try:
+                cn_int = int(cn_str)
+                self.state.set_step_status(
+                    cn_int, "SW", STATUS_PAUSED,
+                    "暂停中——恢复后将重新执行重建+导出"
+                )
+            except ValueError:
+                pass
+
+        total = len(success_configs) + len(fail_configs)
+        logger.info(
+            f"[SW] 逐构型重建+导出完成: {len(success_configs)}/{total} 成功"
+            f"（{len(fail_configs)} 失败，"
+            f"{len(paused_configs)} 因暂停跳过）"
+        )
+        return len(success_configs), len(fail_configs), fail_configs
