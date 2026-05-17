@@ -3,13 +3,14 @@
 SSH 客户端模块 (SSH Client)
 基于 paramiko 封装远程 Windows 工作站的 SSH 操作。
 关键功能：
-- 通过 PowerShell Start-Process 拉起独立后台进程（SSH 断开后进程存活）
+- 通过 PowerShell -EncodedCommand + Start-Process 拉起独立后台进程（SSH 断开后进程存活）
 - 通过轮询标志文件判断远程任务是否完成
 - 文件上传 (SFTP)
 ===============================================================================
 """
 from __future__ import annotations
 
+import base64
 import os
 import socket
 import time
@@ -22,6 +23,9 @@ except ImportError:  # pragma: no cover
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# PowerShell 完整路径（SSH 非交互会话 PATH 不含此目录，需用完整路径定位）
+_PS_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 
 class RemoteWorkstation:
@@ -301,12 +305,15 @@ class RemoteWorkstation:
         """
         在远程工作站以独立后台进程方式执行命令。
 
-        使用 PowerShell Start-Process 启动新的 Windows 进程，
+        使用 PowerShell -EncodedCommand + Start-Process 启动新的 Windows 进程，
         该进程不依附于 SSH 会话，SSH 断开后继续运行。
         任务完成后会创建指定的标志文件。
 
+        通过 -EncodedCommand（UTF-16LE + Base64）传递 PowerShell 脚本，
+        彻底避免 SSH → cmd.exe → PowerShell 之间的引号嵌套问题。
+
         Args:
-            command: 要执行的命令（如 "python batch_meshing_gen4.py 5"）
+            command: 要执行的命令（如 conda run ... python script.py 5）
             flag_file: 任务完成标志文件路径（远程路径）
 
         Returns:
@@ -315,35 +322,40 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
-        # 安全转义：防止命令注入，转义所有 PowerShell 特殊字符
-        _PS_ESCAPE_TABLE = str.maketrans({
-            '"': '`"',   # 双引号
-            '$': '`$',    # 变量展开
-            '`': '``',    # 反引号（转义符本身）
-            '\n': ' ',   # 换行 → 空格
-            '\r': ' ',   # 回车 → 空格
-        })
-        escaped_command = command.translate(_PS_ESCAPE_TABLE)
-        escaped_flag = flag_file.translate(_PS_ESCAPE_TABLE)
+        # 转义单引号（PowerShell 单引号字符串中 ' 需写成 ''）
+        safe_cmd = command.replace("'", "''")
+        safe_flag = flag_file.replace("'", "''")
 
-        # 使用 Start-Process 启动独立 cmd.exe 后台进程
-        # 进程不依附于 SSH 会话，SSH 断开后继续运行
-        # 命令完成后写入标志文件表示任务结束
-        ps_command = (
-            f'Start-Process -FilePath "cmd.exe" '
-            f'-ArgumentList \'/c "{escaped_command} && echo done > "{escaped_flag}""\' '
-            f'-WindowStyle Hidden'
+        # 构造 PowerShell 脚本：
+        #   $c / $f      — 内层命令与标志文件路径（单引号字符串，内容不变）
+        #   $inner       — 拼接带外层引号的 cmd /c 参数：
+        #                    ""<command> && echo done > "<flag>""
+        #   Start-Process — 启动独立 cmd.exe 后台进程
+        #
+        # cmd.exe /c 会剥离首尾各一个 "，剩余：
+        #   "<command> && echo done > "<flag>"
+        # 内层 cmd.exe 可以正确解析此格式（&& 在引号外）。
+        ps_script = (
+            f"$c = '{safe_cmd}'\n"
+            f"$f = '{safe_flag}'\n"
+            "$inner = '\"' + $c + ' && echo done > \"' + $f + '\"\"'\n"
+            'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
         )
+
+        # -EncodedCommand 接受 UTF-16LE + Base64 编码的脚本
+        # 完全绕过 SSH → cmd.exe 的引号转义链
+        encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
+        full_command = f'"{_PS_EXE}" -NoProfile -EncodedCommand {encoded}'
 
         logger.info(f"启动远程后台任务: {command}")
         logger.debug(f"标志文件: {flag_file}")
 
         try:
             # 先清理旧的标志文件
-            self.exec_command(f'if exist "{escaped_flag}" del /f "{escaped_flag}"')
+            self.exec_command(f'if exist "{flag_file}" del /f "{flag_file}"')
 
             # 通过 PowerShell 启动后台进程
-            _, stderr, exit_code = self.exec_command(ps_command, timeout=15)
+            _, stderr, exit_code = self.exec_command(full_command, timeout=15)
 
             if exit_code == 0:
                 logger.info("远程后台任务已启动")
@@ -411,12 +423,13 @@ class RemoteWorkstation:
     # 系统自检
     # ------------------------------------------------------------------
 
-    def check_system(self, conda_exe: str = "") -> dict:
+    def check_system(self, conda_exe: str = "", conda_env: str = "") -> dict:
         """
         执行远程工作站系统自检。
 
         Args:
             conda_exe: conda 可执行文件的完整远程路径（用于 SSH 非交互会话中定位 conda）
+            conda_env: conda 环境名称（用于检测 Python 版本）
 
         Returns:
             包含自检结果的字典
@@ -441,10 +454,18 @@ class RemoteWorkstation:
             out, err, code = self.exec_command("where conda")
             results["conda_available"] = (code == 0)
 
-        # 检查 Python 版本
-        out, err, code = self.exec_command("python --version")
-        if code == 0:
-            results["python_version"] = out.strip()
+        # 检查 Python 版本（优先通过 conda 环境，回退系统 PATH）
+        if conda_exe and conda_env and results["conda_available"]:
+            out, err, code = self.exec_command(
+                f'"{conda_exe}" run -n {conda_env} python --version'
+            )
+            if code == 0 and out.strip():
+                results["python_version"] = out.strip()
+
+        if not results["python_version"]:
+            out, err, code = self.exec_command("python --version")
+            if code == 0:
+                results["python_version"] = out.strip()
 
         # 检查磁盘空间（转换为 GB 显示）
         out, err, code = self.exec_command("wmic logicaldisk where DeviceID='D:' get FreeSpace,Size")

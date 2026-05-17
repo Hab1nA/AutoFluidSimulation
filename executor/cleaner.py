@@ -66,7 +66,10 @@ class FileCleaner:
             ssh = self._get_ssh()
             if ssh.is_connected():
                 results["remote_checks"]["ssh"] = "连接成功"
-                remote_info = ssh.check_system(conda_exe=REMOTE_CONFIG["conda_exe"])  # type: ignore[arg-type]
+                remote_info = ssh.check_system(
+                    conda_exe=REMOTE_CONFIG["conda_exe"],  # type: ignore[arg-type]
+                    conda_env=REMOTE_CONFIG["conda_env"],
+                )
                 results["remote_checks"].update(remote_info)
             else:
                 results["remote_checks"]["ssh"] = "连接失败"

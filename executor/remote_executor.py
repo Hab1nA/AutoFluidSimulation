@@ -95,7 +95,7 @@ class RemoteExecutor:
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         meshing_script = REMOTE_CONFIG["meshing_script"]
-        command = f'call "{conda_exe}" activate {conda_env} && python "{meshing_script}" {config_name}'
+        command = f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
 
         logger.info(f"启动远程网格划分: 构型{config_name}")
         logger.debug(f"远程命令: {command}")
@@ -153,7 +153,7 @@ class RemoteExecutor:
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         solver_script = REMOTE_CONFIG["solver_script"]
-        command = f'call "{conda_exe}" activate {conda_env} && python "{solver_script}" {config_name}'
+        command = f'"{conda_exe}" run -n {conda_env} python "{solver_script}" {config_name}'
 
         logger.info(f"启动远程仿真求解: 构型{config_name}")
 
