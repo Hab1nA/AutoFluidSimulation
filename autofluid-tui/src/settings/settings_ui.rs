@@ -392,6 +392,7 @@ fn build_edit_spans(
 
     // We need to truncate to max_width display-wise.  Build spans first,
     // then we'll truncate if needed.
+    #[allow(clippy::needless_range_loop)] // i 用于 cursor/selection 比较，迭代器不更清晰
     for i in 0..=len {
         // Insert cursor marker before character i (or at end)
         if i == cursor {

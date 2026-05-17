@@ -1,3 +1,7 @@
 [lint]
 ignore = ["E402", "E501"]
 select = ["E", "F", "W"]
+
+[lint.per-file-ignores]
+# SpaceClaim 脚本使用 IronPython import * 模式，F401/F403/F405 不可避免
+"executor/spaceclaim_transit.py" = ["F401", "F403", "F405"]

@@ -287,7 +287,7 @@ impl SettingCategory {
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::EngineConfig) && matches!(idx, 2 | 3 | 4)
+        matches!(self, SettingCategory::EngineConfig) && matches!(idx, 2..=4)
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
@@ -302,17 +302,11 @@ pub struct UndoEntry {
     pub old_value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SettingsFocus {
     pub category_index: usize,
     pub field_index: usize,
     pub editing: bool,
-}
-
-impl Default for SettingsFocus {
-    fn default() -> Self {
-        Self { category_index: 0, field_index: 0, editing: false }
-    }
 }
 
 #[derive(Debug, Clone)]

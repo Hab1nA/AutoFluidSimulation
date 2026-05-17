@@ -257,6 +257,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // 事件处理函数需要访问多个上下文对象
 fn process_event(
     event: CrosstermEvent,
     state: &mut AppState,
@@ -296,7 +297,7 @@ fn process_event(
                                 match daemon.launch(project_dir) {
                                     Ok(pid) => {
                                         log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                        DaemonManager::reconnect_ipc_after_launch(&rt, ipc, state, log_buffer);
+                                        DaemonManager::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -305,7 +306,7 @@ fn process_event(
                             }
                         }
                         command::CommandResult::RestartDaemon => {
-                            daemon.restart_with_ipc(ipc, &rt, state, log_buffer, project_dir);
+                            daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);
                         }
                         command::CommandResult::StopDaemon => {
                             daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);

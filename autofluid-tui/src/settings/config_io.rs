@@ -44,8 +44,8 @@ pub fn read_env_password() -> String {
         Ok(contents) => {
             for line in contents.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("AUTOFLUID_SSH_PASSWORD=") {
-                    return trimmed["AUTOFLUID_SSH_PASSWORD=".len()..].to_string();
+                if let Some(value) = trimmed.strip_prefix("AUTOFLUID_SSH_PASSWORD=") {
+                    return value.to_string();
                 }
             }
             String::new()

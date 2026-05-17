@@ -48,9 +48,9 @@ def check_rust_tui_source(project_dir: str) -> bool:
 
 def print_rust_tui_not_found_help(project_dir: str) -> None:
     """打印 Rust TUI 未找到时的诊断和帮助信息。
-    
+
     检查源码是否完整，为用户提供编译指导。
-    
+
     Args:
         project_dir: 项目根目录绝对路径
     """

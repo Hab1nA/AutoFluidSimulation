@@ -625,6 +625,7 @@ fn handle_detail_click(
 // Up — 鼠标释放
 // ====================================================================
 
+#[allow(clippy::too_many_arguments)] // 鼠标事件处理需要布局上下文
 fn handle_mouse_up(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,

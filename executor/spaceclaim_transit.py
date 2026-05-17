@@ -340,7 +340,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # ------------------------------------------------------------------
     logger.info("正在合并 组4 和 组5...")
     try:
-        merge_result = NamedSelection.Merge("组4", "组5")
+        NamedSelection.Merge("组4", "组5")
         logger.info("  组4+组5 合并成功")
     except Exception as e:
         logger.warning("合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
