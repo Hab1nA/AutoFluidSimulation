@@ -123,12 +123,12 @@ class RemoteWorkstation:
 
     def upload_file(self, local_path: str, remote_path: str, max_retries: int = 3) -> bool:
         """通过 SFTP 上传文件到远程工作站（带重试机制）。
-        
+
         Args:
             local_path: 本地文件路径
             remote_path: 远程文件路径
             max_retries: 最大重试次数
-        
+
         Returns:
             上传成功返回 True，失败返回 False
         """
