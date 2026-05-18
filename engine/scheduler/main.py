@@ -199,9 +199,6 @@ class PipelineScheduler:
         self.sw_phase_handler.prescan_downstream_outputs()
 
         # ---- 步骤 2: 启动文件监控 ----
-        # ★ 首次 SC 全体清理：在任何构型进入 SC 步骤前清理所有旧残留 SpaceClaim 进程
-        #    （_execute_sw_macro 中也会调用；_first_cleanup_done 标志保证幂等）
-        self.runner._sc_pool.do_first_cleanup()
         self._ensure_file_monitor_running()
 
         # ---- 步骤 3: 启动工作线程池（仅在未启动时创建） ----

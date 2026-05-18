@@ -75,6 +75,15 @@ class SCProcessPool:
                    stopped_event: Optional[threading.Event] = None) -> bool:
         """执行 SC 转换：获取/创建常驻槽位 -> 发送命令 -> 等待结果。"""
         with self._lock:
+            # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
+            #   而非在 SW 阶段或 start_pipeline 时过早执行。
+            #   注意：调用 _shutdown_all_internal() 而非 shutdown_all()，
+            #   因为当前已持有 _lock，shutdown_all() 会再次获取锁导致死锁。
+            if not self._first_cleanup_done:
+                logger.info("[SC-Pool] === 首次全体 SC 进程清理（首个构型进入 SC 步骤时）===")
+                self._shutdown_all_internal()
+                self._first_cleanup_done = True
+
             slot = self._get_or_create_persistent_slot()
             if slot is None:
                 return False
@@ -95,11 +104,15 @@ class SCProcessPool:
 
     def shutdown_all(self):
         with self._lock:
-            logger.info("[SC-Pool] 执行全量 SpaceClaim 进程清理...")
-            for slot in self._persistent_slots.values():
-                self._shutdown_persistent_slot(slot)
-            self._kill_all_sc_processes()
-            logger.info("[SC-Pool] 全量清理完成")
+            self._shutdown_all_internal()
+
+    def _shutdown_all_internal(self):
+        """全量清理（内部版本，调用方须已持有 _lock）。"""
+        logger.info("[SC-Pool] 执行全量 SpaceClaim 进程清理...")
+        for slot in self._persistent_slots.values():
+            self._shutdown_persistent_slot(slot)
+        self._kill_all_sc_processes()
+        logger.info("[SC-Pool] 全量清理完成")
 
     def _kill_all_sc_processes(self):
         if os.name != "nt":
@@ -117,14 +130,14 @@ class SCProcessPool:
         with self._lock:
             if not self._first_cleanup_done:
                 logger.info("[SC-Pool] === 首次全体 SC 进程清理（进入 SC 阶段前）===")
-                self.shutdown_all()
+                self._shutdown_all_internal()
                 self._first_cleanup_done = True
 
     def do_final_cleanup(self):
         with self._lock:
             if not self._final_cleanup_done:
                 logger.info("[SC-Pool] === 末次全体 SC 进程清理（SC 阶段全部完成后）===")
-                self.shutdown_all()
+                self._shutdown_all_internal()
                 self._final_cleanup_done = True
 
     def reset(self):
