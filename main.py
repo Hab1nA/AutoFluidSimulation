@@ -71,10 +71,10 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
 
 def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
     """启动后台守护进程子进程。
-    
+
     Args:
         daemon_log_file: 日志文件路径
-    
+
     Returns:
         成功时返回 Popen 对象（包含日志文件句柄引用），失败时返回 None
     """
@@ -216,7 +216,7 @@ def _show_status():
     else:
         print("  后台引擎: 未运行")
 
-    if _check_ipc_ready():
+    if check_ipc_ready():
         print(f"  IPC 端口 {IPC_CONFIG['port']}: 已监听")
     else:
         print(f"  IPC 端口 {IPC_CONFIG['port']}: 未监听")
@@ -256,7 +256,7 @@ def _run_all_mode():
     _ensure_dirs()
 
     # ---- 0. 检测是否已有 Daemon 在运行 ----
-    daemon_already_running = _check_ipc_ready()
+    daemon_already_running = check_ipc_ready()
 
     if daemon_already_running:
         print("=" * 60)
@@ -338,7 +338,7 @@ def _run_all_mode():
         if daemon_proc is not None:
             if hasattr(daemon_proc, "_log_file_handle"):
                 try:
-                    daemon_proc._log_file_handle.close()  # type: ignore[attr-defined]
+                    daemon_proc._log_file_handle.close()
                 except (OSError, AttributeError):
                     pass
             if daemon_proc.poll() is None:

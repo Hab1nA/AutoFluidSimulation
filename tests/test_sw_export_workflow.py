@@ -34,8 +34,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 同时也要为直接读取 LOCAL_PATHS["log_dir"] 的代码创建目录。
 _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="sw_test_")
 _TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
+_TEST_DATA_DIR = os.path.join(_TEST_TMP_ROOT, "data")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)
+os.makedirs(_TEST_DATA_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
+os.environ["AUTOFLUID_DATA_DIR"] = _TEST_DATA_DIR
 
 
 # ============================================================================
@@ -114,59 +117,54 @@ def create_mock_sw_app(config_names: List[str] = None,
 class TestSwComConnection(unittest.TestCase):
     """测试 SolidWorks COM 连接与文档打开/关闭。"""
 
-    def setUp(self):
-        self.task_runner_path = "engine.task_runner.TaskRunner"
+    @classmethod
+    def setUpClass(cls):
+        from executor.sw_executor import SWExecutor
+        cls.SWExecutor = SWExecutor
 
     def test_guess_sw_doc_type_part(self):
-        from engine.task_runner import TaskRunner
         self.assertEqual(
-            TaskRunner._guess_sw_doc_type(r"C:\test\model.SLDPRT"),
-            TaskRunner._SW_DOC_PART
+            self.SWExecutor._guess_sw_doc_type(r"C:\test\model.SLDPRT"),
+            self.SWExecutor._SW_DOC_PART
         )
 
     def test_guess_sw_doc_type_assembly(self):
-        from engine.task_runner import TaskRunner
         self.assertEqual(
-            TaskRunner._guess_sw_doc_type(r"C:\test\asm.SLDASM"),
-            TaskRunner._SW_DOC_ASSEMBLY
+            self.SWExecutor._guess_sw_doc_type(r"C:\test\asm.SLDASM"),
+            self.SWExecutor._SW_DOC_ASSEMBLY
         )
 
     def test_guess_sw_doc_type_case_insensitive(self):
-        from engine.task_runner import TaskRunner
         self.assertEqual(
-            TaskRunner._guess_sw_doc_type(r"C:\test\asm.sldasm"),
-            TaskRunner._SW_DOC_ASSEMBLY
+            self.SWExecutor._guess_sw_doc_type(r"C:\test\asm.sldasm"),
+            self.SWExecutor._SW_DOC_ASSEMBLY
         )
         self.assertEqual(
-            TaskRunner._guess_sw_doc_type(r"C:\test\part.sldprt"),
-            TaskRunner._SW_DOC_PART
+            self.SWExecutor._guess_sw_doc_type(r"C:\test\part.sldprt"),
+            self.SWExecutor._SW_DOC_PART
         )
 
     def test_open_doc_constants(self):
-        from engine.task_runner import TaskRunner
-        self.assertEqual(TaskRunner._SW_DOC_PART, 1)
-        self.assertEqual(TaskRunner._SW_DOC_ASSEMBLY, 2)
-        self.assertEqual(TaskRunner._SW_OPEN_SILENT, 1)
-        self.assertEqual(TaskRunner._SW_SAVE_AS_CURRENT_VERSION, 0)
-        self.assertEqual(TaskRunner._SW_SAVE_AS_OPTIONS_SILENT, 1)
+        self.assertEqual(self.SWExecutor._SW_DOC_PART, 1)
+        self.assertEqual(self.SWExecutor._SW_DOC_ASSEMBLY, 2)
+        self.assertEqual(self.SWExecutor._SW_OPEN_SILENT, 1)
+        self.assertEqual(self.SWExecutor._SW_SAVE_AS_CURRENT_VERSION, 0)
+        self.assertEqual(self.SWExecutor._SW_SAVE_AS_OPTIONS_SILENT, 1)
 
     def test_verify_com_object_valid(self):
-        from engine.task_runner import TaskRunner
         mock_obj = MagicMock()
         mock_obj.GetTitle.return_value = "test"
-        self.assertTrue(TaskRunner._verify_com_object(mock_obj, "TestDoc"))
+        self.assertTrue(self.SWExecutor._verify_com_object(mock_obj, "TestDoc"))
 
     def test_verify_com_object_none(self):
-        from engine.task_runner import TaskRunner
-        self.assertFalse(TaskRunner._verify_com_object(None, "TestDoc"))
+        self.assertFalse(self.SWExecutor._verify_com_object(None, "TestDoc"))
 
     def test_verify_com_object_dead_proxy(self):
-        from engine.task_runner import TaskRunner
         mock_obj = MagicMock()
         mock_obj.GetTitle.side_effect = Exception("COM proxy dead")
         mock_obj.GetPathName.side_effect = Exception("COM proxy dead")
         mock_obj.GetType.side_effect = Exception("COM proxy dead")
-        self.assertFalse(TaskRunner._verify_com_object(mock_obj, "DeadDoc"))
+        self.assertFalse(self.SWExecutor._verify_com_object(mock_obj, "DeadDoc"))
 
 
 # ============================================================================
@@ -220,7 +218,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0, 200.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table(excel_path)
+        warnings = runner._sw_executor._validate_design_table(excel_path)
         self.assertEqual(warnings, [], f"Expected no warnings, got: {warnings}")
 
     def test_missing_design_table_header(self):
@@ -230,7 +228,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table(excel_path)
+        warnings = runner._sw_executor._validate_design_table(excel_path)
         self.assertTrue(any("Design Table" in w or "设计表" in w for w in warnings),
                         f"Expected warning about missing design table header, got: {warnings}")
 
@@ -241,7 +239,7 @@ class TestDesignTableValidation(unittest.TestCase):
             data_rows=[[0, 100.0]],
         )
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table(excel_path)
+        warnings = runner._sw_executor._validate_design_table(excel_path)
         warning_texts = [str(w) for w in warnings]
         has_warning = any("参数列头" in w or "参数" in w for w in warning_texts)
         self.assertTrue(has_warning or len(warnings) == 0,
@@ -249,7 +247,7 @@ class TestDesignTableValidation(unittest.TestCase):
 
     def test_nonexistent_excel(self):
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table(r"C:\nonexistent\file.xlsx")
+        warnings = runner._sw_executor._validate_design_table(r"C:\nonexistent\file.xlsx")
         self.assertTrue(len(warnings) > 0, "Expected warnings for nonexistent file")
 
     def test_empty_excel(self):
@@ -259,7 +257,7 @@ class TestDesignTableValidation(unittest.TestCase):
         wb.save(filepath)
 
         runner = self.runner_class(self.state)
-        warnings = runner._validate_design_table(filepath)
+        warnings = runner._sw_executor._validate_design_table(filepath)
         self.assertTrue(any("缺失" in w for w in warnings),
                         f"Expected row-missing warning for empty workbook, got: {warnings}")
 
@@ -408,7 +406,7 @@ class TestSwExitAndCleanup(unittest.TestCase):
              patch("os.name", "nt"):
             mock_run.return_value = MagicMock(stdout="SLDWORKS.exe", returncode=0)
 
-            runner._terminate_sw_processes()
+            runner._sw_executor._terminate_sw_processes()
 
             self.assertGreaterEqual(mock_run.call_count, 2,
                                     "Should call tasklist + taskkill")
@@ -422,7 +420,7 @@ class TestSwExitAndCleanup(unittest.TestCase):
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(stdout="", returncode=0)
 
-            runner._terminate_sw_processes()
+            runner._sw_executor._terminate_sw_processes()
 
             kill_calls = [
                 c for c in mock_run.call_args_list
@@ -612,7 +610,7 @@ class TestDesignTableImportStrategy(unittest.TestCase):
             config_names=["0", "1"],
         )
 
-        result = self.runner._apply_params_via_com(mock_doc, excel_path)
+        result = self.runner._sw_executor._apply_params_via_com(mock_doc, excel_path)
         self.assertTrue(result, "COM direct param setting should succeed")
         self.assertGreaterEqual(mock_doc.ShowConfiguration2.call_count, 2)
 
@@ -627,7 +625,7 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         mock_app, mock_doc = create_mock_sw_app()
         mock_doc.Parameter.side_effect = Exception("Parameter not found")
 
-        result = self.runner._apply_params_via_com(mock_doc, excel_path)
+        result = self.runner._sw_executor._apply_params_via_com(mock_doc, excel_path)
         self.assertFalse(result,
                          "Should return False when no params match model")
 
@@ -640,14 +638,14 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         wb.save(filepath)
 
         mock_app, mock_doc = create_mock_sw_app()
-        result = self.runner._apply_params_via_com(mock_doc, filepath)
+        result = self.runner._sw_executor._apply_params_via_com(mock_doc, filepath)
         self.assertFalse(result, "Should return False when row 2 is missing")
 
     def test_post_process_design_table(self):
         mock_app, mock_doc = create_mock_sw_app()
         mock_dt = mock_doc.GetDesignTable()
 
-        self.runner._post_process_design_table(mock_doc, "fake.xlsx")
+        self.runner._sw_executor._post_process_design_table(mock_doc, "fake.xlsx")
 
         mock_dt.Updatable = PropertyMock()
         mock_dt.UpdateModel.assert_called()
@@ -661,7 +659,7 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         with open(orig, "w") as f:
             f.write("test")
 
-        self.runner._cleanup_tmp_excel(tmp, orig)
+        self.runner._sw_executor._cleanup_tmp_excel(tmp, orig)
         self.assertFalse(os.path.exists(tmp), "Temp copy should be deleted")
         self.assertTrue(os.path.exists(orig), "Original should be preserved")
 
@@ -670,7 +668,7 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         with open(orig, "w") as f:
             f.write("test")
 
-        self.runner._cleanup_tmp_excel(orig, orig)
+        self.runner._sw_executor._cleanup_tmp_excel(orig, orig)
         self.assertTrue(os.path.exists(orig), "Original should not be deleted when tmp==orig")
 
 
@@ -782,7 +780,7 @@ class TestErrorHandling(unittest.TestCase):
         mock_doc.GetDesignTable.return_value = MagicMock()
         mock_doc.Parameter.side_effect = Exception("Parameter not found")
 
-        result = self.runner._import_design_table_with_retry(
+        result = self.runner._sw_executor._import_design_table_with_retry(
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
@@ -797,7 +795,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, _ = runner._export_all_configs_to_step(mock_doc, "C:\\step")
+        success, fail, _ = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
         self.assertEqual(success, 0)
         self.assertEqual(fail, 0)
 
@@ -811,7 +809,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, fail_list = runner._export_all_configs_to_step(mock_doc, "C:\\step")
+        success, fail, fail_list = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
 
         self.assertEqual(success, 1, "Only config 0 should succeed")
         self.assertEqual(fail, 1, "Default should be in fail_list")
@@ -871,8 +869,9 @@ class TestEndToEndWorkflow(unittest.TestCase):
             save_as_succeeds=True,
         )
 
-        doc_type = self.runner._guess_sw_doc_type("model_gen4.SLDPRT")
-        self.assertEqual(doc_type, self.runner._SW_DOC_PART)
+        from executor.sw_executor import SWExecutor
+        doc_type = SWExecutor._guess_sw_doc_type("model_gen4.SLDPRT")
+        self.assertEqual(doc_type, SWExecutor._SW_DOC_PART)
 
         mock_app.OpenDoc6.assert_not_called()
         mock_doc.ShowConfiguration2.assert_not_called()
@@ -893,7 +892,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
             insert_dt_succeeds=False,
         )
 
-        result = self.runner._import_design_table_with_retry(
+        result = self.runner._sw_executor._import_design_table_with_retry(
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "COM fallback should succeed when InsertFamilyTableOpen fails")
@@ -917,7 +916,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
         mock_doc.GetDesignTable.return_value = MagicMock()
         mock_doc.Parameter.side_effect = Exception("not found")
 
-        result = self.runner._import_design_table_with_retry(
+        result = self.runner._sw_executor._import_design_table_with_retry(
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
@@ -1109,20 +1108,25 @@ class TestComBindingCompatibility(unittest.TestCase):
 
     # ---- _verify_com_object 测试 ----
 
+    @classmethod
+    def setUpClass(cls):
+        from executor.sw_executor import SWExecutor
+        cls.SWExecutor = SWExecutor
+
     def test_verify_com_object_valid(self):
         """有效 COM 对象通过验证。"""
         mock_obj = MagicMock()
         mock_obj.GetTitle.return_value = "TestDoc"
-        self.assertTrue(self.runner._verify_com_object(mock_obj, "TestObj"))
+        self.assertTrue(self.SWExecutor._verify_com_object(mock_obj, "TestObj"))
 
     def test_verify_com_object_none(self):
         """None 对象验证失败。"""
-        self.assertFalse(self.runner._verify_com_object(None, "NullObj"))
+        self.assertFalse(self.SWExecutor._verify_com_object(None, "NullObj"))
 
     def test_verify_com_object_dead_proxy(self):
         """所有验证方法均失败时返回 False。"""
         mock_obj = MagicMock(spec=[])
-        self.assertFalse(self.runner._verify_com_object(mock_obj, "DeadObj"))
+        self.assertFalse(self.SWExecutor._verify_com_object(mock_obj, "DeadObj"))
 
     # ---- SaveAs 后置文件验证测试（_export_all_configs_to_step 行为） ----
 
@@ -1138,7 +1142,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._export_all_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
 
         self.assertGreater(success, 0)
         self.assertEqual(fail, 0)
@@ -1155,7 +1159,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._export_all_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
 
         self.assertEqual(success, 0)
         self.assertGreater(fail, 0)

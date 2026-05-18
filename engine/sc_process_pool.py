@@ -23,6 +23,14 @@ class SCSlot:
 
 
 class SCProcessPool:
+    """SpaceClaim 进程池，管理最多 MAX_SLOTS 个并发 SC 实例。
+
+    设计说明：
+    - 控制事件（paused_event / stopped_event）通过方法参数传递，
+      而非实例属性存储。这避免了与 TaskRunner.set_control_events
+      的状态同步问题——SCProcessPool 是无状态的工具类，每次调用
+      都从调用方获取最新的控制事件。
+    """
     MAX_SLOTS = 3
 
     def __init__(self):
@@ -57,6 +65,11 @@ class SCProcessPool:
                     f"[SC-Pool] 已加载 {len(self._slots)} 个槽位 "
                     f"(max={self.MAX_SLOTS})"
                 )
+            except FileNotFoundError:
+                # 防御：os.path.exists 可能因 mock/TOCTOU 返回 True 但文件实际不存在
+                logger.info("[SC-Pool] 池文件不存在，初始化空池")
+                self._slots = {}
+                self._next_slot_id = 1
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logger.warning(f"[SC-Pool] 池文件损坏，使用空池: {e}")
                 self._slots = {}

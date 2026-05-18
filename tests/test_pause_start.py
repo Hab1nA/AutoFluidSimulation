@@ -134,10 +134,12 @@ class MockTaskRunner:
         return {"local_checks": {}, "remote_checks": {}}
 
 
-import engine.scheduler as scheduler_mod
+import engine.scheduler.main as scheduler_main_mod
+import engine.scheduler.sw_phase as sw_phase_mod
 import engine.file_monitor as file_monitor_mod
+from engine.task_runner import TaskRunner
 
-_OriginalTaskRunner = scheduler_mod.TaskRunner
+_OriginalTaskRunner = TaskRunner
 _OriginalStepFileMonitor = file_monitor_mod.StepFileMonitor
 
 
@@ -177,18 +179,22 @@ class MockStepFileMonitor:
 
 
 def setup_mock_environment():
-    scheduler_mod.TaskRunner = MockTaskRunner
+    scheduler_main_mod.TaskRunner = MockTaskRunner
     file_monitor_mod.StepFileMonitor = MockStepFileMonitor
-    scheduler_mod.StepFileMonitor = MockStepFileMonitor
+    scheduler_main_mod.StepFileMonitor = MockStepFileMonitor
+    sw_phase_mod.StepFileMonitor = MockStepFileMonitor
 
 
 def teardown_mock_environment():
-    scheduler_mod.TaskRunner = _OriginalTaskRunner
+    scheduler_main_mod.TaskRunner = _OriginalTaskRunner
     file_monitor_mod.StepFileMonitor = _OriginalStepFileMonitor
-    scheduler_mod.StepFileMonitor = _OriginalStepFileMonitor
+    scheduler_main_mod.StepFileMonitor = _OriginalStepFileMonitor
+    sw_phase_mod.StepFileMonitor = _OriginalStepFileMonitor
 
 
 class TestContext:
+    __test__ = False  # 非测试类，仅用于测试上下文管理
+
     def __init__(self, num_configs: int = 5):
         self.tmpdir = tempfile.mkdtemp(prefix="autotest_")
         self.db_path = os.path.join(self.tmpdir, "test_state.db")

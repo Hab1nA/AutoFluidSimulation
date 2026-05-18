@@ -392,6 +392,7 @@ fn build_edit_spans(
 
     // We need to truncate to max_width display-wise.  Build spans first,
     // then we'll truncate if needed.
+    #[allow(clippy::needless_range_loop)] // i 用于 cursor/selection 比较，迭代器不更清晰
     for i in 0..=len {
         // Insert cursor marker before character i (or at end)
         if i == cursor {
@@ -421,19 +422,4 @@ fn build_edit_spans(
     }
     spans.truncate(keep);
     spans
-}
-
-/// Legacy helper – returns a plain string version for cases that still use
-/// String (should be phased out once all callers use `build_edit_spans`).
-#[allow(dead_code)]
-fn build_edit_display(buffer: &str, cursor: usize, max_width: usize) -> String {
-    let display = if buffer.is_empty() {
-        "▎".to_string()
-    } else {
-        let before: String = buffer.chars().take(cursor).collect();
-        let cursor_char = buffer.chars().nth(cursor).unwrap_or(' ');
-        let after: String = buffer.chars().skip(cursor + 1).collect();
-        format!("{}│{}", before, format!("{}{}", cursor_char, after))
-    };
-    truncate_for_display(&display, max_width)
 }

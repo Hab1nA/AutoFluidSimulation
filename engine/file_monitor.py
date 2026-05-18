@@ -169,6 +169,11 @@ class StepFileMonitor:
 
         self._get_filename_regex()
 
+    @property
+    def is_running(self) -> bool:
+        """监控器是否正在运行。"""
+        return self._running
+
     # ------------------------------------------------------------------
     # 文件名解析
     # ------------------------------------------------------------------

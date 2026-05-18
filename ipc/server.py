@@ -40,9 +40,12 @@ class IPCServer:
         """
         self.host = host or IPC_CONFIG["host"]
         self.port = port or IPC_CONFIG["port"]
+        self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
         self._socket: Optional[socket.socket] = None
         self._running = False
         self._server_thread: Optional[threading.Thread] = None
+        self._active_connections: int = 0
+        self._conn_lock = threading.Lock()
 
         # 命令处理器注册表
         self._handlers: dict[str, Callable] = {}
@@ -136,10 +139,34 @@ class IPCServer:
     # ------------------------------------------------------------------
 
     def _accept_loop(self):
-        """接受客户端连接的主循环。"""
+        """接受客户端连接的主循环（含连接数限制）。"""
         while self._running:
             try:
                 client_sock, addr = self._socket.accept()
+
+                # ★ 连接数限制：超过上限时拒绝新连接，发送错误后立即关闭
+                with self._conn_lock:
+                    if self._active_connections >= self._max_connections:
+                        logger.warning(
+                            f"IPC 连接数已达上限 ({self._max_connections})，"
+                            f"拒绝新连接: {addr}"
+                        )
+                        try:
+                            reject_msg = serialize(create_response(
+                                "error", "unknown",
+                                message=f"服务器繁忙，当前连接数已达上限 ({self._max_connections})"
+                            ))
+                            client_sock.sendall(reject_msg)
+                        except OSError:
+                            pass
+                        finally:
+                            try:
+                                client_sock.close()
+                            except OSError:
+                                pass
+                        continue
+                    self._active_connections += 1
+
                 logger.info(f"IPC 客户端连接: {addr}")
                 # 每个客户端在独立线程中处理
                 client_thread = threading.Thread(
@@ -193,6 +220,8 @@ class IPCServer:
                 client_sock.close()
             except OSError:
                 pass
+            with self._conn_lock:
+                self._active_connections = max(0, self._active_connections - 1)
             if has_sent_valid_message:
                 logger.info(f"IPC 客户端断开: {addr}")
             else:

@@ -124,7 +124,14 @@ autofluid/
 │   ├── __init__.py
 │   ├── config.py            # 全局硬编码配置 & 环境变量覆盖
 │   ├── daemon.py            # 后台守护进程（PipelineDaemon）
-│   ├── scheduler.py         # DAG 任务调度器（PipelineScheduler）
+│   ├── scheduler.py         # DAG 任务调度器（PipelineScheduler，兼容入口）
+│   ├── scheduler/           # 调度器子模块包
+│   │   ├── __init__.py      # 包入口，导出所有公开接口
+│   │   ├── main.py          # 主调度器（PipelineScheduler，协调者）
+│   │   ├── worker_pool.py   # 工作线程池管理（WorkerPoolManager）
+│   │   ├── barrier.py       # 全局屏障 + Solver 调度（BarrierCoordinator）
+│   │   ├── sw_phase.py      # SW 阶段执行、预扫描、重试（SWPhaseHandler）
+│   │   └── retry.py         # 重试机制 + 暂停感知 sleep（RetryManager）
 │   ├── task_runner.py       # 任务执行器（TaskRunner）
 │   ├── state_manager.py     # 共享状态管理器（SQLite WAL）
 │   ├── sc_process_pool.py   # SpaceClaim 进程并发池（SCProcessPool）
@@ -155,7 +162,7 @@ autofluid/
 ├── autofluid-tui/           # 🦀 Rust TUI 客户端（唯一前端界面）
 │   ├── Cargo.toml           # Rust 项目配置 & 依赖
 │   └── src/
-│       ├── main.rs          # 异步主循环（tokio + ratatui + 鼠标事件处理）
+│       ├── main.rs          # 异步主循环（tokio + ratatui，已精简）
 │       ├── daemon_mgr.rs    # Daemon 进程管理器
 │       ├── ipc.rs           # IPC 模块入口
 │       │   ├── protocol.rs  # IPC 协议（serde 序列化）
@@ -166,7 +173,8 @@ autofluid/
 │       │   └── filter.rs    # 日志过滤器
 │       ├── event_handler.rs # 事件处理模块入口
 │       │   ├── key_handler.rs # 键盘事件处理（含 settings 页面快捷键）
-│       │   └── command.rs   # 命令分发与执行
+│       │   ├── command.rs   # 命令分发与执行
+│       │   └── mouse.rs     # 鼠标事件处理（悬停/点击/拖拽/滚轮）
 │       ├── settings.rs       # 设置页面模块入口
 │       │   ├── mod.rs       # SettingCategory 枚举 & SettingsState 状态管理（5分类38字段）
 │       │   ├── settings_ui.rs# 设置对话框渲染（字段编辑、按钮、滚动条）
@@ -246,9 +254,19 @@ autofluid/
 | `handle_clean_step()` | `clean_step` | 清理步骤文件 |
 | `handle_get_log_entries()` | `get_log_entries` | 增量拉取日志 |
 
-#### 4.1.3 scheduler.py — DAG 任务调度器
+#### 4.1.3 scheduler — DAG 任务调度器
 
-`PipelineScheduler` 实现了基于文件监控的 Producer-Consumer 异步队列和全局同步屏障。
+> 文件：`engine/scheduler/` 包（原 `scheduler.py` 已拆分为职责单一的子模块）
+
+`PipelineScheduler` 实现了基于文件监控的 Producer-Consumer 异步队列和全局同步屏障。拆分后各子模块职责：
+
+| 子模块 | 类 | 职责 |
+|--------|-----|------|
+| `main.py` | `PipelineScheduler` | 主调度器，协调各子模块，提供 pause/resume/stop/reset 控制接口 |
+| `worker_pool.py` | `WorkerPoolManager` | 管理 SC/Transfer/Meshing 工作线程池，从队列取任务执行 |
+| `barrier.py` | `BarrierCoordinator` | 全局屏障监控，所有构型 Meshing 完成后启动 Solver |
+| `sw_phase.py` | `SWPhaseHandler` | SW 阶段执行、输出文件预扫描（断点续传）、SW 重试准备 |
+| `retry.py` | `RetryManager` | 带重试机制的任务执行包装器、暂停感知 sleep |
 
 **调度流程**：
 
@@ -587,7 +605,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
         │   ├─ pending_command 处理（StartDaemon / StopDaemon / FullQuit 等）
         │   ├─ crossterm 事件轮询（50ms 首次 + 0ms 批量排空）
         │   │   ├─ 键盘事件 → key_handler::handle_key()（按 UiMode 路由：Normal / ConfirmDialog / CheckResult / Settings）
-        │   │   ├─ 鼠标事件 → handle_mouse()（悬停/点击/拖拽/滚轮；Settings 模式下双击字段编辑）
+        │   │   ├─ 鼠标事件 → event_handler::mouse::handle_mouse()（悬停/点击/拖拽/滚轮；Settings 模式下双击字段编辑）
         │   │   └─ 终端大小变化 → update_terminal_size()
         │   ├─ 条件重绘（needs_redraw 时执行 do_redraw，UiMode::Settings 时渲染设置对话框）
         │   ├─ IPC 定时轮询（1 秒间隔：状态 + 增量日志；5 秒间隔：引擎状态）
@@ -595,7 +613,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
         └─ 退出清理：disconnect IPC + stop Daemon
 ```
 
-**鼠标事件处理**（`handle_mouse`）：
+**鼠标事件处理**（`event_handler::mouse::handle_mouse`）：
 
 | 事件类型 | 处理逻辑 |
 |----------|----------|
@@ -667,7 +685,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | 类 | 文件 | 职责 |
 |----|------|------|
 | `PipelineDaemon` | engine/daemon.py | 后台守护进程，协调所有子系统 |
-| `PipelineScheduler` | engine/scheduler.py | DAG 任务调度，管理流水线执行 |
+| `PipelineScheduler` | engine/scheduler/main.py | DAG 任务调度，管理流水线执行 |
 | `TaskRunner` | engine/task_runner.py | 各阶段任务的具体执行 |
 | `StateManager` | engine/state_manager.py | SQLite 持久化状态管理 |
 | `StepFileMonitor` | engine/file_monitor.py | STEP 文件目录监控 |
@@ -711,6 +729,7 @@ main() → 初始化终端（raw mode + alternate screen + mouse capture）
 | `get_step_filename()` | engine/config.py | 根据步骤和构型生成文件名 |
 | `ensure_directories()` | engine/config.py | 创建必要目录 |
 | `validate_config()` | engine/config.py | 验证配置完整性 |
+| `handle_mouse()` | event_handler/mouse.rs (Rust) | 鼠标事件处理（悬停/点击/拖拽/滚轮） |
 | `dispatch_command()` | event_handler/command.rs (Rust) | 命令分发与执行 |
 | `handle_key()` | event_handler/key_handler.rs (Rust) | 键盘事件处理 |
 | `parse_filter_arg()` | state/filter.rs (Rust) | 解析日志过滤参数 |
@@ -814,7 +833,7 @@ main.py ──► engine/daemon.py ──► engine/config.py
                            ──► engine/task_runner.py ──► engine/config.py
                            │                          ──► utils/ssh_client.py
                            │                          ──► utils/logger.py
-                           ──► engine/scheduler.py ──► engine/config.py
+                           ──► engine/scheduler/main.py ──► engine/config.py
                            │                       ──► engine/state_manager.py
                            │                       ──► engine/file_monitor.py
                            │                       ──► engine/task_runner.py
@@ -835,6 +854,7 @@ main.rs ──► state/app_state.rs
         ──► daemon_mgr.rs
         ──► event_handler/key_handler.rs ──► state/app_state.rs
         ──► event_handler/command.rs ──► ipc/client.rs
+        ──► event_handler/mouse.rs  ──► ui/scrollbar.rs
         │                               ──► state/app_state.rs
         │                               ──► state/log_buffer.rs
         │                               ──► state/filter.rs

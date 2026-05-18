@@ -287,7 +287,7 @@ impl SettingCategory {
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::EngineConfig) && matches!(idx, 2 | 3 | 4)
+        matches!(self, SettingCategory::EngineConfig) && matches!(idx, 2..=4)
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
@@ -302,17 +302,11 @@ pub struct UndoEntry {
     pub old_value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SettingsFocus {
     pub category_index: usize,
     pub field_index: usize,
     pub editing: bool,
-}
-
-impl Default for SettingsFocus {
-    fn default() -> Self {
-        Self { category_index: 0, field_index: 0, editing: false }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -785,10 +779,7 @@ impl SettingsState {
         if text.is_empty() {
             return false;
         }
-        match arboard::Clipboard::new() {
-            Ok(mut cb) => cb.set_text(text).is_ok(),
-            Err(_) => false,
-        }
+        clipboard_win::set_clipboard_string(&text).is_ok()
     }
 
     /// Cut: copy to clipboard then delete selection.
@@ -806,8 +797,8 @@ impl SettingsState {
 
     /// Paste from system clipboard, replacing any current selection.
     pub fn paste_from_clipboard(&mut self) -> bool {
-        let text = match arboard::Clipboard::new() {
-            Ok(mut cb) => cb.get_text().unwrap_or_default(),
+        let text = match clipboard_win::get_clipboard_string() {
+            Ok(s) => s,
             Err(_) => return false,
         };
         if text.is_empty() {
@@ -824,11 +815,5 @@ impl SettingsState {
         self.edit_buffer.insert_str(byte_pos, &cleaned);
         self.edit_cursor += cleaned.chars().count();
         true
-    }
-
-    /// Clear the selection anchor (e.g. when cursor moves without Shift).
-    #[allow(dead_code)]
-    pub fn clear_selection(&mut self) {
-        self.selection_anchor = None;
     }
 }

@@ -3,6 +3,11 @@ use serde_json::Value;
 
 use crate::generate_request_id;
 
+/// IPC 命令常量定义。
+///
+/// ⚠️ 同步要求：这些常量必须与 Python 侧 `ipc/protocol.py` 中的命令常量保持
+/// 完全一致。添加新命令时，请同时更新两处定义。
+/// 可通过运行 `python -m pytest tests/test_ipc_protocol.py -v -k "command"` 验证。
 pub const CMD_START: &str = "start";
 pub const CMD_PAUSE: &str = "pause";
 pub const CMD_STOP: &str = "stop";

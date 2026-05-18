@@ -17,10 +17,10 @@ class TestSwStepNaming(unittest.TestCase):
         self.assertIsNone(StepFileMonitor.parse_config_name("unrelated.step"))
 
     def test_guess_sw_doc_type(self):
-        from engine.task_runner import TaskRunner
+        from executor.sw_executor import SWExecutor
 
-        self.assertEqual(TaskRunner._guess_sw_doc_type(r"C:\a\b\part.SLDPRT"), TaskRunner._SW_DOC_PART)
-        self.assertEqual(TaskRunner._guess_sw_doc_type(r"C:\a\b\asm.SLDASM"), TaskRunner._SW_DOC_ASSEMBLY)
+        self.assertEqual(SWExecutor._guess_sw_doc_type(r"C:\a\b\part.SLDPRT"), SWExecutor._SW_DOC_PART)
+        self.assertEqual(SWExecutor._guess_sw_doc_type(r"C:\a\b\asm.SLDASM"), SWExecutor._SW_DOC_ASSEMBLY)
 
 
 class TestEnvOverrides(unittest.TestCase):

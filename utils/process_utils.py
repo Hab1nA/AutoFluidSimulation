@@ -15,10 +15,10 @@ MIN_VALID_PID = 1
 
 def is_process_alive(pid: int) -> bool:
     """检测指定 PID 的进程是否存活（跨平台）。
-    
+
     Args:
         pid: 进程 ID
-    
+
     Returns:
         True 表示进程活跃，False 表示已结束或无效
     """
@@ -48,10 +48,10 @@ def is_process_alive(pid: int) -> bool:
 
 def read_pid_file(pid_file: str) -> int | None:
     """读取 PID 文件中的进程 ID。
-    
+
     Args:
         pid_file: PID 文件路径
-    
+
     Returns:
         读取的 PID（整数），失败或文件不存在时返回 None
     """
@@ -64,7 +64,7 @@ def read_pid_file(pid_file: str) -> int | None:
 
 def write_pid_file(pid_file: str, pid: int) -> None:
     """写入 PID 到文件。
-    
+
     Args:
         pid_file: PID 文件路径
         pid: 要写入的进程 ID
@@ -76,7 +76,7 @@ def write_pid_file(pid_file: str, pid: int) -> None:
 
 def remove_pid_file(pid_file: str) -> None:
     """删除 PID 文件。
-    
+
     Args:
         pid_file: PID 文件路径
     """
@@ -88,11 +88,11 @@ def remove_pid_file(pid_file: str) -> None:
 
 def run_taskkill(pid: int, timeout: int = 5) -> bool:
     """使用 taskkill 终止 Windows 进程。
-    
+
     Args:
         pid: 进程 ID
         timeout: taskkill 命令超时（秒）
-    
+
     Returns:
         True 表示成功，False 表示失败
     """
