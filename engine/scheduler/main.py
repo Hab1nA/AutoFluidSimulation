@@ -509,31 +509,39 @@ class PipelineScheduler:
         self._stopped.set()
         self._paused.clear()  # 解除暂停以便线程退出
 
-        # 清理所有 SC 进程
+        # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
+        self.state.set_engine_status("stopped")
+
+        # 清理所有 SC 进程（容错：任何清理步骤失败不阻断整体停止流程）
         try:
             self.runner._sc_pool.shutdown_all()
         except Exception as e:
             logger.debug(f"SCPool 停止清理异常: {e}")
 
-        # 等待关键线程退出
-        for t in self.worker_pool._worker_threads:
-            if t.is_alive():
-                t.join(timeout=3)
-        if self._barrier_thread and self._barrier_thread.is_alive():
-            self._barrier_thread.join(timeout=3)
-        for t in self.barrier_coordinator._solver_threads:
-            if t.is_alive():
-                t.join(timeout=3)
-        self.barrier_coordinator._solver_threads.clear()
+        try:
+            # 等待关键线程退出
+            for t in self.worker_pool._worker_threads:
+                if t.is_alive():
+                    t.join(timeout=3)
+            if self._barrier_thread and self._barrier_thread.is_alive():
+                self._barrier_thread.join(timeout=3)
+            for t in self.barrier_coordinator._solver_threads:
+                if t.is_alive():
+                    t.join(timeout=3)
+            self.barrier_coordinator._solver_threads.clear()
 
-        # 停止文件监控
-        if self._file_monitor:
-            self._file_monitor.stop()
+            # 停止文件监控
+            if self._file_monitor:
+                self._file_monitor.stop()
+        except Exception as e:
+            logger.warning(f"停止清理过程中出现异常（已忽略）: {e}")
 
-        # 断开 SSH
-        self.runner.disconnect_ssh()
+        try:
+            # 断开 SSH
+            self.runner.disconnect_ssh()
+        except Exception as e:
+            logger.debug(f"SSH 断开异常（已忽略）: {e}")
 
-        self.state.set_engine_status("stopped")
         logger.info("流水线已停止")
 
     def reset_config(self, config_name, step_name: str | None = None):

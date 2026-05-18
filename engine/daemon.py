@@ -192,6 +192,17 @@ class PipelineDaemon:
         self.runner = TaskRunner(self.state)
         self.scheduler = PipelineScheduler(self.state, self.runner)
 
+        # ---- 2.5 启动时状态一致性检查 ----
+        # 新进程没有调度器线程，残留的 paused/running 状态一定是不一致的
+        # （stop() 挂起或进程被杀导致 set_engine_status("stopped") 未执行）
+        stale_status = self.state.get_engine_status()
+        if stale_status in ("paused", "running"):
+            logger.warning(
+                f"检测到残留引擎状态 '{stale_status}'（可能是上次退出时 stop() 未完成），"
+                f"重置为 stopped"
+            )
+            self.state.set_engine_status("stopped")
+
         self.ipc_server = IPCServer()
         self.ipc_server.register_default_handlers(self)
 
