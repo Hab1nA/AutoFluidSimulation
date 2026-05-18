@@ -109,7 +109,7 @@ class WorkerPoolManager:
 
             try:
                 # 从队列获取任务（1秒超时以便检查停止/暂停标志）
-                config_name, step_file = self._sc_queue.get(timeout=1)
+                config_name, _step_file = self._sc_queue.get(timeout=1)
             except queue.Empty:
                 # ---- 队列空闲时输出健康状态 ----
                 now = time.time()

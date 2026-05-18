@@ -301,7 +301,7 @@ class SWPhaseHandler:
 
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。"""
-        if self._file_monitor is None or not self._file_monitor._running:
+        if self._file_monitor is None or not self._file_monitor.is_running:
             self._file_monitor = StepFileMonitor(
                 step_dir=None,
                 on_file_ready=self._on_step_file_ready

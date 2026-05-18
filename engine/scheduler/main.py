@@ -431,7 +431,7 @@ class PipelineScheduler:
         self.state.set_engine_status("running")
 
         pipeline_needs_init = False
-        if self._file_monitor is None or not self._file_monitor._running:
+        if self._file_monitor is None or not self._file_monitor.is_running:
             pipeline_needs_init = True
         else:
             alive_workers = [t for t in self.worker_pool._worker_threads if t.is_alive()]

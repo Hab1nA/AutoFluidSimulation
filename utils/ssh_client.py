@@ -322,25 +322,7 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
-        # 转义单引号（PowerShell 单引号字符串中 ' 需写成 ''）
-        safe_cmd = command.replace("'", "''")
-        safe_flag = flag_file.replace("'", "''")
-
-        # 构造 PowerShell 脚本：
-        #   $c / $f      — 内层命令与标志文件路径（单引号字符串，内容不变）
-        #   $inner       — 拼接带外层引号的 cmd /c 参数：
-        #                    ""<command> && echo done > "<flag>""
-        #   Start-Process — 启动独立 cmd.exe 后台进程
-        #
-        # cmd.exe /c 会剥离首尾各一个 "，剩余：
-        #   "<command> && echo done > "<flag>"
-        # 内层 cmd.exe 可以正确解析此格式（&& 在引号外）。
-        ps_script = (
-            f"$c = '{safe_cmd}'\n"
-            f"$f = '{safe_flag}'\n"
-            "$inner = '\"' + $c + ' && echo done > \"' + $f + '\"\"'\n"
-            'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
-        )
+        ps_script = self._build_background_ps_script(command, flag_file)
 
         # -EncodedCommand 接受 UTF-16LE + Base64 编码的脚本
         # 完全绕过 SSH → cmd.exe 的引号转义链
@@ -366,6 +348,19 @@ class RemoteWorkstation:
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"启动远程后台任务异常: {e}")
             return False
+
+    @staticmethod
+    def _build_background_ps_script(command: str, flag_file: str) -> str:
+        """构造用于 Start-Process 后台启动的 PowerShell 脚本。"""
+        # 转义单引号（PowerShell 单引号字符串中 ' 需写成 ''）
+        safe_cmd = command.replace("'", "''")
+        safe_flag = flag_file.replace("'", "''")
+        return (
+            f"$c = '{safe_cmd}'\n"
+            f"$f = '{safe_flag}'\n"
+            "$inner = '\"{0} && echo done > \"\"{1}\"\"\"' -f $c, $f\n"
+            'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
+        )
 
     def wait_for_flag(
         self,
