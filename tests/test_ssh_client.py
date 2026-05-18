@@ -21,6 +21,7 @@ def test_exec_background_generates_valid_encoded_command_with_spaces_and_quotes(
     calls: list[tuple[str, int]] = []
 
     def fake_exec(command: str, timeout: int = 30):
+        # exec_command 返回: (stdout, stderr, exit_code)
         calls.append((command, timeout))
         return ("", "", 0)
 
