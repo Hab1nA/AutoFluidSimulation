@@ -224,7 +224,7 @@ def _get_script_args():
 # 主处理逻辑
 # ============================================================================
 
-def process_step_file(config_name, step_dir, scdoc_dir, result_file=None):
+def process_step_file(config_name, step_dir, scdoc_dir):
     """
     处理单个 STEP 文件：打开 → 创建命名选择集 → 保存 SCDOC。
 
@@ -232,9 +232,6 @@ def process_step_file(config_name, step_dir, scdoc_dir, result_file=None):
         config_name: 构型编号（整数或字符串）
         step_dir: STEP 文件目录
         scdoc_dir: SCDOC 输出目录
-        result_file: 可选，per-run 结果文件路径。提供时在 SaveAs 校验成功后
-                     立即写入成功结果（早完成信号），避免 window.Close 卡住
-                     导致 Python 侧超时。
     """
     file_index = int(config_name)
 
@@ -440,32 +437,10 @@ def process_step_file(config_name, step_dir, scdoc_dir, result_file=None):
         logger.error("输出文件未生成: {}".format(out_path))
         return False
 
-    # ★ 早完成信号：SaveAs + 校验成功后立即通知 Python 侧，
-    #   避免后续 window.Close 卡住导致 Python 超时和竞态。
-    #   _persistent_loop 会在 process_step_file 返回后再次写入
-    #   结果文件（幂等覆盖），此处是安全的提前通知。
-    if result_file is not None:
-        try:
-            _write_result(result_file, str(config_name), True,
-                          "SCDOC SaveAs 完成")
-            logger.info("早完成信号已写入: {}".format(result_file))
-        except Exception as e_early:
-            logger.warning("早完成信号写入失败（可忽略）: {}: {}".format(
-                type(e_early).__name__, e_early))
-
-    # ------------------------------------------------------------------
-    # 8. 关闭文档
-    # ------------------------------------------------------------------
-    logger.info("正在关闭文档...")
-    try:
-        window = Window.ActiveWindow
-        if window is not None:
-            window.Close()
-            logger.info("文档已关闭")
-        else:
-            logger.info("无活动窗口（可能已自动关闭）")
-    except Exception as e:
-        logger.info("关闭窗口时异常（可忽略）: {}: {}".format(type(e).__name__, e))
+    # ★ 不关闭文档：window.Close() 是 GUI 操作，在常驻模式下可能阻塞
+    #   （弹确认框、UI 刷新等），导致脚本无法返回轮询循环。
+    #   SaveAs() 完成后 SCDOC 文件已可用，与窗口是否关闭无关。
+    #   下次 Document.Open() 时 SpaceClaim 会自动处理旧文档状态。
 
     logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
     return True
@@ -584,10 +559,7 @@ def _persistent_loop():
             logger.info("  STEP 目录: {}".format(step_dir))
             logger.info("  SCDOC 目录: {}".format(scdoc_dir))
 
-            # ★ 传入 result_file：process_step_file 在 SaveAs 成功后
-            #   会提前写入成功结果，避免 window.Close 卡住导致超时
-            success = process_step_file(config_name, step_dir, scdoc_dir,
-                                        result_file=result_file)
+            success = process_step_file(config_name, step_dir, scdoc_dir)
 
             _write_result(result_file, config_name, success,
                           "转换成功" if success else "转换失败",

@@ -258,11 +258,15 @@ class SCProcessPool:
     def _send_persistent_command(self, slot: PersistentSlot, config_name: int,
                                  paused_event: Optional[threading.Event],
                                  stopped_event: Optional[threading.Event]) -> bool:
-        """向常驻进程发送命令并等待结果。
+        """向常驻进程发送命令，通过 SCDOC 文件检测判定完成。
 
-        使用 per-run 结果文件避免跨构型竞态：每次命令携带唯一 run_id，
-        脚本将结果写入 sc_result_{slot_id}_{run_id}.json，Python 仅等待
-        该路径——不会误读上次运行的残留结果。
+        ★ 核心设计：与 SW 步骤的 FileStableDetector 统一，直接轮询
+        SCDOC 输出文件。SaveAs() 是 SpaceClaim 内核操作，完成后
+        SCDOC 文件立即可用——不需要等脚本写结果文件、不需要等
+        window.Close()。
+
+        完成条件：SCDOC 文件存在 + mtime >= 命令发送时刻 + 大小稳定 3s。
+        失败信号：脚本写入 success=false 的结果文件 → 提前返回。
         """
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
@@ -275,11 +279,14 @@ class SCProcessPool:
         scdoc_file = os.path.join(scdoc_dir, scdoc_name)
         os.makedirs(scdoc_dir, exist_ok=True)
 
-        # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
+        # per-run 结果文件（仅用于接收错误信号）
         run_id = uuid.uuid4().hex[:12]
         cmd_file = os.path.join(self._persistent_cmd_dir, f"sc_cmd_{slot.slot_id}.json")
         result_file = os.path.join(self._persistent_cmd_dir,
                                    f"sc_result_{slot.slot_id}_{run_id}.json")
+
+        # ★ 记录命令发送时刻：仅接受此时刻之后创建/修改的 SCDOC 文件
+        command_sent_at = time.time()
 
         cmd_data = {
             "command": "process",
@@ -300,14 +307,21 @@ class SCProcessPool:
         timeout = ENGINE_CONFIG["sc_timeout"]
         deadline = time.time() + timeout
         poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
-        scdoc_stable_seconds = 3.0  # SCDOC 文件大小稳定判定窗口
+        scdoc_stable_seconds = 3.0  # 文件大小稳定判定窗口
+
+        # 用于稳定性检测的上一次采样
+        last_size = -1
+        last_size_stable_since = 0.0
 
         while True:
+            # ---- 进程存活检查 ----
             if slot.process is not None and slot.process.poll() is not None:
-                logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 (exit={slot.process.returncode})")
+                logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 "
+                             f"(exit={slot.process.returncode})")
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
+            # ---- 暂停/停止检查 ----
             if paused_event is not None and paused_event.is_set():
                 logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因暂停取消")
                 self._cleanup_run_files(slot.slot_id, run_id)
@@ -318,76 +332,71 @@ class SCProcessPool:
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
+            # ---- 错误提前信号：脚本写入 success=false 的结果文件 ----
             if os.path.exists(result_file):
                 try:
                     with open(result_file, "r") as f:
                         result_data = json.load(f)
-                    result_config = result_data.get("config")
-                    result_run_id = result_data.get("run_id")
                     success = result_data.get("success", False)
                     message = result_data.get("message", "")
-
-                    # ★ 校验 run_id 一致性：防读错结果文件
-                    if result_run_id is not None and str(result_run_id) != str(run_id):
-                        logger.warning(
-                            f"[SC-Pool] 结果文件 run_id 不匹配 "
-                            f"(期望={run_id}, 实际={result_run_id})，跳过"
-                        )
-                        time.sleep(poll_interval)
-                        continue
-
                     try:
                         os.remove(result_file)
                     except OSError:
                         pass
-
-                    if success:
-                        # ★ 校验 config 一致性
-                        if result_config is not None and str(result_config) != str(config_name):
-                            logger.error(
-                                f"[SC-Pool] 结果 config 不匹配 "
-                                f"(期望={config_name}, 实际={result_config})，视为失败"
-                            )
-                            return False
-
-                        # ★ SCDOC 存在性 + 稳定性校验
-                        if not os.path.exists(scdoc_file):
-                            logger.error(f"[SC-Pool] 构型{config_name} result=success 但 SCDOC 不存在")
-                            return False
-
-                        size_1 = os.path.getsize(scdoc_file)
-                        if size_1 <= 0:
-                            logger.error(f"[SC-Pool] 构型{config_name} SCDOC 大小为 0")
-                            return False
-
-                        time.sleep(scdoc_stable_seconds)
-                        if not os.path.exists(scdoc_file):
-                            logger.error(f"[SC-Pool] 构型{config_name} SCDOC 在稳定性等待期间消失")
-                            return False
-                        size_2 = os.path.getsize(scdoc_file)
-                        if size_2 != size_1:
-                            logger.warning(
-                                f"[SC-Pool] 构型{config_name} SCDOC 大小仍在变化 "
-                                f"({size_1} -> {size_2})，接受（SaveAs 可能已锁定文件）"
-                            )
-
-                        logger.info(
-                            f"[SC-Pool] OK 构型{config_name} SCDOC: "
-                            f"{os.path.basename(scdoc_file)} ({size_2} bytes)"
-                        )
-                        return True
-                    else:
-                        logger.error(f"[SC-Pool] FAIL 构型{config_name} 转换失败: {message}")
+                    if not success:
+                        logger.error(f"[SC-Pool] FAIL 构型{config_name} 脚本报错: {message}")
                         return False
-                except (ValueError, IOError, OSError) as e:
-                    logger.error(f"[SC-Pool] 读取结果文件异常: {e}")
+                except (ValueError, IOError, OSError):
                     try:
                         os.remove(result_file)
                     except OSError:
                         pass
-                    return False
 
+            # ---- 主判定：SCDOC 文件检测（与 SW 步骤统一） ----
+            if os.path.exists(scdoc_file):
+                try:
+                    file_mtime = os.path.getmtime(scdoc_file)
+                    file_size = os.path.getsize(scdoc_file)
+                except OSError:
+                    time.sleep(poll_interval)
+                    continue
+
+                # mtime 早于命令发送 → 旧文件残留，跳过
+                if file_mtime < command_sent_at - 1.0:
+                    time.sleep(poll_interval)
+                    continue
+
+                if file_size <= 0:
+                    time.sleep(poll_interval)
+                    continue
+
+                # 稳定性检测：大小在 scdoc_stable_seconds 内不变
+                now = time.time()
+                if file_size != last_size:
+                    last_size = file_size
+                    last_size_stable_since = now
+                elif now - last_size_stable_since >= scdoc_stable_seconds:
+                    # SCDOC 文件大小已稳定 → SaveAs 完成
+                    logger.info(f"[SC-Pool] OK 构型{config_name} SCDOC: "
+                                f"{os.path.basename(scdoc_file)} ({file_size} bytes)")
+                    self._cleanup_run_files(slot.slot_id, run_id)
+                    return True
+
+            # ---- 超时 ----
             if time.time() >= deadline:
+                # 最后一次检查：SCDOC 可能在超时瞬间刚好完成
+                if os.path.exists(scdoc_file):
+                    try:
+                        mt = os.path.getmtime(scdoc_file)
+                        sz = os.path.getsize(scdoc_file)
+                        if mt >= command_sent_at - 1.0 and sz > 0:
+                            logger.warning(
+                                f"[SC-Pool] 构型{config_name} 超时但 SCDOC 已存在，接受 "
+                                f"({sz} bytes)")
+                            self._cleanup_run_files(slot.slot_id, run_id)
+                            return True
+                    except OSError:
+                        pass
                 logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}")
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False

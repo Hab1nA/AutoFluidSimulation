@@ -1,13 +1,13 @@
 """
-SC IPC per-run 结果文件（run_id）单元测试。
+SC 步骤文件检测完成逻辑单元测试。
 
 覆盖：
 - _write_result 输出包含 run_id 字段
-- _send_persistent_command 等待 per-run 结果文件路径
-- 旧格式固定 slot 结果文件不会被误读
-- config 不匹配的结果被拒绝
-- SCDOC 不存在时成功结果被拒绝
+- SCDOC 文件 mtime 过滤（旧文件不被误判为新完成）
+- SCDOC 文件大小稳定性检测
+- 错误提前信号（result_file success=false）
 - _cleanup_run_files 仅清理 run-scoped 文件
+- per-run 结果文件路径隔离
 """
 
 import json
@@ -32,9 +32,7 @@ class TestWriteResultRunId:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _import_write_result(self):
-        """延迟导入 spaceclaim_transit 中的 _write_result。"""
-        # spaceclaim_transit 依赖 SpaceClaim API，无法直接 import。
-        # 直接复制 _write_result 的核心逻辑进行测试。
+        """复制 _write_result 的核心逻辑进行测试（无法直接 import transit）。"""
         import io
 
         def _write_result(result_file, config_name, success, message="",
@@ -91,7 +89,6 @@ class TestWriteResultRunId:
         result_path = os.path.join(self.tmpdir, "sc_result_1_xyz.json")
         write_result(result_path, "5", False, "fail", run_id="xyz")
 
-        # .tmp 文件不应残留
         assert not os.path.exists(result_path + ".tmp")
         assert os.path.exists(result_path)
 
@@ -102,117 +99,151 @@ class TestWriteResultRunId:
 
 
 # ====================================================================
-# per-run 结果文件路径隔离测试
+# SCDOC 文件 mtime 过滤测试
 # ====================================================================
 
-class TestPerRunResultIsolation:
-    """验证不同 run_id 的结果文件互不干扰。"""
+class TestScdocMtimeFiltering:
+    """验证 mtime 过滤：仅接受命令发送后创建/修改的 SCDOC 文件。"""
 
     def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="sc_isolation_test_")
+        self.tmpdir = tempfile.mkdtemp(prefix="sc_mtime_test_")
 
     def teardown_method(self):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_different_run_ids_different_files(self):
-        """不同 run_id 应产生不同的结果文件路径。"""
-        slot_id = 1
-        run_a = "aaa111"
-        run_b = "bbb222"
+    def test_old_file_rejected_by_mtime(self):
+        """mtime 早于命令发送时刻的文件应被跳过。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
 
-        path_a = os.path.join(self.tmpdir,
-                              "sc_result_{}_{}.json".format(slot_id, run_a))
-        path_b = os.path.join(self.tmpdir,
-                              "sc_result_{}_{}.json".format(slot_id, run_b))
+        # 创建一个旧文件（mtime = 1000）
+        with open(scdoc_file, "w") as f:
+            f.write("old content")
+        os.utime(scdoc_file, (1000, 1000))
 
-        assert path_a != path_b
+        command_sent_at = 2000.0
 
-        # 写入两个不同结果
-        with open(path_a, "w") as f:
-            json.dump({"config": "1", "run_id": run_a, "success": True}, f)
-        with open(path_b, "w") as f:
-            json.dump({"config": "2", "run_id": run_b, "success": True}, f)
+        file_mtime = os.path.getmtime(scdoc_file)
+        assert file_mtime < command_sent_at - 1.0  # 应被判定为旧文件
 
-        # 读取 run_a 的结果不应包含 run_b 的数据
-        with open(path_a, "r") as f:
-            data_a = json.load(f)
-        assert data_a["config"] == "1"
-        assert data_a["run_id"] == run_a
+    def test_new_file_accepted_by_mtime(self):
+        """mtime 晚于命令发送时刻的文件应被接受。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
 
-    def test_stale_slot_result_not_read(self):
-        """旧格式固定 slot 结果文件不应被 per-run 等待逻辑读到。"""
-        slot_id = 1
-        run_id = "new_run_123"
+        command_sent_at = time.time() - 5.0  # 5 秒前发送
 
-        # 模拟旧格式残留结果文件
-        old_result = os.path.join(self.tmpdir,
-                                  "sc_result_{}.json".format(slot_id))
-        with open(old_result, "w") as f:
-            json.dump({"config": "99", "success": True}, f)
+        # 创建一个新文件（当前时间）
+        with open(scdoc_file, "w") as f:
+            f.write("new content")
 
-        # 新格式 per-run 结果文件路径
-        new_result = os.path.join(
-            self.tmpdir, "sc_result_{}_{}.json".format(slot_id, run_id))
+        file_mtime = os.path.getmtime(scdoc_file)
+        assert file_mtime >= command_sent_at - 1.0  # 应被判定为新文件
 
-        # 新路径不应存在（旧文件不影响）
-        assert not os.path.exists(new_result)
+    def test_mtime_within_tolerance(self):
+        """mtime 在 1.0s 容差内的文件应被接受。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
+        command_sent_at = time.time()
 
-        # 写入新结果
-        with open(new_result, "w") as f:
-            json.dump({"config": "1", "run_id": run_id, "success": True}, f)
+        with open(scdoc_file, "w") as f:
+            f.write("content")
 
-        with open(new_result, "r") as f:
+        file_mtime = os.path.getmtime(scdoc_file)
+        assert file_mtime >= command_sent_at - 1.0  # 容差 1.0s
+
+
+# ====================================================================
+# SCDOC 文件大小稳定性检测测试
+# ====================================================================
+
+class TestScdocSizeStability:
+    """验证文件大小稳定性检测逻辑。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="sc_stable_test_")
+
+    def teardown_method(self):
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_stable_size_detected(self):
+        """文件大小在窗口期内不变应被判定为稳定。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
+        with open(scdoc_file, "w") as f:
+            f.write("x" * 1024)
+
+        scdoc_stable_seconds = 0.1  # 测试用短窗口
+
+        size_1 = os.path.getsize(scdoc_file)
+        stable_since = time.time()
+
+        time.sleep(scdoc_stable_seconds + 0.05)
+
+        size_2 = os.path.getsize(scdoc_file)
+        now = time.time()
+
+        assert size_1 == size_2
+        assert now - stable_since >= scdoc_stable_seconds
+
+    def test_changing_size_not_stable(self):
+        """文件大小在窗口期内变化不应被判定为稳定。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
+
+        with open(scdoc_file, "w") as f:
+            f.write("x" * 512)
+        size_1 = os.path.getsize(scdoc_file)
+
+        with open(scdoc_file, "a") as f:
+            f.write("y" * 512)
+        size_2 = os.path.getsize(scdoc_file)
+
+        assert size_1 != size_2  # 大小变化 → 不稳定
+
+    def test_zero_size_file_not_accepted(self):
+        """大小为 0 的文件不应被接受。"""
+        scdoc_file = os.path.join(self.tmpdir, "model_gen4_1.scdoc")
+        with open(scdoc_file, "wb"):
+            pass  # 空文件
+
+        assert os.path.getsize(scdoc_file) == 0
+
+
+# ====================================================================
+# 错误提前信号测试
+# ====================================================================
+
+class TestErrorSignal:
+    """验证 result_file 中 success=false 作为错误提前信号。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="sc_error_test_")
+
+    def teardown_method(self):
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_error_result_detected(self):
+        """success=false 的结果文件应被检测为错误信号。"""
+        result_file = os.path.join(self.tmpdir, "sc_result_1_run123.json")
+        with open(result_file, "w") as f:
+            json.dump({"config": "1", "success": False,
+                       "message": "SaveAs failed"}, f)
+
+        with open(result_file, "r") as f:
             data = json.load(f)
-        assert data["config"] == "1"
-        assert data["run_id"] == run_id
+        assert data["success"] is False
+        assert "SaveAs" in data["message"]
 
+    def test_success_result_not_used_for_completion(self):
+        """success=true 的结果文件不作为完成依据（仅靠 SCDOC 文件检测）。"""
+        result_file = os.path.join(self.tmpdir, "sc_result_1_run123.json")
+        with open(result_file, "w") as f:
+            json.dump({"config": "1", "success": True,
+                       "message": "ok"}, f)
 
-# ====================================================================
-# run_id 一致性校验测试
-# ====================================================================
-
-class TestRunIdValidation:
-    """验证结果文件中 run_id 与期望值的一致性校验。"""
-
-    def test_matching_run_id_accepted(self):
-        """run_id 匹配时结果应被接受。"""
-        expected_run_id = "abc123"
-        result_data = {"config": "3", "run_id": "abc123", "success": True}
-        assert str(result_data.get("run_id")) == str(expected_run_id)
-
-    def test_mismatched_run_id_rejected(self):
-        """run_id 不匹配时结果应被拒绝。"""
-        expected_run_id = "abc123"
-        result_data = {"config": "3", "run_id": "WRONG", "success": True}
-        assert str(result_data.get("run_id")) != str(expected_run_id)
-
-    def test_missing_run_id_in_result_accepted(self):
-        """结果中无 run_id 字段时（向后兼容）应被接受。"""
-        result_data = {"config": "3", "success": True}
-        # run_id 为 None 时不做过滤
-        result_run_id = result_data.get("run_id")
-        assert result_run_id is None  # 无 run_id，不做过滤
-
-
-# ====================================================================
-# config 一致性校验测试
-# ====================================================================
-
-class TestConfigValidation:
-    """验证结果文件中 config 与期望值的一致性校验。"""
-
-    def test_matching_config_accepted(self):
-        """config 匹配时结果应被接受。"""
-        expected_config = 3
-        result_data = {"config": "3", "success": True}
-        assert str(result_data.get("config")) == str(expected_config)
-
-    def test_mismatched_config_rejected(self):
-        """config 不匹配时结果应被拒绝。"""
-        expected_config = 3
-        result_data = {"config": "99", "success": True}
-        assert str(result_data.get("config")) != str(expected_config)
+        with open(result_file, "r") as f:
+            data = json.load(f)
+        # success=true 存在但不影响完成判定
+        assert data["success"] is True
 
 
 # ====================================================================
@@ -283,3 +314,41 @@ class TestCleanupRunFiles:
         self._simulate_cleanup_run_files(slot_id, run_id)
 
         assert os.path.exists(ready_file)
+
+
+# ====================================================================
+# per-run 结果文件路径隔离测试
+# ====================================================================
+
+class TestPerRunResultIsolation:
+    """验证不同 run_id 的结果文件互不干扰。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="sc_isolation_test_")
+
+    def teardown_method(self):
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_different_run_ids_different_files(self):
+        """不同 run_id 应产生不同的结果文件路径。"""
+        slot_id = 1
+        run_a = "aaa111"
+        run_b = "bbb222"
+
+        path_a = os.path.join(self.tmpdir,
+                              "sc_result_{}_{}.json".format(slot_id, run_a))
+        path_b = os.path.join(self.tmpdir,
+                              "sc_result_{}_{}.json".format(slot_id, run_b))
+
+        assert path_a != path_b
+
+        with open(path_a, "w") as f:
+            json.dump({"config": "1", "run_id": run_a, "success": True}, f)
+        with open(path_b, "w") as f:
+            json.dump({"config": "2", "run_id": run_b, "success": True}, f)
+
+        with open(path_a, "r") as f:
+            data_a = json.load(f)
+        assert data_a["config"] == "1"
+        assert data_a["run_id"] == run_a
