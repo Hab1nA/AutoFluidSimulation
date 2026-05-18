@@ -27,6 +27,10 @@ import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
 from typing import List
 
+import pytest
+
+openpyxl = pytest.importorskip("openpyxl", reason="test_sw_export_workflow 需要 openpyxl 创建测试 Excel 文件")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 必须在任何 engine.*/utils.* 导入之前设置日志目录环境变量，
@@ -190,7 +194,6 @@ class TestDesignTableValidation(unittest.TestCase):
     def _create_test_excel(self, row1_content=None, row2_content=None,
                             data_rows=None, filename="test_dt.xlsx"):
         """创建测试用 Excel 文件。"""
-        import openpyxl
         filepath = os.path.join(self.tmpdir, filename)
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -251,7 +254,6 @@ class TestDesignTableValidation(unittest.TestCase):
         self.assertTrue(len(warnings) > 0, "Expected warnings for nonexistent file")
 
     def test_empty_excel(self):
-        import openpyxl
         filepath = os.path.join(self.tmpdir, "empty.xlsx")
         wb = openpyxl.Workbook()
         wb.save(filepath)
@@ -579,7 +581,6 @@ class TestDesignTableImportStrategy(unittest.TestCase):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _create_param_excel(self, param_names, config_data, filename="params.xlsx"):
-        import openpyxl
         filepath = os.path.join(self.tmpdir, filename)
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -630,7 +631,6 @@ class TestDesignTableImportStrategy(unittest.TestCase):
                          "Should return False when no params match model")
 
     def test_apply_params_via_com_missing_row2(self):
-        import openpyxl
         filepath = os.path.join(self.tmpdir, "no_row2.xlsx")
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -765,7 +765,6 @@ class TestErrorHandling(unittest.TestCase):
 
     def test_design_table_existing_skip_import(self):
         """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
-        import openpyxl
         excel_path = os.path.join(self.tmpdir, "nonexistent_params.xlsx")
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -838,7 +837,6 @@ class TestEndToEndWorkflow(unittest.TestCase):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _create_e2e_excel(self, num_configs: int = 5):
-        import openpyxl
         filepath = os.path.join(self.tmpdir, "e2e_params.xlsx")
         wb = openpyxl.Workbook()
         ws = wb.active
@@ -899,7 +897,6 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
     def test_workflow_existing_design_table_skip_import(self):
         """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
-        import openpyxl
         excel_path = os.path.join(self.tmpdir, "bad_params.xlsx")
         wb = openpyxl.Workbook()
         ws = wb.active

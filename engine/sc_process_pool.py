@@ -10,10 +10,10 @@ SpaceClaim 进程在处理完一个构型后不退出，等待下一个构型命
     → transit.py(_persistent_loop: 轮询命令文件 → 执行转换 → 写入结果文件)
 
 文件协议 IPC：
-  命令: {cmd_dir}/sc_cmd_{slot_id}.json    -> {"config":3,"stepdir":"...","scdocdir":"..."}
-  结果: {cmd_dir}/sc_result_{slot_id}.json -> {"config":"3","success":true,"message":"..."}
-  就绪: {cmd_dir}/sc_ready_{slot_id}.json  -> {"ready":true,"slot_id":0}
-  退出: sc_cmd_{slot_id}.json              -> {"command":"quit"}
+  命令: {cmd_dir}/sc_cmd_{slot_id}.json              -> {"command":"process","run_id":"...","config":3,...}
+  结果: {cmd_dir}/sc_result_{slot_id}_{run_id}.json  -> {"config":"3","run_id":"...","success":true,...}
+  就绪: {cmd_dir}/sc_ready_{slot_id}.json            -> {"ready":true,"slot_id":0}
+  退出: sc_cmd_{slot_id}.json                        -> {"command":"quit"}
 """
 
 import json
@@ -21,6 +21,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional, Dict
 
@@ -257,7 +258,12 @@ class SCProcessPool:
     def _send_persistent_command(self, slot: PersistentSlot, config_name: int,
                                  paused_event: Optional[threading.Event],
                                  stopped_event: Optional[threading.Event]) -> bool:
-        """向常驻进程发送命令并等待结果。"""
+        """向常驻进程发送命令并等待结果。
+
+        使用 per-run 结果文件避免跨构型竞态：每次命令携带唯一 run_id，
+        脚本将结果写入 sc_result_{slot_id}_{run_id}.json，Python 仅等待
+        该路径——不会误读上次运行的残留结果。
+        """
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
         scdoc_name = get_step_filename("SC", config_name)
@@ -269,10 +275,19 @@ class SCProcessPool:
         scdoc_file = os.path.join(scdoc_dir, scdoc_name)
         os.makedirs(scdoc_dir, exist_ok=True)
 
+        # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
+        run_id = uuid.uuid4().hex[:12]
         cmd_file = os.path.join(self._persistent_cmd_dir, f"sc_cmd_{slot.slot_id}.json")
-        result_file = os.path.join(self._persistent_cmd_dir, f"sc_result_{slot.slot_id}.json")
+        result_file = os.path.join(self._persistent_cmd_dir,
+                                   f"sc_result_{slot.slot_id}_{run_id}.json")
 
-        cmd_data = {"config": config_name, "stepdir": step_dir, "scdocdir": scdoc_dir}
+        cmd_data = {
+            "command": "process",
+            "run_id": run_id,
+            "config": config_name,
+            "stepdir": step_dir,
+            "scdocdir": scdoc_dir,
+        }
         try:
             with open(cmd_file, "w") as f:
                 json.dump(cmd_data, f)
@@ -280,41 +295,86 @@ class SCProcessPool:
             logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
             return False
 
-        logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id})")
+        logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})")
 
         timeout = ENGINE_CONFIG["sc_timeout"]
         deadline = time.time() + timeout
         poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
+        scdoc_stable_seconds = 3.0  # SCDOC 文件大小稳定判定窗口
 
         while True:
             if slot.process is not None and slot.process.poll() is not None:
                 logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 (exit={slot.process.returncode})")
+                self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
             if paused_event is not None and paused_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停取消")
-                self._cleanup_ipc_files(slot.slot_id)
+                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因暂停取消")
+                self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因停止取消")
-                self._cleanup_ipc_files(slot.slot_id)
+                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消")
+                self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
             if os.path.exists(result_file):
                 try:
                     with open(result_file, "r") as f:
                         result_data = json.load(f)
+                    result_config = result_data.get("config")
+                    result_run_id = result_data.get("run_id")
                     success = result_data.get("success", False)
                     message = result_data.get("message", "")
+
+                    # ★ 校验 run_id 一致性：防读错结果文件
+                    if result_run_id is not None and str(result_run_id) != str(run_id):
+                        logger.warning(
+                            f"[SC-Pool] 结果文件 run_id 不匹配 "
+                            f"(期望={run_id}, 实际={result_run_id})，跳过"
+                        )
+                        time.sleep(poll_interval)
+                        continue
+
                     try:
                         os.remove(result_file)
                     except OSError:
                         pass
+
                     if success:
-                        if os.path.exists(scdoc_file):
-                            file_size = os.path.getsize(scdoc_file)
-                            logger.info(f"[SC-Pool] OK 构型{config_name} SCDOC: {os.path.basename(scdoc_file)} ({file_size} bytes)")
+                        # ★ 校验 config 一致性
+                        if result_config is not None and str(result_config) != str(config_name):
+                            logger.error(
+                                f"[SC-Pool] 结果 config 不匹配 "
+                                f"(期望={config_name}, 实际={result_config})，视为失败"
+                            )
+                            return False
+
+                        # ★ SCDOC 存在性 + 稳定性校验
+                        if not os.path.exists(scdoc_file):
+                            logger.error(f"[SC-Pool] 构型{config_name} result=success 但 SCDOC 不存在")
+                            return False
+
+                        size_1 = os.path.getsize(scdoc_file)
+                        if size_1 <= 0:
+                            logger.error(f"[SC-Pool] 构型{config_name} SCDOC 大小为 0")
+                            return False
+
+                        time.sleep(scdoc_stable_seconds)
+                        if not os.path.exists(scdoc_file):
+                            logger.error(f"[SC-Pool] 构型{config_name} SCDOC 在稳定性等待期间消失")
+                            return False
+                        size_2 = os.path.getsize(scdoc_file)
+                        if size_2 != size_1:
+                            logger.warning(
+                                f"[SC-Pool] 构型{config_name} SCDOC 大小仍在变化 "
+                                f"({size_1} -> {size_2})，接受（SaveAs 可能已锁定文件）"
+                            )
+
+                        logger.info(
+                            f"[SC-Pool] OK 构型{config_name} SCDOC: "
+                            f"{os.path.basename(scdoc_file)} ({size_2} bytes)"
+                        )
                         return True
                     else:
                         logger.error(f"[SC-Pool] FAIL 构型{config_name} 转换失败: {message}")
@@ -328,8 +388,8 @@ class SCProcessPool:
                     return False
 
             if time.time() >= deadline:
-                logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s)")
-                self._cleanup_ipc_files(slot.slot_id)
+                logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}")
+                self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
             time.sleep(poll_interval)
@@ -338,9 +398,26 @@ class SCProcessPool:
     # 槽位生命周期
     # ==================================================================
 
+    def _cleanup_run_files(self, slot_id: int, run_id: str) -> None:
+        """清理单次运行的结果文件（不清理 ready 文件和槽位级命令文件）。"""
+        for suffix in [f"sc_result_{slot_id}_{run_id}.json",
+                       f"sc_result_{slot_id}_{run_id}.json.tmp"]:
+            path = os.path.join(self._persistent_cmd_dir, suffix)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
     def _cleanup_ipc_files(self, slot_id: int) -> None:
-        """清理槽位相关的所有 IPC 文件（命令、结果、就绪标志）。"""
-        for suffix in [f"sc_cmd_{slot_id}.json", f"sc_result_{slot_id}.json",
+        """清理槽位相关的所有 IPC 文件（命令、结果、就绪标志）。
+
+        用于槽位整体关闭/重置场景（shutdown_all / reset），
+        不在单次命令超时时调用——避免误删 ready 文件。
+        """
+        # 兼容清理：旧格式固定结果文件 + 本次改动后不再产生的 per-run 结果
+        for suffix in [f"sc_cmd_{slot_id}.json",
+                       f"sc_result_{slot_id}.json",
                        f"sc_result_{slot_id}.json.tmp",
                        f"sc_ready_{slot_id}.json"]:
             path = os.path.join(self._persistent_cmd_dir, suffix)
@@ -349,6 +426,17 @@ class SCProcessPool:
                     os.remove(path)
             except OSError:
                 pass
+        # 清理所有 per-run 结果文件
+        try:
+            prefix = f"sc_result_{slot_id}_"
+            for name in os.listdir(self._persistent_cmd_dir):
+                if name.startswith(prefix) and name.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(self._persistent_cmd_dir, name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     def _cleanup_persistent_slot(self, slot: PersistentSlot) -> None:
         """清理常驻槽位（终止进程、清理文件）。调用方须持有 _lock。"""

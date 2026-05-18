@@ -224,7 +224,7 @@ def _get_script_args():
 # 主处理逻辑
 # ============================================================================
 
-def process_step_file(config_name, step_dir, scdoc_dir):
+def process_step_file(config_name, step_dir, scdoc_dir, result_file=None):
     """
     处理单个 STEP 文件：打开 → 创建命名选择集 → 保存 SCDOC。
 
@@ -232,6 +232,9 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         config_name: 构型编号（整数或字符串）
         step_dir: STEP 文件目录
         scdoc_dir: SCDOC 输出目录
+        result_file: 可选，per-run 结果文件路径。提供时在 SaveAs 校验成功后
+                     立即写入成功结果（早完成信号），避免 window.Close 卡住
+                     导致 Python 侧超时。
     """
     file_index = int(config_name)
 
@@ -437,6 +440,19 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         logger.error("输出文件未生成: {}".format(out_path))
         return False
 
+    # ★ 早完成信号：SaveAs + 校验成功后立即通知 Python 侧，
+    #   避免后续 window.Close 卡住导致 Python 超时和竞态。
+    #   _persistent_loop 会在 process_step_file 返回后再次写入
+    #   结果文件（幂等覆盖），此处是安全的提前通知。
+    if result_file is not None:
+        try:
+            _write_result(result_file, str(config_name), True,
+                          "SCDOC SaveAs 完成")
+            logger.info("早完成信号已写入: {}".format(result_file))
+        except Exception as e_early:
+            logger.warning("早完成信号写入失败（可忽略）: {}: {}".format(
+                type(e_early).__name__, e_early))
+
     # ------------------------------------------------------------------
     # 8. 关闭文档
     # ------------------------------------------------------------------
@@ -465,10 +481,16 @@ def process_step_file(config_name, step_dir, scdoc_dir):
 # ---- 常驻模式：文件协议 IPC ----
 # Bridge 启动 SpaceClaim 时设置 AUTOFLUID_SC_PERSISTENT=1，
 # 脚本进入命令轮询循环，SpaceClaim 进程不退出。
+#
+# 文件协议：
+#   命令: sc_cmd_{slot_id}.json              -> {"command":"process","run_id":"...","config":3,...}
+#   结果: sc_result_{slot_id}_{run_id}.json  -> {"config":"3","run_id":"...","success":true,...}
+#   就绪: sc_ready_{slot_id}.json            -> {"ready":true,"slot_id":0}
+#   退出: sc_cmd_{slot_id}.json              -> {"command":"quit"}
 _persistent_initialized = False
 
 def _persistent_loop():
-    """常驻模式主循环：轮询命令文件，执行转换，写入结果文件。"""
+    """常驻模式主循环：轮询命令文件，执行转换，写入 per-run 结果文件。"""
     global _persistent_initialized
     if _persistent_initialized:
         return
@@ -482,7 +504,6 @@ def _persistent_loop():
         return
 
     cmd_file = os.path.join(cmd_dir, "sc_cmd_{}.json".format(slot_id))
-    result_file = os.path.join(cmd_dir, "sc_result_{}.json".format(slot_id))
     ready_file = os.path.join(cmd_dir, "sc_ready_{}.json".format(slot_id))
 
     # 写入就绪标志
@@ -494,15 +515,11 @@ def _persistent_loop():
         logger.error("常驻模式: 写入就绪标志失败: {}".format(e))
         return
 
-    # 清理可能残留的结果文件
-    try:
-        if os.path.exists(result_file):
-            os.remove(result_file)
-    except (IOError, OSError):
-        pass
-
     poll_interval = 1.0
     logger.info("常驻模式: 开始轮询命令文件 {}".format(cmd_file))
+
+    # result_file 在每条命令中按 run_id 动态计算
+    result_file = ""
 
     while True:
         try:
@@ -516,7 +533,6 @@ def _persistent_loop():
                     cmd_data = json.load(f)
             except (ValueError, IOError, OSError) as e:
                 logger.error("常驻模式: 读取命令文件失败: {}".format(e))
-                # 清理损坏的命令文件
                 try:
                     os.remove(cmd_file)
                 except (IOError, OSError):
@@ -535,10 +551,21 @@ def _persistent_loop():
             config_name = str(cmd_data.get("config", ""))
             step_dir = cmd_data.get("stepdir", "")
             scdoc_dir = cmd_data.get("scdocdir", "")
+            run_id = cmd_data.get("run_id", "")
+
+            # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
+            if run_id:
+                result_file = os.path.join(
+                    cmd_dir, "sc_result_{}_{}".format(slot_id, run_id))
+            else:
+                # 兼容无 run_id 的旧命令格式
+                result_file = os.path.join(
+                    cmd_dir, "sc_result_{}".format(slot_id))
 
             if not config_name or not step_dir or not scdoc_dir:
                 logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))
-                _write_result(result_file, config_name, False, "命令缺少必要字段")
+                _write_result(result_file, config_name, False,
+                              "命令缺少必要字段", run_id=run_id)
                 try:
                     os.remove(cmd_file)
                 except (IOError, OSError):
@@ -552,14 +579,19 @@ def _persistent_loop():
                 pass
 
             logger.info("=" * 40)
-            logger.info("常驻模式: 开始处理构型 {}".format(config_name))
+            logger.info("常驻模式: 开始处理构型 {} (run={})".format(
+                config_name, run_id))
             logger.info("  STEP 目录: {}".format(step_dir))
             logger.info("  SCDOC 目录: {}".format(scdoc_dir))
 
-            success = process_step_file(config_name, step_dir, scdoc_dir)
+            # ★ 传入 result_file：process_step_file 在 SaveAs 成功后
+            #   会提前写入成功结果，避免 window.Close 卡住导致超时
+            success = process_step_file(config_name, step_dir, scdoc_dir,
+                                        result_file=result_file)
 
             _write_result(result_file, config_name, success,
-                          "转换成功" if success else "转换失败")
+                          "转换成功" if success else "转换失败",
+                          run_id=run_id)
 
             # ★ 日志调用单独包裹：即使日志器因编码问题崩溃，
             #   也不会导致异常传播到外层 except（那会覆盖已写入的结果文件）
@@ -575,7 +607,7 @@ def _persistent_loop():
             logger.critical("常驻模式: 主循环异常: {}: {}".format(
                 type(e).__name__, e))
             traceback.print_exc()
-            # 写入错误结果
+            # 写入错误结果（使用最近的 result_file）
             try:
                 _write_result(result_file, "", False,
                               "主循环异常: {}: {}".format(type(e).__name__, e))
@@ -585,7 +617,8 @@ def _persistent_loop():
     logger.info("常驻模式: 退出命令循环")
 
 
-def _write_result(result_file, config_name, success, message=""):
+def _write_result(result_file, config_name, success, message="",
+                  run_id=None):
     """写入结果文件。
 
     使用原子写入模式：先写 .tmp 文件再 rename，确保 Python 端
@@ -598,6 +631,8 @@ def _write_result(result_file, config_name, success, message=""):
         "message": str(message),
         "timestamp": time.time(),
     }
+    if run_id:
+        result["run_id"] = run_id
     try:
         # 先写临时文件再重命名，确保原子性
         tmp_file = result_file + ".tmp"
