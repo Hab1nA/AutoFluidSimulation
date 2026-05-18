@@ -100,7 +100,6 @@ class EngineConfig(TypedDict):
     solver_timeout: int
     max_retries: int
     state_refresh_interval: float
-    sc_process_mode: str
     sc_persistent_ready_timeout: int
 
 
@@ -330,8 +329,6 @@ ENGINE_CONFIG: EngineConfig = {
     "max_retries": 3,
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": 0.5,
-    # SC 进程模式："pooled"（常驻模式，消除启动开销）或 "oneshot"（传统模式）
-    "sc_process_mode": "oneshot",
     # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
     "sc_persistent_ready_timeout": 180,
 }

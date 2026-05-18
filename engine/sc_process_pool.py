@@ -22,7 +22,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import setup_logger
@@ -199,6 +199,15 @@ class SCProcessPool:
 
         self._cleanup_ipc_files(slot.slot_id)
 
+        # ★ 显式删除旧 ready 文件：防止前次运行的残留文件误导就绪检测
+        ready_file = os.path.join(self._persistent_cmd_dir, f"sc_ready_{slot.slot_id}.json")
+        try:
+            if os.path.exists(ready_file):
+                os.remove(ready_file)
+                logger.debug(f"[SC-Pool] 已清理旧 ready 文件: {ready_file}")
+        except OSError:
+            pass
+
         try:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -212,7 +221,6 @@ class SCProcessPool:
             slot.started_at = time.time()
             logger.info(f"[SC-Pool] 常驻 Bridge PID={process.pid}")
 
-            ready_file = os.path.join(self._persistent_cmd_dir, f"sc_ready_{slot.slot_id}.json")
             ready_timeout = ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
             deadline = time.time() + ready_timeout
 
@@ -331,8 +339,10 @@ class SCProcessPool:
     # ==================================================================
 
     def _cleanup_ipc_files(self, slot_id: int) -> None:
+        """清理槽位相关的所有 IPC 文件（命令、结果、就绪标志）。"""
         for suffix in [f"sc_cmd_{slot_id}.json", f"sc_result_{slot_id}.json",
-                       f"sc_result_{slot_id}.json.tmp"]:
+                       f"sc_result_{slot_id}.json.tmp",
+                       f"sc_ready_{slot_id}.json"]:
             path = os.path.join(self._persistent_cmd_dir, suffix)
             try:
                 if os.path.exists(path):

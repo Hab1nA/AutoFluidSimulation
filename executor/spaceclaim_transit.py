@@ -69,11 +69,20 @@ class _SpaceClaimLogger(object):
         level_name = self._LEVEL_NAMES.get(level, "INFO")
         line = "[{}] [{}] [{}] {}".format(timestamp, level_name, self._name, msg)
         try:
-            with io.open(self._log_file, "a", encoding="utf-8") as f:
+            # errors="replace": 遇到无法编码的字符（如 \x00）时替换为 ?，
+            # 防止 UnicodeEncodeError 导致整个日志调用链崩溃
+            with io.open(self._log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line + "\n")
         except (IOError, OSError):
             pass
-        print(line)
+        try:
+            print(line)
+        except (UnicodeEncodeError, IOError, OSError):
+            # IronPython print 在某些编码环境下也可能失败
+            try:
+                print(line.encode("ascii", "replace").decode("ascii"))
+            except Exception:
+                pass
 
     def debug(self, msg):
         """记录 DEBUG 级别日志。"""
@@ -446,67 +455,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     return True
 
 
-# ============================================================================
-# 脚本入口
-# ============================================================================
-# 说明：SpaceClaim 在 /RunScript 模式下会执行整个脚本文件。
-#       脚本末尾的 Main() 调用确保在作为 .py 文件直接运行时也能正常工作。
-#       SpaceClaim 不会自动调用 Main()，因此不存在双重执行问题。
-
-def Main():
-    """脚本主入口。由脚本末尾显式调用。"""
-    try:
-        # 获取脚本参数
-        script_args = _get_script_args()
-
-        if not script_args or len(script_args) < 3:
-            logger.error("=" * 60)
-            logger.error("参数不足！")
-            logger.info("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
-            logger.info("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
-            logger.error("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
-            logger.error("=" * 60)
-            return
-
-        config_name = script_args[0]
-        step_dir = script_args[1]
-        scdoc_dir = script_args[2]
-
-        logger.info("=" * 60)
-        logger.info("SpaceClaim Transit Script V23")
-        logger.info("  构型编号: {}".format(config_name))
-        logger.info("  STEP 目录: {}".format(step_dir))
-        logger.info("  SCDOC 目录: {}".format(scdoc_dir))
-        logger.info("=" * 60)
-
-        success = process_step_file(config_name, step_dir, scdoc_dir)
-
-        if success:
-            logger.info("构型 {} 转换成功".format(config_name))
-        else:
-            logger.error("构型 {} 转换失败".format(config_name))
-
-    except Exception as e:
-        logger.critical("脚本执行异常: {}: {}".format(type(e).__name__, e))
-        traceback.print_exc()
-
-    finally:
-        # ★ 脚本执行完毕后退出 SpaceClaim（/RunScript 模式会自动退出，
-        #    但显式调用确保在任何情况下 SpaceClaim 都能正常关闭，
-        #    避免残留进程影响下次启动）
-        # 若设置了环境变量 AUTOFLUID_SC_NOEXIT=1，则跳过退出（用于交互式调试）
-        if os.environ.get("AUTOFLUID_SC_NOEXIT", "") != "1":
-            try:
-                logger.info("正在退出 SpaceClaim...")
-                Command.Execute("Exit")
-            except Exception as e_exit:
-                logger.warning("退出 SpaceClaim 时异常（可能已在关闭中）: {}: {}".format(
-                    type(e_exit).__name__, e_exit))
-        else:
-            logger.info("AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
-
-
-# ============================================================================
+# ===========================================================================
 # 脚本入口
 # ============================================================================
 # 说明：SpaceClaim 在 /RunScript 模式下会执行整个脚本文件。
@@ -612,10 +561,15 @@ def _persistent_loop():
             _write_result(result_file, config_name, success,
                           "转换成功" if success else "转换失败")
 
-            if success:
-                logger.info("常驻模式: 构型 {} 转换成功".format(config_name))
-            else:
-                logger.error("常驻模式: 构型 {} 转换失败".format(config_name))
+            # ★ 日志调用单独包裹：即使日志器因编码问题崩溃，
+            #   也不会导致异常传播到外层 except（那会覆盖已写入的结果文件）
+            try:
+                if success:
+                    logger.info("常驻模式: 构型 {} 转换成功".format(config_name))
+                else:
+                    logger.error("常驻模式: 构型 {} 转换失败".format(config_name))
+            except Exception:
+                pass
 
         except Exception as e:
             logger.critical("常驻模式: 主循环异常: {}: {}".format(
@@ -632,7 +586,12 @@ def _persistent_loop():
 
 
 def _write_result(result_file, config_name, success, message=""):
-    """写入结果文件。"""
+    """写入结果文件。
+
+    使用原子写入模式：先写 .tmp 文件再 rename，确保 Python 端
+    不会读到半写状态的文件。写入后立即 flush + fsync，确保数据
+    落盘——即使后续代码抛出异常，结果文件也已可被 Python 端检测。
+    """
     result = {
         "config": config_name,
         "success": bool(success),
@@ -642,9 +601,13 @@ def _write_result(result_file, config_name, success, message=""):
     try:
         # 先写临时文件再重命名，确保原子性
         tmp_file = result_file + ".tmp"
-        with open(tmp_file, "w") as f:
+        with io.open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(result, f)
             f.write("\n")
+            # ★ 立即 flush + fsync：确保数据落盘，
+            #   即使后续代码抛出异常，Python 端也能读到完整结果
+            f.flush()
+            os.fsync(f.fileno())
         # Windows 下 rename 目标存在时会报错，先删除
         try:
             if os.path.exists(result_file):
@@ -652,8 +615,33 @@ def _write_result(result_file, config_name, success, message=""):
         except (IOError, OSError):
             pass
         os.rename(tmp_file, result_file)
-    except (IOError, OSError) as e:
-        logger.error("写入结果文件失败: {}".format(e))
+        logger.debug("结果文件已写入: {}".format(result_file))
+    except Exception as e:
+        # 捕获所有异常（包括 UnicodeEncodeError），确保不会因编码问题
+        # 导致结果文件完全丢失。尝试以纯 ASCII 方式降级写入。
+        logger.error("写入结果文件失败: {}: {}".format(type(e).__name__, e))
+        try:
+            fallback = {
+                "config": config_name,
+                "success": bool(success),
+                "message": "result_write_error",
+                "timestamp": time.time(),
+            }
+            tmp_file = result_file + ".tmp"
+            with io.open(tmp_file, "w", encoding="ascii", errors="replace") as f:
+                json.dump(fallback, f)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                if os.path.exists(result_file):
+                    os.remove(result_file)
+            except (IOError, OSError):
+                pass
+            os.rename(tmp_file, result_file)
+            logger.info("降级写入结果文件成功: {}".format(result_file))
+        except Exception as e2:
+            logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
 
 
 def Main():
