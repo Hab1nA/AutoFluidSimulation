@@ -338,7 +338,7 @@ def _run_all_mode():
         if daemon_proc is not None:
             if hasattr(daemon_proc, "_log_file_handle"):
                 try:
-                    daemon_proc._log_file_handle.close()  # type: ignore[attr-defined]
+                    daemon_proc._log_file_handle.close()
                 except (OSError, AttributeError):
                     pass
             if daemon_proc.poll() is None:

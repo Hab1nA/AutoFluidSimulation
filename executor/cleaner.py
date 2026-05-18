@@ -11,7 +11,10 @@
 """
 
 import os
-from typing import Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from utils.ssh_client import RemoteWorkstation
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
@@ -25,7 +28,7 @@ logger = setup_logger(__name__)
 class FileCleaner:
     """文件清理与系统自检器。"""
 
-    def __init__(self, state_manager, ssh_getter):
+    def __init__(self, state_manager: Any, ssh_getter: Callable[[], "RemoteWorkstation"]):
         """初始化清理器。
 
         Args:
@@ -67,7 +70,7 @@ class FileCleaner:
             if ssh.is_connected():
                 results["remote_checks"]["ssh"] = "连接成功"
                 remote_info = ssh.check_system(
-                    conda_exe=REMOTE_CONFIG["conda_exe"],  # type: ignore[arg-type]
+                    conda_exe=REMOTE_CONFIG["conda_exe"],
                     conda_env=REMOTE_CONFIG["conda_env"],
                 )
                 results["remote_checks"].update(remote_info)

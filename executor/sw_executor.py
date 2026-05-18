@@ -415,7 +415,7 @@ class SWExecutor:
             except Exception:
                 title = os.path.basename(sw_model)
             try:
-                sw_app.CloseDoc(title)  # type: ignore[union-attr]
+                sw_app.CloseDoc(title)
                 logger.info(f"[SW-Cleanup] 已关闭模型文档: {title}")
             except Exception as e_doc:
                 logger.debug(f"[SW-Cleanup] 关闭模型文档异常: {e_doc}")

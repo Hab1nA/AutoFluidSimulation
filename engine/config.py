@@ -7,7 +7,7 @@
 import os
 import sys
 import hashlib
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, TypedDict, cast
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -30,9 +30,82 @@ def _env_override(key: str, default: str) -> str:
 
 
 # ============================================================================
+# 配置字典类型定义 (TypedDict)
+# ============================================================================
+
+
+class LocalPathsConfig(TypedDict):
+    sw_exe: str
+    sw_model: str
+    excel: str
+    step_dir: str
+    sc_exe: str
+    sc_script: str
+    sc_bridge: str
+    scdoc_dir: str
+    log_dir: str
+    data_dir: str
+
+
+class RemoteConfig(TypedDict):
+    host: str
+    port: int
+    username: str
+    password: str
+    root_dir: str
+    scdoc_dir: str
+    msh_dir: str
+    result_dir: str
+    conda_env: str
+    conda_exe: str
+    meshing_script: str
+    solver_script: str
+    flag_dir: str
+
+
+class IPCConfig(TypedDict):
+    host: str
+    port: int
+    db_path: str
+    timeout: float
+    max_connections: int
+
+
+class ProcessManagementConfig(TypedDict):
+    min_valid_pid: int
+    ipc_ready_timeout: int
+    taskkill_timeout: int
+
+
+class OperationTimeoutsConfig(TypedDict):
+    sw_startup: int
+    sw_dispatch_startup_delay: int
+    sw_exit_wait_seconds: int
+    sc_poll_interval: float
+    ssh_connection: int
+    dir_recursion_limit: int
+    ssh_upload_max_retries: int
+
+
+class EngineConfig(TypedDict):
+    watchdog_interval: float
+    sw_macro_timeout: int
+    sw_close_doc_on_finish: bool
+    sw_exit_on_finish: bool
+    sw_visible: bool
+    sw_max_retries: int
+    sc_timeout: int
+    transfer_timeout: int
+    meshing_timeout: int
+    solver_timeout: int
+    max_retries: int
+    state_refresh_interval: float
+
+
+# ============================================================================
 # 本地 PC 路径配置
 # ============================================================================
-LOCAL_PATHS = {
+LOCAL_PATHS: LocalPathsConfig = {
     # SolidWorks 可执行文件路径（备选启动方案：COM Dispatch 失败时直接启动）
     "sw_exe": _env_override(
         "AUTOFLUID_SW_EXE",
@@ -90,7 +163,7 @@ LOCAL_PATHS = {
 # ============================================================================
 # 远程工作站 (Windows 22H2) SSH 配置
 # ============================================================================
-REMOTE_CONFIG = {
+REMOTE_CONFIG: RemoteConfig = {
     "host": os.environ.get("AUTOFLUID_SSH_HOST", "172.17.135.240"),
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
     "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
@@ -158,7 +231,7 @@ STEP_FILE_PATTERNS = {
 # ============================================================================
 # IPC 通信配置
 # ============================================================================
-IPC_CONFIG = {
+IPC_CONFIG: IPCConfig = {
     # 使用本地 TCP socket 进行 IPC
     "host": "127.0.0.1",
     "port": 9527,
@@ -173,7 +246,7 @@ IPC_CONFIG = {
 # ============================================================================
 # 进程管理常数
 # ============================================================================
-PROCESS_MANAGEMENT = {
+PROCESS_MANAGEMENT: ProcessManagementConfig = {
     # 最小有效 PID（用于验证 PID 值）
     "min_valid_pid": 1,
     # IPC 就绪超时（秒） —— 启动 Daemon 后等待其 IPC 端口就绪的最长时间
@@ -185,7 +258,7 @@ PROCESS_MANAGEMENT = {
 # ============================================================================
 # 操作超时常数
 # ============================================================================
-OPERATION_TIMEOUTS = {
+OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     # SolidWorks 启动超时（秒）
     "sw_startup": 60,
     # SW COM Dispatch 后等待窗口加载的延迟（秒）
@@ -229,7 +302,7 @@ def get_db_path_for_fingerprint(fingerprint: str) -> str:
 # ============================================================================
 # 调度引擎配置
 # ============================================================================
-ENGINE_CONFIG = {
+ENGINE_CONFIG: EngineConfig = {
     # 文件监控轮询间隔（秒）
     "watchdog_interval": 1.0,
     # SW 宏执行超时（秒）—— 导出所有构型的总时间
@@ -258,7 +331,7 @@ ENGINE_CONFIG = {
 }
 
 
-def get_step_filename(step_name: str, config_name: int):
+def get_step_filename(step_name: str, config_name: int) -> Optional[str]:
     """根据 STEP_FILE_PATTERNS 生成文件名。"""
     pattern = STEP_FILE_PATTERNS.get(step_name)
     if not pattern:
@@ -319,7 +392,7 @@ def _apply_env_overrides():
                 REMOTE_CONFIG[key] = env_val
 
 
-def load_toml_config(toml_path: str = None) -> dict:
+def load_toml_config(toml_path: Optional[str] = None) -> dict[str, Any]:
     """
     从 autofluid_config.toml 加载配置。
     若文件不存在或无法解析，返回空字典。
@@ -337,10 +410,10 @@ def load_toml_config(toml_path: str = None) -> dict:
         if sys.version_info >= (3, 11):
             import tomllib
             with open(toml_path, "rb") as f:
-                return tomllib.load(f)
+                return cast(dict[str, Any], tomllib.load(f))
         else:
             import toml
-            return toml.load(toml_path)
+            return cast(dict[str, Any], toml.load(toml_path))
     except Exception:
         return {}
 

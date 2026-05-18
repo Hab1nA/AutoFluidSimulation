@@ -14,7 +14,7 @@
 """
 import os
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
@@ -37,7 +37,7 @@ class TaskRunner:
     保持 SSH 连接和 SCProcessPool，将具体执行逻辑委托给子模块。
     """
 
-    def __init__(self, state_manager):
+    def __init__(self, state_manager: Any):
         """初始化任务执行器。
 
         Args:
@@ -89,10 +89,10 @@ class TaskRunner:
         with self._ssh_lock:
             if self._ssh is None:
                 self._ssh = RemoteWorkstation(
-                    host=REMOTE_CONFIG["host"],  # type: ignore[arg-type]
-                    port=REMOTE_CONFIG["port"],  # type: ignore[arg-type]
-                    username=REMOTE_CONFIG["username"],  # type: ignore[arg-type]
-                    password=REMOTE_CONFIG["password"],  # type: ignore[arg-type]
+                    host=REMOTE_CONFIG["host"],
+                    port=REMOTE_CONFIG["port"],
+                    username=REMOTE_CONFIG["username"],
+                    password=REMOTE_CONFIG["password"],
                 )
             if not self._ssh.is_connected():
                 if not self._ssh.connect():

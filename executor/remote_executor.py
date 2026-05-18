@@ -10,7 +10,10 @@
 
 import os
 import threading
-from typing import Optional
+from typing import Any, Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from utils.ssh_client import RemoteWorkstation
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
@@ -28,7 +31,7 @@ class RemoteExecutor:
     共享同一个 SSH 连接。
     """
 
-    def __init__(self, state_manager, ssh_getter, ssh_lock: threading.RLock):
+    def __init__(self, state_manager: Any, ssh_getter: Callable[[], "RemoteWorkstation"], ssh_lock: threading.RLock):
         """初始化远程执行器。
 
         Args:
@@ -128,7 +131,7 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
                 success = ssh.wait_for_flag(
                     flag_file,
-                    timeout=ENGINE_CONFIG["meshing_timeout"],  # type: ignore[arg-type]
+                    timeout=ENGINE_CONFIG["meshing_timeout"],
                     poll_interval=10,
                     paused_event=paused_event,
                     stopped_event=stopped_event,
@@ -185,7 +188,7 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
                 success = ssh.wait_for_flag(
                     flag_file,
-                    timeout=ENGINE_CONFIG["solver_timeout"],  # type: ignore[arg-type]
+                    timeout=ENGINE_CONFIG["solver_timeout"],
                     poll_interval=30,
                     paused_event=paused_event,
                     stopped_event=stopped_event,
