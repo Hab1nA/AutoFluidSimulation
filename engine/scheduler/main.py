@@ -346,13 +346,11 @@ class PipelineScheduler:
                     )
                     sw_completed_count += 1
                 else:
-                    self.state.set_step_status(
-                        cn, "SW", STATUS_ERROR,
-                        "暂停恢复: STEP 文件缺失"
-                    )
-                    sw_error_count += 1
-                    logger.warning(
-                        f"[Resume] 构型{cn} SW: STEP 文件缺失，标记为 Error"
+                    # ★ 保持 PAUSED 状态：STEP 文件缺失可能是因为用户在暂停期间
+                    #   手动关闭了 SW 进程。此时不应自动标记 Error 触发重试，
+                    #   而应保持 PAUSED，由 _handle_sw_breakpoint_resume 统一处理。
+                    logger.info(
+                        f"[Resume] 构型{cn} SW: STEP 文件缺失，保持 PAUSED 状态"
                     )
             else:
                 self.state.set_step_status(
@@ -362,7 +360,7 @@ class PipelineScheduler:
                 sw_error_count += 1
 
         if sw_error_count > 0:
-            # 有 SW Error 构型 → 清除 sw_macro_started 标志以允许重新运行 SW
+            # 有 SW Error 构型（仅文件名生成失败等不可恢复错误）
             self.state.set_sw_macro_started(False)
             logger.warning(
                 f"[Resume] SW 步骤: {sw_completed_count} 个完成, "

@@ -149,6 +149,7 @@ class SWExecutor:
 
             sw_app = None
             doc = None
+            paused_during_export = False
             try:
                 # 1. 连接 SW
                 sw_app = self._connect_sw()
@@ -192,6 +193,19 @@ class SWExecutor:
                         pass
                     return False
 
+                # 4.5 暂停检查：若暂停标志已置位，跳过校验和清理，
+                #     保持 SW 进程存活以便恢复时继续使用
+                paused_during_export = (
+                    self._paused_event is not None
+                    and self._paused_event.is_set()
+                )
+                if paused_during_export:
+                    logger.info(
+                        "[SW] 暂停标志已置位，跳过 STEP 校验和 SW 清理，"
+                        "保持 SW 进程存活"
+                    )
+                    return True
+
                 # 5. 安全网校验
                 total_found = self._verify_step_exports(step_dir)
                 if total_found > 0:
@@ -203,7 +217,8 @@ class SWExecutor:
 
                 return True
             finally:
-                self._disconnect_sw(sw_app, doc, sw_model)
+                if not paused_during_export:
+                    self._disconnect_sw(sw_app, doc, sw_model)
 
         except ImportError:
             logger.error("[SW] win32com 未安装，请执行: pip install pywin32")
