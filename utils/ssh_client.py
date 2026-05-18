@@ -355,6 +355,8 @@ class RemoteWorkstation:
         # 转义单引号（PowerShell 单引号字符串中 ' 需写成 ''）
         safe_cmd = command.replace("'", "''")
         safe_flag = flag_file.replace("'", "''")
+        # 使用 -f 占位符替换可直接生成双引号字符，避免在单引号字符串中引入 \"
+        # 等字面量导致 cmd.exe 引号结构损坏。
         return (
             f"$c = '{safe_cmd}'\n"
             f"$f = '{safe_flag}'\n"

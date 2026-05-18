@@ -1,4 +1,5 @@
 import base64
+from unittest.mock import patch
 
 from utils.ssh_client import RemoteWorkstation, _PS_EXE
 
@@ -21,16 +22,15 @@ def test_exec_background_generates_valid_encoded_command_with_spaces_and_quotes(
         calls.append((command, timeout))
         return ("", "", 0)
 
-    host.ensure_connected = lambda: True  # type: ignore[method-assign]
-    host.exec_command = fake_exec  # type: ignore[method-assign]
-
     command = (
         r'call "C:\Program Files\Anaconda3\Scripts\activate.bat" '
         r'&& python "D:\work dir\run.py" --msg "hello world"'
     )
     flag_file = r"D:\flags\task done.flag"
 
-    assert host.exec_background(command, flag_file) is True
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            assert host.exec_background(command, flag_file) is True
     assert len(calls) == 2
 
     launch_cmd = calls[1][0]
