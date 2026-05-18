@@ -317,6 +317,15 @@ class StateManager:
                 ).fetchone()
                 return row["retry_count"] if row else 0
 
+    def get_step_retry_count(self, config_name: int, step_name: str) -> int:
+        """查询指定构型指定步骤的当前重试次数。"""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
+                (config_name, step_name)
+            ).fetchone()
+            return row["retry_count"] if row else 0
+
     # ------------------------------------------------------------------
     # 批量状态操作（用于 reset 命令）
     # ------------------------------------------------------------------

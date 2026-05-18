@@ -151,19 +151,19 @@ class SWPhaseHandler:
             self.worker_pool_manager.start_if_needed()
 
         # 执行 SW 步骤（含重试机制）
-        sw_max_retries = ENGINE_CONFIG.get("sw_max_retries", 1)
+        max_retries = int(ENGINE_CONFIG["max_retries"])
         sw_success = False
-        for sw_attempt in range(1, int(sw_max_retries) + 1):
+        for sw_attempt in range(1, max_retries + 1):
             if self._stopped.is_set():
                 return False
 
             if sw_attempt > 1:
-                self._prepare_sw_retry(all_configs, sw_attempt, sw_max_retries)
+                self._prepare_sw_retry(all_configs, sw_attempt, max_retries)
                 if self._stopped.is_set():
                     return False
 
             logger.info(
-                f"[SW] 执行 SW 步骤 (尝试 {sw_attempt}/{sw_max_retries})..."
+                f"[SW] 执行 SW 步骤 (尝试 {sw_attempt}/{max_retries})..."
             )
             sw_success = self.runner.execute_sw_step()
             if sw_success:
@@ -176,7 +176,7 @@ class SWPhaseHandler:
                 if sw_st not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
                     self.state.set_step_status(
                         cn, "SW", STATUS_ERROR,
-                        f"SW 步骤失败（重试 {sw_max_retries} 次后）"
+                        f"SW 步骤失败（重试 {max_retries} 次后）"
                     )
             self.state.set_engine_status("stopped")
             logger.error("[SW] SW 步骤失败，流水线中止")

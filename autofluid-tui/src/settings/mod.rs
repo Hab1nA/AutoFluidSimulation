@@ -108,7 +108,6 @@ pub struct EngineConfig {
     pub sw_close_doc_on_finish: bool,
     pub sw_exit_on_finish: bool,
     pub sw_visible: bool,
-    pub sw_max_retries: u32,
     pub sc_timeout: u64,
     pub transfer_timeout: u64,
     pub meshing_timeout: u64,
@@ -125,7 +124,6 @@ impl Default for EngineConfig {
             sw_close_doc_on_finish: true,
             sw_exit_on_finish: true,
             sw_visible: true,
-            sw_max_retries: 2,
             sc_timeout: 300,
             transfer_timeout: 120,
             meshing_timeout: 600,
@@ -239,9 +237,9 @@ impl SettingCategory {
             },
             SettingCategory::EngineConfig => match idx {
                 0 => "watchdog_interval", 1 => "sw_macro_timeout", 2 => "sw_close_doc_on_finish",
-                3 => "sw_exit_on_finish", 4 => "sw_visible", 5 => "sw_max_retries",
-                6 => "sc_timeout", 7 => "transfer_timeout", 8 => "meshing_timeout",
-                9 => "solver_timeout", 10 => "max_retries", 11 => "state_refresh_interval",
+                3 => "sw_exit_on_finish", 4 => "sw_visible",
+                5 => "sc_timeout", 6 => "transfer_timeout", 7 => "meshing_timeout",
+                8 => "solver_timeout", 9 => "max_retries", 10 => "state_refresh_interval",
                 _ => "",
             },
             SettingCategory::OperationTimeouts => match idx {
@@ -274,8 +272,8 @@ impl SettingCategory {
             },
             SettingCategory::EngineConfig => match idx {
                 0 => "看门狗间隔(秒)", 1 => "SW宏超时(秒)", 2 => "SW关闭文档", 3 => "SW退出",
-                4 => "SW显示窗口", 5 => "SW最大重试", 6 => "SC超时(秒)", 7 => "传输超时(秒)",
-                8 => "网格超时(秒)", 9 => "求解超时(秒)", 10 => "最大重试", 11 => "状态刷新间隔(秒)",
+                4 => "SW显示窗口", 5 => "SC超时(秒)", 6 => "传输超时(秒)",
+                7 => "网格超时(秒)", 8 => "求解超时(秒)", 9 => "最大重试", 10 => "状态刷新间隔(秒)",
                 _ => "",
             },
             SettingCategory::OperationTimeouts => match idx {
@@ -454,13 +452,12 @@ impl SettingsState {
                 2 => self.config.engine_config.sw_close_doc_on_finish.to_string(),
                 3 => self.config.engine_config.sw_exit_on_finish.to_string(),
                 4 => self.config.engine_config.sw_visible.to_string(),
-                5 => self.config.engine_config.sw_max_retries.to_string(),
-                6 => self.config.engine_config.sc_timeout.to_string(),
-                7 => self.config.engine_config.transfer_timeout.to_string(),
-                8 => self.config.engine_config.meshing_timeout.to_string(),
-                9 => self.config.engine_config.solver_timeout.to_string(),
-                10 => self.config.engine_config.max_retries.to_string(),
-                11 => self.config.engine_config.state_refresh_interval.to_string(),
+                5 => self.config.engine_config.sc_timeout.to_string(),
+                6 => self.config.engine_config.transfer_timeout.to_string(),
+                7 => self.config.engine_config.meshing_timeout.to_string(),
+                8 => self.config.engine_config.solver_timeout.to_string(),
+                9 => self.config.engine_config.max_retries.to_string(),
+                10 => self.config.engine_config.state_refresh_interval.to_string(),
                 _ => String::new(),
             },
             SettingCategory::OperationTimeouts => match idx {
@@ -527,13 +524,12 @@ impl SettingsState {
                 2 => self.config.engine_config.sw_close_doc_on_finish = value == "true" || value == "是",
                 3 => self.config.engine_config.sw_exit_on_finish = value == "true" || value == "是",
                 4 => self.config.engine_config.sw_visible = value == "true" || value == "是",
-                5 => if let Ok(v) = value.parse::<u32>() { self.config.engine_config.sw_max_retries = v; }
-                6 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.sc_timeout = v; }
-                7 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.transfer_timeout = v; }
-                8 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.meshing_timeout = v; }
-                9 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.solver_timeout = v; }
-                10 => if let Ok(v) = value.parse::<u32>() { self.config.engine_config.max_retries = v; }
-                11 => if let Ok(v) = value.parse::<f64>() { self.config.engine_config.state_refresh_interval = v; }
+                5 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.sc_timeout = v; }
+                6 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.transfer_timeout = v; }
+                7 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.meshing_timeout = v; }
+                8 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.solver_timeout = v; }
+                9 => if let Ok(v) = value.parse::<u32>() { self.config.engine_config.max_retries = v; }
+                10 => if let Ok(v) = value.parse::<f64>() { self.config.engine_config.state_refresh_interval = v; }
                 _ => {}
             },
             SettingCategory::OperationTimeouts => match idx {

@@ -93,7 +93,6 @@ class EngineConfig(TypedDict):
     sw_close_doc_on_finish: bool
     sw_exit_on_finish: bool
     sw_visible: bool
-    sw_max_retries: int
     sc_timeout: int
     transfer_timeout: int
     meshing_timeout: int
@@ -315,8 +314,6 @@ ENGINE_CONFIG: EngineConfig = {
     "sw_close_doc_on_finish": True,
     "sw_exit_on_finish": True,
     "sw_visible": True,
-    # SW 宏执行最大重试次数（默认 1 = 不重试，SW 启动/执行开销大）
-    "sw_max_retries": 2,
     # SC 脚本执行超时（秒）
     "sc_timeout": 300,
     # 文件传输超时（秒）

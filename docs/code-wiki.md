@@ -1029,7 +1029,6 @@ cargo build --release
 | `sw_close_doc_on_finish` | True | 宏完成后关闭模型文档 |
 | `sw_exit_on_finish` | True | 宏完成后退出 SolidWorks |
 | `sw_visible` | True | 是否显示 SW 主窗口 |
-| `sw_max_retries` | 2 | SW 宏最大重试次数 |
 | `sc_timeout` | 300s | SpaceClaim 脚本超时 |
 | `transfer_timeout` | 120s | 文件传输超时 |
 | `meshing_timeout` | 600s | 网格划分超时 |

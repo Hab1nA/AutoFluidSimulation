@@ -22,8 +22,8 @@ import os
 from typing import Optional
 
 from engine.config import (
-    STEP_INDEX,
-    STATUS_WAITING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    STEP_INDEX, STEP_NAMES, ENGINE_CONFIG,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
@@ -331,119 +331,114 @@ class PipelineScheduler:
 
     def _resume_paused_steps(self):
         """
-        恢复暂停的步骤：检查输出文件，决定标记完成或重新入队。
+        断点续传扫描：对每个构型从 SW 开始逐步检查，
+        找到第一个非 COMPLETED 步骤后推入对应队列。
 
-        设计原则：
-        - SW 步骤的 PAUSED 状态：检查 STEP 文件是否已生成。
-          若已生成 → 标记 Completed。若缺失 → 标记 Error 并清除 sw_macro_started。
-        - SC 步骤的并发数受 _num_workers 限制。若暂停前有 N 个 SC 进程
-          正在运行，恢复时不应将所有 PAUSED 直接改为 RUNNING（会导致
-          超过并发限制的进程同时显示为 Running）。
-        - 对 PAUSED 的 SC 步骤：先检查 SCDOC 输出文件是否已生成。
-          若已生成 → 标记 Completed，后续 Transfer/Meshing 由 worker 自动衔接。
-          若未生成 → 重新推入 _sc_queue，由 worker 池按并发限制逐个处理。
-        - 其他步骤（Transfer/Meshing/Solver）的 PAUSED 状态由
-          set_all_paused_to_running(exclude_steps=["SW", "SC"]) 统一恢复。
+        - COMPLETED → 继续检查下一步骤
+        - RUNNING   → 跳过（正在执行）
+        - PAUSED    → 检查输出文件是否存在，存在则标记完成继续，否则优先入队
+        - WAITING   → 普通入队
+        - ERROR/RETRYING → 检查重试次数，未达上限则重置为 WAITING 并入队，否则保留 ERROR
         """
         step_dir = LOCAL_PATHS.get("step_dir", "")
-        sw_completed_count = 0
-        sw_error_count = 0
-        sc_completed_count = 0
-        sc_enqueued_count = 0
+        scdoc_dir = LOCAL_PATHS.get("scdoc_dir", "")
+        max_retries = ENGINE_CONFIG["max_retries"]
 
-        # ---- SW 步骤：检查 STEP 文件 ----
-        paused_sw = self.state.get_configs_at_step("SW", STATUS_PAUSED)
-        for cn in paused_sw:
-            sw_filename = get_step_filename("SW", cn)
-            if sw_filename:
-                step_file = os.path.join(step_dir, sw_filename)
-                if os.path.exists(step_file) and os.path.getsize(step_file) > 0:
-                    self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
-                    logger.info(
-                        f"[Resume] 构型{cn} SW: STEP 文件已存在，标记为 Completed"
-                    )
-                    sw_completed_count += 1
-                else:
-                    # ★ 保持 PAUSED 状态：STEP 文件缺失可能是因为用户在暂停期间
-                    #   手动关闭了 SW 进程。此时不应自动标记 Error 触发重试，
-                    #   而应保持 PAUSED，由 _handle_sw_breakpoint_resume 统一处理。
-                    logger.info(
-                        f"[Resume] 构型{cn} SW: STEP 文件缺失，保持 PAUSED 状态"
-                    )
-            else:
-                self.state.set_step_status(
-                    cn, "SW", STATUS_ERROR,
-                    "暂停恢复: 无法生成 SW 文件名"
-                )
-                sw_error_count += 1
+        # 优先队列：PAUSED 构型先入队
+        priority_enqueue: list[tuple[int, str]] = []   # (cn, step)
+        normal_enqueue: list[tuple[int, str]] = []     # (cn, step)
+        completed_count = 0
 
-        if sw_error_count > 0:
-            # 有 SW Error 构型（仅文件名生成失败等不可恢复错误）
-            self.state.set_sw_macro_started(False)
-            logger.warning(
-                f"[Resume] SW 步骤: {sw_completed_count} 个完成, "
-                f"{sw_error_count} 个 Error，已清除 sw_macro_started 标志"
-            )
-        elif sw_completed_count > 0:
-            logger.info(
-                f"[Resume] SW 步骤处理完成: {sw_completed_count} 个标记完成"
-            )
+        for cn in self.state.get_all_configs():
+            for step in STEP_NAMES:
+                status = self.state.get_step_status(cn, step)
 
-        # ---- SC 步骤：检查 SCDOC 文件 ----
-        paused_sc = self.state.get_configs_at_step("SC", STATUS_PAUSED)
-        for cn in paused_sc:
-            scdoc_name = get_step_filename("SC", cn)
-            if scdoc_name:
-                scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
-                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
-                    self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
-                    logger.info(
-                        f"[Resume] 构型{cn} SC: SCDOC 已存在，标记为 Completed"
-                    )
-                    sc_completed_count += 1
+                if status == STATUS_COMPLETED:
                     continue
 
-            # SCDOC 不存在 → 重新推入队列
-            sw_filename = get_step_filename("SW", cn)
-            if sw_filename:
-                step_file = os.path.join(step_dir, sw_filename)
-                if os.path.exists(step_file):
-                    self._sc_queue.put((cn, step_file))
-                    sc_enqueued_count += 1
-                    logger.info(
-                        f"[Resume] 构型{cn} SC: 无输出文件，重新入队等待处理"
-                    )
-                else:
-                    self.state.set_step_status(
-                        cn, "SC", STATUS_ERROR,
-                        "暂停恢复: STEP 文件缺失，无法重新入队"
-                    )
-                    logger.warning(
-                        f"[Resume] 构型{cn} SC: STEP 文件缺失，标记为 Error"
-                    )
-            else:
-                self.state.set_step_status(
-                    cn, "SC", STATUS_ERROR,
-                    "暂停恢复: 无法生成 SW 文件名"
-                )
+                # ---- 找到第一个非 COMPLETED 步骤 ----
 
-        if sc_completed_count or sc_enqueued_count:
+                if status == STATUS_RUNNING:
+                    break
+
+                if status == STATUS_PAUSED:
+                    if self._check_step_output_exists(cn, step, step_dir, scdoc_dir):
+                        self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                        continue
+                    else:
+                        priority_enqueue.append((cn, step))
+                        break
+
+                if status == STATUS_WAITING:
+                    normal_enqueue.append((cn, step))
+                    break
+
+                if status in (STATUS_ERROR, STATUS_RETRYING):
+                    retry_count = self.state.get_step_retry_count(cn, step)
+                    if retry_count < max_retries:
+                        self.state.set_step_status(cn, step, STATUS_WAITING)
+                        normal_enqueue.append((cn, step))
+                    break
+
+                break  # 未知状态，跳过
+
+            else:
+                completed_count += 1
+
+        # ---- 统一入队（PAUSED 优先）----
+        sc_enqueued = 0
+        for cn, step in priority_enqueue:
+            if step == "SC":
+                self._enqueue_sc(cn, step_dir)
+                sc_enqueued += 1
+            elif step in ("Transfer", "Meshing", "Solver"):
+                self.state.set_step_status(cn, step, STATUS_RUNNING)
+
+        for cn, step in normal_enqueue:
+            if step == "SC":
+                self._enqueue_sc(cn, step_dir)
+                sc_enqueued += 1
+            elif step in ("Transfer", "Meshing", "Solver"):
+                self.state.set_step_status(cn, step, STATUS_RUNNING)
+
+        # ---- 仅输出汇总日志 ----
+        total_need = len(priority_enqueue) + len(normal_enqueue)
+        if total_need > 0 or completed_count > 0:
             logger.info(
-                f"[Resume] SC 步骤处理完成: {sc_completed_count} 个标记完成, "
-                f"{sc_enqueued_count} 个重新入队"
+                f"[Resume] 断点续传扫描完成: {completed_count} 个构型全部完成, "
+                f"{len(priority_enqueue)} 个 PAUSED 优先恢复, "
+                f"{len(normal_enqueue)} 个普通恢复, "
+                f"{sc_enqueued} 个 SC 入队"
             )
+
+    def _check_step_output_exists(
+        self, cn: int, step: str, step_dir: str, scdoc_dir: str
+    ) -> bool:
+        """检查某步骤的输出文件是否已存在于磁盘。"""
+        if step == "SW":
+            filename = get_step_filename("SW", cn)
+            return bool(filename and os.path.exists(os.path.join(step_dir, filename)))
+        if step == "SC":
+            filename = get_step_filename("SC", cn)
+            return bool(filename and os.path.exists(os.path.join(scdoc_dir, filename)))
+        # Transfer/Meshing/Solver 的输出在远程，不做本地检查
+        return False
+
+    def _enqueue_sc(self, cn: int, step_dir: str) -> None:
+        """将构型的 SC 步骤推入处理队列。"""
+        sw_filename = get_step_filename("SW", cn)
+        if sw_filename:
+            step_file = os.path.join(step_dir, sw_filename)
+            if os.path.exists(step_file):
+                self._sc_queue.put((cn, step_file))
 
     def resume(self):
         logger.info("收到继续指令")
 
-        # ★ 第一步：智能恢复暂停的 SC 步骤（检查输出、重新入队）
-        #    避免 set_all_paused_to_running() 将 SC 步骤全部改为 Running，
-        #    导致超过 _num_workers 并发限制的进程同时显示为 Running
+        # ★ 断点续传扫描：对每个构型从 SW 起逐步检查，找到断点并入队
+        #    已覆盖所有步骤的 PAUSED/WAITING/ERROR 状态，无需再调用
+        #    set_all_paused_to_running()
         self._resume_paused_steps()
-
-        # ★ 第二步：其他步骤（Transfer/Solver）的 PAUSED → RUNNING
-        #    SW、SC、Meshing 步骤已分别处理，此处排除避免覆盖
-        self.state.set_all_paused_to_running(exclude_steps=["SW", "SC", "Meshing"])
 
         self._paused.clear()
         self.state.set_engine_status("running")

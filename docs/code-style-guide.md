@@ -158,7 +158,6 @@ pub struct EngineConfig {
     pub watchdog_interval: f64,
     pub sw_macro_timeout: u64,
     pub sw_close_doc_on_finish: bool,
-    pub sw_max_retries: u32,
     pub sc_timeout: u64,
     pub transfer_timeout: u64,
     pub meshing_timeout: u64,
@@ -443,8 +442,7 @@ STATUS_ERROR      = "Error"       # 出错
 "transfer_timeout"       # 文件传输超时
 "meshing_timeout"        # 网格超时
 "solver_timeout"         # 求解超时
-"max_retries"            # 最大重试次数
-"sw_max_retries"         # SW 最大重试次数
+"max_retries"            # 最大重试次数（SW/SC/Transfer/Meshing 统一）
 
 # 位于 OPERATION_TIMEOUTS dict:
 "sw_startup"             # SW 启动超时

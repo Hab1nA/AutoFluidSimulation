@@ -37,7 +37,6 @@ sw_macro_timeout = 3600
 sw_close_doc_on_finish = true
 sw_exit_on_finish = true
 sw_visible = true
-sw_max_retries = 2
 sc_timeout = 300
 transfer_timeout = 120
 meshing_timeout = 600
