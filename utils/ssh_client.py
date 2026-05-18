@@ -362,6 +362,7 @@ class RemoteWorkstation:
             f"$f = '{safe_flag}'\n"
             # 这里必须使用 -f 生成双引号字面量，避免出现 `\"` 文本。
             # 其中 ""{1}"" 会传给 cmd.exe 作为 "<flag>"，确保含空格路径被正确引用。
+            # 示例: $c='python run.py', $f='D:\flags\a b.flag' -> "python run.py && echo done > ""D:\flags\a b.flag"""
             "$inner = '\"{0} && echo done > \"\"{1}\"\"\"' -f $c, $f\n"
             'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
         )
