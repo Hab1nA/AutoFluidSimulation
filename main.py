@@ -274,7 +274,12 @@ def _run_all_mode():
         try:
             rust_bin = find_rust_tui_binary(PROJECT_DIR)
             if rust_bin:
-                tui_proc = subprocess.Popen([rust_bin], cwd=PROJECT_DIR)
+                # 传递最新 client 日志目录给 TUI
+                latest_client = _find_latest_session_dir("client")
+                tui_env = os.environ.copy()
+                if latest_client:
+                    tui_env["AUTOFLUID_SESSION_LOG_DIR"] = latest_client
+                tui_proc = subprocess.Popen([rust_bin], cwd=PROJECT_DIR, env=tui_env)
                 tui_proc.wait()
             else:
                 print_rust_tui_not_found_help(PROJECT_DIR)
@@ -366,9 +371,12 @@ def _run_all_mode():
     try:
         rust_bin = find_rust_tui_binary(PROJECT_DIR)
         if rust_bin:
+            tui_env = os.environ.copy()
+            tui_env["AUTOFLUID_SESSION_LOG_DIR"] = client_log_dir
             tui_proc = subprocess.Popen(
                 [rust_bin],
                 cwd=PROJECT_DIR,
+                env=tui_env,
             )
             tui_proc.wait()
         else:
@@ -431,7 +439,11 @@ def main():
         rust_bin = find_rust_tui_binary(PROJECT_DIR)
         if rust_bin:
             try:
-                result = subprocess.run([rust_bin], cwd=PROJECT_DIR)
+                client_log_dir = get_session_log_dir()
+                tui_env = os.environ.copy()
+                if client_log_dir:
+                    tui_env["AUTOFLUID_SESSION_LOG_DIR"] = client_log_dir
+                result = subprocess.run([rust_bin], cwd=PROJECT_DIR, env=tui_env)
                 sys.exit(result.returncode)
             except FileNotFoundError:
                 print(f"[错误] 找不到 Rust TUI 二进制文件: {rust_bin}", file=sys.stderr)

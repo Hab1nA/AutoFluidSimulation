@@ -30,6 +30,74 @@ pub use utils::format_local_time;
 //   daemon.stop_with_ipc()
 //   daemon.restart_with_ipc()
 
+/// 初始化文件日志。
+/// 优先使用 AUTOFLUID_SESSION_LOG_DIR 环境变量（由 Python 启动器设置）；
+/// 若未设置，尝试查找 logs/client/ 下最新的时间戳子目录；
+/// 若均不可用，回退到 stderr-only 模式。
+fn init_file_logger() {
+    use log::LevelFilter;
+    use std::fs::OpenOptions;
+    use std::path::PathBuf;
+
+    let log_dir: Option<PathBuf> = std::env::var("AUTOFLUID_SESSION_LOG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(find_latest_client_session_dir);
+
+    match log_dir {
+        Some(dir) => {
+            let log_path = dir.join("autofluid-tui.log");
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                Ok(file) => {
+                    env_logger::Builder::new()
+                        .filter_level(LevelFilter::Info)
+                        .target(env_logger::Target::Pipe(Box::new(file)))
+                        .format_timestamp_millis()
+                        .init();
+                    log::info!("AutoFluid TUI v{} 启动，日志文件: {:?}", env!("CARGO_PKG_VERSION"), log_path);
+                }
+                Err(e) => {
+                    eprintln!("警告: 无法创建日志文件 {:?}: {}", log_path, e);
+                    init_stderr_logger();
+                }
+            }
+        }
+        None => init_stderr_logger(),
+    }
+}
+
+fn init_stderr_logger() {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .target(env_logger::Target::Stderr)
+        .format_timestamp_millis()
+        .init();
+    log::info!("AutoFluid TUI v{} 启动 (stderr-only 日志)", env!("CARGO_PKG_VERSION"));
+}
+
+/// 查找 logs/client/ 下最新的时间戳子目录
+fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
+    let client_dir = std::env::current_dir()
+        .ok()?
+        .join("logs")
+        .join("client");
+    if !client_dir.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(&client_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    entries.first().map(|e| e.path())
+}
+
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
     let t = SystemTime::now()
@@ -45,6 +113,7 @@ pub fn generate_request_id() -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_file_logger();
     crossterm::terminal::enable_raw_mode()?;
 
     let mut stdout = io::stdout();

@@ -33,7 +33,9 @@ if __name__ == "__main__":
         print("      使用 quit full 命令彻底停止后台引擎")
         print()
         try:
-            result = subprocess.run([rust_bin], cwd=PROJECT_DIR)
+            env = os.environ.copy()
+            env["AUTOFLUID_SESSION_LOG_DIR"] = session_log_dir
+            result = subprocess.run([rust_bin], cwd=PROJECT_DIR, env=env)
             sys.exit(result.returncode)
         except FileNotFoundError:
             print(f"错误: 找不到 Rust TUI 二进制文件: {rust_bin}", file=sys.stderr)
