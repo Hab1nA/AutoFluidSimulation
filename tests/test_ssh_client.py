@@ -33,10 +33,11 @@ def test_exec_background_generates_valid_encoded_command_with_spaces_and_quotes(
 
     with patch.object(host, "ensure_connected", return_value=True):
         with patch.object(host, "exec_command", side_effect=fake_exec):
-            assert host.exec_background(command, flag_file) is True
-    assert len(calls) == 2
+            with patch.object(host, "delete_remote_file", return_value=True):
+                assert host.exec_background(command, flag_file) is True
+    assert len(calls) == 1  # 仅主命令，标志文件清理已改用 SFTP
 
-    launch_cmd = calls[1][0]
+    launch_cmd = calls[0][0]
     assert launch_cmd.startswith(f'"{_EXPECTED_PS_EXE}" -NoProfile -EncodedCommand ')
     encoded = launch_cmd.split(" -EncodedCommand ", 1)[1]
     ps_script = base64.b64decode(encoded).decode("utf-16-le")
