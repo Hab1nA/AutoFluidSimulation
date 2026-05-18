@@ -35,6 +35,7 @@ from .worker_pool import WorkerPoolManager
 from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
+from .meshing_monitor import MeshingMonitor
 from .utils import pause_aware_sleep
 
 logger = setup_logger(__name__)
@@ -105,6 +106,15 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
         )
+        self.meshing_monitor = MeshingMonitor(
+            state_manager=self.state,
+            remote_executor=self.runner._remote_executor,
+            paused_event=self._paused,
+            stopped_event=self._stopped,
+        )
+
+        # 注入 MeshingMonitor 到 WorkerPool
+        self.worker_pool.set_meshing_monitor(self.meshing_monitor)
 
         # ---- 工作线程 ----
         self._barrier_thread: Optional[threading.Thread] = None
@@ -188,6 +198,9 @@ class PipelineScheduler:
 
         # ---- 步骤 3: 启动工作线程池（仅在未启动时创建） ----
         self.worker_pool.start_if_needed()
+
+        # ---- 步骤 3.5: 启动 MeshingMonitor ----
+        self.meshing_monitor.start_if_needed()
 
         # ---- 步骤 4: 启动全局屏障监控 ----
         self._ensure_barrier_monitor_running()
@@ -423,9 +436,9 @@ class PipelineScheduler:
         #    导致超过 _num_workers 并发限制的进程同时显示为 Running
         self._resume_paused_steps()
 
-        # ★ 第二步：其他步骤（Transfer/Meshing/Solver）的 PAUSED → RUNNING
-        #    SW 和 SC 步骤已在上一步处理完毕，此处排除避免覆盖
-        self.state.set_all_paused_to_running(exclude_steps=["SW", "SC"])
+        # ★ 第二步：其他步骤（Transfer/Solver）的 PAUSED → RUNNING
+        #    SW、SC、Meshing 步骤已分别处理，此处排除避免覆盖
+        self.state.set_all_paused_to_running(exclude_steps=["SW", "SC", "Meshing"])
 
         self._paused.clear()
         self.state.set_engine_status("running")
@@ -473,6 +486,11 @@ class PipelineScheduler:
             return
 
         self.worker_pool.start_if_needed()
+
+        if self._stopped.is_set():
+            return
+
+        self.meshing_monitor.start_if_needed()
 
         if self._stopped.is_set():
             return

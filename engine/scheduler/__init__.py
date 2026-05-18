@@ -15,6 +15,7 @@ from .worker_pool import WorkerPoolManager
 from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
+from .meshing_monitor import MeshingMonitor
 from .utils import pause_aware_sleep
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "BarrierCoordinator",
     "SWPhaseHandler",
     "RetryManager",
+    "MeshingMonitor",
     "pause_aware_sleep",
 ]

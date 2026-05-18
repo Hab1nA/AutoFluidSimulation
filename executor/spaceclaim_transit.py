@@ -25,6 +25,8 @@
 import os
 import sys
 import io
+import json
+import time
 import traceback
 from datetime import datetime
 
@@ -504,6 +506,213 @@ def Main():
             logger.info("AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
 
 
-# 显式调用 Main() —— SpaceClaim 不会自动调用，此处确保脚本执行
-Main()
+# ============================================================================
+# 脚本入口
+# ============================================================================
+# 说明：SpaceClaim 在 /RunScript 模式下会执行整个脚本文件。
+#       脚本末尾的 Main() 调用确保在作为 .py 文件直接运行时也能正常工作。
+#       SpaceClaim 不会自动调用 Main()，因此不存在双重执行问题。
 
+# ---- 常驻模式：文件协议 IPC ----
+# Bridge 启动 SpaceClaim 时设置 AUTOFLUID_SC_PERSISTENT=1，
+# 脚本进入命令轮询循环，SpaceClaim 进程不退出。
+_persistent_initialized = False
+
+def _persistent_loop():
+    """常驻模式主循环：轮询命令文件，执行转换，写入结果文件。"""
+    global _persistent_initialized
+    if _persistent_initialized:
+        return
+    _persistent_initialized = True
+
+    cmd_dir = os.environ.get("AUTOFLUID_SC_CMD_DIR", "")
+    slot_id = os.environ.get("AUTOFLUID_SC_SLOT_ID", "0")
+
+    if not cmd_dir:
+        logger.error("常驻模式: AUTOFLUID_SC_CMD_DIR 未设置")
+        return
+
+    cmd_file = os.path.join(cmd_dir, "sc_cmd_{}.json".format(slot_id))
+    result_file = os.path.join(cmd_dir, "sc_result_{}.json".format(slot_id))
+    ready_file = os.path.join(cmd_dir, "sc_ready_{}.json".format(slot_id))
+
+    # 写入就绪标志
+    try:
+        with open(ready_file, "w") as f:
+            f.write('{"ready":true,"slot_id":' + str(slot_id) + '}\n')
+        logger.info("常驻模式: 就绪标志已写入 {}".format(ready_file))
+    except (IOError, OSError) as e:
+        logger.error("常驻模式: 写入就绪标志失败: {}".format(e))
+        return
+
+    # 清理可能残留的结果文件
+    try:
+        if os.path.exists(result_file):
+            os.remove(result_file)
+    except (IOError, OSError):
+        pass
+
+    poll_interval = 1.0
+    logger.info("常驻模式: 开始轮询命令文件 {}".format(cmd_file))
+
+    while True:
+        try:
+            if not os.path.exists(cmd_file):
+                time.sleep(poll_interval)
+                continue
+
+            # 读取命令
+            try:
+                with open(cmd_file, "r") as f:
+                    cmd_data = json.load(f)
+            except (ValueError, IOError, OSError) as e:
+                logger.error("常驻模式: 读取命令文件失败: {}".format(e))
+                # 清理损坏的命令文件
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                continue
+
+            # 检查退出命令
+            if cmd_data.get("command") == "quit":
+                logger.info("常驻模式: 收到退出命令")
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                break
+
+            config_name = str(cmd_data.get("config", ""))
+            step_dir = cmd_data.get("stepdir", "")
+            scdoc_dir = cmd_data.get("scdocdir", "")
+
+            if not config_name or not step_dir or not scdoc_dir:
+                logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))
+                _write_result(result_file, config_name, False, "命令缺少必要字段")
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                continue
+
+            # 清理命令文件（已读取）
+            try:
+                os.remove(cmd_file)
+            except (IOError, OSError):
+                pass
+
+            logger.info("=" * 40)
+            logger.info("常驻模式: 开始处理构型 {}".format(config_name))
+            logger.info("  STEP 目录: {}".format(step_dir))
+            logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+
+            success = process_step_file(config_name, step_dir, scdoc_dir)
+
+            _write_result(result_file, config_name, success,
+                          "转换成功" if success else "转换失败")
+
+            if success:
+                logger.info("常驻模式: 构型 {} 转换成功".format(config_name))
+            else:
+                logger.error("常驻模式: 构型 {} 转换失败".format(config_name))
+
+        except Exception as e:
+            logger.critical("常驻模式: 主循环异常: {}: {}".format(
+                type(e).__name__, e))
+            traceback.print_exc()
+            # 写入错误结果
+            try:
+                _write_result(result_file, "", False,
+                              "主循环异常: {}: {}".format(type(e).__name__, e))
+            except Exception:
+                pass
+
+    logger.info("常驻模式: 退出命令循环")
+
+
+def _write_result(result_file, config_name, success, message=""):
+    """写入结果文件。"""
+    result = {
+        "config": config_name,
+        "success": bool(success),
+        "message": str(message),
+        "timestamp": time.time(),
+    }
+    try:
+        # 先写临时文件再重命名，确保原子性
+        tmp_file = result_file + ".tmp"
+        with open(tmp_file, "w") as f:
+            json.dump(result, f)
+            f.write("\n")
+        # Windows 下 rename 目标存在时会报错，先删除
+        try:
+            if os.path.exists(result_file):
+                os.remove(result_file)
+        except (IOError, OSError):
+            pass
+        os.rename(tmp_file, result_file)
+    except (IOError, OSError) as e:
+        logger.error("写入结果文件失败: {}".format(e))
+
+
+def Main():
+    """脚本主入口。由脚本末尾显式调用。"""
+    try:
+        # 获取脚本参数
+        script_args = _get_script_args()
+
+        if not script_args or len(script_args) < 3:
+            logger.error("=" * 60)
+            logger.error("参数不足！")
+            logger.info("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
+            logger.info("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
+            logger.error("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
+            logger.error("=" * 60)
+            return
+
+        config_name = script_args[0]
+        step_dir = script_args[1]
+        scdoc_dir = script_args[2]
+
+        logger.info("=" * 60)
+        logger.info("SpaceClaim Transit Script V23")
+        logger.info("  构型编号: {}".format(config_name))
+        logger.info("  STEP 目录: {}".format(step_dir))
+        logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+        logger.info("=" * 60)
+
+        success = process_step_file(config_name, step_dir, scdoc_dir)
+
+        if success:
+            logger.info("构型 {} 转换成功".format(config_name))
+        else:
+            logger.error("构型 {} 转换失败".format(config_name))
+
+    except Exception as e:
+        logger.critical("脚本执行异常: {}: {}".format(type(e).__name__, e))
+        traceback.print_exc()
+
+    finally:
+        # ★ 脚本执行完毕后退出 SpaceClaim（/RunScript 模式会自动退出，
+        #    但显式调用确保在任何情况下 SpaceClaim 都能正常关闭，
+        #    避免残留进程影响下次启动）
+        # 若设置了环境变量 AUTOFLUID_SC_NOEXIT=1，则跳过退出（用于交互式调试）
+        if os.environ.get("AUTOFLUID_SC_NOEXIT", "") != "1":
+            try:
+                logger.info("正在退出 SpaceClaim...")
+                Command.Execute("Exit")
+            except Exception as e_exit:
+                logger.warning("退出 SpaceClaim 时异常（可能已在关闭中）: {}: {}".format(
+                    type(e_exit).__name__, e_exit))
+        else:
+            logger.info("AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
+
+
+# ---- 脚本入口分发 ----
+# 常驻模式（AUTOFLUID_SC_PERSISTENT=1）：进入文件协议 IPC 循环
+# 一次性模式（默认）：执行 Main()
+if os.environ.get("AUTOFLUID_SC_PERSISTENT", "") == "1":
+    _persistent_loop()
+else:
+    Main()

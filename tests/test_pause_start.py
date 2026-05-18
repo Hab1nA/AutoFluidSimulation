@@ -53,6 +53,26 @@ class _MockSCPool:
     def run_config(self, *args, **kwargs): return True
 
 
+class _MockRemoteExecutor:
+    """Mock for RemoteExecutor, used by MeshingMonitor in tests."""
+    def __init__(self, state_manager):
+        self.state = state_manager
+        self._ssh_lock = threading.RLock()
+
+    def _get_ssh(self):
+        return None
+
+    def start_meshing(self, config_name: int) -> bool:
+        return True
+
+    def check_meshing_done(self, config_name: int) -> bool:
+        return False
+
+    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        time.sleep(0.1)
+        return True
+
+
 class MockTaskRunner:
     def __init__(self, state_manager: StateManager):
         self.state = state_manager
@@ -61,6 +81,7 @@ class MockTaskRunner:
         self._sw_call_count = 0
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
+        self._remote_executor = _MockRemoteExecutor(self.state)
 
     def execute_sw_step(self) -> bool:
         self._sw_call_count += 1

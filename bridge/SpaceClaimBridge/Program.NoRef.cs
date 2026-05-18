@@ -46,6 +46,9 @@ namespace AutoFluidSimulation.Bridge
         {
             public string Script, Config, StepDir, ScdocDir;
             public int Timeout = 300;
+            public bool Persistent;
+            public string CmdDir;
+            public int SlotId;
         }
 
         static Options ParseArgs(string[] args)
@@ -74,6 +77,19 @@ namespace AutoFluidSimulation.Bridge
                             if (int.TryParse(args[i], out t)) o.Timeout = t;
                         }
                         break;
+                    case "--persistent":
+                        o.Persistent = true;
+                        break;
+                    case "--cmddir":
+                        if (++i < args.Length) o.CmdDir = args[i];
+                        break;
+                    case "--slotid":
+                        if (++i < args.Length)
+                        {
+                            int sid;
+                            if (int.TryParse(args[i], out sid)) o.SlotId = sid;
+                        }
+                        break;
                     default:
                         Console.Error.WriteLine("未知参数: " + args[i]);
                         Console.Error.WriteLine("用法: SpaceClaimBridge.exe --script <path> --config <n> --stepdir <dir> --scdocdir <dir> [--timeout <s>]");
@@ -83,14 +99,30 @@ namespace AutoFluidSimulation.Bridge
             if (string.IsNullOrEmpty(o.Script) || string.IsNullOrEmpty(o.Config) ||
                 string.IsNullOrEmpty(o.StepDir) || string.IsNullOrEmpty(o.ScdocDir))
             {
-                Console.Error.WriteLine("缺少必要参数");
-                return null;
+                if (o.Persistent)
+                {
+                    if (string.IsNullOrEmpty(o.Script) || string.IsNullOrEmpty(o.CmdDir))
+                    {
+                        Console.Error.WriteLine("Persistent mode requires --script and --cmddir");
+                        return null;
+                    }
+                }
+                else
+                {
+                    Console.Error.WriteLine("缺少必要参数");
+                    return null;
+                }
             }
             return o;
         }
 
         static int Execute(Options o)
         {
+            if (o.Persistent)
+            {
+                return ExecutePersistent(o);
+            }
+
             Console.WriteLine(string.Format("[BRIDGE] script={0} config={1}", o.Script, o.Config));
             Console.WriteLine(string.Format("[BRIDGE] stepdir={0} scdocdir={1}", o.StepDir, o.ScdocDir));
 
@@ -202,6 +234,112 @@ namespace AutoFluidSimulation.Bridge
 
             Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] Timeout ({0}s)", totalTimeout));
             return 5;
+        }
+
+        static int ExecutePersistent(Options o)
+        {
+            Console.WriteLine("[BRIDGE] Persistent mode starting");
+            Console.WriteLine("[BRIDGE]   Script: " + o.Script);
+            Console.WriteLine("[BRIDGE]   SlotId: " + o.SlotId);
+            Console.WriteLine("[BRIDGE]   CmdDir: " + o.CmdDir);
+
+            if (string.IsNullOrEmpty(o.CmdDir))
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] Persistent mode requires --cmddir");
+                return 4;
+            }
+
+            Directory.CreateDirectory(o.CmdDir);
+
+            string scExe = FindSpaceClaimExe();
+            if (scExe == null)
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe not found");
+                return 2;
+            }
+
+            DateTime launchBaseline = DateTime.UtcNow;
+            string runScriptArg = string.Format("/RunScript=\"{0}\"", o.Script);
+
+            Console.WriteLine("[BRIDGE] Launching SpaceClaim (persistent mode)...");
+            Console.WriteLine("[BRIDGE]   Env: AUTOFLUID_SC_PERSISTENT=1");
+
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = scExe,
+                    Arguments = runScriptArg + " /Splash=False /Welcome=False",
+                    UseShellExecute = false,
+                };
+                psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";
+                psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
+                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = o.CmdDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = o.SlotId.ToString();
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] Failed to launch SpaceClaim: " + ex.Message);
+                return 2;
+            }
+
+            Console.WriteLine("[BRIDGE] Waiting for SpaceClaim process...");
+            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            if (workingProcess == null)
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim process did not appear within 120s");
+                return 2;
+            }
+
+            Console.WriteLine(string.Format("[BRIDGE] SpaceClaim found (PID={0}), waiting for GUI...", workingProcess.Id));
+            WaitForGuiReady(workingProcess, 30);
+
+            // Wait for script ready flag
+            string readyFile = Path.Combine(o.CmdDir, string.Format("sc_ready_{0}.json", o.SlotId));
+            Console.WriteLine("[BRIDGE] Waiting for script ready flag: " + readyFile);
+            DateTime readyDeadline = DateTime.UtcNow.AddSeconds(120);
+            while (DateTime.UtcNow < readyDeadline)
+            {
+                if (File.Exists(readyFile))
+                {
+                    Console.WriteLine("[BRIDGE] Script ready flag detected");
+                    break;
+                }
+                try { workingProcess.Refresh(); if (workingProcess.HasExited) break; }
+                catch { break; }
+                Thread.Sleep(2000);
+            }
+
+            if (!File.Exists(readyFile))
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] Script ready timeout (120s)");
+                return 5;
+            }
+
+            Console.WriteLine("[BRIDGE] Persistent mode ready, monitoring...");
+
+            while (true)
+            {
+                try
+                {
+                    workingProcess.Refresh();
+                    if (workingProcess.HasExited)
+                    {
+                        Console.WriteLine("[BRIDGE] SpaceClaim exited, Bridge exiting");
+                        break;
+                    }
+                }
+                catch
+                {
+                    Console.WriteLine("[BRIDGE] Process check failed, Bridge exiting");
+                    break;
+                }
+                Thread.Sleep(2000);
+            }
+
+            Console.WriteLine("[BRIDGE] Persistent mode exited");
+            return 0;
         }
 
         static string FindSpaceClaimExe()

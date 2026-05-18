@@ -54,13 +54,20 @@ class WorkerPoolManager:
         self._stopped = stopped_event
         self._barrier_passed = barrier_passed_event
 
+        # ---- MeshingMonitor（由 PipelineScheduler 注入） ----
+        self._meshing_monitor = None
+
         # ---- 工作线程 ----
         self._worker_threads: list[threading.Thread] = []
 
         # ---- 工作线程数 ----
-        self._num_workers = 3  # SC/Transfer/Meshing 并发工作线程数
+        self._num_workers = 3  # SC/Transfer 并发工作线程数
 
         logger.info("工作线程池管理器初始化完成")
+
+    def set_meshing_monitor(self, meshing_monitor) -> None:
+        """注入 MeshingMonitor 实例。由 PipelineScheduler 在创建后调用。"""
+        self._meshing_monitor = meshing_monitor
 
     # ------------------------------------------------------------------
     # 工作线程池管理
@@ -141,21 +148,23 @@ class WorkerPoolManager:
                 self._process_single_config(config_name)
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"处理构型{config_name} 时发生未预期异常: {e}", exc_info=True)
-                # 尝试标记当前未完成的步骤为 Error
-                for step in ["SC", "Transfer", "Meshing"]:
+                # 只标记 SC+Transfer 步骤为 Error（Meshing 由 MeshingMonitor 管理）
+                for step in ["SC", "Transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)
                         if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
                             self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
                     except Exception as mark_err:
                         logger.debug(f"标记构型{config_name}步骤{step}为Error时异常: {mark_err}")
+                # Transfer 失败时，Meshing 也无法执行，标记为 Error
+                self._mark_meshing_error_if_transfer_failed(config_name, str(e))
             except Exception as e:
                 # 最后的兜底：捕获所有其他异常类型，防止工作线程意外崩溃
                 logger.critical(
                     f"处理构型{config_name} 时发生致命异常: {type(e).__name__}: {e}",
                     exc_info=True
                 )
-                for step in ["SC", "Transfer", "Meshing"]:
+                for step in ["SC", "Transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)
                         if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
@@ -163,6 +172,9 @@ class WorkerPoolManager:
                                                         f"致命异常: {type(e).__name__}: {e}")
                     except Exception:
                         pass
+                self._mark_meshing_error_if_transfer_failed(
+                    config_name, f"致命异常: {type(e).__name__}: {e}"
+                )
             finally:
                 self._sc_queue.task_done()
 
@@ -246,84 +258,15 @@ class WorkerPoolManager:
         if self._stopped.is_set():
             return
 
-        # ---- Meshing 阶段 ----
-        meshing_status = self.state.get_step_status(config_name, "Meshing")
-        if meshing_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            # ★ 执行前检查远程输出：若标志文件或网格文件已存在则跳过
-            meshing_skip = False
-            try:
-                ssh = self.runner.get_ssh()
-                if ssh.is_connected():
-                    flag_file = (
-                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
-                        f"/meshing_done_{config_name}.txt"
-                    )
-                    mesh_name = get_step_filename("Meshing", config_name)
-                    if ssh.check_remote_file(flag_file):
-                        logger.info(
-                            f"构型{config_name} Meshing: "
-                            f"标志文件已存在，跳过执行"
-                        )
-                        self.state.set_step_status(
-                            config_name, "Meshing", STATUS_COMPLETED
-                        )
-                        meshing_skip = True
-                    elif mesh_name:
-                        mesh_file = (
-                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
-                            f"/{mesh_name}"
-                        )
-                        if ssh.check_remote_file(mesh_file):
-                            logger.info(
-                                f"构型{config_name} Meshing: "
-                                f"网格文件已存在，跳过执行"
-                            )
-                            self.state.set_step_status(
-                                config_name, "Meshing", STATUS_COMPLETED
-                            )
-                            meshing_skip = True
-            except Exception:
-                pass
-
-            if not meshing_skip:
-                if not self._execute_with_retry(config_name, "Meshing",
-                                                 self.runner.execute_meshing):
-                    return
-
-                # ★ 启动远程网格划分后检查暂停标志
-                while self._paused.is_set() and not self._stopped.is_set():
-                    time.sleep(1)
-                if self._stopped.is_set():
-                    return
-
-                # 启动远程网格划分后，轮询等待完成
-                logger.info(f"等待构型{config_name} 网格划分完成...")
-                if self.runner.wait_meshing_completion(
-                    config_name,
-                    paused_event=self._paused,
-                    stopped_event=self._stopped,
-                ):
-                    self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
-                    logger.info(f"构型{config_name} 网格划分完成 ✓")
-                else:
-                    # ★ 区分暂停和真正的超时
-                    if self._paused.is_set():
-                        self.state.set_step_status(
-                            config_name, "Meshing", STATUS_PAUSED,
-                            "等待网格划分期间暂停"
-                        )
-                    elif self._stopped.is_set():
-                        self.state.set_step_status(
-                            config_name, "Meshing", STATUS_PAUSED,
-                            "引擎已停止"
-                        )
-                    else:
-                        self.state.set_step_status(
-                            config_name, "Meshing", STATUS_ERROR, "网格划分超时"
-                        )
-                    return
-
-        logger.info(f"构型{config_name} SC→Transfer→Meshing 全部完成 ✓")
+        # ---- 提交 Meshing 到 MeshingMonitor ----
+        if self._meshing_monitor is not None:
+            self._meshing_monitor.submit(config_name)
+            logger.info(f"构型{config_name} SC→Transfer 完成，已提交 MeshingMonitor")
+        else:
+            logger.warning(
+                f"构型{config_name} Transfer 完成但 MeshingMonitor 未就绪，"
+                f"Meshing 将在下次重启时由断点续传处理"
+            )
 
     def _execute_with_retry(self, config_name: int, step_name: str,
                             execute_func) -> bool:
@@ -423,6 +366,18 @@ class WorkerPoolManager:
         self.state.set_step_status(config_name, step_name, STATUS_ERROR,
                                     f"重试 {max_retries} 次后仍然失败")
         return False
+
+    def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:
+        """Transfer 失败时，将 Meshing 标记为 Error（若尚未完成）。"""
+        meshing_st = self.state.get_step_status(config_name, "Meshing")
+        if meshing_st not in (STATUS_COMPLETED, STATUS_ERROR):
+            self.state.set_step_status(
+                config_name, "Meshing", STATUS_ERROR,
+                f"上游 Transfer 失败: {reason}",
+            )
+            logger.info(
+                f"构型{config_name} Meshing 因 Transfer 失败标记为 Error"
+            )
 
     def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
         """
