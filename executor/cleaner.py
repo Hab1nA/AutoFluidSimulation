@@ -113,7 +113,7 @@ class FileCleaner:
 
         remote_patterns = {
             "SW":       None,
-            "SC":       None,
+            "SC":       ("scdoc_dir",  STEP_FILE_PATTERNS["SC"],      None),
             "Transfer": None,
             "Meshing":  ("msh_dir",    STEP_FILE_PATTERNS["Meshing"], None),
             "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  (".cas.h5", ".dat.h5")),
