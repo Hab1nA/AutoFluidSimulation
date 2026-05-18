@@ -187,6 +187,14 @@ class PipelineScheduler:
             # SW 致命失败 / 已暂停 / 已停止 → 直接返回
             return
 
+        # ★ 暂停检查：SW 阶段完成后，若暂停标志已置位，停止后续组件启动。
+        #   避免 pause 指令在 SW 宏执行期间到达后，宏完成后仍启动文件监控、
+        #   工作线程池、屏障监控等下游组件（不符合暂停语义）。
+        if self._paused.is_set():
+            logger.info("SW 阶段已完成，但暂停标志已置位，暂停后续组件启动，等待 resume 指令")
+            self.state.set_engine_status("paused")
+            return
+
         # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
         self.sw_phase_handler.prescan_downstream_outputs()
 
@@ -471,13 +479,19 @@ class PipelineScheduler:
         logger.info("流水线已恢复运行")
 
     def _init_downstream_components(self):
-        """初始化 SW 之后的下游流水线组件（文件监控、工作线程、屏障监控）。
+        """初始化 SW 之后的下游流水线组件（预扫描、文件监控、工作线程、屏障监控）。
 
         在 resume() 恢复暂停时调用，处理 SW 已完成但 workers 尚未启动的场景。
         所有组件启动前均检查 _stopped 标志，避免在引擎停止时创建新线程。
         """
         if self._stopped.is_set():
             logger.info("引擎已停止，跳过下游组件初始化")
+            return
+
+        # 预扫描下游输出文件（断点续传）
+        self.sw_phase_handler.prescan_downstream_outputs()
+
+        if self._stopped.is_set():
             return
 
         self._ensure_file_monitor_running()
