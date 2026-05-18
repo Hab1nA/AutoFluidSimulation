@@ -360,6 +360,7 @@ class RemoteWorkstation:
         return (
             f"$c = '{safe_cmd}'\n"
             f"$f = '{safe_flag}'\n"
+            # 这里必须使用 -f 生成双引号字面量，避免出现 `\"` 文本。
             "$inner = '\"{0} && echo done > \"\"{1}\"\"\"' -f $c, $f\n"
             'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
         )

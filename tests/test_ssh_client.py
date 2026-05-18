@@ -1,7 +1,9 @@
 import base64
 from unittest.mock import patch
 
-from utils.ssh_client import RemoteWorkstation, _PS_EXE
+from utils.ssh_client import RemoteWorkstation
+
+_EXPECTED_PS_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 
 def test_build_background_ps_script_escapes_single_quotes():
@@ -34,7 +36,7 @@ def test_exec_background_generates_valid_encoded_command_with_spaces_and_quotes(
     assert len(calls) == 2
 
     launch_cmd = calls[1][0]
-    assert launch_cmd.startswith(f'"{_PS_EXE}" -NoProfile -EncodedCommand ')
+    assert launch_cmd.startswith(f'"{_EXPECTED_PS_EXE}" -NoProfile -EncodedCommand ')
     encoded = launch_cmd.split(" -EncodedCommand ", 1)[1]
     ps_script = base64.b64decode(encoded).decode("utf-16-le")
     assert "$inner = '\"{0} && echo done > \"\"{1}\"\"\"' -f $c, $f" in ps_script
