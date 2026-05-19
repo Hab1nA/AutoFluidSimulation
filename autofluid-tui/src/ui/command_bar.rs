@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
@@ -121,10 +121,11 @@ pub fn daemon_menu_command(index: u8) -> Option<&'static str> {
 }
 
 pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, buttons_area: ratatui::layout::Rect, state: &AppState) {
+    let theme = &state.theme;
     let input_style = if state.focus_zone == FocusZone::CommandInput {
-        Style::default().fg(Color::Rgb(0, 255, 136)).bg(Color::Rgb(13, 13, 13))
+        Style::default().fg(theme.success).bg(theme.input_bg)
     } else {
-        Style::default().fg(Color::Rgb(100, 160, 100)).bg(Color::Rgb(13, 13, 13))
+        Style::default().fg(theme.gray_3).bg(theme.input_bg)
     };
 
     let before_cursor: String = state.command_buffer.text.chars().take(state.command_buffer.cursor).collect();
@@ -153,13 +154,13 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
     };
 
     let cursor_highlight = Style::default()
-        .fg(Color::Rgb(0, 0, 0))
-        .bg(Color::Rgb(0, 255, 136))
+        .fg(theme.cursor_fg)
+        .bg(theme.success)
         .add_modifier(Modifier::BOLD);
 
     let sel_style = Style::default()
-        .fg(Color::Rgb(22, 33, 62))
-        .bg(Color::Rgb(0, 255, 136));
+        .fg(theme.bg)
+        .bg(theme.success);
 
     let input_line = if state.focus_zone == FocusZone::CommandInput {
         let sel = state.command_buffer.selection_range();
@@ -178,7 +179,7 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
             spans.push(Span::styled(ch.to_string(), style));
         }
         if state.command_buffer.cursor >= chars.len() {
-            spans.push(Span::styled("▎".to_string(), Style::default().fg(Color::Rgb(0, 255, 136))));
+            spans.push(Span::styled("▎".to_string(), Style::default().fg(theme.success)));
         }
         Line::from(spans)
     } else {
@@ -186,14 +187,10 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         Line::from(Span::styled(full_text, input_style))
     };
 
-    let cmd_border_style = if state.focus_zone == FocusZone::CommandInput {
-        Style::default().fg(Color::Rgb(233, 69, 96))
-    } else {
-        Style::default().fg(Color::Rgb(15, 52, 96))
-    };
+    let cmd_border_style = theme.border_style_for(state.focus_zone == FocusZone::CommandInput);
 
     let paragraph = Paragraph::new(vec![input_line])
-        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
+        .style(Style::default().bg(theme.input_bg))
         .alignment(Alignment::Left)
         .scroll((0, scroll_x))
         .block(
@@ -210,15 +207,15 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         let is_clicked = state.clicked_button == Some(i as u8);
 
         let btn_style = if is_clicked {
-            Style::default().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 255, 255)).add_modifier(Modifier::BOLD)
+            theme.btn_click()
         } else if is_hovered {
-            Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD)
+            theme.btn_hover()
         } else {
-            Style::default().fg(Color::Rgb(224, 224, 224)).bg(Color::Rgb(15, 52, 96))
+            theme.btn_normal()
         };
 
         spans.push(Span::styled(format!(" {} ", label), btn_style));
-        spans.push(Span::styled(" ", Style::default().bg(Color::Rgb(15, 52, 96))));
+        spans.push(Span::styled(" ", Style::default().bg(theme.secondary)));
     }
 
     let total_btn_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| button_total_width(l) + 1).sum();
@@ -226,13 +223,13 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
 
     let mut padded_spans = vec![Span::styled(
         " ".repeat(padding as usize),
-        Style::default().bg(Color::Rgb(15, 52, 96))
+        Style::default().bg(theme.secondary)
     )];
     padded_spans.extend(spans);
 
     let buttons_line = Line::from(padded_spans);
     let buttons = Paragraph::new(vec![Line::from(""), buttons_line, Line::from("")])
-        .style(Style::default().bg(Color::Rgb(15, 52, 96)));
+        .style(Style::default().bg(theme.secondary));
     frame.render_widget(buttons, buttons_area);
 
     if state.daemon_menu_open {
@@ -240,8 +237,8 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
             frame.render_widget(Clear, menu_area);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(233, 69, 96)))
-                .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+                .border_style(Style::default().fg(theme.accent))
+                .style(Style::default().bg(theme.bg));
             frame.render_widget(block, menu_area);
 
             let mut lines = Vec::new();
@@ -249,11 +246,11 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
                 let hovered = state.hovered_daemon_menu_item == Some(idx as u8);
                 let clicked = state.clicked_daemon_menu_item == Some(idx as u8);
                 let style = if clicked {
-                    Style::default().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 255, 255)).add_modifier(Modifier::BOLD)
+                    theme.btn_click()
                 } else if hovered {
-                    Style::default().fg(Color::Rgb(255, 255, 255)).bg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD)
+                    theme.btn_hover()
                 } else {
-                    Style::default().fg(Color::Rgb(224, 224, 224)).bg(Color::Rgb(22, 33, 62))
+                    Style::default().fg(theme.fg).bg(theme.bg)
                 };
                 lines.push(Line::from(Span::styled(format!(" {:<8} ", label), style)));
             }

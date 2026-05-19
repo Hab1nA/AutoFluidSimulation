@@ -19,38 +19,30 @@ pub struct DetailPanelParams<'a> {
     pub hovered_detail_row: Option<u16>,
     pub clicked_detail_row: Option<u16>,
     pub hscroll: u16,
+    pub theme: &'a crate::theme::AppTheme,
 }
 
-fn info_message_color(msg: &str) -> Color {
-    if msg.contains('✅') {
-        Color::Rgb(0, 204, 102)
-    } else if msg.contains('❌') {
-        Color::Rgb(255, 68, 68)
-    } else if msg.contains('⚠') {
-        Color::Rgb(255, 204, 0)
-    } else if msg.contains('💡') || msg.contains('📌') {
-        Color::Rgb(0, 188, 240)
-    } else if msg.contains('⏳') || msg.contains('⏸') {
-        Color::Rgb(255, 136, 0)
+fn info_message_color(msg: &str, theme: &crate::theme::AppTheme) -> Color {
+    if msg.contains('\u{2705}') {
+        theme.success
+    } else if msg.contains('\u{274C}') {
+        theme.error
+    } else if msg.contains('\u{26A0}') {
+        theme.warning
+    } else if msg.contains('\u{1F4A1}') || msg.contains('\u{1F4CC}') {
+        theme.info
+    } else if msg.contains('\u{23F3}') || msg.contains('\u{23F8}') {
+        theme.warning
     } else {
-        Color::Rgb(0, 255, 136)
+        theme.success
     }
 }
 
-const HOVER_HIGHLIGHT_STYLE: Style = Style::new()
-    .bg(Color::Rgb(15, 52, 96))
-    .add_modifier(Modifier::BOLD);
-
-const CLICK_HIGHLIGHT_STYLE: Style = Style::new()
-    .fg(Color::Rgb(0, 0, 0))
-    .bg(Color::Rgb(255, 255, 255))
-    .add_modifier(Modifier::BOLD);
-
-pub fn compute_info_lines_no_wrap(log_buffer: &LogBuffer) -> (Vec<Line<'static>>, usize) {
+pub fn compute_info_lines_no_wrap(log_buffer: &LogBuffer, theme: &crate::theme::AppTheme) -> (Vec<Line<'static>>, usize) {
     let mut lines: Vec<Line> = Vec::new();
     let mut max_width: usize = 0;
     for msg in &log_buffer.info_messages {
-        let color = info_message_color(msg);
+        let color = info_message_color(msg, theme);
         let w = unicode_width::UnicodeWidthStr::width(msg.as_str());
         if w > max_width {
             max_width = w;
@@ -107,6 +99,7 @@ fn compute_layout(inner: Rect, total: usize, max_content_width: usize) -> (usize
     (content_height, content_width, has_vscroll, has_hscroll)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_info_panel(
     frame: &mut Frame,
     area: Rect,
@@ -115,12 +108,9 @@ pub fn render_info_panel(
     focus_zone: FocusZone,
     hscroll: u16,
     auto_scroll: bool,
+    theme: &crate::theme::AppTheme,
 ) {
-    let border_style = if focus_zone == FocusZone::InfoLog {
-        Style::default().fg(Color::Rgb(233, 69, 96))
-    } else {
-        Style::default().fg(Color::Rgb(51, 51, 51))
-    };
+    let border_style = theme.border_style_for(focus_zone == FocusZone::InfoLog);
 
     let mut title_text = " 📋 信息提示 ".to_string();
     if auto_scroll {
@@ -131,13 +121,13 @@ pub fn render_info_panel(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(title_text)
-        .title_style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
-        .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+        .title_style(theme.title_style())
+        .style(Style::default().bg(theme.bg));
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let (lines, max_content_width) = compute_info_lines_no_wrap(log_buffer);
+    let (lines, max_content_width) = compute_info_lines_no_wrap(log_buffer, theme);
     let total = lines.len();
     let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
 
@@ -153,7 +143,7 @@ pub fn render_info_panel(
     };
 
     let paragraph = Paragraph::new(visible_lines)
-        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
+        .style(Style::default().bg(theme.panel_bg))
         .scroll((0, hscroll));
     frame.render_widget(paragraph, text_area);
 
@@ -218,12 +208,13 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
         ref hovered_detail_row,
         ref clicked_detail_row,
         ref hscroll,
+        theme,
     } = params;
 
     let border_style = if *focus_zone == FocusZone::DetailLog {
-        Style::default().fg(Color::Rgb(233, 69, 96))
+        Style::default().fg(theme.accent)
     } else {
-        Style::default().fg(Color::Rgb(51, 51, 51))
+        Style::default().fg(theme.border_inactive)
     };
 
     let mut title_text = " 📝 详细日志 ".to_string();
@@ -241,8 +232,8 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
         .borders(Borders::ALL)
         .border_style(border_style)
         .title(title_text)
-        .title_style(Style::default().fg(Color::Rgb(11, 188, 240)).add_modifier(Modifier::BOLD))
-        .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+        .title_style(theme.detail_title_style())
+        .style(Style::default().bg(theme.bg));
     frame.render_widget(Clear, area);
     let inner = block.inner(area);
     frame.render_widget(&block, area);
@@ -263,9 +254,9 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
             let is_clicked = *clicked_detail_row == Some(idx as u16);
             let is_hovered = !is_clicked && *hovered_detail_row == Some(idx as u16);
             let highlight_style = if is_clicked {
-                CLICK_HIGHLIGHT_STYLE
+                Style::default().fg(theme.click_fg).bg(theme.click_bg).add_modifier(Modifier::BOLD)
             } else if is_hovered {
-                HOVER_HIGHLIGHT_STYLE
+                theme.hover_style()
             } else {
                 Style::default()
             };
@@ -286,7 +277,7 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
     };
 
     let paragraph = Paragraph::new(visible_lines)
-        .style(Style::default().bg(Color::Rgb(13, 13, 13)))
+        .style(Style::default().bg(theme.panel_bg))
         .scroll((0, *hscroll));
     frame.render_widget(paragraph, text_area);
 

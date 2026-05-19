@@ -2,6 +2,7 @@ mod ipc;
 mod settings;
 mod state;
 mod text_buffer;
+mod theme;
 mod ui;
 mod event_handler;
 mod daemon_mgr;
@@ -565,7 +566,7 @@ fn do_redraw(
 
         state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer);
+        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
         let info_visual_count = info_lines.0.len();
         let info_max_width = info_lines.1;
         let detail_lines = ui::logs::compute_detail_lines_no_wrap(log_buffer, &state.log_filter_level, &state.log_filter_source);
@@ -703,7 +704,7 @@ fn do_redraw(
         ui::header::render_header(frame, layout.header, state);
         ui::header::render_info_bar(frame, layout.info_bar, state);
         ui::table::render_table(frame, layout.status_table, state);
-        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll);
+        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll, &state.theme);
         ui::logs::render_detail_panel(
         frame,
         layout.detail_panel,
@@ -717,6 +718,7 @@ fn do_redraw(
             hovered_detail_row: state.hovered_detail_row,
             clicked_detail_row: state.clicked_detail_row,
             hscroll: state.detail_log_hscroll,
+            theme: &state.theme,
         },
     );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);

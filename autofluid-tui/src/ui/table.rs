@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::Alignment;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 
@@ -8,6 +8,7 @@ use crate::state::app_state::{AppState, FocusZone, STEP_NAMES, status_icon, stat
 use crate::ui::scrollbar;
 
 pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let theme = &state.theme;
     let visible_data_rows = area.height.saturating_sub(3) as usize;
     let total_rows = state.configs.len();
     let scroll = state.table_scroll_offset as usize;
@@ -18,14 +19,10 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
         }))
         .collect();
 
-    let border_style = if state.focus_zone == FocusZone::Table {
-        Style::default().fg(Color::Rgb(233, 69, 96))
-    } else {
-        Style::default().fg(Color::Rgb(51, 51, 51))
-    };
+    let border_style = theme.border_style_for(state.focus_zone == FocusZone::Table);
 
     let header = Row::new(header_cells)
-        .style(Style::default().fg(Color::Rgb(233, 69, 96)).bg(Color::Rgb(22, 33, 62)))
+        .style(Style::default().fg(theme.accent).bg(theme.bg))
         .height(1);
 
     let visible_configs: Vec<u64> = state.configs.iter()
@@ -38,7 +35,7 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
         let cn_str = cn.to_string();
         let is_hovered = state.hovered_table_row == Some(scroll as u16 + i as u16);
         let row_style = if is_hovered {
-            Style::default().bg(Color::Rgb(15, 52, 96)).add_modifier(Modifier::BOLD)
+            theme.hover_style()
         } else {
             Style::default()
         };
@@ -64,13 +61,13 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .style(Style::default().bg(Color::Rgb(26, 26, 46)));
+        .style(Style::default().bg(theme.table_bg));
     let inner = block.inner(area);
 
     let table = Table::new(rows, &widths)
         .header(header)
         .block(block)
-        .style(Style::default().fg(Color::Rgb(224, 224, 224)));
+        .style(Style::default().fg(theme.fg));
 
     frame.render_widget(table, area);
 

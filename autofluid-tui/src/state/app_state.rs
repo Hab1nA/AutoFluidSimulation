@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::settings::SettingsState;
 use crate::text_buffer::TextBuffer;
+use crate::theme::AppTheme;
 
 pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
@@ -166,6 +167,7 @@ pub struct AppState {
     pub dialog_scroll: u16,
     pub dialog_button_bar_y: Option<u16>,
     pub settings_state: Option<SettingsState>,
+    pub theme: AppTheme,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
