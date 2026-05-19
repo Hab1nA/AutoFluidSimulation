@@ -231,7 +231,7 @@ class PipelineDaemon:
             while self._running:
                 time.sleep(1)
         except KeyboardInterrupt:
-            logger.info("收到中断信号")
+            logger.info("TUI 客户端退出，后台引擎关闭")
         finally:
             self.shutdown()
 
@@ -263,8 +263,8 @@ class PipelineDaemon:
             logger.info(f"收到信号 {signum}，正在关闭...")
             self._running = False
 
-        # Windows 上仅支持 SIGINT 和 SIGTERM（部分）
-        for sig in [signal.SIGINT, signal.SIGTERM]:
+        # 仅保留 SIGTERM —— Ctrl+C (SIGINT) 在 TUI 客户端中已被分配给复制功能
+        for sig in [signal.SIGTERM]:
             try:
                 signal.signal(sig, signal_handler)
             except (AttributeError, ValueError):

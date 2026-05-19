@@ -14,7 +14,7 @@ data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
 host = "172.17.135.240"
 port = 22
 username = "ps"
-password = "" # 请在项目根目录 .env 文件中设置 AUTOFLUID_SSH_PASSWORD
+password = "abc@123"
 root_dir = 'D:\xkz_1020'
 scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
@@ -45,7 +45,7 @@ sc_timeout = 300
 sc_poll_interval = 2.0
 sc_process_appear_timeout = 120
 sc_gui_ready_timeout = 30
-sc_gui_stable_delay = 15
+sc_gui_stable_delay = 5
 
 [global_settings]
 watchdog_interval = 1.0

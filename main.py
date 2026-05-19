@@ -119,33 +119,33 @@ def _stop_daemon_subprocess():
     """终止后台守护进程。"""
     pid = read_pid_file(DAEMON_PID_FILE)
     if pid is None:
-        print("  后台引擎: 未运行")
+        print("后台引擎: 未运行")
         remove_pid_file(DAEMON_PID_FILE)
         return
     if not is_process_alive(pid):
-        print("  后台引擎: 未运行")
+        print("后台引擎: 未运行")
     else:
         try:
             if sys.platform == "win32":
                 if run_taskkill(pid):
-                    print(f"  后台引擎进程已终止 (PID: {pid})")
+                    print(f"后台引擎进程已终止 (PID: {pid})")
                 else:
-                    print(f"  [警告] 无法终止后台引擎进程 (PID: {pid})")
+                    print(f"[警告] 无法终止后台引擎进程 (PID: {pid})")
             else:
                 os.kill(pid, signal.SIGTERM)
                 try:
                     os.waitpid(pid, os.WNOHANG)
                 except ChildProcessError:
                     pass
-                print(f"  后台引擎进程已终止 (PID: {pid})")
+                print(f"后台引擎进程已终止 (PID: {pid})")
         except (OSError, ProcessLookupError) as e:
-            print(f"  [警告] 终止后台引擎进程失败: {e}")
+            print(f"[警告] 终止后台引擎进程失败: {e}")
     remove_pid_file(DAEMON_PID_FILE)
 
 
 def _stop_all_processes():
     print("=" * 60)
-    print("  正在停止所有仿真进程...")
+    print("正在停止所有仿真进程...")
     print("=" * 60)
 
     if sys.platform == "win32":
@@ -174,9 +174,9 @@ def _stop_all_processes():
                         p = int(pid_str)
                         try:
                             if run_taskkill(p):
-                                print(f"  {label}进程已终止 (PID: {p})")
+                                print(f"{label}进程已终止 (PID: {p})")
                             else:
-                                print(f"  [警告] 无法终止 {label} 进程 (PID: {p})")
+                                print(f"[警告] 无法终止 {label} 进程 (PID: {p})")
                         except OSError:
                             pass
             except (subprocess.SubprocessError, OSError):
@@ -207,43 +207,43 @@ def _find_latest_session_dir(process_type: str) -> str | None:
 
 def _show_status():
     print("=" * 60)
-    print("  仿真程序运行状态")
+    print("仿真程序运行状态")
     print("=" * 60)
 
     daemon_pid = read_pid_file(DAEMON_PID_FILE)
     if daemon_pid is not None and is_process_alive(daemon_pid):
-        print(f"  后台引擎: 运行中 (PID: {daemon_pid})")
+        print(f"后台引擎: 运行中 (PID: {daemon_pid})")
     else:
-        print("  后台引擎: 未运行")
+        print("后台引擎: 未运行")
 
     if check_ipc_ready():
-        print(f"  IPC 端口 {IPC_CONFIG['port']}: 已监听")
+        print(f"IPC 端口 {IPC_CONFIG['port']}: 已监听")
     else:
-        print(f"  IPC 端口 {IPC_CONFIG['port']}: 未监听")
+        print(f"IPC 端口 {IPC_CONFIG['port']}: 未监听")
 
     daemon_session = _find_latest_session_dir("daemon")
     if daemon_session and os.path.isdir(daemon_session):
-        print(f"  Daemon 最新日志目录: {daemon_session}")
+        print(f"Daemon 最新日志目录: {daemon_session}")
         try:
             log_files = [f for f in os.listdir(daemon_session) if f.endswith(".log")]
             for lf in sorted(log_files):
                 fp = os.path.join(daemon_session, lf)
                 size = os.path.getsize(fp)
                 mtime = datetime.fromtimestamp(os.path.getmtime(fp))
-                print(f"    {lf}  ({size} 字节, {mtime:%Y-%m-%d %H:%M:%S})")
+                print(f"{lf}  ({size} 字节, {mtime:%Y-%m-%d %H:%M:%S})")
         except OSError:
             pass
 
     client_session = _find_latest_session_dir("client")
     if client_session and os.path.isdir(client_session):
-        print(f"  Client 最新日志目录: {client_session}")
+        print(f"Client 最新日志目录: {client_session}")
         try:
             log_files = [f for f in os.listdir(client_session) if f.endswith(".log")]
             for lf in sorted(log_files):
                 fp = os.path.join(client_session, lf)
                 size = os.path.getsize(fp)
                 mtime = datetime.fromtimestamp(os.path.getmtime(fp))
-                print(f"    {lf}  ({size} 字节, {mtime:%Y-%m-%d %H:%M:%S})")
+                print(f"{lf}  ({size} 字节, {mtime:%Y-%m-%d %H:%M:%S})")
         except OSError:
             pass
 
@@ -260,14 +260,14 @@ def _run_all_mode():
 
     if daemon_already_running:
         print("=" * 60)
-        print("  TUI 界面 (连接到已有后台引擎)")
+        print("TUI 界面 (连接到已有后台引擎)")
         print("=" * 60)
         print()
         daemon_pid = read_pid_file(DAEMON_PID_FILE)
         if daemon_pid:
-            print(f"  后台引擎已在运行 (PID: {daemon_pid})，直接启动客户端...")
+            print(f"后台引擎已在运行 (PID: {daemon_pid})，直接启动客户端...")
         else:
-            print("  后台引擎已在运行，直接启动客户端...")
+            print("后台引擎已在运行，直接启动客户端...")
         print()
 
         # 直接启动 TUI（在主进程中运行 Rust TUI 子进程）
@@ -302,12 +302,12 @@ def _run_all_mode():
     os.environ["AUTOFLUID_SESSION_TIMESTAMP"] = session_timestamp
 
     print("=" * 60)
-    print("  同时启动后台引擎 + TUI 界面 (进程分离模式)")
+    print("同时启动后台引擎 + TUI 界面 (进程分离模式)")
     print("=" * 60)
     print()
-    print(f"  会话时间戳: {session_timestamp}")
-    print(f"  Daemon 日志目录: {daemon_log_dir}")
-    print(f"  Client 日志目录: {client_log_dir}")
+    print(f"会话时间戳: {session_timestamp}")
+    print(f"Daemon 日志目录: {daemon_log_dir}")
+    print(f"Client 日志目录: {client_log_dir}")
     print()
 
     sp_logger = _setup_subprocess_logger(daemon_subprocess_log)
@@ -319,18 +319,18 @@ def _run_all_mode():
         print("[错误] 后台引擎启动失败，终止操作。", file=sys.stderr)
         sys.exit(1)
     sp_logger.info(f"Daemon 子进程已启动, PID={daemon_proc.pid}")
-    print(f"      后台引擎已启动 (PID: {daemon_proc.pid})")
-    print(f"      日志文件: {daemon_subprocess_log}")
+    print(f"后台引擎已启动 (PID: {daemon_proc.pid})")
+    print(f"日志文件: {daemon_subprocess_log}")
 
     # ---- 2. 等待 IPC 就绪 ----
     print("[2/3] 等待后台引擎 IPC 就绪...")
     ready = _wait_for_ipc()
     if ready:
-        print("      后台引擎 IPC 已就绪")
+        print("后台引擎 IPC 已就绪")
         sp_logger.info("Daemon IPC 已就绪")
     else:
         print("[警告] 后台引擎未在预期时间内就绪，仍将尝试启动客户端")
-        print("       若客户端无法连接，请检查日志: " + daemon_subprocess_log)
+        print("若客户端无法连接，请检查日志: " + daemon_subprocess_log)
         sp_logger.warning("Daemon IPC 就绪超时")
 
     # ---- 3. 启动 TUI Client ----
@@ -383,7 +383,7 @@ def _run_all_mode():
             sp_logger.error("未找到 Rust TUI 二进制文件")
             print_rust_tui_not_found_help(PROJECT_DIR)
     except KeyboardInterrupt:
-        sp_logger.info("TUI Client 接收到 Ctrl+C 信号")
+        sp_logger.info("TUI Client 退出")
     except OSError as e:
         sp_logger.error(f"TUI Client 启动失败: {e}", exc_info=True)
         print(f"\n[错误] TUI 客户端启动失败: {e}", file=sys.stderr)
@@ -428,13 +428,13 @@ def main():
     if args.daemon:
         from utils.logger import init_session, get_session_log_dir
         init_session("daemon")
-        print(f"  日志目录: {get_session_log_dir()}")
+        print(f"日志目录: {get_session_log_dir()}")
         from engine.daemon import main as daemon_main
         daemon_main()
     elif args.client:
         from utils.logger import init_session, get_session_log_dir
         init_session("client")
-        print(f"  日志目录: {get_session_log_dir()}")
+        print(f"日志目录: {get_session_log_dir()}")
 
         rust_bin = find_rust_tui_binary(PROJECT_DIR)
         if rust_bin:
@@ -466,10 +466,10 @@ def main():
         parser.print_help()
         print()
         print("推荐使用方式:")
-        print("  python main.py --all       # 一键启动 (Daemon + Client)")
-        print("  python start.bat            # Windows 快捷启动 (双窗口)")
-        print("  终端1: python start_daemon.py")
-        print("  终端2: python start_client.py")
+        print("python main.py --all       # 一键启动 (Daemon + Client)")
+        print("python start.bat            # Windows 快捷启动 (双窗口)")
+        print("终端1: python start_daemon.py")
+        print("终端2: python start_client.py")
 
 
 if __name__ == "__main__":
