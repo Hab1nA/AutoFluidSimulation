@@ -25,6 +25,7 @@
 import os
 import sys
 import io
+import codecs
 import json
 import time
 import traceback
@@ -69,9 +70,11 @@ class _SpaceClaimLogger(object):
         level_name = self._LEVEL_NAMES.get(level, "INFO")
         line = "[{}] [{}] [{}] {}".format(timestamp, level_name, self._name, msg)
         try:
-            # errors="replace": 遇到无法编码的字符（如 \x00）时替换为 ?，
-            # 防止 UnicodeEncodeError 导致整个日志调用链崩溃
-            with io.open(self._log_file, "a", encoding="utf-8", errors="replace") as f:
+            # 使用 codecs.open 替代 io.open：
+            # IronPython 2.7 的 io.open 不一定将 errors 参数传递到底层 StreamWriter，
+            # 导致 errors="replace" 不生效，遇到 \x00 等字符时仍抛 UnicodeEncodeError。
+            # codecs.open 在 Python 2 中对 errors 参数的支持更可靠。
+            with codecs.open(self._log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line + "\n")
         except (IOError, OSError):
             pass
@@ -437,10 +440,18 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         logger.error("输出文件未生成: {}".format(out_path))
         return False
 
-    # ★ 不关闭文档：window.Close() 是 GUI 操作，在常驻模式下可能阻塞
-    #   （弹确认框、UI 刷新等），导致脚本无法返回轮询循环。
-    #   SaveAs() 完成后 SCDOC 文件已可用，与窗口是否关闭无关。
-    #   下次 Document.Open() 时 SpaceClaim 会自动处理旧文档状态。
+    # ------------------------------------------------------------------
+    # 8. 关闭文档释放资源
+    # ------------------------------------------------------------------
+    # 使用 doc.Close() 关闭文档本身（非 window.Close() GUI 操作），
+    # 释放 SpaceClaim 内部的文档句柄和内存。不关闭会导致文档句柄累积，
+    # 约 2-3 个文档后进程因资源耗尽崩溃。
+    try:
+        if doc is not None:
+            doc.Close()
+            logger.info("文档已关闭")
+    except Exception as e:
+        logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
 
     logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
     return True
@@ -575,10 +586,20 @@ def _persistent_loop():
             except Exception:
                 pass
 
-        except Exception as e:
-            logger.critical("常驻模式: 主循环异常: {}: {}".format(
-                type(e).__name__, e))
-            traceback.print_exc()
+        except BaseException as e:
+            # ★ 使用 BaseException 而非 Exception：
+            #   在 IronPython/SpaceClaim 环境中，traceback.print_exc() 可能抛出
+            #   .NET 层面的 SystemException 等非 Python Exception 子类。
+            #   若仅捕获 Exception，这些异常会绕过处理器直接终止脚本。
+            try:
+                logger.critical("常驻模式: 主循环异常: {}: {}".format(
+                    type(e).__name__, e))
+            except Exception:
+                pass
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
             # 写入错误结果（使用最近的 result_file）
             try:
                 _write_result(result_file, "", False,
