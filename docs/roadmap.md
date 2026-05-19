@@ -1,9 +1,9 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.1  
+> 文档版本：v1.2  
 > 创建日期：2026-05-09  
-> 最后更新：2026-05-11  
-> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.2.0)
+> 最后更新：2026-05-20  
+> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.6.0)
 
 ---
 
@@ -95,32 +95,58 @@ SW → SC → Transfer → Meshing → Solver
 | SW | 本地 PC | win32com COM API | 批量串行（一次宏导出所有构型） |
 | SC | 本地 PC | C# SpaceClaimBridge.exe 进程检测模式（SCProcessPool 3 槽位池） | 流水线并发（3 Worker + 等待队列） |
 | Transfer | 本地 PC → 工作站 | paramiko SFTP | 流水线并发（3 Worker） |
-| Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（3 Worker） |
+| Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（3 Worker）+ MeshingMonitor 串行管理 |
 | Solver | 远程工作站 | SSH + PowerShell Start-Process | 全局屏障后并行启动 |
 
 ### 2.3 关键代码模块清单
 
+#### Python 后端
+
 | 模块 | 文件 | 行数 | 核心职责 |
 |------|------|------|---------|
-| PipelineDaemon | `engine/daemon.py` | ~390 | 后台守护进程，协调所有子系统 |
-| PipelineScheduler | `engine/scheduler.py` | ~980 | DAG 调度、全局屏障、Worker 线程池 |
-| TaskRunner | `engine/task_runner.py` | ~1680 | 各阶段具体执行逻辑 |
-| StateManager | `engine/state_manager.py` | ~500+ | SQLite WAL 持久化状态 |
-| StepFileMonitor | `engine/file_monitor.py` | ~365 | STEP 文件写入完成检测 |
-| IPCServer | `ipc/server.py` | ~225 | TCP Socket 监听与命令分发 |
-| IPCProtocol | `ipc/protocol.py` | ~120 | JSON over TCP 消息协议 |
-| RemoteWorkstation | `utils/ssh_client.py` | ~415 | paramiko SSH 封装 |
-| Config | `engine/config.py` | ~250 | 全局硬编码配置 |
-| IpcClient (Rust) | `autofluid-tui/src/ipc/client.rs` | ~80 | Rust tokio TCP 客户端 |
-| IpcProtocol (Rust) | `autofluid-tui/src/ipc/protocol.rs` | ~70 | Rust 端协议定义 |
-| AppState (Rust) | `autofluid-tui/src/state/app_state.rs` | ~200+ | Rust 端状态管理 |
-| Table UI (Rust) | `autofluid-tui/src/ui/table.rs` | ~60 | Rust 端表格渲染 |
-| DaemonManager (Rust) | `autofluid-tui/src/daemon_mgr.rs` | ~70 | Rust 端 Daemon 进程管理 |
-| Main (Rust) | `autofluid-tui/src/main.rs` | ~200 | Rust TUI 主循环 |
-| Command (Rust) | `autofluid-tui/src/event_handler/command.rs` | ~200+ | Rust 端命令处理 |
-| Main Entry | `main.py` | ~455 | 总控程序入口 |
-| StartDaemon | `start_daemon.py` | ~35 | Daemon 启动脚本 |
-| StartClient | `start_client.py` | ~67 | Client 启动脚本 |
+| PipelineDaemon | `engine/daemon.py` | ~500 | 后台守护进程，IPC 命令处理器，协调所有子系统 |
+| PipelineScheduler | `engine/scheduler/main.py` | ~571 | DAG 调度主逻辑、全局屏障、Solver 分发 |
+| Scheduler 子包 | `engine/scheduler/` | ~2100+ | `barrier.py` 屏障协调、`sw_phase.py` SW 阶段、`worker_pool.py` 3 工作线程池、`meshing_monitor.py` 网格监控、`retry.py` 重试管理、`utils.py` 辅助函数 |
+| TaskRunner | `engine/task_runner.py` | ~217 | 各阶段执行逻辑编排（委托 executor 模块） |
+| StateManager | `engine/state_manager.py` | ~579 | SQLite WAL 持久化状态（configs/steps/engine_state 表） |
+| SCProcessPool | `engine/sc_process_pool.py` | ~567 | 3 槽位常驻进程池（文件协议 IPC，消除 SC 启动开销） |
+| StepFileMonitor | `engine/file_monitor.py` | ~382 | FileStableDetector 文件写入完成检测（多采样稳定性判定） |
+| Config | `engine/config.py` | ~516 | TOML 配置加载 + 环境变量覆盖 + TypedDict 定义 |
+| ConfigFingerprint | `engine/config_fingerprint.py` | ~31 | 配置指纹 MD5 计算（数据库分片，不同构型组合自动切换 DB） |
+| IPCServer | `ipc/server.py` | ~264 | TCP Socket 监听与命令分发 |
+| IPCProtocol | `ipc/protocol.py` | ~129 | JSON over TCP 消息协议（11 个命令） |
+| RemoteWorkstation | `utils/ssh_client.py` | ~504 | paramiko SSH/SFTP 封装 |
+| Logger | `utils/logger.py` | ~493 | 会话级日志 + 广播处理器（TUI 增量拉取） |
+| ExcelReader | `utils/excel_reader.py` | ~83 | Excel 参数表读取 |
+| Cleaner | `executor/cleaner.py` | ~174 | 系统健康检查 + 中间文件清理 |
+| RemoteExecutor | `executor/remote_executor.py` | ~282 | SFTP 传输 + 远程 Meshing/Solver 执行 |
+| SWExecutor | `executor/sw_executor.py` | ~1395 | SolidWorks COM 自动化（直接 API 导出 STEP） |
+| SCScript | `executor/spaceclaim_transit.py` | ~789 | SpaceClaim Python API 转换脚本 |
+
+#### Rust TUI 前端
+
+| 模块 | 文件 | 行数 | 核心职责 |
+|------|------|------|---------|
+| Main | `autofluid-tui/src/main.rs` | ~837 | 异步主循环、事件分发、UI 渲染调度 |
+| DaemonManager | `autofluid-tui/src/daemon_mgr.rs` | ~107 | Daemon 子进程生命周期管理 |
+| Theme | `autofluid-tui/src/theme.rs` | ~104 | ThemePalette 10 字段语义色板 + AppTheme 扩展 |
+| IpcClient | `autofluid-tui/src/ipc/client.rs` | ~196 | tokio TCP 客户端、命令发送/响应接收 |
+| IpcProtocol | `autofluid-tui/src/ipc/protocol.rs` | ~98 | Rust 端协议定义（与 Python 端同步） |
+| AppState | `autofluid-tui/src/state/app_state.rs` | ~394 | 应用状态管理（表格数据、过滤、日志缓冲） |
+| Table UI | `autofluid-tui/src/ui/table.rs` | ~90 | 状态表格渲染 |
+| Header UI | `autofluid-tui/src/ui/header.rs` | ~45 | 标题栏渲染 |
+| Layout | `autofluid-tui/src/ui/layout.rs` | ~73 | 整体布局分割 |
+| CommandBar | `autofluid-tui/src/ui/command_bar.rs` | ~285 | 8 按钮快捷栏 + Daemon 子菜单 |
+| Dialogs | `autofluid-tui/src/ui/dialogs.rs` | ~499 | 确认对话框、消息框渲染 |
+| Scrollbar | `autofluid-tui/src/ui/scrollbar.rs` | ~118 | 垂直/水平滚动条（支持拖拽） |
+| Logs UI | `autofluid-tui/src/ui/logs.rs` | ~317 | 双栏日志面板（信息提示 + 详细日志） |
+| Command Handler | `autofluid-tui/src/event_handler/command.rs` | ~451 | 命令解析与执行 |
+| KeyHandler | `autofluid-tui/src/event_handler/key_handler.rs` | ~544 | 键盘快捷键处理 |
+| MouseHandler | `autofluid-tui/src/event_handler/mouse.rs` | ~1018 | 鼠标交互（悬停、点击、拖拽、滚轮） |
+| Settings | `autofluid-tui/src/settings/mod.rs` | ~758 | 7 分类 48 字段设置管理 |
+| SettingsUI | `autofluid-tui/src/settings/settings_ui.rs` | ~434 | 设置页面渲染 |
+| SettingsIO | `autofluid-tui/src/settings/config_io.rs` | ~83 | TOML 配置读写 |
+| SettingsValidation | `autofluid-tui/src/settings/validation.rs` | ~343 | 字段校验 |
 
 ---
 
@@ -551,10 +577,10 @@ ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"F
 
 #### 4.3.1 当前屏障逻辑
 
-当前全局屏障在 `scheduler.py` 的 `_barrier_monitor_loop()` 中实现：
+当前全局屏障在 `engine/scheduler/barrier.py` 的 `_barrier_monitor_loop()` 中实现：
 
 ```python
-# scheduler.py:721
+# engine/scheduler/main.py
 if self.state.all_configs_completed_at_step("Meshing"):
     self._barrier_passed.set()
     self._dispatch_solver_tasks()
@@ -818,7 +844,7 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 |------|:--------:|---------|---------|
 | `engine/config.py` | 🔴 重度 | 结构变更 | `REMOTE_CONFIG` → `WORKSTATIONS` 列表；`STEP_NAMES` 增加 PostProcess/Collect；`IPC_CONFIG["host"]` 改为 `0.0.0.0`；新增 `STAGING_DIR`、`LOCAL_WORKER_CONFIG` 等配置；`STEP_FILE_PATTERNS` 增加 PostProcess/Collect 条目；`STEP_INDEX` 自动扩展 |
 | `engine/daemon.py` | 🔴 重度 | 架构重构 | 新增 `LocalWorkerAdapter`；新增 `handle_collect_results` / `handle_worker_register` / `handle_worker_heartbeat` 等 IPC 命令处理器；`_load_excel_data()` 需触发构型分配；`handle_start()` 需区分本地 Worker 在线/离线场景 |
-| `engine/scheduler.py` | 🔴 重度 | 核心逻辑重写 | `_barrier_passed` 改为 dict；`_barrier_monitor_loop` 改为每工作站一个；`_dispatch_solver_tasks` 增加工作站参数；Solver/PostProcess 完成判断改为基于结果文件（.cas/.dat/后处理输出）轮询而非进程退出；`_worker_loop` 中 `_process_single_config` 需感知工作站分配；`_on_step_file_ready` 改为接收 RPC 上报；`reset_config` 需处理多工作站屏障重置 |
+| `engine/scheduler/` | 🔴 重度 | 核心逻辑重写 | `_barrier_passed` 改为 dict；`_barrier_monitor_loop` 改为每工作站一个；`_dispatch_solver_tasks` 增加工作站参数；Solver/PostProcess 完成判断改为基于结果文件（.cas/.dat/后处理输出）轮询而非进程退出；`_worker_loop` 中 `_process_single_config` 需感知工作站分配；`_on_step_file_ready` 改为接收 RPC 上报；`reset_config` 需处理多工作站屏障重置 |
 | `engine/task_runner.py` | 🔴 重度 | 接口重构 | `self._ssh` → `self._ssh_pool`；`get_ssh()` 增加 `workstation_id` 参数；`execute_transfer()` 需指定目标工作站；`execute_meshing()` / `execute_solver()` 增加 `workstation_id` 参数；`wait_solver_completion()` / `wait_postprocess_completion()` 改为基于结果文件轮询；`collect_results_from_workstation(ws_id)` 新增；`clean_step_files()` 需遍历所有工作站；`run_system_check()` 需检查所有工作站 |
 | `engine/state_manager.py` | 🟡 中度 | 表结构扩展 | `steps` 表新增 `workstation_id` 列；新增 `result_delivery` 表；新增 `mark_result_staged()` / `get_undelivered_results()` / `mark_result_delivered()` 方法；`all_configs_completed_at_step()` 增加 `config_names` 过滤参数；`load_configs()` 需同步构型分配信息 |
 | `engine/file_monitor.py` | 🟡 中度 | 运行模式变更 | 在 LocalWorker 侧保持原有逻辑不变；Daemon 侧不再需要此模块，改为接收 RPC 上报事件 |
@@ -947,7 +973,7 @@ P1: 工作站级屏障 ◄──────────────────
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
-| R12 | **工作站级屏障与全局状态不一致** | 🔴 高 | `is_global_barrier_met()` 在多处被引用（`daemon.py:269`、`scheduler.py:82-83`），改为工作站级后语义变化 | 全面搜索 `barrier` 相关引用，逐一适配；`is_global_barrier_met()` 改为 `all_workstation_barriers_met()` 或保留全局语义（所有工作站屏障都通过） |
+| R12 | **工作站级屏障与全局状态不一致** | 🔴 高 | `is_global_barrier_met()` 在多处被引用（`daemon.py`、`scheduler/main.py`），改为工作站级后语义变化 | 全面搜索 `barrier` 相关引用，逐一适配；`is_global_barrier_met()` 改为 `all_workstation_barriers_met()` 或保留全局语义（所有工作站屏障都通过） |
 | R13 | **reset 操作后屏障状态未正确清理** | 🟡 中 | `reset_config()` 中 `_barrier_passed.clear()` 只清理了单个 Event，改为 dict 后需清理对应工作站的 Event | `reset_config` 遍历受影响工作站的 `_barrier_passed[ws_id]` 并 clear |
 | R14 | **断点续传时工作站分配变化** | 🟡 中 | 重启后 WORKSTATIONS 列表顺序变化导致同一构型分配到不同工作站 | 构型分配结果持久化到 `steps` 表的 `workstation_id` 列；断点续传时优先使用已记录的分配 |
 | R15 | **Solver 与 PostProcess 的完成判断时机** | 🟡 中 | 由于仿真脚本内嵌后处理，如果不以文件产出为判断依据，会导致 Solver/PostProcess 完成状态提前标记 | Meshing 屏障通过后启动 Solver；Solver 和 PostProcess 均以检测结果文件（.cas/.dat 及后处理输出文件）为完成信号，而非 Python 程序退出信号 |
@@ -1013,25 +1039,30 @@ P1: 工作站级屏障 ◄──────────────────
 
 ## 附录 A：关键代码引用索引
 
-| 引用点 | 文件 | 行号 | 说明 |
-|--------|------|------|------|
-| SSH 单实例 | `engine/task_runner.py` | L51 | `self._ssh: Optional[RemoteWorkstation] = None` |
-| SSH 全局锁 | `engine/task_runner.py` | L52 | `self._ssh_lock = threading.RLock()` |
-| 单工作站配置 | `engine/config.py` | L87-110 | `REMOTE_CONFIG` 单字典 |
-| IPC 本地监听 | `engine/config.py` | L156 | `IPC_CONFIG["host"] = "127.0.0.1"` |
-| 步骤枚举 | `engine/config.py` | L115 | `STEP_NAMES = ["SW", "SC", "Transfer", "Meshing", "Solver"]` |
-| 全局屏障检查 | `engine/scheduler.py` | L721 | `self.state.all_configs_completed_at_step("Meshing")` |
-| 屏障 Event | `engine/scheduler.py` | L65 | `self._barrier_passed = threading.Event()` |
-| Worker 线程数 | `engine/scheduler.py` | L79 | `self._num_workers = 3` |
-| 屏障状态持久化 | `engine/scheduler.py` | L82-83 | `if self.state.is_global_barrier_met(): self._barrier_passed.set()` |
-| 全局屏障查询 | `engine/daemon.py` | L269 | `stats["barrier_passed"] = self.state.is_global_barrier_met()` |
-| Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | L12 | `pub const STEP_NAMES: [&str; 5]` |
-| Rust IPC 默认地址 | `autofluid-tui/src/ipc/client.rs` | L7 | `const DEFAULT_HOST: &str = "127.0.0.1"` |
-| Rust Daemon 管理 | `autofluid-tui/src/daemon_mgr.rs` | L12-36 | 本地启动 Daemon 子进程 |
-| Python IPC 协议 | `ipc/protocol.py` | L36-51 | 命令常量定义 |
-| Rust IPC 协议 | `autofluid-tui/src/ipc/protocol.rs` | L4-13 | 命令常量定义 |
-| 数据库表结构 | `engine/state_manager.py` | L74-97 | `configs` + `steps` 表 |
-| 全局屏障查询方法 | `engine/state_manager.py` | L448-460 | `all_configs_completed_at_step()` |
+> **注意**：行号可能随代码更新而变化，建议以文件内搜索关键字为准。
+
+| 引用点 | 文件 | 关键字 | 说明 |
+|--------|------|--------|------|
+| SSH 单实例 | `engine/task_runner.py` | `self._ssh` | `Optional[RemoteWorkstation]` |
+| SSH 全局锁 | `engine/task_runner.py` | `self._ssh_lock` | `threading.RLock()` |
+| 单工作站配置 | `engine/config.py` | `REMOTE_CONFIG` | 单字典 SSH 连接信息 |
+| IPC 本地监听 | `engine/config.py` | `IPC_CONFIG` | `"host": "127.0.0.1"` |
+| 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["SW", "SC", "Transfer", "Meshing", "Solver"]` |
+| 全局屏障检查 | `engine/scheduler/main.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成 |
+| 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `threading.Event()` |
+| Worker 线程数 | `engine/scheduler/worker_pool.py` | `_num_workers` | `= 3` |
+| 屏障状态持久化 | `engine/scheduler/main.py` | `is_global_barrier_met` | 启动时恢复屏障状态 |
+| 全局屏障查询 | `engine/daemon.py` | `barrier_passed` | IPC 响应中包含屏障状态 |
+| Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | `STEP_NAMES` | `pub const STEP_NAMES: [&str; 5]` |
+| Rust IPC 默认地址 | `autofluid-tui/src/ipc/client.rs` | `DEFAULT_HOST` | `"127.0.0.1"` |
+| Rust Daemon 管理 | `autofluid-tui/src/daemon_mgr.rs` | `DaemonManager` | 本地启动 Daemon 子进程 |
+| Python IPC 协议 | `ipc/protocol.py` | `CMD_` | 命令常量定义（11 个） |
+| Rust IPC 协议 | `autofluid-tui/src/ipc/protocol.rs` | `CMD_` | 命令常量定义（与 Python 同步） |
+| 数据库表结构 | `engine/state_manager.py` | `CREATE TABLE` | `configs` + `steps` + `engine_state` 表 |
+| 全局屏障查询方法 | `engine/state_manager.py` | `all_configs_completed_at_step` | 按步骤查询完成状态 |
+| SC 进程池 IPC 协议 | `engine/sc_process_pool.py` | `sc_cmd_` / `sc_result_` | 文件协议 JSON 命令/结果 |
+| 配置指纹 | `engine/config_fingerprint.py` | `compute_config_fingerprint` | MD5 前 8 位，数据库分片 |
+| 主题系统 | `autofluid-tui/src/theme.rs` | `ThemePalette` / `AppTheme` | 10 字段语义色板 + 扩展字段 |
 
 ## 附录 B：术语表
 
