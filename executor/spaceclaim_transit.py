@@ -76,6 +76,15 @@ class _SpaceClaimLogger(object):
             # codecs.open 在 Python 2 中对 errors 参数的支持更可靠。
             with codecs.open(self._log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line + "\n")
+        except UnicodeEncodeError:
+            # codecs.open 的 errors="replace" 在 IronPython 2.7 中仍可能失效（
+            # .NET StreamWriter 编码设为 'unknown' 时），降级为 ASCII 写入。
+            try:
+                safe = line.encode("ascii", "replace").decode("ascii")
+                with codecs.open(self._log_file, "a", encoding="ascii", errors="replace") as f:
+                    f.write(safe + "\n")
+            except Exception:
+                pass
         except (IOError, OSError):
             pass
         try:
@@ -221,6 +230,51 @@ def _get_script_args():
         return [env_config, env_step, env_scdoc]
 
     return []
+
+
+# ============================================================================
+# 文档关闭辅助
+# ============================================================================
+
+def _close_document(doc):
+    """关闭 SpaceClaim 文档，释放内部资源。
+
+    SpaceClaim API V23 的 Document 对象没有 Close() 方法。
+    通过多种方式尝试关闭，确保资源被释放：
+
+    1. Command.Execute("CloseWindow") — 通过 SpaceClaim 命令系统关闭当前窗口
+    2. doc.Window.Close() — 通过文档关联的 Window 对象关闭
+    3. Window.ActiveWindow.Close() — 关闭当前活动窗口
+
+    Args:
+        doc: SpaceClaim Document 对象（Document.Open 返回值）
+    """
+    # 方式1: 通过命令系统关闭（最可靠，与 Command.Execute("Exit") 同一体系）
+    try:
+        Command.Execute("CloseWindow")
+        return
+    except Exception:
+        pass
+
+    # 方式2: 通过文档的 Window 属性关闭
+    try:
+        window = doc.Window
+        if window is not None:
+            window.Close()
+            return
+    except Exception:
+        pass
+
+    # 方式3: 关闭当前活动窗口
+    try:
+        window = Window.ActiveWindow
+        if window is not None:
+            window.Close()
+            return
+    except Exception:
+        pass
+
+    logger.warning("所有文档关闭方式均失败，资源可能未释放")
 
 
 # ============================================================================
@@ -443,12 +497,13 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # ------------------------------------------------------------------
     # 8. 关闭文档释放资源
     # ------------------------------------------------------------------
-    # 使用 doc.Close() 关闭文档本身（非 window.Close() GUI 操作），
-    # 释放 SpaceClaim 内部的文档句柄和内存。不关闭会导致文档句柄累积，
+    # 不关闭文档会导致 SpaceClaim 内部文档句柄/内存累积，
     # 约 2-3 个文档后进程因资源耗尽崩溃。
+    # SpaceClaim API V23 的 Document 对象没有 Close() 方法，
+    # 需要通过 Command.Execute("CloseWindow") 或 Window 对象关闭。
     try:
         if doc is not None:
-            doc.Close()
+            _close_document(doc)
             logger.info("文档已关闭")
     except Exception as e:
         logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
@@ -629,7 +684,7 @@ def _write_result(result_file, config_name, success, message="",
     try:
         # 先写临时文件再重命名，确保原子性
         tmp_file = result_file + ".tmp"
-        with io.open(tmp_file, "w", encoding="utf-8") as f:
+        with io.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
             json.dump(result, f)
             f.write("\n")
             # ★ 立即 flush + fsync：确保数据落盘，
