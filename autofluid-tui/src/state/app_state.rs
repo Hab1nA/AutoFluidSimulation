@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::settings::SettingsState;
+use crate::text_buffer::TextBuffer;
 
 pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
@@ -128,8 +129,7 @@ pub struct AppState {
     pub ui_mode: UiMode,
     pub should_quit: bool,
     pub needs_redraw: bool,
-    pub command_input: String,
-    pub command_cursor: usize,
+    pub command_buffer: TextBuffer,
     pub confirm_message: Option<String>,
     pub confirm_callback: Option<ConfirmAction>,
     pub check_data: Option<serde_json::Value>,

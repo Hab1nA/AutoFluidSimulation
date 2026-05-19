@@ -1,6 +1,7 @@
 mod ipc;
 mod settings;
 mod state;
+mod text_buffer;
 mod ui;
 mod event_handler;
 mod daemon_mgr;

@@ -85,6 +85,10 @@ class OperationTimeoutsConfig(TypedDict):
     ssh_connection: int
     dir_recursion_limit: int
     ssh_upload_max_retries: int
+    # SpaceClaim 启动相关超时
+    sc_process_appear_timeout: int  # 启动exe后等待进程出现(秒)
+    sc_gui_ready_timeout: int       # 进程出现后等待主窗口可交互(秒)
+    sc_gui_stable_delay: int        # 主窗口就绪后额外等待后台稳定(秒)
 
 
 class EngineConfig(TypedDict):
@@ -274,6 +278,13 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     "dir_recursion_limit": 32,
     # 文件上传重试的最大次数
     "ssh_upload_max_retries": 3,
+    # SpaceClaim 启动相关超时
+    # 启动 exe 后等待进程在系统中出现的最大秒数
+    "sc_process_appear_timeout": 120,
+    # 进程出现后等待主窗口可交互的最大秒数
+    "sc_gui_ready_timeout": 30,
+    # 主窗口就绪后额外等待后台加载稳定的秒数
+    "sc_gui_stable_delay": 15,
 }
 
 # ============================================================================
@@ -431,6 +442,35 @@ def reload_config_from_toml() -> bool:
             REMOTE_CONFIG.update(toml_data["remote_config"])
         if "step_file_patterns" in toml_data:
             STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
+        # 新分类格式：按工具维度拆分为 solidworks / spaceclaim / global_settings
+        if "solidworks" in toml_data:
+            ENGINE_CONFIG.update(
+                {k: v for k, v in toml_data["solidworks"].items()
+                 if k in ENGINE_CONFIG}
+            )
+            OPERATION_TIMEOUTS.update(
+                {k: v for k, v in toml_data["solidworks"].items()
+                 if k in OPERATION_TIMEOUTS}
+            )
+        if "spaceclaim" in toml_data:
+            ENGINE_CONFIG.update(
+                {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in ENGINE_CONFIG}
+            )
+            OPERATION_TIMEOUTS.update(
+                {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in OPERATION_TIMEOUTS}
+            )
+        if "global_settings" in toml_data:
+            ENGINE_CONFIG.update(
+                {k: v for k, v in toml_data["global_settings"].items()
+                 if k in ENGINE_CONFIG}
+            )
+            OPERATION_TIMEOUTS.update(
+                {k: v for k, v in toml_data["global_settings"].items()
+                 if k in OPERATION_TIMEOUTS}
+            )
+        # 向后兼容：旧格式 engine_config / operation_timeouts
         if "engine_config" in toml_data:
             ENGINE_CONFIG.update(toml_data["engine_config"])
         if "operation_timeouts" in toml_data:

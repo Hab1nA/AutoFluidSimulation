@@ -30,7 +30,7 @@ class IPCServer:
     收到命令后，调用注册的回调函数进行处理。
     """
 
-    def __init__(self, host: str = None, port: int = None):
+    def __init__(self, host: str | None = None, port: int | None = None):
         """
         初始化 IPC 服务器。
 

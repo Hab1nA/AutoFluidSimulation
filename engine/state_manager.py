@@ -33,7 +33,7 @@ class StateManager:
     写入操作由 Daemon 进程独占（通过 Python 线程锁保护）。
     """
 
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str | None = None):
         """
         初始化状态管理器。
 
@@ -492,7 +492,7 @@ class StateManager:
     # 辅助查询方法
     # ------------------------------------------------------------------
 
-    def get_configs_at_step(self, step_name: str, status: str = None) -> List[int]:
+    def get_configs_at_step(self, step_name: str, status: str | None = None) -> List[int]:
         """获取处于指定步骤指定状态的构型列表。"""
         with self._get_connection() as conn:
             if status:

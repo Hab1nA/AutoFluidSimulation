@@ -127,9 +127,9 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         Style::default().fg(Color::Rgb(100, 160, 100)).bg(Color::Rgb(13, 13, 13))
     };
 
-    let before_cursor: String = state.command_input.chars().take(state.command_cursor).collect();
-    let cursor_char = state.command_input.chars().nth(state.command_cursor);
-    let after_cursor: String = state.command_input.chars().skip(state.command_cursor + 1).collect();
+    let before_cursor: String = state.command_buffer.text.chars().take(state.command_buffer.cursor).collect();
+    let cursor_char = state.command_buffer.text.chars().nth(state.command_buffer.cursor);
+    let after_cursor: String = state.command_buffer.text.chars().skip(state.command_buffer.cursor + 1).collect();
 
     let prefix = "> ";
     let before_text = format!("{}{}", prefix, before_cursor);
@@ -157,20 +157,32 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         .bg(Color::Rgb(0, 255, 136))
         .add_modifier(Modifier::BOLD);
 
+    let sel_style = Style::default()
+        .fg(Color::Rgb(22, 33, 62))
+        .bg(Color::Rgb(0, 255, 136));
+
     let input_line = if state.focus_zone == FocusZone::CommandInput {
-        let mut spans = vec![
+        let sel = state.command_buffer.selection_range();
+        let chars: Vec<char> = state.command_buffer.text.chars().collect();
+        let mut spans: Vec<Span<'_>> = vec![
             Span::styled(prefix, input_style),
-            Span::styled(before_cursor, input_style),
         ];
-        if let Some(ch) = cursor_char {
-            spans.push(Span::styled(ch.to_string(), cursor_highlight));
-            spans.push(Span::styled(after_cursor, input_style));
-        } else {
+        for (i, ch) in chars.iter().enumerate() {
+            let style = if i == state.command_buffer.cursor {
+                cursor_highlight
+            } else if let Some((s, e)) = sel {
+                if i >= s && i < e { sel_style } else { input_style }
+            } else {
+                input_style
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        if state.command_buffer.cursor >= chars.len() {
             spans.push(Span::styled("▎".to_string(), Style::default().fg(Color::Rgb(0, 255, 136))));
         }
         Line::from(spans)
     } else {
-        let full_text = format!("{}{}{}", prefix, state.command_input, " ");
+        let full_text = format!("{}{}{}", prefix, state.command_buffer.text, " ");
         Line::from(Span::styled(full_text, input_style))
     };
 

@@ -157,7 +157,7 @@ def _infer_log_category(name: str) -> str:
     return "daemon"
 
 
-def setup_logger(name: str, log_file: str = None) -> logging.Logger:
+def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
     """创建并配置一个 logger 实例。
 
     若已通过 init_session() 初始化会话，日志文件将存放在会话目录下，

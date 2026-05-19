@@ -213,15 +213,17 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
-                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程在 120s 内未出现");
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim 进程在 {processAppearTimeout}s 内未出现");
                 return 2;
             }
 
             Console.WriteLine($"[BRIDGE] SpaceClaim 进程已出现 (PID={workingProcess.Id}), 等待 GUI 就绪...");
-            WaitForGuiReady(workingProcess, 30);
+            int guiReadyTimeout = GetEnvInt("AUTOFLUID_SC_GUI_READY_TIMEOUT", 30);
+            WaitForGuiReady(workingProcess, guiReadyTimeout);
 
             Console.WriteLine("[BRIDGE] SpaceClaim 正在运行, 监控脚本执行完成...");
 
@@ -335,15 +337,17 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
-                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程在 120s 内未出现");
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim 进程在 {processAppearTimeout}s 内未出现");
                 return 2;
             }
 
             Console.WriteLine($"[BRIDGE] SpaceClaim 进程已出现 (PID={workingProcess.Id}), 等待 GUI 就绪...");
-            WaitForGuiReady(workingProcess, 30);
+            int guiReadyTimeout = GetEnvInt("AUTOFLUID_SC_GUI_READY_TIMEOUT", 30);
+            WaitForGuiReady(workingProcess, guiReadyTimeout);
 
             // 等待脚本就绪标志
             string readyFile = Path.Combine(opts.CmdDir, $"sc_ready_{opts.SlotId}.json");
@@ -472,6 +476,16 @@ namespace AutoFluidSimulation.Bridge
             return null;
         }
 
+        private static int GetEnvInt(string name, int defaultValue)
+        {
+            string value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value) && int.TryParse(value, out int parsed) && parsed > 0)
+            {
+                return parsed;
+            }
+            return defaultValue;
+        }
+
         private static void WaitForGuiReady(Process p, int timeoutSec)
         {
             DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
@@ -539,12 +553,12 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine($"[BRIDGE] Warning: Phase 2 WaitForInputIdle 异常: {ex.Message}");
             }
 
-            // Phase 3 等待时间可通过环境变量 AUTOFLUID_SC_GUI_WAIT 配置（默认 15 秒）
-            int guiWaitSeconds = 15;
-            string envWait = Environment.GetEnvironmentVariable("AUTOFLUID_SC_GUI_WAIT");
-            if (!string.IsNullOrEmpty(envWait) && int.TryParse(envWait, out int parsed) && parsed > 0)
+            // Phase 3 等待时间可通过环境变量配置（默认 15 秒）
+            // AUTOFLUID_SC_GUI_STABLE_DELAY 优先，向后兼容 AUTOFLUID_SC_GUI_WAIT
+            int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 0);
+            if (guiWaitSeconds <= 0)
             {
-                guiWaitSeconds = parsed;
+                guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_WAIT", 15);
             }
             Console.WriteLine($"[BRIDGE] Phase 3: 等待加载稳定 (延时 {guiWaitSeconds}s)...");
             Thread.Sleep(guiWaitSeconds * 1000);

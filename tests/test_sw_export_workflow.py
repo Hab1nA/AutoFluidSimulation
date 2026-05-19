@@ -25,7 +25,6 @@ import tempfile
 import shutil
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
-from typing import List
 
 import pytest
 
@@ -49,7 +48,7 @@ os.environ["AUTOFLUID_DATA_DIR"] = _TEST_DATA_DIR
 # 测试辅助：创建模拟 SW COM 对象
 # ============================================================================
 
-def create_mock_sw_app(config_names: List[str] = None,
+def create_mock_sw_app(config_names: list[str] | None = None,
                         open_doc_succeeds: bool = True,
                         insert_dt_succeeds: bool = True,
                         save_as_succeeds: bool = True):

@@ -5,7 +5,7 @@ pub mod validation;
 use serde::{Deserialize, Serialize};
 
 use crate::settings::validation::{validate_config, ValidationError};
-use crate::utils::char_to_byte_index;
+use crate::text_buffer::TextBuffer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalPaths {
@@ -102,56 +102,73 @@ impl Default for StepFilePatterns {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EngineConfig {
-    pub watchdog_interval: f64,
+pub struct SolidWorksConfig {
     pub sw_macro_timeout: u64,
     pub sw_close_doc_on_finish: bool,
     pub sw_exit_on_finish: bool,
     pub sw_visible: bool,
-    pub sc_timeout: u64,
-    pub transfer_timeout: u64,
-    pub meshing_timeout: u64,
-    pub solver_timeout: u64,
-    pub max_retries: u32,
-    pub state_refresh_interval: f64,
+    pub sw_startup: u64,
+    pub sw_dispatch_startup_delay: u64,
+    pub sw_exit_wait_seconds: u64,
 }
 
-impl Default for EngineConfig {
+impl Default for SolidWorksConfig {
     fn default() -> Self {
         Self {
-            watchdog_interval: 1.0,
             sw_macro_timeout: 3600,
             sw_close_doc_on_finish: true,
             sw_exit_on_finish: true,
             sw_visible: true,
-            sc_timeout: 300,
-            transfer_timeout: 120,
-            meshing_timeout: 600,
-            solver_timeout: 7200,
-            max_retries: 3,
-            state_refresh_interval: 0.5,
+            sw_startup: 60,
+            sw_dispatch_startup_delay: 8,
+            sw_exit_wait_seconds: 15,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperationTimeouts {
-    pub sw_startup: u64,
-    pub sw_dispatch_startup_delay: u64,
-    pub sw_exit_wait_seconds: u64,
+pub struct SpaceClaimConfig {
+    pub sc_timeout: u64,
     pub sc_poll_interval: f64,
+    pub sc_process_appear_timeout: u64,
+    pub sc_gui_ready_timeout: u64,
+    pub sc_gui_stable_delay: u64,
+}
+
+impl Default for SpaceClaimConfig {
+    fn default() -> Self {
+        Self {
+            sc_timeout: 300,
+            sc_poll_interval: 2.0,
+            sc_process_appear_timeout: 120,
+            sc_gui_ready_timeout: 30,
+            sc_gui_stable_delay: 15,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalSettings {
+    pub watchdog_interval: f64,
+    pub transfer_timeout: u64,
+    pub meshing_timeout: u64,
+    pub solver_timeout: u64,
+    pub max_retries: u32,
+    pub state_refresh_interval: f64,
     pub ssh_connection: u64,
     pub dir_recursion_limit: u32,
     pub ssh_upload_max_retries: u32,
 }
 
-impl Default for OperationTimeouts {
+impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
-            sw_startup: 60,
-            sw_dispatch_startup_delay: 8,
-            sw_exit_wait_seconds: 15,
-            sc_poll_interval: 2.0,
+            watchdog_interval: 1.0,
+            transfer_timeout: 120,
+            meshing_timeout: 600,
+            solver_timeout: 7200,
+            max_retries: 3,
+            state_refresh_interval: 0.5,
             ssh_connection: 10,
             dir_recursion_limit: 32,
             ssh_upload_max_retries: 3,
@@ -168,9 +185,11 @@ pub struct SettingsConfig {
     #[serde(default)]
     pub step_file_patterns: StepFilePatterns,
     #[serde(default)]
-    pub engine_config: EngineConfig,
+    pub solidworks: SolidWorksConfig,
     #[serde(default)]
-    pub operation_timeouts: OperationTimeouts,
+    pub spaceclaim: SpaceClaimConfig,
+    #[serde(default)]
+    pub global_settings: GlobalSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,18 +198,20 @@ pub enum SettingCategory {
     RemoteConnection,
     RemoteDirs,
     StepPatterns,
-    EngineConfig,
-    OperationTimeouts,
+    SolidWorks,
+    SpaceClaim,
+    GlobalSettings,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 6] = [
+    pub const ALL: [SettingCategory; 7] = [
         SettingCategory::LocalPaths,
         SettingCategory::RemoteConnection,
         SettingCategory::RemoteDirs,
         SettingCategory::StepPatterns,
-        SettingCategory::EngineConfig,
-        SettingCategory::OperationTimeouts,
+        SettingCategory::SolidWorks,
+        SettingCategory::SpaceClaim,
+        SettingCategory::GlobalSettings,
     ];
 
     pub fn display_name(self) -> &'static str {
@@ -199,8 +220,9 @@ impl SettingCategory {
             SettingCategory::RemoteConnection => "远程工作站连接",
             SettingCategory::RemoteDirs => "远程执行目录",
             SettingCategory::StepPatterns => "步骤文件模板",
-            SettingCategory::EngineConfig => "引擎配置",
-            SettingCategory::OperationTimeouts => "操作超时参数",
+            SettingCategory::SolidWorks => "SolidWorks",
+            SettingCategory::SpaceClaim => "SpaceClaim",
+            SettingCategory::GlobalSettings => "全局设置",
         }
     }
 
@@ -210,8 +232,9 @@ impl SettingCategory {
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 9,
             SettingCategory::StepPatterns => 4,
-            SettingCategory::EngineConfig => 12,
-            SettingCategory::OperationTimeouts => 7,
+            SettingCategory::SolidWorks => 7,
+            SettingCategory::SpaceClaim => 5,
+            SettingCategory::GlobalSettings => 9,
         }
     }
 
@@ -235,16 +258,21 @@ impl SettingCategory {
                 0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver",
                 _ => "",
             },
-            SettingCategory::EngineConfig => match idx {
-                0 => "watchdog_interval", 1 => "sw_macro_timeout", 2 => "sw_close_doc_on_finish",
-                3 => "sw_exit_on_finish", 4 => "sw_visible",
-                5 => "sc_timeout", 6 => "transfer_timeout", 7 => "meshing_timeout",
-                8 => "solver_timeout", 9 => "max_retries", 10 => "state_refresh_interval",
+            SettingCategory::SolidWorks => match idx {
+                0 => "sw_macro_timeout", 1 => "sw_close_doc_on_finish", 2 => "sw_exit_on_finish",
+                3 => "sw_visible", 4 => "sw_startup", 5 => "sw_dispatch_startup_delay",
+                6 => "sw_exit_wait_seconds",
                 _ => "",
             },
-            SettingCategory::OperationTimeouts => match idx {
-                0 => "sw_startup", 1 => "sw_dispatch_startup_delay", 2 => "sw_exit_wait_seconds",
-                3 => "sc_poll_interval", 4 => "ssh_connection", 5 => "dir_recursion_limit", 6 => "ssh_upload_max_retries",
+            SettingCategory::SpaceClaim => match idx {
+                0 => "sc_timeout", 1 => "sc_poll_interval", 2 => "sc_process_appear_timeout",
+                3 => "sc_gui_ready_timeout", 4 => "sc_gui_stable_delay",
+                _ => "",
+            },
+            SettingCategory::GlobalSettings => match idx {
+                0 => "watchdog_interval", 1 => "transfer_timeout", 2 => "meshing_timeout",
+                3 => "solver_timeout", 4 => "max_retries", 5 => "state_refresh_interval",
+                6 => "ssh_connection", 7 => "dir_recursion_limit", 8 => "ssh_upload_max_retries",
                 _ => "",
             },
         }
@@ -270,22 +298,28 @@ impl SettingCategory {
                 0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板",
                 _ => "",
             },
-            SettingCategory::EngineConfig => match idx {
-                0 => "看门狗间隔(秒)", 1 => "SW宏超时(秒)", 2 => "SW关闭文档", 3 => "SW退出",
-                4 => "SW显示窗口", 5 => "SC超时(秒)", 6 => "传输超时(秒)",
-                7 => "网格超时(秒)", 8 => "求解超时(秒)", 9 => "最大重试", 10 => "状态刷新间隔(秒)",
+            SettingCategory::SolidWorks => match idx {
+                0 => "宏超时(秒)", 1 => "完成后关闭文档", 2 => "完成后退出SW",
+                3 => "显示窗口", 4 => "启动超时(秒)", 5 => "调度启动延迟(秒)",
+                6 => "退出等待(秒)",
                 _ => "",
             },
-            SettingCategory::OperationTimeouts => match idx {
-                0 => "SW启动超时(秒)", 1 => "SW调度启动延迟(秒)", 2 => "SW退出等待(秒)",
-                3 => "SC轮询间隔(秒)", 4 => "SSH连接超时(秒)", 5 => "目录递归深度限制", 6 => "SSH上传最大重试",
+            SettingCategory::SpaceClaim => match idx {
+                0 => "脚本超时(秒)", 1 => "轮询间隔(秒)", 2 => "进程出现等待(秒)",
+                3 => "窗口就绪超时(秒)", 4 => "窗口稳定等待(秒)",
+                _ => "",
+            },
+            SettingCategory::GlobalSettings => match idx {
+                0 => "看门狗间隔(秒)", 1 => "传输超时(秒)", 2 => "网格超时(秒)",
+                3 => "求解超时(秒)", 4 => "最大重试", 5 => "状态刷新间隔(秒)",
+                6 => "SSH连接超时(秒)", 7 => "目录递归深度限制", 8 => "SSH上传最大重试",
                 _ => "",
             },
         }
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::EngineConfig) && matches!(idx, 2..=4)
+        matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=3)
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
@@ -314,12 +348,8 @@ pub struct SettingsState {
     pub scroll: u16,
     pub dirty: bool,
     pub validation_errors: Vec<ValidationError>,
-    pub edit_buffer: String,
-    pub edit_cursor: usize,
-    /// Selection anchor for Shift+arrow / Ctrl+A. When Some, selection spans
-    /// from `selection_anchor` (inclusive) to `edit_cursor` (exclusive if
-    /// cursor > anchor, inclusive otherwise). The two may be in either order.
-    pub selection_anchor: Option<usize>,
+    /// 通用文本编辑缓冲区（光标、选区、剪贴板）。
+    pub buffer: TextBuffer,
     pub undo_stack: Vec<UndoEntry>,
     pub saved: bool,
     pub save_error: Option<String>,
@@ -381,9 +411,7 @@ impl SettingsState {
             scroll: 0,
             dirty: false,
             validation_errors: Vec::new(),
-            edit_buffer: String::new(),
-            edit_cursor: 0,
-            selection_anchor: None,
+            buffer: TextBuffer::new(),
             undo_stack: Vec::new(),
             saved: false,
             save_error: None,
@@ -446,28 +474,34 @@ impl SettingsState {
                 3 => self.config.step_file_patterns.solver.clone(),
                 _ => String::new(),
             },
-            SettingCategory::EngineConfig => match idx {
-                0 => self.config.engine_config.watchdog_interval.to_string(),
-                1 => self.config.engine_config.sw_macro_timeout.to_string(),
-                2 => self.config.engine_config.sw_close_doc_on_finish.to_string(),
-                3 => self.config.engine_config.sw_exit_on_finish.to_string(),
-                4 => self.config.engine_config.sw_visible.to_string(),
-                5 => self.config.engine_config.sc_timeout.to_string(),
-                6 => self.config.engine_config.transfer_timeout.to_string(),
-                7 => self.config.engine_config.meshing_timeout.to_string(),
-                8 => self.config.engine_config.solver_timeout.to_string(),
-                9 => self.config.engine_config.max_retries.to_string(),
-                10 => self.config.engine_config.state_refresh_interval.to_string(),
+            SettingCategory::SolidWorks => match idx {
+                0 => self.config.solidworks.sw_macro_timeout.to_string(),
+                1 => self.config.solidworks.sw_close_doc_on_finish.to_string(),
+                2 => self.config.solidworks.sw_exit_on_finish.to_string(),
+                3 => self.config.solidworks.sw_visible.to_string(),
+                4 => self.config.solidworks.sw_startup.to_string(),
+                5 => self.config.solidworks.sw_dispatch_startup_delay.to_string(),
+                6 => self.config.solidworks.sw_exit_wait_seconds.to_string(),
                 _ => String::new(),
             },
-            SettingCategory::OperationTimeouts => match idx {
-                0 => self.config.operation_timeouts.sw_startup.to_string(),
-                1 => self.config.operation_timeouts.sw_dispatch_startup_delay.to_string(),
-                2 => self.config.operation_timeouts.sw_exit_wait_seconds.to_string(),
-                3 => self.config.operation_timeouts.sc_poll_interval.to_string(),
-                4 => self.config.operation_timeouts.ssh_connection.to_string(),
-                5 => self.config.operation_timeouts.dir_recursion_limit.to_string(),
-                6 => self.config.operation_timeouts.ssh_upload_max_retries.to_string(),
+            SettingCategory::SpaceClaim => match idx {
+                0 => self.config.spaceclaim.sc_timeout.to_string(),
+                1 => self.config.spaceclaim.sc_poll_interval.to_string(),
+                2 => self.config.spaceclaim.sc_process_appear_timeout.to_string(),
+                3 => self.config.spaceclaim.sc_gui_ready_timeout.to_string(),
+                4 => self.config.spaceclaim.sc_gui_stable_delay.to_string(),
+                _ => String::new(),
+            },
+            SettingCategory::GlobalSettings => match idx {
+                0 => self.config.global_settings.watchdog_interval.to_string(),
+                1 => self.config.global_settings.transfer_timeout.to_string(),
+                2 => self.config.global_settings.meshing_timeout.to_string(),
+                3 => self.config.global_settings.solver_timeout.to_string(),
+                4 => self.config.global_settings.max_retries.to_string(),
+                5 => self.config.global_settings.state_refresh_interval.to_string(),
+                6 => self.config.global_settings.ssh_connection.to_string(),
+                7 => self.config.global_settings.dir_recursion_limit.to_string(),
+                8 => self.config.global_settings.ssh_upload_max_retries.to_string(),
                 _ => String::new(),
             },
         }
@@ -518,28 +552,34 @@ impl SettingsState {
                 3 => self.config.step_file_patterns.solver = value.to_string(),
                 _ => {}
             },
-            SettingCategory::EngineConfig => match idx {
-                0 => if let Ok(v) = value.parse::<f64>() { self.config.engine_config.watchdog_interval = v; }
-                1 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.sw_macro_timeout = v; }
-                2 => self.config.engine_config.sw_close_doc_on_finish = value == "true" || value == "是",
-                3 => self.config.engine_config.sw_exit_on_finish = value == "true" || value == "是",
-                4 => self.config.engine_config.sw_visible = value == "true" || value == "是",
-                5 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.sc_timeout = v; }
-                6 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.transfer_timeout = v; }
-                7 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.meshing_timeout = v; }
-                8 => if let Ok(v) = value.parse::<u64>() { self.config.engine_config.solver_timeout = v; }
-                9 => if let Ok(v) = value.parse::<u32>() { self.config.engine_config.max_retries = v; }
-                10 => if let Ok(v) = value.parse::<f64>() { self.config.engine_config.state_refresh_interval = v; }
+            SettingCategory::SolidWorks => match idx {
+                0 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_macro_timeout = v; }
+                1 => self.config.solidworks.sw_close_doc_on_finish = value == "true" || value == "是",
+                2 => self.config.solidworks.sw_exit_on_finish = value == "true" || value == "是",
+                3 => self.config.solidworks.sw_visible = value == "true" || value == "是",
+                4 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_startup = v; }
+                5 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_dispatch_startup_delay = v; }
+                6 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_exit_wait_seconds = v; }
                 _ => {}
             },
-            SettingCategory::OperationTimeouts => match idx {
-                0 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_startup = v; }
-                1 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_dispatch_startup_delay = v; }
-                2 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.sw_exit_wait_seconds = v; }
-                3 => if let Ok(v) = value.parse::<f64>() { self.config.operation_timeouts.sc_poll_interval = v; }
-                4 => if let Ok(v) = value.parse::<u64>() { self.config.operation_timeouts.ssh_connection = v; }
-                5 => if let Ok(v) = value.parse::<u32>() { self.config.operation_timeouts.dir_recursion_limit = v; }
-                6 => if let Ok(v) = value.parse::<u32>() { self.config.operation_timeouts.ssh_upload_max_retries = v; }
+            SettingCategory::SpaceClaim => match idx {
+                0 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_timeout = v; }
+                1 => if let Ok(v) = value.parse::<f64>() { self.config.spaceclaim.sc_poll_interval = v; }
+                2 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_process_appear_timeout = v; }
+                3 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_gui_ready_timeout = v; }
+                4 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_gui_stable_delay = v; }
+                _ => {}
+            },
+            SettingCategory::GlobalSettings => match idx {
+                0 => if let Ok(v) = value.parse::<f64>() { self.config.global_settings.watchdog_interval = v; }
+                1 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.transfer_timeout = v; }
+                2 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.meshing_timeout = v; }
+                3 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.solver_timeout = v; }
+                4 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.max_retries = v; }
+                5 => if let Ok(v) = value.parse::<f64>() { self.config.global_settings.state_refresh_interval = v; }
+                6 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.ssh_connection = v; }
+                7 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.dir_recursion_limit = v; }
+                8 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.ssh_upload_max_retries = v; }
                 _ => {}
             },
         }
@@ -592,17 +632,13 @@ impl SettingsState {
     }
 
     pub fn begin_edit_current_field(&mut self) {
-        self.edit_buffer = self.get_field_value(self.current_category(), self.focus.field_index);
-        let char_count = self.edit_buffer.chars().count();
-        self.edit_cursor = char_count;
-        self.selection_anchor = None;
+        let value = self.get_field_value(self.current_category(), self.focus.field_index);
+        self.buffer = TextBuffer::with_text(value);
         self.focus.editing = true;
     }
 
     pub fn cancel_edit_current_field(&mut self) {
-        self.edit_buffer.clear();
-        self.edit_cursor = 0;
-        self.selection_anchor = None;
+        self.buffer = TextBuffer::new();
         self.focus.editing = false;
     }
 
@@ -610,7 +646,7 @@ impl SettingsState {
         let cat = self.current_category();
         let idx = self.focus.field_index;
         let old_value = self.get_field_value(cat, idx);
-        let new_value = self.edit_buffer.clone();
+        let new_value = self.buffer.text.clone();
 
         if old_value != new_value {
             self.undo_stack.push(UndoEntry {
@@ -633,8 +669,7 @@ impl SettingsState {
             }
         }
 
-        self.edit_buffer.clear();
-        self.edit_cursor = 0;
+        self.buffer = TextBuffer::new();
         self.focus.editing = false;
     }
 
@@ -650,56 +685,31 @@ impl SettingsState {
     }
 
     pub fn input_char(&mut self, c: char) {
-        self.delete_selection(); // replaces selection if any
-        let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
-        self.edit_buffer.insert(byte_pos, c);
-        self.edit_cursor += 1;
-        self.selection_anchor = None;
+        self.buffer.input_char(c);
     }
 
     pub fn input_backspace(&mut self) {
-        if self.delete_selection().is_some() {
-            return;
-        }
-        if self.edit_cursor > 0 {
-            self.edit_cursor -= 1;
-            let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
-            self.edit_buffer.remove(byte_pos);
-        }
+        self.buffer.input_backspace();
     }
 
     pub fn input_delete(&mut self) {
-        if self.delete_selection().is_some() {
-            return;
-        }
-        if self.edit_cursor < self.edit_buffer.chars().count() {
-            let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
-            self.edit_buffer.remove(byte_pos);
-        }
+        self.buffer.input_delete();
     }
 
     pub fn move_cursor_left(&mut self) {
-        self.selection_anchor = None;
-        if self.edit_cursor > 0 {
-            self.edit_cursor -= 1;
-        }
+        self.buffer.move_cursor_left();
     }
 
     pub fn move_cursor_right(&mut self) {
-        self.selection_anchor = None;
-        if self.edit_cursor < self.edit_buffer.chars().count() {
-            self.edit_cursor += 1;
-        }
+        self.buffer.move_cursor_right();
     }
 
     pub fn move_cursor_home(&mut self) {
-        self.selection_anchor = None;
-        self.edit_cursor = 0;
+        self.buffer.move_cursor_home();
     }
 
     pub fn move_cursor_end(&mut self) {
-        self.selection_anchor = None;
-        self.edit_cursor = self.edit_buffer.chars().count();
+        self.buffer.move_cursor_end();
     }
 
     pub fn toggle_boolean(&mut self) {
@@ -728,88 +738,21 @@ impl SettingsState {
         Ok(())
     }
 
-    // ── Selection helpers ──────────────────────────────────────────────
+    // ── Selection helpers (delegated to TextBuffer) ─────────────────
 
-    /// Returns (start, end) char indices of the current selection, where
-    /// start <= end.  Returns None when there is no active selection.
-    pub fn selection_range(&self) -> Option<(usize, usize)> {
-        let anchor = self.selection_anchor?;
-        let cursor = self.edit_cursor;
-        if anchor == cursor {
-            return None;
-        }
-        let (s, e) = if anchor < cursor { (anchor, cursor) } else { (cursor, anchor) };
-        Some((s, e))
-    }
-
-    /// Select all text in the edit buffer.
     pub fn select_all(&mut self) {
-        let len = self.edit_buffer.chars().count();
-        if len == 0 {
-            self.selection_anchor = None;
-            return;
-        }
-        self.selection_anchor = Some(0);
-        self.edit_cursor = len;
+        self.buffer.select_all();
     }
 
-    /// Delete the currently selected text (if any) and return it.
-    pub fn delete_selection(&mut self) -> Option<String> {
-        let (start, end) = self.selection_range()?;
-        let selected: String = self.edit_buffer.chars().skip(start).take(end - start).collect();
-        let byte_start = char_to_byte_index(&self.edit_buffer, start);
-        let byte_end = char_to_byte_index(&self.edit_buffer, end);
-        self.edit_buffer.drain(byte_start..byte_end);
-        self.edit_cursor = start;
-        self.selection_anchor = None;
-        Some(selected)
-    }
-
-    /// Copy the selected text to the system clipboard.  Returns true on
-    /// success.
     pub fn copy_selection(&self) -> bool {
-        let Some((start, end)) = self.selection_range() else {
-            return false;
-        };
-        let text: String = self.edit_buffer.chars().skip(start).take(end - start).collect();
-        if text.is_empty() {
-            return false;
-        }
-        clipboard_win::set_clipboard_string(&text).is_ok()
+        self.buffer.copy_selection()
     }
 
-    /// Cut: copy to clipboard then delete selection.
     pub fn cut_selection(&mut self) -> bool {
-        if self.selection_range().is_none() {
-            return false;
-        }
-        // Copy first
-        let copied = self.copy_selection();
-        if copied {
-            self.delete_selection();
-        }
-        copied
+        self.buffer.cut_selection()
     }
 
-    /// Paste from system clipboard, replacing any current selection.
     pub fn paste_from_clipboard(&mut self) -> bool {
-        let text = match clipboard_win::get_clipboard_string() {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        if text.is_empty() {
-            return false;
-        }
-        // Remove newlines – settings fields are single-line
-        let cleaned: String = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
-        if cleaned.is_empty() {
-            return false;
-        }
-        // Delete any existing selection first
-        self.delete_selection();
-        let byte_pos = char_to_byte_index(&self.edit_buffer, self.edit_cursor);
-        self.edit_buffer.insert_str(byte_pos, &cleaned);
-        self.edit_cursor += cleaned.chars().count();
-        true
+        self.buffer.paste_from_clipboard()
     }
 }

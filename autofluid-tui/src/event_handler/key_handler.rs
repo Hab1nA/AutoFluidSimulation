@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::state::app_state::{AppState, FocusZone, UiMode};
-use crate::utils::char_to_byte_index;
 
 pub enum AppAction {
     None,
@@ -25,10 +24,6 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_quit = true;
-            AppAction::Quit
-        }
         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.should_quit = true;
             AppAction::Quit
@@ -55,60 +50,67 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
 fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
         KeyCode::Enter => {
-            let cmd = state.command_input.clone();
-            state.command_input.clear();
-            state.command_cursor = 0;
+            let cmd = state.command_buffer.text.clone();
+            state.command_buffer = Default::default();
             if !cmd.is_empty() {
                 AppAction::SubmitCommand(cmd)
             } else {
                 AppAction::None
             }
         }
+        // ── Clipboard shortcuts ──────────────────────────────────
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.select_all();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.copy_selection();
+            AppAction::None
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.cut_selection();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.paste_from_clipboard();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        // ── Regular editing ─────────────────────────────────────
         KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
+            state.command_buffer.input_char(c);
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Backspace => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.needs_redraw = true;
-            }
+            state.command_buffer.input_backspace();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Delete => {
-            if state.command_cursor < state.command_input.chars().count() {
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.needs_redraw = true;
-            }
+            state.command_buffer.input_delete();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Left => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                state.needs_redraw = true;
-            }
+            state.command_buffer.move_cursor_left();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Right => {
-            if state.command_cursor < state.command_input.chars().count() {
-                state.command_cursor += 1;
-                state.needs_redraw = true;
-            }
+            state.command_buffer.move_cursor_right();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Home => {
-            state.command_cursor = 0;
+            state.command_buffer.move_cursor_home();
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::End => {
-            state.command_cursor = state.command_input.chars().count();
+            state.command_buffer.move_cursor_end();
             state.needs_redraw = true;
             AppAction::None
         }
@@ -171,24 +173,19 @@ fn handle_scroll_keys(key: KeyCode, area: &mut dyn ScrollArea) -> bool {
 fn handle_command_passthrough(key: KeyCode, state: &mut AppState) -> AppAction {
     match key {
         KeyCode::Enter => {
-            let cmd = state.command_input.clone();
+            let cmd = state.command_buffer.text.clone();
             if !cmd.is_empty() {
-                state.command_input.clear();
-                state.command_cursor = 0;
+                state.command_buffer = Default::default();
                 return AppAction::SubmitCommand(cmd);
             }
         }
         KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
+            state.command_buffer.input_char(c);
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
         }
-        KeyCode::Backspace if state.command_cursor > 0 => {
-            state.command_cursor -= 1;
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.remove(byte_pos);
+        KeyCode::Backspace if state.command_buffer.cursor > 0 => {
+            state.command_buffer.input_backspace();
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
         }

@@ -274,7 +274,7 @@ class PipelineDaemon:
     # IPC 命令处理器
     # ------------------------------------------------------------------
 
-    def handle_start(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_start(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 start 命令（启动或继续流水线）。
 
         状态机：
@@ -328,7 +328,7 @@ class PipelineDaemon:
 
         return True, None, "流水线已启动"
 
-    def handle_pause(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_pause(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 pause 命令。
 
         暂停行为取决于当前所处阶段：
@@ -345,24 +345,24 @@ class PipelineDaemon:
         self.scheduler.pause()
         return True, None, "流水线已暂停（当前运行步骤完成后不再取新任务）"
 
-    def handle_stop(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_stop(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
         # 在另一个线程中执行关闭，以便给客户端返回响应
         threading.Thread(target=self.shutdown, daemon=True).start()
         return True, None, "后台引擎正在安全退出..."
 
-    def handle_check(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_check(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 check 命令（系统自检）。"""
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
 
-    def handle_get_all_status(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_all_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取所有构型的状态。"""
         statuses = self.state.get_all_statuses()
         return True, statuses, ""
 
-    def handle_get_statistics(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_statistics(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取统计信息。"""
         stats = self.state.get_statistics()
         engine_status = self.state.get_engine_status()
@@ -371,7 +371,7 @@ class PipelineDaemon:
         stats["barrier_passed"] = self.state.is_global_barrier_met()
         return True, stats, ""
 
-    def handle_get_engine_status(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_engine_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取引擎状态。"""
         status = {
             "engine_status": self.state.get_engine_status(),
@@ -451,7 +451,7 @@ class PipelineDaemon:
                 msg += f" (构型{config_name})"
         return True, None, msg
 
-    def handle_reload_config(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_reload_config(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
         from engine.config import reload_config_from_toml
         if reload_config_from_toml():

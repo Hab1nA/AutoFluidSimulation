@@ -214,6 +214,17 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
         sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
 
+        # 传递 SC 启动超时配置给 Bridge
+        sc_env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_process_appear_timeout", 120)
+        )
+        sc_env["AUTOFLUID_SC_GUI_READY_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_ready_timeout", 30)
+        )
+        sc_env["AUTOFLUID_SC_GUI_STABLE_DELAY"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_stable_delay", 15)
+        )
+
         logger.info(f"[SC-Pool] 启动常驻 Bridge: 槽位{slot.slot_id}")
         logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
 
