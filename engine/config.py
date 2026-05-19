@@ -432,10 +432,33 @@ def load_toml_config(toml_path: Optional[str] = None) -> dict[str, Any]:
         return {}
 
 
+def _expand_env_vars(value: Any) -> Any:
+    """展开字符串值中的 ${VAR} 环境变量引用。非字符串值原样返回。"""
+    if not isinstance(value, str):
+        return value
+    import re
+    def _replace(m: "re.Match[str]") -> str:
+        var_name = m.group(1)
+        return os.environ.get(var_name, m.group(0))  # 未定义则保留原文
+    return re.sub(r'\$\{(\w+)\}', _replace, value)
+
+
+def _expand_dict_env_vars(d: dict) -> dict:
+    """展开字典中所有字符串值的 ${VAR} 环境变量引用。"""
+    return {k: _expand_env_vars(v) for k, v in d.items()}
+
+
 def reload_config_from_toml() -> bool:
-    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。"""
+    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。
+
+    TOML 中支持 ${VAR} 语法引用环境变量（如 ``password = "${AUTOFLUID_SSH_PASSWORD}"``）。
+    """
     toml_data = load_toml_config()
     if toml_data:
+        # 展开 ${VAR} 环境变量引用（如 password = "${AUTOFLUID_SSH_PASSWORD}"）
+        for section_key in toml_data:
+            if isinstance(toml_data[section_key], dict):
+                toml_data[section_key] = _expand_dict_env_vars(toml_data[section_key])
         if "local_paths" in toml_data:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:

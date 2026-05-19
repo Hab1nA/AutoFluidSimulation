@@ -1079,6 +1079,7 @@ class SWExecutor:
             try:
                 logger.info("[SW-Export] 降级为逐个配置 EditRebuild3...")
                 doc._FlagAsMethod('GetConfigurationNames')
+                doc._FlagAsMethod('EditRebuild3')
                 raw = doc.GetConfigurationNames()
                 if isinstance(raw, (tuple, list)):
                     configs = [str(c) for c in raw]

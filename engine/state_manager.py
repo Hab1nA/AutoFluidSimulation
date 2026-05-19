@@ -189,25 +189,31 @@ class StateManager:
                     )
 
                 # 3) 插入或更新构型参数；仅为新构型创建步骤记录
+                #    使用 executemany 批量操作提升性能
                 added_count = 0
                 updated_count = 0
+                new_step_rows = []
+                config_rows = []
                 for config_name, params in configs.items():
                     is_new = config_name not in existing_configs
-
-                    conn.execute("""
-                        INSERT OR REPLACE INTO configs (config_name, param1, param2, param3, param4)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (config_name, *params))
-
+                    config_rows.append((config_name, *params))
                     if is_new:
                         for step_name in STEP_NAMES:
-                            conn.execute("""
-                                INSERT OR IGNORE INTO steps (config_name, step_name, status)
-                                VALUES (?, ?, ?)
-                            """, (config_name, step_name, STATUS_WAITING))
+                            new_step_rows.append((config_name, step_name, STATUS_WAITING))
                         added_count += 1
                     else:
                         updated_count += 1
+
+                conn.executemany("""
+                    INSERT OR REPLACE INTO configs (config_name, param1, param2, param3, param4)
+                    VALUES (?, ?, ?, ?, ?)
+                """, config_rows)
+
+                if new_step_rows:
+                    conn.executemany("""
+                        INSERT OR IGNORE INTO steps (config_name, step_name, status)
+                        VALUES (?, ?, ?)
+                    """, new_step_rows)
 
         logger.info(
             f"已同步构型数据到状态库: 新增 {added_count}，更新 {updated_count}，"

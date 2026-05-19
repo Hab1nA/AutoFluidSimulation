@@ -74,7 +74,7 @@ class SCProcessPool:
     def run_config(self, config_name: int,
                    paused_event: Optional[threading.Event] = None,
                    stopped_event: Optional[threading.Event] = None) -> bool:
-        """执行 SC 转换：获取/创建常驻槽位 -> 发送命令 -> 等待结果。"""
+        """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
         with self._lock:
             # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
             #   而非在 SW 阶段或 start_pipeline 时过早执行。
@@ -87,6 +87,19 @@ class SCProcessPool:
 
             slot = self._get_or_create_persistent_slot()
             if slot is None:
+                return False
+
+        # ★ 槽位就绪等待：在锁外执行，避免长时间阻塞其他线程。
+        #   新创建的槽位处于 "starting" 状态，需等待 Bridge 写入就绪文件；
+        #   已就绪的槽位直接跳过。
+        if slot.status == "starting":
+            if not self._wait_for_slot_ready(slot):
+                return False
+
+        with self._lock:
+            # double-check：等待期间槽位可能已被其他操作清理
+            if slot.slot_id not in self._persistent_slots:
+                logger.error(f"[SC-Pool] 槽位{slot.slot_id} 在等待期间被清理")
                 return False
             slot.status = "busy"
             slot.current_config = config_name
@@ -251,55 +264,52 @@ class SCProcessPool:
             slot.pid = process.pid
             slot.started_at = time.time()
             logger.info(f"[SC-Pool] 常驻 Bridge PID={process.pid}")
-
-            ready_timeout = ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
-            deadline = time.time() + ready_timeout
-
-            # 将等待逻辑移出锁作用域，确保异常安全
-            return self._wait_for_ready(slot, ready_file, deadline)
+            return True
 
         except OSError as e:
             logger.error(f"[SC-Pool] 常驻 Bridge 启动失败: {e}")
             self._cleanup_persistent_slot(slot)
             return False
 
-    def _wait_for_ready(self, slot: PersistentSlot, ready_file: str, deadline: float) -> bool:
-        """等待槽位就绪（不持有 _lock，避免长时间阻塞其他操作）。
+    def _wait_for_slot_ready(self, slot: PersistentSlot) -> bool:
+        """等待槽位就绪（不持有 _lock，由调用方在锁外调用）。
 
-        调用方须已持有 _lock（由 _launch_persistent_process 调用），
-        本方法在等待期间释放锁，完成后重新获取。
+        新创建的槽位处于 "starting" 状态，Bridge 启动 SpaceClaim 后
+        会写入 ready 文件。本方法轮询等待 ready 文件出现。
+
+        Returns:
+            True 表示槽位已就绪，False 表示超时或进程异常退出。
         """
-        self._lock.release()
-        try:
-            while time.time() < deadline:
-                if slot.process is not None and slot.process.poll() is not None:
-                    logger.error(
-                        f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
-                        f"(exit={slot.process.returncode})"
-                    )
-                    with self._lock:
-                        self._cleanup_persistent_slot(slot)
-                    return False
-                if os.path.exists(ready_file):
-                    logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
-                    with self._lock:
-                        slot.status = "ready"
-                    return True
-                time.sleep(2)
+        ready_file = os.path.join(self._persistent_cmd_dir, f"sc_ready_{slot.slot_id}.json")
+        ready_timeout = ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
+        deadline = time.time() + ready_timeout
 
-            logger.error(
-                f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 "
-                f"({ENGINE_CONFIG.get('sc_persistent_ready_timeout', 180)}s)"
-            )
-            with self._lock:
-                self._cleanup_persistent_slot(slot)
-            return False
-        except BaseException:
-            with self._lock:
-                self._cleanup_persistent_slot(slot)
-            raise
-        finally:
-            self._lock.acquire()
+        logger.info(f"[SC-Pool] 等待槽位{slot.slot_id} 就绪 (超时 {ready_timeout}s)...")
+
+        while time.time() < deadline:
+            # 进程存活检查
+            if slot.process is not None and slot.process.poll() is not None:
+                logger.error(
+                    f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
+                    f"(exit={slot.process.returncode})"
+                )
+                with self._lock:
+                    self._cleanup_persistent_slot(slot)
+                return False
+            # ready 文件检查
+            if os.path.exists(ready_file):
+                logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
+                with self._lock:
+                    slot.status = "ready"
+                return True
+            time.sleep(2)
+
+        logger.error(
+            f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 ({ready_timeout}s)"
+        )
+        with self._lock:
+            self._cleanup_persistent_slot(slot)
+        return False
 
     # ==================================================================
     # 命令发送与结果等待

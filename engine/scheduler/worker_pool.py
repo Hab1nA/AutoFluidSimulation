@@ -112,6 +112,7 @@ class WorkerPoolManager:
 
         _last_queue_report = time.time()
         _queue_report_interval = 30.0  # 每 30 秒输出一次队列健康状态
+        _consecutive_fatal_count = 0   # 连续兜底异常计数器（检测系统性故障）
 
         while not self._stopped.is_set():
             # 检查暂停
@@ -151,6 +152,7 @@ class WorkerPoolManager:
 
             try:
                 self._process_single_config(config_name)
+                _consecutive_fatal_count = 0  # 成功处理，重置计数器
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"处理构型{config_name} 时发生未预期异常: {e}", exc_info=True)
                 # 只标记 SC+Transfer 步骤为 Error（Meshing 由 MeshingMonitor 管理）
@@ -164,11 +166,20 @@ class WorkerPoolManager:
                 # Transfer 失败时，Meshing 也无法执行，标记为 Error
                 self._mark_meshing_error_if_transfer_failed(config_name, str(e))
             except Exception as e:
-                # 最后的兜底：捕获所有其他异常类型，防止工作线程意外崩溃
-                logger.critical(
-                    f"处理构型{config_name} 时发生致命异常: {type(e).__name__}: {e}",
-                    exc_info=True
-                )
+                # 兜底：捕获所有其他异常类型，防止工作线程意外崩溃
+                _consecutive_fatal_count += 1
+                if _consecutive_fatal_count >= 3:
+                    logger.critical(
+                        f"处理构型{config_name} 时发生致命异常 "
+                        f"(连续第{_consecutive_fatal_count}次，可能存在系统性故障): "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True
+                    )
+                else:
+                    logger.critical(
+                        f"处理构型{config_name} 时发生致命异常: {type(e).__name__}: {e}",
+                        exc_info=True
+                    )
                 for step in ["SC", "Transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)

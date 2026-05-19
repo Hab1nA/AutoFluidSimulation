@@ -107,8 +107,17 @@ class RemoteWorkstation:
         logger.info("SSH 连接已断开")
 
     def is_connected(self) -> bool:
-        """检查 SSH 是否已连接。"""
-        return self._ssh is not None and self._ssh.get_transport() is not None and self._ssh.get_transport().is_active()
+        """检查 SSH 是否已连接（含心跳验证）。"""
+        if self._ssh is None:
+            return False
+        transport = self._ssh.get_transport()
+        if transport is None or not transport.is_active():
+            return False
+        try:
+            transport.send_ignore()
+            return True
+        except (OSError, EOFError):
+            return False
 
     def ensure_connected(self) -> bool:
         """确保连接有效，若断开则自动重连。"""
