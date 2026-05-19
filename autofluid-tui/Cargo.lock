@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "autofluid-tui"
-version = "2.5.1"
+version = "2.6.0"
 dependencies = [
  "clipboard-win",
  "crossterm",
