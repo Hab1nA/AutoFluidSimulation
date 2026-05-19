@@ -235,7 +235,7 @@ class WorkerPoolManager:
             if scdoc_name:
                 try:
                     ssh = self.runner.get_ssh()
-                    if ssh.is_connected():
+                    if ssh is not None and ssh.is_connected():
                         remote_scdoc = (
                             f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
                             f"/{scdoc_name}"
@@ -249,8 +249,10 @@ class WorkerPoolManager:
                                 config_name, "Transfer", STATUS_COMPLETED
                             )
                             transfer_skip = True
-                except Exception:
-                    pass
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    logger.warning(
+                        f"构型{config_name} Transfer: SSH 检查远程文件失败: {e}"
+                    )
             if not transfer_skip:
                 if not self._retry_manager.execute_with_retry(config_name, "Transfer",
                                                  self.runner.execute_transfer):

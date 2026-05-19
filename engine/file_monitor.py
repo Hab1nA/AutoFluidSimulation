@@ -281,6 +281,16 @@ class StepFileMonitor:
         self._wake_event.set()
         logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
 
+    def resume_only(self):
+        """仅恢复监控，不重置已处理文件集合。
+
+        用于 pause→resume 场景：_resume_paused_steps() 已完成断点续传扫描，
+        文件监控器只需继续检测新写入的 STEP 文件，无需重新扫描旧文件。
+        """
+        self._paused.clear()
+        self._wake_event.set()
+        logger.info("STEP 文件监控已恢复（仅清除暂停标志）")
+
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""
         if not os.path.isdir(self.step_dir):

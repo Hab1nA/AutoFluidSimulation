@@ -22,7 +22,7 @@ import os
 from typing import Optional
 
 from engine.config import (
-    STEP_INDEX, STEP_NAMES, ENGINE_CONFIG,
+    STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, get_step_filename,
 )
@@ -443,14 +443,36 @@ class PipelineScheduler:
     def _check_step_output_exists(
         self, cn: int, step: str, step_dir: str, scdoc_dir: str
     ) -> bool:
-        """检查某步骤的输出文件是否已存在于磁盘。"""
+        """检查某步骤的输出文件是否已存在（本地文件检查大小 > 0，远程文件通过 SSH 检查）。"""
         if step == "SW":
             filename = get_step_filename("SW", cn)
-            return bool(filename and os.path.exists(os.path.join(step_dir, filename)))
+            if not filename:
+                return False
+            path = os.path.join(step_dir, filename)
+            return os.path.exists(path) and os.path.getsize(path) > 0
         if step == "SC":
             filename = get_step_filename("SC", cn)
-            return bool(filename and os.path.exists(os.path.join(scdoc_dir, filename)))
-        # Transfer/Meshing/Solver 的输出在远程，不做本地检查
+            if not filename:
+                return False
+            path = os.path.join(scdoc_dir, filename)
+            return os.path.exists(path) and os.path.getsize(path) > 0
+        if step == "Transfer":
+            # ★ 与 prescan_downstream_outputs 统一：通过 SSH 检查远程 SCDOC 文件
+            filename = get_step_filename("SC", cn)
+            if not filename:
+                return False
+            try:
+                ssh = self.runner.get_ssh()
+                if ssh is None or not ssh.is_connected():
+                    return False
+                remote_scdoc = (
+                    f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
+                    f"/{filename}"
+                )
+                return ssh.check_remote_file(remote_scdoc)
+            except Exception:
+                return False
+        # Meshing/Solver 的输出在远程，暂不做检查（由 MeshingMonitor/Barrier 管理）
         return False
 
     def _enqueue_sc(self, cn: int, step_dir: str) -> None:
@@ -472,65 +494,19 @@ class PipelineScheduler:
         self._paused.clear()
         self.state.set_engine_status("running")
 
-        pipeline_needs_init = False
-        if self._file_monitor is None or not self._file_monitor.is_running:
-            pipeline_needs_init = True
-        else:
-            alive_workers = [t for t in self.worker_pool._worker_threads if t.is_alive()]
-            if not alive_workers:
-                pipeline_needs_init = True
-
-        if pipeline_needs_init:
-            logger.info("检测到流水线组件未就绪，启动初始化...")
-            if self.state.is_sw_macro_started():
-                self._init_downstream_components()
-            else:
-                logger.info("SW 宏尚未完成，重新启动流水线...")
-                t = threading.Thread(
-                    target=self.start_pipeline,
-                    daemon=True,
-                    name="SchedulerMain-Resume"
-                )
-                t.start()
-                self._pipeline_thread = t
-                return
-
-        if self._file_monitor is not None:
-            self._file_monitor.resume_and_reset()
-        logger.info("流水线已恢复运行")
-
-    def _init_downstream_components(self):
-        """初始化 SW 之后的下游流水线组件（预扫描、文件监控、工作线程、屏障监控）。
-
-        在 resume() 恢复暂停时调用，处理 SW 已完成但 workers 尚未启动的场景。
-        所有组件启动前均检查 _stopped 标志，避免在引擎停止时创建新线程。
-        """
-        if self._stopped.is_set():
-            logger.info("引擎已停止，跳过下游组件初始化")
-            return
-
-        # 预扫描下游输出文件（断点续传）
-        self.sw_phase_handler.prescan_downstream_outputs()
-
-        if self._stopped.is_set():
-            return
-
+        # 确保各组件线程存活（start_if_needed 内部已是幂等的，不会重复创建）
         self._ensure_file_monitor_running()
-
-        if self._stopped.is_set():
-            return
-
         self.worker_pool.start_if_needed()
-
-        if self._stopped.is_set():
-            return
-
         self.meshing_monitor.start_if_needed()
-
-        if self._stopped.is_set():
-            return
-
         self._ensure_barrier_monitor_running()
+
+        # ★ 仅清除文件监控器的暂停标志，不重置已处理文件集合。
+        #   _resume_paused_steps() 已完成断点续传扫描并入队，
+        #   文件监控器只需继续检测新写入的 STEP 文件，无需重新扫描旧文件
+        #   （resume_and_reset 会清空 _processed_files 导致重复入队）。
+        if self._file_monitor is not None:
+            self._file_monitor.resume_only()
+        logger.info("流水线已恢复运行")
 
     def stop(self):
         """停止流水线。"""

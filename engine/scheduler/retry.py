@@ -96,6 +96,21 @@ class RetryManager:
             try:
                 success = execute_func(config_name)
                 if success:
+                    # ★ 执行成功后检查暂停标志：防止 pause 在 execute_func 执行期间
+                    #   被触发，导致 set_all_running_to_paused() 已将状态改为 PAUSED
+                    #   但此处又覆盖为 COMPLETED 的竞态。
+                    #   SC 步骤通过内部轮询循环检测 pause 并返回 False 来避免此问题，
+                    #   但 Transfer 等同步步骤无法中途检测 pause，因此在此统一保护。
+                    if self._paused.is_set():
+                        self.state.set_step_status(
+                            config_name, step_name, STATUS_PAUSED,
+                            "执行完成但系统已暂停"
+                        )
+                        logger.info(
+                            f"[{step_name}] 构型{config_name} 执行成功但系统已暂停，"
+                            f"标记为 Paused 而非 Completed"
+                        )
+                        return False
                     # 对于 Meshing 和 Solver，状态由调用者设置（因为需要等待远程完成）
                     if step_name not in ("Meshing", "Solver"):
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
