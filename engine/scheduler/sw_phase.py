@@ -160,6 +160,9 @@ class SWPhaseHandler:
                 self._prepare_sw_retry(all_configs, sw_attempt, max_retries)
                 if self._stopped.is_set():
                     return False
+                # ★ _prepare_sw_retry 可能因暂停而早返回，跳过无意义的 execute_sw_step
+                if self._paused.is_set():
+                    break
 
             logger.info(
                 f"[SW] 执行 SW 步骤 (尝试 {sw_attempt}/{max_retries})..."
@@ -190,22 +193,10 @@ class SWPhaseHandler:
                         self.state.set_step_status(cn, "SW", STATUS_PAUSED)
                 self.state.set_engine_status("paused")
             return False
-        else:
-            # SW 步骤成功执行，但 execute_sw_step 内部可能已标记部分构型为 Error
-            # （例如某些构型的 STEP 文件缺失）
-            # 若此时暂停标志已置位，将这些 Error 步骤回退为 Paused
-            if self._paused.is_set():
-                paused_count = 0
-                for cn in all_configs:
-                    sw_status = self.state.get_step_status(cn, "SW")
-                    if sw_status == STATUS_ERROR:
-                        self.state.set_step_status(cn, "SW", STATUS_PAUSED,
-                                                   "暂停中——恢复后将重新校验 STEP")
-                        paused_count += 1
-                if paused_count > 0:
-                    logger.info(
-                        f"[SW] 暂停标志已置位，已将 {paused_count} 个 SW Error 构型回退为 Paused"
-                    )
+
+        # 若执行到这里，说明 SW 步骤成功（sw_success=True）。
+        # execute_sw_step 内部可能已标记部分构型为 Error（如 STEP 文件缺失），
+        # 但 Error 是最终状态，即使处于暂停期间也保持不变，由 resume 的重试机制处理。
 
         # SW 阶段导出汇总
         if not self._paused.is_set():
@@ -504,8 +495,12 @@ class SWPhaseHandler:
             attempt: 当前重试次数 (1-based)
             max_retries: 最大重试次数
         """
+        # ★ 暂停时立即返回：重试准备（杀进程、等待冷却等）在暂停状态下无意义，
+        #   且其 ~16 秒阻塞会延迟 pipeline 线程退出，导致 resume 后新旧线程竞争。
+        #   暂停状态由 _execute_sw_macro 循环结束后的暂停分支统一处理。
         if self._paused.is_set():
-            logger.info("[SW] SW 步骤重试前检测到暂停标志，将在重试延迟中等待继续...")
+            logger.info("[SW] 重试准备中检测到暂停标志，跳过重试准备")
+            return
 
         # 将所有 SW 步骤标记为 Retrying
         for cn in all_configs:

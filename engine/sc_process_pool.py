@@ -106,6 +106,9 @@ class SCProcessPool:
     def shutdown_all(self):
         with self._lock:
             self._shutdown_all_internal()
+            # 重置首次清理标志：下次进入 SC 阶段时需重新清理残留进程
+            # （修复：stop() 后同一 Daemon 再次 start 时跳过清理的问题）
+            self._first_cleanup_done = False
 
     def _shutdown_all_internal(self):
         """全量清理（内部版本，调用方须已持有 _lock）。"""

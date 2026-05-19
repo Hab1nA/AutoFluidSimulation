@@ -506,6 +506,16 @@ class PipelineScheduler:
         #   （resume_and_reset 会清空 _processed_files 导致重复入队）。
         if self._file_monitor is not None:
             self._file_monitor.resume_only()
+
+        # ★ 若 pipeline 线程已退出（如 SW 失败+暂停后 start_pipeline 返回），
+        #   重启 pipeline 使 _resume_paused_steps 中已重置的 Error→Waiting 构型能被
+        #   SW 阶段重新处理。
+        if self._pipeline_thread is None or not self._pipeline_thread.is_alive():
+            t = threading.Thread(target=self.start_pipeline, daemon=True)
+            t.start()
+            self._pipeline_thread = t
+            logger.info("[Resume] pipeline 线程已退出，已重新启动")
+
         logger.info("流水线已恢复运行")
 
     def stop(self):
