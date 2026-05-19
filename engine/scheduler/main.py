@@ -78,6 +78,11 @@ class PipelineScheduler:
         self._sc_queue: queue.Queue = queue.Queue()
 
         # ---- 子模块 ----
+        self.retry_manager = RetryManager(
+            state_manager=self.state,
+            paused_event=self._paused,
+            stopped_event=self._stopped,
+        )
         self.worker_pool = WorkerPoolManager(
             state_manager=self.state,
             task_runner=self.runner,
@@ -85,6 +90,7 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
             barrier_passed_event=self._barrier_passed,
+            retry_manager=self.retry_manager,
         )
         self.barrier_coordinator = BarrierCoordinator(
             state_manager=self.state,
@@ -92,6 +98,7 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
             barrier_passed_event=self._barrier_passed,
+            retry_manager=self.retry_manager,
         )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
@@ -100,11 +107,6 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
             worker_pool_manager=self.worker_pool,
-        )
-        self.retry_manager = RetryManager(
-            state_manager=self.state,
-            paused_event=self._paused,
-            stopped_event=self._stopped,
         )
         self.meshing_monitor = MeshingMonitor(
             state_manager=self.state,
@@ -119,7 +121,13 @@ class PipelineScheduler:
         # ---- 工作线程 ----
         self._barrier_thread: Optional[threading.Thread] = None
         self._solver_threads: list[threading.Thread] = []   # 求解线程（屏障通过后启动）
-        self._file_monitor: Optional[StepFileMonitor] = None
+        # 预创建文件监控器并注入 SW 阶段处理器（避免双重实例）
+        self._file_monitor: Optional[StepFileMonitor] = StepFileMonitor(
+            step_dir=None,
+            on_file_ready=self._on_step_file_ready,
+            shared_paused_event=self._paused,
+        )
+        self.sw_phase_handler.set_file_monitor(self._file_monitor)
         self._pipeline_thread: Optional[threading.Thread] = None  # 主调度线程引用
 
         # 恢复全局屏障状态（断点续传）
@@ -263,11 +271,7 @@ class PipelineScheduler:
 
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。"""
-        if self._file_monitor is None or not self._file_monitor.is_running:
-            self._file_monitor = StepFileMonitor(
-                step_dir=None,
-                on_file_ready=self._on_step_file_ready
-            )
+        if self._file_monitor is not None and not self._file_monitor.is_running:
             self._file_monitor.start()
 
     def _ensure_barrier_monitor_running(self):
@@ -377,7 +381,10 @@ class PipelineScheduler:
                     retry_count = self.state.get_step_retry_count(cn, step)
                     if retry_count < max_retries:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
-                        normal_enqueue.append((cn, step))
+                        # 注：SW 重试由 start_pipeline 的 SW 阶段统一处理，
+                        # 此处重置为 WAITING 后，下次 start_pipeline 会检测到并重新执行
+                        if step != "SW":
+                            normal_enqueue.append((cn, step))
                     break
 
                 break  # 未知状态，跳过
@@ -387,19 +394,40 @@ class PipelineScheduler:
 
         # ---- 统一入队（PAUSED 优先）----
         sc_enqueued = 0
+        meshing_submitted = 0
         for cn, step in priority_enqueue:
             if step == "SC":
                 self._enqueue_sc(cn, step_dir)
                 sc_enqueued += 1
-            elif step in ("Transfer", "Meshing", "Solver"):
-                self.state.set_step_status(cn, step, STATUS_RUNNING)
+            elif step == "Transfer":
+                # Transfer 需要 SC 先完成 → 入 SC 队列让 Worker 处理
+                # Worker._process_single_config 会检测 SC 已 Completed 并跳过
+                self._enqueue_sc(cn, step_dir)
+                sc_enqueued += 1
+            elif step == "Meshing":
+                # MeshingMonitor 管理 Meshing 生命周期
+                if self.meshing_monitor is not None:
+                    self.state.set_step_status(cn, "Meshing", STATUS_WAITING)
+                    self.meshing_monitor.submit(cn)
+                    meshing_submitted += 1
+            elif step == "Solver":
+                # Solver 由屏障调度器统一管理，保持当前状态等屏障通过后处理
+                pass
 
         for cn, step in normal_enqueue:
             if step == "SC":
                 self._enqueue_sc(cn, step_dir)
                 sc_enqueued += 1
-            elif step in ("Transfer", "Meshing", "Solver"):
-                self.state.set_step_status(cn, step, STATUS_RUNNING)
+            elif step == "Transfer":
+                self._enqueue_sc(cn, step_dir)
+                sc_enqueued += 1
+            elif step == "Meshing":
+                if self.meshing_monitor is not None:
+                    self.state.set_step_status(cn, "Meshing", STATUS_WAITING)
+                    self.meshing_monitor.submit(cn)
+                    meshing_submitted += 1
+            elif step == "Solver":
+                pass
 
         # ---- 仅输出汇总日志 ----
         total_need = len(priority_enqueue) + len(normal_enqueue)
@@ -408,7 +436,8 @@ class PipelineScheduler:
                 f"[Resume] 断点续传扫描完成: {completed_count} 个构型全部完成, "
                 f"{len(priority_enqueue)} 个 PAUSED 优先恢复, "
                 f"{len(normal_enqueue)} 个普通恢复, "
-                f"{sc_enqueued} 个 SC 入队"
+                f"{sc_enqueued} 个 SC 入队, "
+                f"{meshing_submitted} 个 Meshing 提交"
             )
 
     def _check_step_output_exists(

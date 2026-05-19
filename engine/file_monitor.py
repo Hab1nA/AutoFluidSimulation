@@ -79,7 +79,8 @@ class FileStableDetector:
 
         # 只保留最近 stable_time 秒内的记录
         cutoff = now - self.stable_time
-        history[:] = [(t, s) for t, s in history if t >= cutoff]
+        self._history[filepath] = [(t, s) for t, s in history if t >= cutoff]
+        history = self._history[filepath]
 
         # 如果历史记录不足 stable_time，说明文件可能还在写入
         if len(history) < 2:
@@ -151,7 +152,8 @@ class StepFileMonitor:
         return cls._FILENAME_REGEX
 
     def __init__(self, step_dir: str | None = None,
-                 on_file_ready: Callable[[int, str], None] | None = None):
+                 on_file_ready: Callable[[int, str], None] | None = None,
+                 shared_paused_event: threading.Event | None = None):
         self.step_dir = step_dir or LOCAL_PATHS["step_dir"]
         self.on_file_ready = on_file_ready
         self._running = False
@@ -162,8 +164,8 @@ class StepFileMonitor:
         )
         self._processed_files: Set[str] = set()
         self._known_files: Set[str] = set()
-        # 暂停控制：_paused事件控制监控循环暂停，_wake_event用于唤醒等待，_need_reset标记恢复时需要重置状态
-        self._paused = threading.Event()
+        # 暂停控制：优先使用调度器传入的共享 Event，实现暂停标志同步
+        self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
 

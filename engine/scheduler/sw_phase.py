@@ -122,7 +122,6 @@ class SWPhaseHandler:
             True 表示 SW 宏执行成功，False 表示失败
         """
         logger.info("[SW] SW 步骤尚未启动，准备执行...")
-        all_configs = self.state.get_all_configs()
 
         # 将所有构型的 SW 状态设为 Running（仅限 Waiting/Paused/Error/Retrying 状态）
         for cn in all_configs:
@@ -254,7 +253,6 @@ class SWPhaseHandler:
         # 断点续传时，检查是否有 SW 步骤处于 Paused 或 Error 状态
         # Paused：恢复后需重新校验 STEP 文件
         # Error：清除 sw_macro_started 标志以允许重试 SW 宏
-        all_configs = self.state.get_all_configs()
         has_paused_sw = False
         has_error_sw = False
         for cn in all_configs:
@@ -297,14 +295,22 @@ class SWPhaseHandler:
         return True
 
     def _ensure_file_monitor_running(self):
-        """确保文件监控器正在运行。"""
-        if self._file_monitor is None or not self._file_monitor.is_running:
+        """确保文件监控器正在运行。
+
+        优先使用由 PipelineScheduler 注入的共享实例（通过 set_file_monitor()），
+        仅在未注入时回退为自行创建。
+        """
+        if self._file_monitor is None:
+            # 防御性回退：未注入时自行创建（独立测试场景）
             self._file_monitor = StepFileMonitor(
                 step_dir=None,
-                on_file_ready=self._on_step_file_ready
+                on_file_ready=self._on_step_file_ready,
+                shared_paused_event=self._paused,
             )
+            logger.info("[SW] 文件监控器未注入，已自行创建（独立模式）")
+        if not self._file_monitor.is_running:
             self._file_monitor.start()
-            logger.info("[SW] 文件监控已提前启动（在 SW 步骤执行前）")
+            logger.info("[SW] 已启动 STEP 文件监控（提前于 SW 宏，实现边导出边处理）")
 
     def _on_step_file_ready(self, config_name: int, filepath: str):
         """文件就绪回调。"""

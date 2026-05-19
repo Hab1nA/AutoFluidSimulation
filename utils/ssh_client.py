@@ -146,8 +146,9 @@ class RemoteWorkstation:
                 self._ensure_remote_dir(remote_dir)
 
                 logger.info(f"正在上传: {local_path} -> {remote_path}")
-                # 再次确认 SFTP 连接有效（防止类型检查器报错）
-                assert self._sftp is not None, "SFTP 连接已断开"
+                # 再次确认 SFTP 连接有效
+                if self._sftp is None:
+                    raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
                 self._sftp.put(local_path, remote_path)
                 logger.info(f"上传完成: {os.path.basename(local_path)}")
                 return True

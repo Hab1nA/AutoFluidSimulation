@@ -98,18 +98,21 @@ fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
     entries.first().map(|e| e.path())
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
+    let count = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let t = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let mut s = String::with_capacity(8);
-    for i in 0..8 {
-        let nibble = ((t >> (i * 4)) ^ (t >> ((i + 8) * 4))) as u8 & 0x0f;
-        s.push(std::char::from_digit(nibble as u32, 16).unwrap_or('0'));
-    }
-    s
+    // 结合时间戳低位和原子计数器，确保唯一性
+    let time_part = ((t as u64) ^ ((t >> 32) as u64)) & 0xFFFF_FFFF;
+    let combined = time_part.wrapping_add(count);
+    format!("{:08x}", combined)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

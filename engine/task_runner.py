@@ -79,6 +79,8 @@ class TaskRunner:
         self._stopped_event = stopped_event
         # 将控制事件传递给 SW 执行器，使其逐构型循环可响应 pause/stop
         self._sw_executor.set_control_events(paused_event, stopped_event)
+        # 注：RemoteExecutor 不需要独立注入控制事件，它通过
+        # wait_meshing_completion/wait_solver_completion 的参数接收事件
 
     # ------------------------------------------------------------------
     # SSH 连接管理
@@ -119,20 +121,20 @@ class TaskRunner:
 
     def execute_sc_step(self, config_name: int) -> bool:
         """执行 SC 步骤（SCProcessPool）。"""
-        _sw_step_name = get_step_filename("SW", config_name)
-        if not _sw_step_name:
+        sw_step_name = get_step_filename("SW", config_name)
+        if not sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件名配置错误")
             return False
-        _scdoc_name = get_step_filename("SC", config_name)
-        if not _scdoc_name:
+        scdoc_name = get_step_filename("SC", config_name)
+        if not scdoc_name:
             logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
             self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
 
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
-        step_file = os.path.join(step_dir, _sw_step_name)
+        step_file = os.path.join(step_dir, sw_step_name)
 
         os.makedirs(scdoc_dir, exist_ok=True)
 

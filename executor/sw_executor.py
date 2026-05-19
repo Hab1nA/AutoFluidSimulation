@@ -276,7 +276,11 @@ class SWExecutor:
         if not self._launch_sw_process():
             logger.error("[SW] 所有启动方式均失败，无法连接 SolidWorks")
             return None
-        sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+        try:
+            sw_app = win32com.client.GetActiveObject("SldWorks.Application")
+        except Exception as e3:
+            logger.error(f"[SW] 第3层 GetActiveObject 失败: {e3}")
+            return None
         try:
             sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
         except Exception:
@@ -1208,11 +1212,14 @@ class SWExecutor:
         for cn_str in conf_names:
             # ---- 暂停检查 ----
             if self._paused_event is not None and self._paused_event.is_set():
+                # 一次性收集当前及后续所有构型为暂停
+                remaining_idx = conf_names.index(cn_str)
+                paused_configs.extend(conf_names[remaining_idx:])
                 logger.info(
-                    f"[SW] 暂停标志已置位，构型 {cn_str} 及后续构型暂停"
+                    f"[SW] 暂停标志已置位，构型 {cn_str}~{conf_names[-1]} 暂停"
+                    f"（共 {len(conf_names) - remaining_idx} 个）"
                 )
-                paused_configs.append(cn_str)
-                continue
+                break
 
             # ---- 停止检查 ----
             if self._stopped_event is not None and self._stopped_event.is_set():

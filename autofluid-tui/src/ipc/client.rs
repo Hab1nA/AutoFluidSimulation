@@ -60,15 +60,14 @@ impl IpcClient {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
 
-        // ★ 使用独立的 result 变量暂存结果，
-        //    以便在所有路径上都能将 stream 归还给 self.stream
-        let result = match tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_until(b'\n', &mut buffer)).await {
+        match tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_until(b'\n', &mut buffer)).await {
             Ok(Ok(0)) => {
                 // 对端关闭连接 → stream 已不可用，丢弃
-                self.stream = None;
+                // reader 随之 drop，stream 句柄被关闭
                 Err("连接已断开".to_string())
             }
             Ok(Ok(_)) => {
+                // 正常读取成功：从 reader 取回 stream 归还
                 let stream = reader.into_inner();
                 self.stream = Some(stream);
                 match IpcResponse::deserialize(&buffer) {
@@ -77,8 +76,9 @@ impl IpcClient {
                 }
             }
             Ok(Err(e)) => {
-                // 读取 I/O 错误：stream 可能已损坏
-                self.stream = None;
+                // 读取 I/O 错误：尝试归还 stream（可能仍可用）
+                let stream = reader.into_inner();
+                self.stream = Some(stream);
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
@@ -87,9 +87,7 @@ impl IpcClient {
                 self.stream = Some(stream);
                 Err("请求超时".to_string())
             }
-        };
-
-        result
+        }
     }
 
     pub async fn start_pipeline(&mut self) -> Result<IpcResponse, String> {

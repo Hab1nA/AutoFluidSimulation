@@ -151,7 +151,9 @@ class PipelineDaemon:
             self._running = False
             return
 
-        # ---- 0.5 验证配置 ----
+        # ---- 0.5 加载 TOML 配置 & 验证 ----
+        from engine.config import reload_config_from_toml
+        reload_config_from_toml()
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")

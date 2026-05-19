@@ -65,6 +65,7 @@ class SCProcessPool:
         self._persistent_slots: Dict[int, PersistentSlot] = {}
         self._persistent_cmd_dir = os.path.join(self._data_dir, "sc_ipc")
         os.makedirs(self._persistent_cmd_dir, exist_ok=True)
+        self._next_slot_id = 1  # 自增槽位 ID 计数器
 
     # ==================================================================
     # 执行入口
@@ -147,6 +148,7 @@ class SCProcessPool:
             for slot in self._persistent_slots.values():
                 self._cleanup_persistent_slot(slot)
             self._persistent_slots.clear()
+            self._next_slot_id = 1
             logger.info("[SC-Pool] 已重置：常驻进程全部归零")
 
     # ==================================================================
@@ -177,7 +179,8 @@ class SCProcessPool:
             logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self.MAX_SLOTS})")
             return None
 
-        slot_id = len(self._persistent_slots) + 1
+        slot_id = self._next_slot_id
+        self._next_slot_id += 1
         slot = PersistentSlot(slot_id=slot_id, cmd_dir=self._persistent_cmd_dir)
         self._persistent_slots[slot_id] = slot
 
@@ -238,31 +241,51 @@ class SCProcessPool:
             ready_timeout = ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
             deadline = time.time() + ready_timeout
 
-            self._lock.release()
-            try:
-                while time.time() < deadline:
-                    if process.poll() is not None:
-                        logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 (exit={process.returncode})")
-                        with self._lock:
-                            self._cleanup_persistent_slot(slot)
-                        return False
-                    if os.path.exists(ready_file):
-                        logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
-                        with self._lock:
-                            slot.status = "ready"
-                        return True
-                    time.sleep(2)
-            finally:
-                self._lock.acquire()
-
-            logger.error(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 ({ready_timeout}s)")
-            self._cleanup_persistent_slot(slot)
-            return False
+            # 将等待逻辑移出锁作用域，确保异常安全
+            return self._wait_for_ready(slot, ready_file, deadline)
 
         except OSError as e:
             logger.error(f"[SC-Pool] 常驻 Bridge 启动失败: {e}")
             self._cleanup_persistent_slot(slot)
             return False
+
+    def _wait_for_ready(self, slot: PersistentSlot, ready_file: str, deadline: float) -> bool:
+        """等待槽位就绪（不持有 _lock，避免长时间阻塞其他操作）。
+
+        调用方须已持有 _lock（由 _launch_persistent_process 调用），
+        本方法在等待期间释放锁，完成后重新获取。
+        """
+        self._lock.release()
+        try:
+            while time.time() < deadline:
+                if slot.process is not None and slot.process.poll() is not None:
+                    logger.error(
+                        f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
+                        f"(exit={slot.process.returncode})"
+                    )
+                    with self._lock:
+                        self._cleanup_persistent_slot(slot)
+                    return False
+                if os.path.exists(ready_file):
+                    logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
+                    with self._lock:
+                        slot.status = "ready"
+                    return True
+                time.sleep(2)
+
+            logger.error(
+                f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 "
+                f"({ENGINE_CONFIG.get('sc_persistent_ready_timeout', 180)}s)"
+            )
+            with self._lock:
+                self._cleanup_persistent_slot(slot)
+            return False
+        except BaseException:
+            with self._lock:
+                self._cleanup_persistent_slot(slot)
+            raise
+        finally:
+            self._lock.acquire()
 
     # ==================================================================
     # 命令发送与结果等待
@@ -320,7 +343,7 @@ class SCProcessPool:
         timeout = ENGINE_CONFIG["sc_timeout"]
         deadline = time.time() + timeout
         poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
-        scdoc_stable_seconds = 3.0  # 文件大小稳定判定窗口
+        scdoc_stable_seconds = ENGINE_CONFIG.get("sc_scdoc_stable_seconds", 3.0)
 
         # 用于稳定性检测的上一次采样
         last_size = -1

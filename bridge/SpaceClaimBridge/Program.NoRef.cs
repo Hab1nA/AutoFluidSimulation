@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -44,11 +45,14 @@ namespace AutoFluidSimulation.Bridge
 
         class Options
         {
-            public string Script, Config, StepDir, ScdocDir;
-            public int Timeout = 300;
-            public bool Persistent;
-            public string CmdDir;
-            public int SlotId;
+            public string Script { get; set; }
+            public string Config { get; set; }
+            public string StepDir { get; set; }
+            public string ScdocDir { get; set; }
+            public int Timeout { get; set; } = 300;
+            public bool Persistent { get; set; }
+            public string CmdDir { get; set; }
+            public int SlotId { get; set; }
         }
 
         static Options ParseArgs(string[] args)
@@ -166,7 +170,10 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = o.Config;
                 psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = o.StepDir;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = o.ScdocDir;
-                Process.Start(psi);
+                using (Process started = Process.Start(psi))
+                {
+                    // 仅用于触发启动，句柄由 WaitForProcessAppear 重新获取
+                }
             }
             catch (Exception ex)
             {
@@ -276,7 +283,10 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
                 psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = o.CmdDir;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = o.SlotId.ToString();
-                Process.Start(psi);
+                using (Process started = Process.Start(psi))
+                {
+                    // 仅用于触发启动，句柄由 WaitForProcessAppear 重新获取
+                }
             }
             catch (Exception ex)
             {
@@ -307,7 +317,7 @@ namespace AutoFluidSimulation.Bridge
                     break;
                 }
                 try { workingProcess.Refresh(); if (workingProcess.HasExited) break; }
-                catch { break; }
+                catch (Exception ex) { Console.Error.WriteLine("[BRIDGE] Warning: 进程检查失败: " + ex.Message); break; }
                 Thread.Sleep(2000);
             }
 
@@ -330,9 +340,9 @@ namespace AutoFluidSimulation.Bridge
                         break;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    Console.WriteLine("[BRIDGE] Process check failed, Bridge exiting");
+                    Console.Error.WriteLine("[BRIDGE] Warning: 进程检查失败: " + ex.Message);
                     break;
                 }
                 Thread.Sleep(2000);
@@ -344,6 +354,13 @@ namespace AutoFluidSimulation.Bridge
 
         static string FindSpaceClaimExe()
         {
+            // 优先检查环境变量 AUTOFLUID_SC_EXE
+            string envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
+            if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
+            {
+                Console.WriteLine("[BRIDGE] Found SpaceClaim.exe (env): " + envPath);
+                return envPath;
+            }
             foreach (string p in SpaceClaimExePaths)
             {
                 if (File.Exists(p))
@@ -357,6 +374,14 @@ namespace AutoFluidSimulation.Bridge
 
         static Process WaitForProcessAppear(DateTime after, int timeoutSec)
         {
+            // 记录启动前已有的进程 PID，用于过滤旧进程
+            var existingPids = new HashSet<int>();
+            foreach (Process ep in Process.GetProcessesByName(ProcessName))
+            {
+                try { existingPids.Add(ep.Id); } catch (Exception ex) { Console.Error.WriteLine("[BRIDGE] Warning: 记录旧PID失败: " + ex.Message); }
+                ep.Dispose();
+            }
+
             DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
             while (DateTime.UtcNow < deadline)
             {
@@ -365,18 +390,30 @@ namespace AutoFluidSimulation.Bridge
                 {
                     try
                     {
-                        if (p.StartTime.ToUniversalTime() >= after)
+                        // 优先匹配启动后的新进程（不在旧 PID 集合中）
+                        if (!existingPids.Contains(p.Id) && p.StartTime.ToUniversalTime() >= after)
                         {
                             return p;
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine("[BRIDGE] Warning: 访问进程信息失败: " + ex.Message);
+                    }
                 }
-                if (procs.Length > 0)
+                // fallback：返回第一个非旧进程
+                foreach (Process p in procs)
                 {
-                    try { return procs[0]; }
-                    catch { }
+                    if (!existingPids.Contains(p.Id))
+                    {
+                        try { return p; }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine("[BRIDGE] Warning: 返回进程失败: " + ex.Message);
+                        }
+                    }
                 }
+                foreach (var p in procs) p.Dispose();
                 Thread.Sleep(1000);
             }
             return null;
@@ -403,7 +440,10 @@ namespace AutoFluidSimulation.Bridge
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("[BRIDGE] Warning: 主窗口检测异常: " + ex.Message);
+                }
                 if (!mainWindowFound) Thread.Sleep(1000);
             }
 
@@ -419,7 +459,10 @@ namespace AutoFluidSimulation.Bridge
                         return;
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("[BRIDGE] Warning: WaitForInputIdle 异常: " + ex.Message);
+                }
                 Console.WriteLine("[BRIDGE]   Fallback failed, using fixed delay (20s)");
                 Thread.Sleep(20000);
                 return;
@@ -438,13 +481,24 @@ namespace AutoFluidSimulation.Bridge
                     Console.WriteLine("[BRIDGE]   WaitForInputIdle timed out, continuing...");
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                Console.WriteLine("[BRIDGE]   WaitForInputIdle exception, continuing...");
+                Console.Error.WriteLine("[BRIDGE] Warning: Phase 2 WaitForInputIdle 异常: " + ex.Message);
             }
 
-            Console.WriteLine("[BRIDGE] Phase 3: Waiting for loading stabilization (fixed 15s)...");
-            Thread.Sleep(15000);
+            // Phase 3 等待时间可通过环境变量 AUTOFLUID_SC_GUI_WAIT 配置（默认 15 秒）
+            int guiWaitSeconds = 15;
+            string envWait = Environment.GetEnvironmentVariable("AUTOFLUID_SC_GUI_WAIT");
+            if (!string.IsNullOrEmpty(envWait))
+            {
+                int parsed;
+                if (int.TryParse(envWait, out parsed) && parsed > 0)
+                {
+                    guiWaitSeconds = parsed;
+                }
+            }
+            Console.WriteLine(string.Format("[BRIDGE] Phase 3: Waiting for loading stabilization ({0}s)...", guiWaitSeconds));
+            Thread.Sleep(guiWaitSeconds * 1000);
             Console.WriteLine("[BRIDGE] SpaceClaim GUI loading complete");
         }
 

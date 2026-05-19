@@ -81,13 +81,13 @@ class StateManager:
             try:
                 conn.rollback()
             except Exception as e:
-                logger.error(f"数据库回滚异常: {e}")
+                logger.error("数据库回滚异常: %s", e)
             raise
         finally:
             try:
                 conn.close()
             except Exception as e:
-                logger.error(f"数据库连接关闭异常: {e}")
+                logger.error("数据库连接关闭异常: %s", e)
 
     def _init_database(self):
         """初始化数据库表结构。"""

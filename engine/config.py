@@ -100,6 +100,7 @@ class EngineConfig(TypedDict):
     max_retries: int
     state_refresh_interval: float
     sc_persistent_ready_timeout: int
+    sc_scdoc_stable_seconds: float
 
 
 # ============================================================================
@@ -328,6 +329,8 @@ ENGINE_CONFIG: EngineConfig = {
     "state_refresh_interval": 0.5,
     # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
     "sc_persistent_ready_timeout": 180,
+    # SC SCDOC 文件大小稳定判定窗口（秒）—— SaveAs 完成的判定依据
+    "sc_scdoc_stable_seconds": 3.0,
 }
 
 
@@ -438,7 +441,9 @@ def reload_config_from_toml() -> bool:
 
 
 # 启动时尝试加载 TOML 配置，合并到默认值中
-reload_config_from_toml()
+# 注：由 daemon 启动时通过 ensure_directories() + validate_config() 显式调用，
+# 避免模块加载时自动执行带来的测试副作用
+# reload_config_from_toml()
 
 
 def validate_config() -> list:

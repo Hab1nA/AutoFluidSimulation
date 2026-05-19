@@ -88,18 +88,30 @@ class RemoteExecutor:
     # 网格划分
     # ------------------------------------------------------------------
 
+    def _build_meshing_command(self, config_name: int) -> tuple[str, str]:
+        """构建远程网格划分命令和标志文件路径。
+
+        Args:
+            config_name: 构型名称
+
+        Returns:
+            (command, flag_file) 元组
+        """
+        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        conda_env = REMOTE_CONFIG["conda_env"]
+        conda_exe = REMOTE_CONFIG["conda_exe"]
+        meshing_script = REMOTE_CONFIG["meshing_script"]
+        command = f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
+        return command, flag_file
+
     def execute_meshing(self, config_name: int) -> bool:
         """在远程工作站启动网格划分后台任务。"""
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
             return False
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
 
-        conda_env = REMOTE_CONFIG["conda_env"]
-        conda_exe = REMOTE_CONFIG["conda_exe"]
-        meshing_script = REMOTE_CONFIG["meshing_script"]
-        command = f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
+        command, flag_file = self._build_meshing_command(config_name)
 
         logger.info(f"启动远程网格划分: 构型{config_name}")
         logger.debug(f"远程命令: {command}")
@@ -127,12 +139,8 @@ class RemoteExecutor:
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
             return False
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
 
-        conda_env = REMOTE_CONFIG["conda_env"]
-        conda_exe = REMOTE_CONFIG["conda_exe"]
-        meshing_script = REMOTE_CONFIG["meshing_script"]
-        command = f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
+        command, flag_file = self._build_meshing_command(config_name)
 
         logger.info(f"[MeshingMonitor] 启动远程网格划分: 构型{config_name}")
         logger.debug(f"[MeshingMonitor] 远程命令: {command}")

@@ -56,9 +56,18 @@ impl IpcRequest {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        let mut json = serde_json::to_string(self).unwrap_or_default();
-        json.push('\n');
-        json.into_bytes()
+        match serde_json::to_string(self) {
+            Ok(mut json) => {
+                json.push('\n');
+                json.into_bytes()
+            }
+            Err(e) => {
+                eprintln!("[IPC] 序列化失败: {e}");
+                // 返回最小错误响应
+                let fallback = format!(r#"{{"ok":false,"request_id":"","status":"error","data":null,"message":"内部序列化错误: {e}"}}\n"#);
+                fallback.into_bytes()
+            }
+        }
     }
 }
 
@@ -73,6 +82,12 @@ impl IpcResponse {
         if trimmed.is_empty() {
             return None;
         }
-        serde_json::from_str(trimmed).ok()
+        match serde_json::from_str(trimmed) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                eprintln!("[IPC] 反序列化失败: {e}, 原始数据: {trimmed}");
+                None
+            }
+        }
     }
 }
