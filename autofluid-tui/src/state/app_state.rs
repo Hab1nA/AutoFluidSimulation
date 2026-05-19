@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::settings::SettingsState;
 use crate::text_buffer::TextBuffer;
@@ -197,6 +198,50 @@ impl AppState {
 
     pub fn update_terminal_size(&mut self, width: u16, height: u16) {
         self.terminal_size = ratatui::layout::Rect::new(0, 0, width, height);
+    }
+
+    /// 每帧调用一次：清理过期的点击动画状态。
+    pub fn tick(&mut self) {
+        let btn_timeout = Duration::from_millis(120);
+        let detail_timeout = Duration::from_millis(20);
+
+        if let Some(ct) = self.click_time {
+            if self.clicked_button.is_some() && ct.elapsed() > btn_timeout {
+                self.clicked_button = None;
+                self.click_time = None;
+                self.needs_redraw = true;
+            }
+        }
+        if let Some(ct) = self.daemon_menu_click_time {
+            if self.clicked_daemon_menu_item.is_some() && ct.elapsed() > btn_timeout {
+                self.clicked_daemon_menu_item = None;
+                self.daemon_menu_click_time = None;
+                self.needs_redraw = true;
+            }
+        }
+        if let Some(ct) = self.dialog_click_time {
+            if self.clicked_dialog_button.is_some() && ct.elapsed() > btn_timeout {
+                self.clicked_dialog_button = None;
+                self.dialog_click_time = None;
+                self.needs_redraw = true;
+            }
+        }
+        if let Some(ct) = self.detail_click_time {
+            if self.clicked_detail_row.is_some() && ct.elapsed() > detail_timeout {
+                self.clicked_detail_row = None;
+                self.detail_click_time = None;
+                self.needs_redraw = true;
+            }
+        }
+        if let Some(ref mut ss) = self.settings_state {
+            if let Some(ct) = ss.field_click_time {
+                if ss.clicked_field.is_some() && ct.elapsed() > detail_timeout {
+                    ss.clicked_field = None;
+                    ss.field_click_time = None;
+                    self.needs_redraw = true;
+                }
+            }
+        }
     }
 
     pub fn update_status_data(&mut self, data: &serde_json::Value) {

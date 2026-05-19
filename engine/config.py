@@ -6,8 +6,7 @@
 """
 import os
 import sys
-import hashlib
-from typing import Any, Dict, List, Optional, TypedDict, cast
+from typing import Any, Optional, TypedDict, cast
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -288,27 +287,9 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
 }
 
 # ============================================================================
-# 配置指纹与数据库分片
+# 配置指纹与数据库分片（实际实现已迁入 config_fingerprint.py）
 # ============================================================================
-
-def compute_config_fingerprint(configs: Dict[int, List[float]]) -> str:
-    """
-    计算构型组合的指纹（MD5 前 8 位）。
-
-    同一组构型组合产生相同指纹，用于数据库文件分片——
-    修改 Excel 设计表后构型组合变化，指纹随之变化，自动使用新数据库。
-    """
-    items = sorted(configs.items())
-    canonical = ";".join(
-        f"{name}:" + ",".join(f"{p:.6g}" for p in params)
-        for name, params in items
-    )
-    return hashlib.md5(canonical.encode()).hexdigest()[:8]
-
-
-def get_db_path_for_fingerprint(fingerprint: str) -> str:
-    """根据配置指纹生成对应的数据库文件路径。"""
-    return os.path.join(LOCAL_PATHS["data_dir"], f"pipeline_state_{fingerprint}.db")
+from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint  # noqa: F401
 
 
 # ============================================================================

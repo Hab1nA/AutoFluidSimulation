@@ -32,8 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, ensure_directories, validate_config,
-    compute_config_fingerprint, get_db_path_for_fingerprint,
 )
+from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler

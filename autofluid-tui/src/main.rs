@@ -295,44 +295,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             break;
         }
 
-        if let Some(ct) = state.click_time {
-            if state.clicked_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_button = None;
-                state.click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.daemon_menu_click_time {
-            if state.clicked_daemon_menu_item.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_daemon_menu_item = None;
-                state.daemon_menu_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.dialog_click_time {
-            if state.clicked_dialog_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_dialog_button = None;
-                state.dialog_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.detail_click_time {
-            if state.clicked_detail_row.is_some() && ct.elapsed() > Duration::from_millis(20) {
-                state.clicked_detail_row = None;
-                state.detail_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        // 设置页面字段点击动画超时
-        if let Some(ref mut ss) = state.settings_state {
-            if let Some(ct) = ss.field_click_time {
-                if ss.clicked_field.is_some() && ct.elapsed() > Duration::from_millis(20) {
-                    ss.clicked_field = None;
-                    ss.field_click_time = None;
-                    state.needs_redraw = true;
-                }
-            }
-        }
+        state.tick();
 
         if let Some(cmd) = state.pending_command.take() {
             let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));

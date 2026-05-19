@@ -463,6 +463,9 @@ def get_broadcast_handler() -> LogBroadcastHandler | None:
         return _broadcast_handler
 
 
+_MAX_BROADCAST_CAPACITY: int = 2000
+
+
 def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     """创建并安装全局 LogBroadcastHandler 到 root logger。
 
@@ -470,7 +473,7 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     使用线程锁保护，防止多线程并发安装导致重复 handler。
 
     Args:
-        capacity: 环形缓冲区容量
+        capacity: 环形缓冲区容量（硬性上限为 2000 条）
 
     Returns:
         LogBroadcastHandler 实例
@@ -481,7 +484,8 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
         if _broadcast_handler is not None:
             return _broadcast_handler
 
-        _broadcast_handler = LogBroadcastHandler(capacity=capacity)
+        clamped = min(capacity, _MAX_BROADCAST_CAPACITY)
+        _broadcast_handler = LogBroadcastHandler(capacity=clamped)
 
         root_logger = logging.getLogger()
         root_logger.addHandler(_broadcast_handler)
