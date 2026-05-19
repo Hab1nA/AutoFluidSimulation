@@ -8,16 +8,16 @@ import threading
 import subprocess
 import queue
 import os
-import time
 from typing import Optional
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, get_step_filename,
+    ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.file_monitor import StepFileMonitor
+from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped, check_step_output_exists
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -133,9 +133,7 @@ class SWPhaseHandler:
         if self._paused.is_set():
             logger.info("[SW] SW 步骤启动前检测到暂停标志，等待继续指令...")
             self.state.set_engine_status("paused")
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
+            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return False
             # 恢复后重新标记 SW 为 Running
             for cn in all_configs:
@@ -349,130 +347,44 @@ class SWPhaseHandler:
             return
 
         prescan_count = 0
-        ssh_available = False
         ssh = None
 
         # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
         try:
             ssh = self.runner.get_ssh()
-            ssh_available = ssh.is_connected()
+            if not ssh.is_connected():
+                ssh = None
         except Exception:
-            pass
+            ssh = None
+
+        step_dir = LOCAL_PATHS["step_dir"]
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
 
         for cn in all_configs:
-            # ---- SW: 检查本地 STEP 文件 ----
-            sw_status = self.state.get_step_status(cn, "SW")
-            if sw_status not in (STATUS_COMPLETED,):
-                sw_filename = get_step_filename("SW", cn)
-                if sw_filename:
-                    sw_filepath = os.path.join(LOCAL_PATHS["step_dir"], sw_filename)
-                    if os.path.exists(sw_filepath) and os.path.getsize(sw_filepath) > 0:
-                        self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
-                        logger.info(
-                            f"[Prescan] 构型{cn} SW: STEP 文件已存在，"
-                            f"标记为 Completed"
-                        )
-                        prescan_count += 1
+            for step in STEP_NAMES:
+                # 仅检查非 Completed 步骤
+                if self.state.get_step_status(cn, step) == STATUS_COMPLETED:
+                    continue
 
-            # ---- SC: 检查本地 SCDOC 文件 ----
-            sc_status = self.state.get_step_status(cn, "SC")
-            if sc_status not in (STATUS_COMPLETED,):
-                scdoc_name = get_step_filename("SC", cn)
-                if scdoc_name:
-                    scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
-                    if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
-                        self.state.set_step_status(cn, "SC", STATUS_COMPLETED)
-                        logger.info(
-                            f"[预扫描] 构型{cn} SC: SCDOC 文件已存在，"
-                            f"标记为 Completed"
-                        )
-                        prescan_count += 1
+                # ---- 依赖链检查：仅在上游步骤已完成时才检查下游 ----
+                if step == "Transfer" and self.state.get_step_status(cn, "SC") != STATUS_COMPLETED:
+                    continue
+                if step == "Meshing" and self.state.get_step_status(cn, "Transfer") != STATUS_COMPLETED:
+                    continue
+                if step == "Solver" and self.state.get_step_status(cn, "Meshing") != STATUS_COMPLETED:
+                    continue
 
-            # ---- Transfer: 检查远程 SCDOC 文件 ----
-            transfer_status = self.state.get_step_status(cn, "Transfer")
-            if transfer_status not in (STATUS_COMPLETED,) and ssh_available:
-                # Transfer 依赖 SC 输出，SC Completed 后才检查远程文件
-                if self.state.get_step_status(cn, "SC") == STATUS_COMPLETED:
-                    scdoc_name = get_step_filename("SC", cn)
-                    if scdoc_name:
-                        remote_scdoc = (
-                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
-                            f"/{scdoc_name}"
-                        )
-                        try:
-                            if ssh.check_remote_file(remote_scdoc):
-                                self.state.set_step_status(
-                                    cn, "Transfer", STATUS_COMPLETED
-                                )
-                                logger.info(
-                                    f"[预扫描] 构型{cn} Transfer: "
-                                    f"远程 SCDOC 已存在，标记为 Completed"
-                                )
-                                prescan_count += 1
-                        except Exception:
-                            pass
+                # ---- 远程步骤需要 SSH ----
+                if step in ("Transfer", "Meshing", "Solver") and ssh is None:
+                    continue
 
-            # ---- Meshing: 检查远程标志文件 + 网格输出文件 ----
-            meshing_status = self.state.get_step_status(cn, "Meshing")
-            if meshing_status not in (STATUS_COMPLETED,) and ssh_available:
-                if self.state.get_step_status(cn, "Transfer") == STATUS_COMPLETED:
-                    flag_file = (
-                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
-                        f"/meshing_done_{cn}.txt"
+                if check_step_output_exists(cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh):
+                    self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                    logger.info(
+                        f"[预扫描] 构型{cn} {step}: "
+                        f"输出文件已存在，标记为 Completed"
                     )
-                    mesh_name = get_step_filename("Meshing", cn)
-                    mesh_file = None
-                    if mesh_name:
-                        mesh_file = (
-                            f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
-                            f"/{mesh_name}"
-                        )
-                    try:
-                        # 标志文件存在 → 网格划分刚完成但状态未更新
-                        # 网格文件存在 → 上一次运行已完成
-                        if ssh.check_remote_file(flag_file) or (
-                            mesh_file and ssh.check_remote_file(mesh_file)
-                        ):
-                            self.state.set_step_status(
-                                cn, "Meshing", STATUS_COMPLETED
-                            )
-                            logger.info(
-                                f"[预扫描] 构型{cn} Meshing: "
-                                f"远程输出已存在，标记为 Completed"
-                            )
-                            prescan_count += 1
-                    except Exception:
-                        pass
-
-            # ---- Solver: 检查远程标志文件 + 求解输出文件 ----
-            solver_status = self.state.get_step_status(cn, "Solver")
-            if solver_status not in (STATUS_COMPLETED,) and ssh_available:
-                if self.state.get_step_status(cn, "Meshing") == STATUS_COMPLETED:
-                    flag_file = (
-                        f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
-                        f"/solver_done_{cn}.txt"
-                    )
-                    result_name = get_step_filename("Solver", cn)
-                    result_file = None
-                    if result_name:
-                        result_file = (
-                            f"{REMOTE_CONFIG['result_dir'].replace(chr(92), '/')}"
-                            f"/{result_name}"
-                        )
-                    try:
-                        if ssh.check_remote_file(flag_file) or (
-                            result_file and ssh.check_remote_file(result_file)
-                        ):
-                            self.state.set_step_status(
-                                cn, "Solver", STATUS_COMPLETED
-                            )
-                            logger.info(
-                                f"[预扫描] 构型{cn} Solver: "
-                                f"远程输出已存在，标记为 Completed"
-                            )
-                            prescan_count += 1
-                    except Exception:
-                        pass
+                    prescan_count += 1
 
         if prescan_count > 0:
             logger.info(
@@ -514,7 +426,7 @@ class SWPhaseHandler:
         logger.info(
             f"[SW] SW 步骤重试 {attempt}/{max_retries}，等待 10 秒并清理残留进程..."
         )
-        if not self._pause_aware_sleep(10):
+        if not pause_aware_sleep(10, self._paused, self._stopped):
             return
 
         # 终止残留 SW 进程
@@ -529,7 +441,7 @@ class SWPhaseHandler:
         # 等待 SW 进程完全退出
         logger.info("[SW-Cleanup] 等待 SolidWorks 进程完全退出...")
         for _ in range(10):
-            if not self._pause_aware_sleep(1):
+            if not pause_aware_sleep(1, self._paused, self._stopped):
                 return
             try:
                 check = subprocess.run(
@@ -544,7 +456,7 @@ class SWPhaseHandler:
                 break
 
         # 额外冷却确保 COM 子系统完全释放
-        if not self._pause_aware_sleep(5):
+        if not pause_aware_sleep(5, self._paused, self._stopped):
             return
 
         # 重置文件监控器状态，避免重试时同名文件被跳过
@@ -560,31 +472,3 @@ class SWPhaseHandler:
             current_status = self.state.get_step_status(cn, "SW")
             if current_status == STATUS_RETRYING:
                 self.state.set_step_status(cn, "SW", STATUS_RUNNING)
-
-    def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
-        """
-        可响应暂停/停止的 sleep 替代方法。
-
-        将 sleep 切分为 check_interval 粒度的小段，每段检查
-        _paused 和 _stopped 标志。若检测到 stopped 则立即返回。
-
-        Args:
-            duration: 总等待时长（秒）
-            check_interval: 每次检查的间隔（秒）
-
-        Returns:
-            True 表示 sleep 完整结束，False 表示因 stopped 提前退出
-        """
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            if self._stopped.is_set():
-                return False
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
-                return False
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            time.sleep(min(check_interval, remaining))
-        return True

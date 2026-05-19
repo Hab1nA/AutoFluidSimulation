@@ -72,9 +72,9 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
                 config_name = int(row[0])  # 第1列：构型名称（整数）
                 params = [float(row[i]) for i in PARAM_COLUMN_RANGE]  # 第2-5列：参数
                 configs[config_name] = params
-                logger.debug(f"  读取构型 {config_name}: 参数 = {params}")
+                logger.debug(f"读取构型 {config_name}: 参数 = {params}")
             except (ValueError, TypeError, IndexError) as e:
-                logger.warning(f"  跳过无效行: {row}, 错误: {e}")
+                logger.warning(f"跳过无效行: {row}, 错误: {e}")
                 continue
     finally:
         if wb is not None:

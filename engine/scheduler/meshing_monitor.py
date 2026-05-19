@@ -23,6 +23,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from executor.remote_executor import RemoteExecutor
 from utils.logger import setup_logger
+from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped
 
 logger = setup_logger(__name__)
 
@@ -134,9 +135,7 @@ class MeshingMonitor:
     def _process_single_meshing(self, config_name: int) -> None:
         """处理单个构型的 Meshing 阶段。"""
         # ---- 暂停/停止检查 ----
-        while self._paused.is_set() and not self._stopped.is_set():
-            time.sleep(1)
-        if self._stopped.is_set():
+        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
         # ---- 断点续传：检查远程输出是否已存在 ----
@@ -164,9 +163,7 @@ class MeshingMonitor:
         for attempt in range(1, max_retries + 1):
             if self._stopped.is_set():
                 return
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
+            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
 
             self.state.set_step_status(config_name, "Meshing", STATUS_RUNNING)
@@ -189,7 +186,7 @@ class MeshingMonitor:
                     f"[MeshingMonitor] 构型{config_name} Meshing 启动失败，"
                     f"{5 * attempt}s 后重试"
                 )
-                if not self._pause_aware_sleep(5 * attempt):
+                if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                     return
             else:
                 self.state.set_step_status(
@@ -283,23 +280,3 @@ class MeshingMonitor:
         except Exception:
             pass
         return False
-
-    # ------------------------------------------------------------------
-    # 辅助
-    # ------------------------------------------------------------------
-
-    def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
-        """可响应暂停/停止的 sleep。返回 False 表示因 stopped 提前退出。"""
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            if self._stopped.is_set():
-                return False
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
-                return False
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            time.sleep(min(check_interval, remaining))
-        return True

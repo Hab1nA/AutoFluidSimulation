@@ -36,7 +36,7 @@ from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
 from .meshing_monitor import MeshingMonitor
-from .utils import pause_aware_sleep
+from .utils import check_step_output_exists
 
 logger = setup_logger(__name__)
 
@@ -135,17 +135,6 @@ class PipelineScheduler:
             self._barrier_passed.set()
 
         logger.info("流水线调度器初始化完成")
-
-    # ------------------------------------------------------------------
-    # 暂停感知的 sleep 辅助方法
-    # ------------------------------------------------------------------
-
-    def _pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
-        """可响应暂停/停止的 sleep 替代方法。
-
-        委托给共享函数 pause_aware_sleep。
-        """
-        return pause_aware_sleep(duration, self._paused, self._stopped, check_interval)
 
     # ------------------------------------------------------------------
     # 主调度入口
@@ -443,37 +432,16 @@ class PipelineScheduler:
     def _check_step_output_exists(
         self, cn: int, step: str, step_dir: str, scdoc_dir: str
     ) -> bool:
-        """检查某步骤的输出文件是否已存在（本地文件检查大小 > 0，远程文件通过 SSH 检查）。"""
-        if step == "SW":
-            filename = get_step_filename("SW", cn)
-            if not filename:
-                return False
-            path = os.path.join(step_dir, filename)
-            return os.path.exists(path) and os.path.getsize(path) > 0
-        if step == "SC":
-            filename = get_step_filename("SC", cn)
-            if not filename:
-                return False
-            path = os.path.join(scdoc_dir, filename)
-            return os.path.exists(path) and os.path.getsize(path) > 0
+        """检查某步骤的输出文件是否已存在（委托给统一函数）。"""
+        ssh = None
         if step == "Transfer":
-            # ★ 与 prescan_downstream_outputs 统一：通过 SSH 检查远程 SCDOC 文件
-            filename = get_step_filename("SC", cn)
-            if not filename:
-                return False
             try:
                 ssh = self.runner.get_ssh()
-                if ssh is None or not ssh.is_connected():
-                    return False
-                remote_scdoc = (
-                    f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
-                    f"/{filename}"
-                )
-                return ssh.check_remote_file(remote_scdoc)
             except Exception:
-                return False
-        # Meshing/Solver 的输出在远程，暂不做检查（由 MeshingMonitor/Barrier 管理）
-        return False
+                pass
+        return check_step_output_exists(
+            cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh
+        )
 
     def _enqueue_sc(self, cn: int, step_dir: str) -> None:
         """将构型的 SC 步骤推入处理队列。"""

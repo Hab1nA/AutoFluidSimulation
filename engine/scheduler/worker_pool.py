@@ -16,6 +16,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
+from engine.scheduler.utils import wait_unless_paused_or_stopped
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -200,9 +201,7 @@ class WorkerPoolManager:
         sc_status = self.state.get_step_status(config_name, "SC")
         if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             # ★ 执行前检查暂停标志
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
+            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
             # ★ 执行前检查输出文件：若 SCDOC 已存在则直接标记完成，避免重复启动 SC
             scdoc_name = get_step_filename("SC", config_name)
@@ -221,9 +220,7 @@ class WorkerPoolManager:
                 return
 
         # ★ SC 完成后检查暂停标志
-        while self._paused.is_set() and not self._stopped.is_set():
-            time.sleep(1)
-        if self._stopped.is_set():
+        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
         # ---- Transfer 阶段 ----
@@ -259,9 +256,7 @@ class WorkerPoolManager:
                     return
 
         # ★ Transfer 完成后检查暂停标志
-        while self._paused.is_set() and not self._stopped.is_set():
-            time.sleep(1)
-        if self._stopped.is_set():
+        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
         # ---- 提交 Meshing 到 MeshingMonitor ----

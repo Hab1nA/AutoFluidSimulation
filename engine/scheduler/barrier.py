@@ -14,7 +14,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
 from utils.logger import setup_logger
-from engine.scheduler.utils import pause_aware_sleep
+from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped
 
 logger = setup_logger(__name__)
 
@@ -181,9 +181,7 @@ class BarrierCoordinator:
         若暂停标志已置位，则等待恢复后再分发。
         """
         # ★ 分发前检查暂停标志
-        while self._paused.is_set() and not self._stopped.is_set():
-            time.sleep(1)
-        if self._stopped.is_set():
+        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             logger.warning("Solver 分发前检测到停止标志，取消分发")
             return
 
@@ -218,9 +216,7 @@ class BarrierCoordinator:
             config_name: 构型名称
         """
         # ★ 执行前检查暂停标志
-        while self._paused.is_set() and not self._stopped.is_set():
-            time.sleep(1)
-        if self._stopped.is_set():
+        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
@@ -229,9 +225,7 @@ class BarrierCoordinator:
         if self._retry_manager.execute_with_retry(config_name, "Solver",
                                      self.runner.execute_solver):
             # ★ 启动远程求解后检查暂停标志
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
+            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
 
             # 轮询等待求解完成

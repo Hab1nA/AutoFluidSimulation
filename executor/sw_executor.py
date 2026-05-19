@@ -122,7 +122,7 @@ class SWExecutor:
         excel_warnings = self._validate_design_table(excel_path)
         if excel_warnings:
             for w in excel_warnings:
-                logger.warning(f"[SW]   ⚠ {w}")
+                logger.warning(f"[SW-DesignTable] ⚠ {w}")
 
         # ---- 防御性优化：若所有构型已完成则跳过 ----
         all_configs = self.state.get_all_configs()
@@ -238,7 +238,7 @@ class SWExecutor:
         import win32com.client
 
         # ---- 第1层: 连接已运行的 SW ----
-        logger.info("[SW] 正在连接 SolidWorks (第1层: GetActiveObject)...")
+        logger.info("[SW-COM] 正在连接 SolidWorks (第1层: GetActiveObject)...")
         try:
             sw_app = win32com.client.GetActiveObject("SldWorks.Application")
             logger.info("[SW-COM] 已连接到运行中的 SolidWorks 实例")
@@ -250,7 +250,7 @@ class SWExecutor:
             )
 
         # ---- 第2层: 通过 COM Dispatch 启动 ----
-        logger.info("[SW] 正在启动 SolidWorks (第2层: COM Dispatch)...")
+        logger.info("[SW-COM] 正在启动 SolidWorks (第2层: COM Dispatch)...")
         try:
             sw_app = win32com.client.Dispatch("SldWorks.Application")
             try:
@@ -271,15 +271,15 @@ class SWExecutor:
             )
 
         # ---- 第3层: 直接启动 exe ----
-        logger.info("[SW] 正在启动 SolidWorks (第3层: subprocess)...")
+        logger.info("[SW-COM] 正在启动 SolidWorks (第3层: subprocess)...")
         self._terminate_sw_processes()
         if not self._launch_sw_process():
-            logger.error("[SW] 所有启动方式均失败，无法连接 SolidWorks")
+            logger.error("[SW-COM] 所有启动方式均失败，无法连接 SolidWorks")
             return None
         try:
             sw_app = win32com.client.GetActiveObject("SldWorks.Application")
         except Exception as e3:
-            logger.error(f"[SW] 第3层 GetActiveObject 失败: {e3}")
+            logger.error(f"[SW-COM] 第3层 GetActiveObject 失败: {e3}")
             return None
         try:
             sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
@@ -292,10 +292,10 @@ class SWExecutor:
         """通过 subprocess 直接启动 SolidWorks.exe，轮询等待 COM 就绪。"""
         sw_exe = LOCAL_PATHS.get("sw_exe", "")
         if not sw_exe or not os.path.exists(sw_exe):
-            logger.warning("未配置 SolidWorks 可执行文件路径 (sw_exe)，无法使用 subprocess 启动")
+            logger.warning("[SW-COM] 未配置 SolidWorks 可执行文件路径 (sw_exe)，无法使用 subprocess 启动")
             return False
 
-        logger.info(f"正在通过 subprocess 启动 SolidWorks: {sw_exe}")
+        logger.info(f"[SW-COM] 正在通过 subprocess 启动 SolidWorks: {sw_exe}")
         try:
             creation_flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == "nt" else 0
             subprocess.Popen(
@@ -304,7 +304,7 @@ class SWExecutor:
                 stderr=subprocess.DEVNULL,
                 creationflags=creation_flags,
             )
-            logger.info("SolidWorks 进程已启动，等待 COM 接口就绪...")
+            logger.info("[SW-COM] SolidWorks 进程已启动，等待 COM 接口就绪...")
 
             import win32com.client
             max_wait = 60
@@ -313,19 +313,19 @@ class SWExecutor:
                 try:
                     sw_app = win32com.client.GetActiveObject("SldWorks.Application")
                     if sw_app is not None:
-                        logger.info(f"SolidWorks COM 接口已就绪 (等待了 {attempt + 1} 秒)")
+                        logger.info(f"[SW-COM] SolidWorks COM 接口已就绪 (等待了 {attempt + 1} 秒)")
                         return True
                 except (AttributeError, TypeError):
                     pass
                 except Exception as e:
-                    logger.debug(f"获取 SolidWorks COM 对象异常: {e}")
-            logger.error(f"等待 SolidWorks 启动超时 ({max_wait} 秒)")
+                    logger.debug(f"[SW-COM] 获取 SolidWorks COM 对象异常: {e}")
+            logger.error(f"[SW-COM] 等待 SolidWorks 启动超时 ({max_wait} 秒)")
             return False
         except FileNotFoundError:
-            logger.error(f"找不到 SolidWorks 可执行文件: {sw_exe}")
+            logger.error(f"[SW-COM] 找不到 SolidWorks 可执行文件: {sw_exe}")
             return False
         except OSError as e:
-            logger.error(f"启动 SolidWorks 进程失败: {e}")
+            logger.error(f"[SW-COM] 启动 SolidWorks 进程失败: {e}")
             return False
 
     def _terminate_sw_processes(self):
@@ -359,7 +359,7 @@ class SWExecutor:
         import win32com.client
         import pythoncom
 
-        logger.info(f"[SW] 正在打开模型 (OpenDoc6): {os.path.basename(sw_model)}")
+        logger.info(f"[SW-COM] 正在打开模型 (OpenDoc6): {os.path.basename(sw_model)}")
         open_errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         open_warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
 
@@ -389,7 +389,7 @@ class SWExecutor:
 
         if doc is None:
             logger.error(
-                f"[SW] 无法打开 SW 模型: {sw_model}"
+                f"[SW-COM] 无法打开 SW 模型: {sw_model}"
                 f"（文件可能损坏、版本不兼容，或路径含特殊字符）"
             )
             return None
@@ -405,7 +405,7 @@ class SWExecutor:
                 pass
             return None
 
-        logger.info(f"[SW] ✓ 模型已打开: {os.path.basename(sw_model)}")
+        logger.info(f"[SW-COM] 模型已打开: {os.path.basename(sw_model)}")
         return doc
 
     def _disconnect_sw(self, sw_app, doc, sw_model: str):
@@ -653,9 +653,9 @@ class SWExecutor:
         self._diagnose_param_mismatch(doc, excel_path)
         logger.error("=" * 60)
         logger.error("[SW-DesignTable] 所有导入方式均失败！")
-        logger.error(f"  Excel: {excel_path}")
-        logger.error(f"  模型: {basename_model}")
-        logger.error("  请检查上述诊断信息中列出的参数名不匹配项。")
+        logger.error(f"[SW-DesignTable] Excel: {excel_path}")
+        logger.error(f"[SW-DesignTable] 模型: {basename_model}")
+        logger.error("[SW-DesignTable] 请检查上述诊断信息中列出的参数名不匹配项。")
         logger.error("=" * 60)
         try:
             sw_app.CloseDoc(basename_model)
@@ -670,14 +670,14 @@ class SWExecutor:
             if design_table is not None:
                 try:
                     design_table.Updatable = False
-                    logger.info("[SW-DesignTable]   已禁止'模型→设计表'反向更新")
+                    logger.info("[SW-DesignTable] 已禁止'模型→设计表'反向更新")
                 except Exception as e_upd:
-                    logger.debug(f"[SW-DesignTable]   设置 Updatable=False 失败: {e_upd}")
+                    logger.debug(f"[SW-DesignTable] 设置 Updatable=False 失败: {e_upd}")
                 try:
                     design_table.UpdateModel()
-                    logger.info("[SW-DesignTable]   ✓ UpdateModel 完成")
+                    logger.info("[SW-DesignTable] UpdateModel 完成")
                 except Exception as e_um:
-                    logger.debug(f"[SW-DesignTable]   UpdateModel 异常: {e_um}")
+                    logger.debug(f"[SW-DesignTable] UpdateModel 异常: {e_um}")
             else:
                 logger.info("[SW-DesignTable] GetDesignTable 返回 None（可能已自动应用）")
         except Exception as e_dt:
@@ -694,7 +694,7 @@ class SWExecutor:
 
     def _apply_params_via_com(self, doc, excel_path: str) -> bool:
         """策略B: 解析 Excel 参数表，直接通过 COM API 为每个构型设置参数值。"""
-        logger.info("[SW-COM-Param] 正在读取 Excel 参数表...")
+        logger.info("[SW-DesignTable] 正在读取 Excel 参数表...")
         import openpyxl
 
         config_data = {}  # {config_name: [param_values]}
@@ -705,17 +705,17 @@ class SWExecutor:
 
             row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
             if not row2_cells:
-                logger.error("[SW-COM-Param] Excel 第2行缺失（应包含参数名）")
+                logger.error("[SW-DesignTable] Excel 第2行缺失（应包含参数名）")
                 return False
             row2 = [cell.value for cell in row2_cells[0]]
             excel_param_names = [
                 str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
             ]
             if not excel_param_names:
-                logger.error("[SW-COM-Param] Excel 第2行无有效参数名")
+                logger.error("[SW-DesignTable] Excel 第2行无有效参数名")
                 return False
             logger.info(
-                f"[SW-COM-Param] Excel 参数名 ({len(excel_param_names)}个): "
+                f"[SW-DesignTable] Excel 参数名 ({len(excel_param_names)}个): "
                 f"{excel_param_names}"
             )
 
@@ -728,10 +728,10 @@ class SWExecutor:
                     config_data[cn] = vals
                 except (ValueError, TypeError, IndexError):
                     continue
-            logger.info(f"[SW-COM-Param] 读取到 {len(config_data)} 个构型数据")
+            logger.info(f"[SW-DesignTable] 读取到 {len(config_data)} 个构型数据")
 
             if not config_data:
-                logger.error("[SW-COM-Param] Excel 无有效构型数据")
+                logger.error("[SW-DesignTable] Excel 无有效构型数据")
                 return False
         finally:
             if wb is not None:
@@ -751,7 +751,7 @@ class SWExecutor:
             elif raw is not None:
                 model_configs = [str(raw)]
         except Exception as e:
-            logger.warning(f"[SW-COM-Param] 获取配置列表失败 ({type(e).__name__})，尝试替代方法...")
+            logger.warning(f"[SW-DesignTable] 获取配置列表失败 ({type(e).__name__})，尝试替代方法...")
             for cn in sorted(config_data.keys()):
                 cfg_str = str(cn)
                 try:
@@ -760,9 +760,9 @@ class SWExecutor:
                 except Exception:
                     pass
         if model_configs:
-            logger.info(f"[SW-COM-Param] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
+            logger.info(f"[SW-DesignTable] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
         else:
-            logger.warning("[SW-COM-Param] 无法获取模型配置列表，将尝试所有 Excel 构型")
+            logger.warning("[SW-DesignTable] 无法获取模型配置列表，将尝试所有 Excel 构型")
 
         # --- 构建参数名映射 ---
         matched_params = []
@@ -779,18 +779,18 @@ class SWExecutor:
 
         if unmatched_excel:
             logger.warning(
-                f"[SW-COM-Param] {len(unmatched_excel)} 个 Excel 参数在模型中未找到: "
+                f"[SW-DesignTable] {len(unmatched_excel)} 个 Excel 参数在模型中未找到: "
                 f"{unmatched_excel}"
             )
         if not matched_params:
-            logger.error("[SW-COM-Param] 没有任何 Excel 参数与模型匹配！无法设置参数。")
+            logger.error("[SW-DesignTable] 没有任何 Excel 参数与模型匹配！无法设置参数。")
             if unmatched_excel:
                 logger.info(
-                    f"[SW-COM-Param] 未匹配的 Excel 参数: {sorted(unmatched_excel)}"
+                    f"[SW-DesignTable] 未匹配的 Excel 参数: {sorted(unmatched_excel)}"
                 )
             return False
         logger.info(
-            f"[SW-COM-Param] 匹配参数 ({len(matched_params)}个): {matched_params}"
+            f"[SW-DesignTable] 匹配参数 ({len(matched_params)}个): {matched_params}"
         )
 
         # --- 逐个构型设置参数 ---
@@ -800,13 +800,13 @@ class SWExecutor:
             cfg_str = str(config_name)
 
             if not skip_config_check and cfg_str not in model_configs:
-                logger.debug(f"[SW-COM-Param] 构型{config_name} 不在模型配置列表中，跳过")
+                logger.debug(f"[SW-DesignTable] 构型{config_name} 不在模型配置列表中，跳过")
                 continue
 
             try:
                 doc.ShowConfiguration2(cfg_str)
             except Exception as e:
-                logger.warning(f"[SW-COM-Param] 切换构型{cfg_str}失败: {e}")
+                logger.warning(f"[SW-DesignTable] 切换构型{cfg_str}失败: {e}")
                 continue
 
             config_ok = True
@@ -814,14 +814,14 @@ class SWExecutor:
                 try:
                     param = doc.Parameter(pname)
                     if param is None:
-                        logger.warning(f"[SW-COM-Param] 构型{config_name}: 参数'{pname}'不存在")
+                        logger.warning(f"[SW-DesignTable] 构型{config_name}: 参数'{pname}'不存在")
                         config_ok = False
                         continue
                     param.Value = pvalue
-                    logger.debug(f"[SW-COM-Param]   构型{config_name}: {pname} = {pvalue}")
+                    logger.debug(f"[SW-DesignTable] 构型{config_name}: {pname} = {pvalue}")
                 except Exception as e:
                     logger.warning(
-                        f"[SW-COM-Param] 构型{config_name} 设置 {pname}={pvalue} 失败: "
+                        f"[SW-DesignTable] 构型{config_name} 设置 {pname}={pvalue} 失败: "
                         f"{type(e).__name__}: {e}"
                     )
                     config_ok = False
@@ -829,10 +829,10 @@ class SWExecutor:
             if config_ok:
                 success_count += 1
             else:
-                logger.warning(f"[SW-COM-Param] 构型{config_name} 部分参数设置失败")
+                logger.warning(f"[SW-DesignTable] 构型{config_name} 部分参数设置失败")
 
         logger.info(
-            f"[SW-COM-Param] ✓ 完成: {success_count}/{len(config_data)} 个构型参数已设置"
+            f"[SW-DesignTable] ✓ 完成: {success_count}/{len(config_data)} 个构型参数已设置"
         )
         return success_count > 0
 
@@ -869,17 +869,17 @@ class SWExecutor:
             except Exception:
                 pass
 
-        logger.info(f"  Excel 参数 ({len(excel_params)}): {excel_params}")
-        logger.info(f"  模型匹配参数 ({len(model_param_names)}): {model_param_names}")
+        logger.info(f"[SW-DesignTable] Excel 参数 ({len(excel_params)}): {excel_params}")
+        logger.info(f"[SW-DesignTable] 模型匹配参数 ({len(model_param_names)}): {model_param_names}")
 
         unmatched = [p for p in excel_params if p not in model_param_names]
 
         if unmatched:
             logger.info("")
-            logger.info("  建议修复方式：")
-            logger.info("  1. 更新 Excel 第2行参数名，使其与模型一致")
-            logger.info("  2. 或在 SW 中重命名模型参数，使其与 Excel 一致")
-            logger.info("  3. 若参数名无误，检查 Excel 工作表和 SW 文档类型是否匹配")
+            logger.info("[SW-DesignTable] 建议修复方式：")
+            logger.info("[SW-DesignTable] 1. 更新 Excel 第2行参数名，使其与模型一致")
+            logger.info("[SW-DesignTable] 2. 或在 SW 中重命名模型参数，使其与 Excel 一致")
+            logger.info("[SW-DesignTable] 3. 若参数名无误，检查 Excel 工作表和 SW 文档类型是否匹配")
 
     # ------------------------------------------------------------------
     # STEP 导出
@@ -897,7 +897,7 @@ class SWExecutor:
     def _verify_com_object(obj, label: str = "COM对象") -> bool:
         """验证 COM 对象是否有效（非 None 且代理仍存活）。"""
         if obj is None:
-            logger.error(f"[COM验证] {label} 为 None")
+            logger.error(f"[SW-COM] {label} 为 None")
             return False
 
         for method_name in ("GetTitle", "GetPathName", "GetType"):
@@ -905,26 +905,26 @@ class SWExecutor:
                 val = getattr(obj, method_name)
                 if callable(val):
                     _ = val()
-                logger.debug(f"[COM验证] ✓ {label} 有效 (通过 {method_name})")
+                logger.debug(f"[SW-COM] {label} 有效 (通过 {method_name})")
                 return True
             except AttributeError:
                 continue
             except Exception as e:
                 logger.debug(
-                    f"[COM验证] {label} {method_name} 失败: "
+                    f"[SW-COM] {label} {method_name} 失败: "
                     f"{type(e).__name__}"
                 )
                 continue
 
         logger.warning(
-            f"[COM验证] {label} 所有验证方法均失败，"
+            f"[SW-COM] {label} 所有验证方法均失败，"
             f"对象可能为无效 COM 代理"
         )
         return False
 
     def _export_all_configs_to_step(self, doc, step_dir: str):
         """直接通过 COM API 遍历所有配置并导出 STEP 文件。"""
-        logger.info("正在通过 COM 直接导出各构型 STEP 文件...")
+        logger.info("[SW-Export] 正在通过 COM 直接导出各构型 STEP 文件...")
 
         import pythoncom
         import win32com.client
@@ -941,10 +941,10 @@ class SWExecutor:
             conf_names = [str(raw)]
 
         if not conf_names:
-            logger.error("无法获取模型配置名称列表")
+            logger.error("[SW-Export] 无法获取模型配置名称列表")
             return 0, 0, []
 
-        logger.info(f"发现 {len(conf_names)} 个配置，开始逐构型导出...")
+        logger.info(f"[SW-Export] 发现 {len(conf_names)} 个配置，开始逐构型导出...")
 
         success_configs = []
         fail_configs = []
@@ -957,7 +957,7 @@ class SWExecutor:
 
             filename = get_step_filename("SW", cn_int) if cn_int is not None else None
             if not filename:
-                logger.warning(f"  构型{cn_str}: 无法生成 STEP 文件名，跳过")
+                logger.warning(f"[SW-Export] 构型{cn_str}: 无法生成 STEP 文件名，跳过")
                 fail_configs.append(cn_int if cn_int is not None else cn_str)
                 continue
 
@@ -967,7 +967,7 @@ class SWExecutor:
                 _sw_st = self.state.get_step_status(cn_int, "SW")
                 if _sw_st == STATUS_COMPLETED and os.path.exists(filepath):
                     logger.info(
-                        f"  ✓ 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
+                        f"[SW-Export] 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
                     )
                     success_configs.append(cn_int)
                     continue
@@ -976,7 +976,7 @@ class SWExecutor:
                 doc.ShowConfiguration2(cn_str)
             except Exception as e:
                 logger.error(
-                    f"  构型{cn_str}: ShowConfiguration2 失败 "
+                    f"[SW-Export] 构型{cn_str}: ShowConfiguration2 失败 "
                     f"({type(e).__name__}: {e})"
                 )
                 if cn_int is not None:
@@ -1010,13 +1010,13 @@ class SWExecutor:
                     save_ok = True
                     if not os.path.exists(filepath):
                         logger.warning(
-                            f"  ✗ 构型{cn_str}: SaveAs 返回 True 但文件不存在"
+                            f"[SW-Export] 构型{cn_str}: SaveAs 返回 True 但文件不存在"
                             f"（{os.path.basename(filepath)}）"
                         )
                         save_ok = False
                     if save_ok:
                         logger.info(
-                            f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                            f"[SW-Export] 构型{cn_str}: {os.path.basename(filepath)} "
                             f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
                         )
                         if cn_int is not None:
@@ -1031,7 +1031,7 @@ class SWExecutor:
                             fail_configs.append(cn_int)
                 else:
                     logger.warning(
-                        f"  ✗ 构型{cn_str}: SaveAs 返回 False "
+                        f"[SW-Export] 构型{cn_str}: SaveAs 返回 False "
                         f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
                     )
                     if cn_int is not None:
@@ -1042,7 +1042,7 @@ class SWExecutor:
                         fail_configs.append(cn_int)
             except Exception as e:
                 logger.error(
-                    f"  ✗ 构型{cn_str}: SaveAs 异常 ({type(e).__name__}: {e})"
+                    f"[SW-Export] 构型{cn_str}: SaveAs 异常 ({type(e).__name__}: {e})"
                 )
                 if cn_int is not None:
                     self.state.set_step_status(
@@ -1053,14 +1053,14 @@ class SWExecutor:
 
         total = len(success_configs) + len(fail_configs)
         logger.info(
-            f"STEP 导出完成: {len(success_configs)}/{total} 成功"
+            f"[SW-Export] STEP 导出完成: {len(success_configs)}/{total} 成功"
             f"（{len(fail_configs)} 失败）"
         )
         return len(success_configs), len(fail_configs), fail_configs
 
     def _rebuild_all_configs(self, doc) -> bool:
         """重建 SW 模型的所有构型。"""
-        logger.info("[SW] 正在重建所有构型（ForceRebuildAll）...")
+        logger.info("[SW-Export] 正在重建所有构型（ForceRebuildAll）...")
         rebuild_ok = False
 
         try:
@@ -1068,16 +1068,16 @@ class SWExecutor:
             ext._FlagAsMethod('ForceRebuildAll')
             ext.ForceRebuildAll()
             rebuild_ok = True
-            logger.info("[SW] ✓ 所有构型重建完成 (ForceRebuildAll)")
+            logger.info("[SW-Export] 所有构型重建完成 (ForceRebuildAll)")
         except Exception as e_rebuild:
             logger.warning(
-                f"[SW] ForceRebuildAll 策略1 失败 "
+                f"[SW-Export] ForceRebuildAll 策略1 失败 "
                 f"({type(e_rebuild).__name__}: {e_rebuild})"
             )
 
         if not rebuild_ok:
             try:
-                logger.info("[SW] 降级为逐个配置 EditRebuild3...")
+                logger.info("[SW-Export] 降级为逐个配置 EditRebuild3...")
                 doc._FlagAsMethod('GetConfigurationNames')
                 raw = doc.GetConfigurationNames()
                 if isinstance(raw, (tuple, list)):
@@ -1096,12 +1096,12 @@ class SWExecutor:
                         pass
                 if rebuilt_count > 0:
                     rebuild_ok = True
-                    logger.info(f"[SW] ✓ 逐个配置重建完成 ({rebuilt_count}/{len(configs)} 个)")
+                    logger.info(f"[SW-Export] 逐个配置重建完成 ({rebuilt_count}/{len(configs)} 个)")
                 else:
-                    logger.warning("[SW] 逐个配置重建: 0 个成功")
+                    logger.warning("[SW-Export] 逐个配置重建: 0 个成功")
             except Exception as e_rebuild2:
                 logger.warning(
-                    f"[SW] 逐个配置重建失败 "
+                    f"[SW-Export] 逐个配置重建失败 "
                     f"({type(e_rebuild2).__name__}: {e_rebuild2})"
                 )
 
@@ -1114,41 +1114,41 @@ class SWExecutor:
         found_configs: List[int] = []
         already_completed: List[int] = []
 
-        logger.info("[SW] STEP 导出完毕，正在校验各构型 STEP 文件...")
-        logger.info(f"[SW]   输出目录: {step_dir}")
+        logger.info("[SW-Export] STEP 导出完毕，正在校验各构型 STEP 文件...")
+        logger.info(f"[SW-Export] 输出目录: {step_dir}")
 
         for cn in all_configs:
             filename = get_step_filename("SW", cn)
             if not filename:
-                logger.warning(f"[SW]   构型{cn}: 无法生成 STEP 文件名，跳过校验")
+                logger.warning(f"[SW-Export] 构型{cn}: 无法生成 STEP 文件名，跳过校验")
                 continue
             expected_file = os.path.join(step_dir, filename)
             current_status = self.state.get_step_status(cn, "SW")
             if os.path.exists(expected_file):
                 if current_status == STATUS_COMPLETED:
                     already_completed.append(cn)
-                    logger.debug(f"[SW]   构型{cn} ✓ (文件监控器已标记)")
+                    logger.debug(f"[SW-Export] 构型{cn} (文件监控器已标记)")
                 else:
                     self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
                     found_configs.append(cn)
-                    logger.debug(f"[SW]   构型{cn} ✓ (安全网补标记)")
+                    logger.debug(f"[SW-Export] 构型{cn} (安全网补标记)")
             else:
                 self.state.set_step_status(
                     cn, "SW", STATUS_ERROR,
                     f"STEP 导出完毕但文件缺失: {filename}"
                 )
                 missing_configs.append(cn)
-                logger.warning(f"[SW]   构型{cn} ✗ STEP 缺失")
+                logger.warning(f"[SW-Export] 构型{cn} STEP 缺失")
 
         total_found = len(already_completed) + len(found_configs)
         logger.info(
-            f"[SW] STEP 校验完成: "
+            f"[SW-Export] STEP 校验完成: "
             f"{total_found}/{len(all_configs)} 成功"
             f"（文件监控器实时: {len(already_completed)}，安全网: {len(found_configs)}）"
         )
         if missing_configs:
             logger.warning(
-                f"[SW] 缺失构型: {sorted(missing_configs)} "
+                f"[SW-Export] 缺失构型: {sorted(missing_configs)} "
                 f"— 可能原因: 构型重建失败 / 设计表参数错误"
             )
         return total_found
@@ -1190,11 +1190,11 @@ class SWExecutor:
             conf_names = [str(raw)]
 
         if not conf_names:
-            logger.error("[SW] 无法获取模型配置名称列表")
+            logger.error("[SW-Export] 无法获取模型配置名称列表")
             return 0, 0, []
 
         logger.info(
-            f"[SW] 开始逐构型重建+导出（共 {len(conf_names)} 个配置）"
+            f"[SW-Export] 开始逐构型重建+导出（共 {len(conf_names)} 个配置）"
         )
 
         success_configs: list = []
@@ -1216,7 +1216,7 @@ class SWExecutor:
                 remaining_idx = conf_names.index(cn_str)
                 paused_configs.extend(conf_names[remaining_idx:])
                 logger.info(
-                    f"[SW] 暂停标志已置位，构型 {cn_str}~{conf_names[-1]} 暂停"
+                    f"[SW-Export] 暂停标志已置位，构型 {cn_str}~{conf_names[-1]} 暂停"
                     f"（共 {len(conf_names) - remaining_idx} 个）"
                 )
                 break
@@ -1224,7 +1224,7 @@ class SWExecutor:
             # ---- 停止检查 ----
             if self._stopped_event is not None and self._stopped_event.is_set():
                 logger.info(
-                    f"[SW] 停止标志已置位，构型 {cn_str} 及后续构型中止"
+                    f"[SW-Export] 停止标志已置位，构型 {cn_str} 及后续构型中止"
                 )
                 break
 
@@ -1238,7 +1238,7 @@ class SWExecutor:
                 get_step_filename("SW", cn_int) if cn_int is not None else None
             )
             if not filename:
-                logger.warning(f"  构型{cn_str}: 无法生成 STEP 文件名，跳过")
+                logger.warning(f"[SW-Export] 构型{cn_str}: 无法生成 STEP 文件名，跳过")
                 fail_configs.append(cn_int if cn_int is not None else cn_str)
                 continue
 
@@ -1249,7 +1249,7 @@ class SWExecutor:
                 sw_st = self.state.get_step_status(cn_int, "SW")
                 if sw_st == STATUS_COMPLETED and os.path.exists(filepath):
                     logger.info(
-                        f"  ✓ 构型{cn_str}: 已完成且 STEP 存在，跳过"
+                        f"[SW-Export] 构型{cn_str}: 已完成且 STEP 存在，跳过"
                     )
                     success_configs.append(cn_int)
                     continue
@@ -1259,7 +1259,7 @@ class SWExecutor:
                 doc.ShowConfiguration2(cn_str)
             except Exception as e:
                 logger.error(
-                    f"  构型{cn_str}: ShowConfiguration2 失败 "
+                    f"[SW-Export] 构型{cn_str}: ShowConfiguration2 失败 "
                     f"({type(e).__name__}: {e})"
                 )
                 if cn_int is not None:
@@ -1277,7 +1277,7 @@ class SWExecutor:
             try:
                 ext.Rebuild(0)
                 rebuild_ok = True
-                logger.debug(f"  构型{cn_str}: Extension.Rebuild 完成")
+                logger.debug(f"[SW-Export] 构型{cn_str}: Extension.Rebuild 完成")
             except TypeError:
                 # ext.Rebuild 可能被 dispatch 误识别为属性
                 try:
@@ -1289,7 +1289,7 @@ class SWExecutor:
                     pass
             except Exception as e:
                 logger.debug(
-                    f"  构型{cn_str}: Extension.Rebuild 失败 "
+                    f"[SW-Export] 构型{cn_str}: Extension.Rebuild 失败 "
                     f"({type(e).__name__}: {e})"
                 )
 
@@ -1297,10 +1297,10 @@ class SWExecutor:
                 try:
                     doc.Rebuild(0)
                     rebuild_ok = True
-                    logger.debug(f"  构型{cn_str}: doc.Rebuild 完成")
+                    logger.debug(f"[SW-Export] 构型{cn_str}: doc.Rebuild 完成")
                 except Exception:
                     logger.debug(
-                        f"  构型{cn_str}: doc.Rebuild 也失败，依赖 SaveAs 隐式重建"
+                        f"[SW-Export] 构型{cn_str}: doc.Rebuild 也失败，依赖 SaveAs 隐式重建"
                     )
 
             # ---- 步骤 C: 导出 STEP ----
@@ -1327,13 +1327,13 @@ class SWExecutor:
                     save_ok = True
                     if not os.path.exists(filepath):
                         logger.warning(
-                            f"  ✗ 构型{cn_str}: SaveAs 返回 True 但文件不存在"
+                            f"[SW-Export] 构型{cn_str}: SaveAs 返回 True 但文件不存在"
                             f"（{os.path.basename(filepath)}）"
                         )
                         save_ok = False
                     if save_ok:
                         logger.info(
-                            f"  ✓ 构型{cn_str}: {os.path.basename(filepath)} "
+                            f"[SW-Export] 构型{cn_str}: {os.path.basename(filepath)} "
                             f"(Errors={save_errors.value}, "
                             f"Warnings={save_warnings.value})"
                         )
@@ -1351,7 +1351,7 @@ class SWExecutor:
                             fail_configs.append(cn_int)
                 else:
                     logger.warning(
-                        f"  ✗ 构型{cn_str}: SaveAs 返回 False "
+                        f"[SW-Export] 构型{cn_str}: SaveAs 返回 False "
                         f"(Errors={save_errors.value}, "
                         f"Warnings={save_warnings.value})"
                     )
@@ -1364,7 +1364,7 @@ class SWExecutor:
                         fail_configs.append(cn_int)
             except Exception as e:
                 logger.error(
-                    f"  ✗ 构型{cn_str}: SaveAs 异常 "
+                    f"[SW-Export] 构型{cn_str}: SaveAs 异常 "
                     f"({type(e).__name__}: {e})"
                 )
                 if cn_int is not None:
@@ -1387,7 +1387,7 @@ class SWExecutor:
 
         total = len(success_configs) + len(fail_configs)
         logger.info(
-            f"[SW] 逐构型重建+导出完成: {len(success_configs)}/{total} 成功"
+            f"[SW-Export] 逐构型重建+导出完成: {len(success_configs)}/{total} 成功"
             f"（{len(fail_configs)} 失败，"
             f"{len(paused_configs)} 因暂停跳过）"
         )

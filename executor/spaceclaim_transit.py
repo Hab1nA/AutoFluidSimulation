@@ -297,7 +297,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     step_path = os.path.join(step_dir, step_filename)
 
     logger.info("正在处理构型 {}".format(file_index))
-    logger.info("  输入文件: {}".format(step_path))
+    logger.info("输入文件: {}".format(step_path))
 
     # ------------------------------------------------------------------
     # 1. 检查输入文件
@@ -307,7 +307,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         return False
 
     file_size = os.path.getsize(step_path)
-    logger.info("  文件大小: {} bytes".format(file_size))
+    logger.info("文件大小: {} bytes".format(file_size))
 
     # ------------------------------------------------------------------
     # 2. 打开文档
@@ -399,9 +399,9 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for i, (lo, hi) in enumerate(selection_specs, 1):
         result = _create_named_selection(lo, hi)
         if result is not None:
-            logger.info("  组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.info("组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
         else:
-            logger.error("  组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.error("组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
 
     # ------------------------------------------------------------------
     # 4b. 合并组4和组5（wall_chamber 和 wall_throat 的过渡段合并）
@@ -409,7 +409,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     logger.info("正在合并 组4 和 组5...")
     try:
         NamedSelection.Merge("组4", "组5")
-        logger.info("  组4+组5 合并成功")
+        logger.info("组4+组5 合并成功")
     except Exception as e:
         logger.warning("合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
         logger.warning("将跳过合并，这可能导致后续重命名映射偏移")
@@ -427,9 +427,9 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for lo, hi in remaining_specs:
         result = _create_named_selection(lo, hi)
         if result is not None:
-            logger.info("  选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
+            logger.info("选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
         else:
-            logger.error("  选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
+            logger.error("选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
 
     # ------------------------------------------------------------------
     # 5. 重命名选择集为英文名
@@ -456,7 +456,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
             logger.info("  {} → {}".format(old_name, new_name))
             rename_success += 1
         except Exception as e:
-            logger.warning("  重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
+            logger.warning("重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
             rename_fail += 1
 
     if rename_fail > 0:
@@ -622,8 +622,8 @@ def _persistent_loop():
             logger.info("=" * 40)
             logger.info("常驻模式: 开始处理构型 {} (run={})".format(
                 config_name, run_id))
-            logger.info("  STEP 目录: {}".format(step_dir))
-            logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+            logger.info("STEP 目录: {}".format(step_dir))
+            logger.info("SCDOC 目录: {}".format(scdoc_dir))
 
             success = process_step_file(config_name, step_dir, scdoc_dir)
 
@@ -748,9 +748,9 @@ def Main():
 
         logger.info("=" * 60)
         logger.info("SpaceClaim Transit Script V23")
-        logger.info("  构型编号: {}".format(config_name))
-        logger.info("  STEP 目录: {}".format(step_dir))
-        logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+        logger.info("构型编号: {}".format(config_name))
+        logger.info("STEP 目录: {}".format(step_dir))
+        logger.info("SCDOC 目录: {}".format(scdoc_dir))
         logger.info("=" * 60)
 
         success = process_step_file(config_name, step_dir, scdoc_dir)
