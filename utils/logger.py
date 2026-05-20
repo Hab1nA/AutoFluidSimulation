@@ -220,13 +220,10 @@ def _flush_deferred_loggers() -> None:
         file_handler.setFormatter(formatter)
 
         # 先写入缓冲内容
-        for msg in buf_handler.buffer:
-            file_handler.emit(
-                logging.LogRecord(
-                    name=logger.name, level=logging.DEBUG, pathname="", lineno=0,
-                    msg=msg, args=(), exc_info=None,
-                )
-            )
+        if file_handler.stream is not None:
+            for msg in buf_handler.buffer:
+                file_handler.stream.write(msg + file_handler.terminator)
+            file_handler.flush()
 
         # 替换 handler：移除 buffer，添加 file handler
         logger.removeHandler(buf_handler)

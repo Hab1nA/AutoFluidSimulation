@@ -559,10 +559,9 @@ def _persistent_loop():
     poll_interval = 1.0
     logger.info("常驻模式: 开始轮询命令文件 {}".format(cmd_file))
 
-    # result_file 在每条命令中按 run_id 动态计算
-    result_file = ""
-
     while True:
+        result_file = os.path.join(
+            cmd_dir, "sc_result_{}.json".format(slot_id))
         try:
             if not os.path.exists(cmd_file):
                 time.sleep(poll_interval)
@@ -597,11 +596,11 @@ def _persistent_loop():
             # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
             if run_id:
                 result_file = os.path.join(
-                    cmd_dir, "sc_result_{}_{}".format(slot_id, run_id))
+                    cmd_dir, "sc_result_{}_{}.json".format(slot_id, run_id))
             else:
                 # 兼容无 run_id 的旧命令格式
                 result_file = os.path.join(
-                    cmd_dir, "sc_result_{}".format(slot_id))
+                    cmd_dir, "sc_result_{}.json".format(slot_id))
 
             if not config_name or not step_dir or not scdoc_dir:
                 logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))

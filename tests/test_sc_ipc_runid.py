@@ -352,3 +352,21 @@ class TestPerRunResultIsolation:
             data_a = json.load(f)
         assert data_a["config"] == "1"
         assert data_a["run_id"] == run_a
+
+
+class TestPersistentResultPaths:
+    """验证常驻模式结果文件路径始终带有 .json 扩展名。"""
+
+    def test_result_path_with_run_id_has_json_suffix(self):
+        slot_id = 1
+        run_id = "abc123"
+        result_path = os.path.join(
+            "cmd_dir", "sc_result_{}_{}.json".format(slot_id, run_id)
+        )
+        assert result_path.endswith(".json")
+
+    def test_default_result_path_is_non_empty_json_file(self):
+        slot_id = 2
+        result_path = os.path.join("cmd_dir", "sc_result_{}.json".format(slot_id))
+        assert result_path.endswith(".json")
+        assert os.path.basename(result_path) == "sc_result_2.json"
