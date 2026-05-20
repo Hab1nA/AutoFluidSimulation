@@ -116,7 +116,7 @@ class RemoteWorkstation:
         try:
             transport.send_ignore()
             return True
-        except (paramiko.SSHException, OSError, EOFError):
+        except (OSError, EOFError):
             return False
 
     def ensure_connected(self) -> bool:

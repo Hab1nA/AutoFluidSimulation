@@ -260,24 +260,23 @@ class MeshingMonitor:
         """检查远程标志文件或网格文件是否已存在。"""
         from engine.config import REMOTE_CONFIG
         try:
-            with self._remote_executor._ssh_lock:
-                ssh = self._remote_executor._get_ssh()
-                if not ssh.is_connected():
-                    return False
-                flag_file = (
-                    f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
-                    f"/meshing_done_{config_name}.txt"
+            ssh = self._remote_executor._get_ssh()
+            if not ssh.is_connected():
+                return False
+            flag_file = (
+                f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
+                f"/meshing_done_{config_name}.txt"
+            )
+            if ssh.check_remote_file(flag_file):
+                return True
+            mesh_name = get_step_filename("Meshing", config_name)
+            if mesh_name:
+                mesh_file = (
+                    f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
+                    f"/{mesh_name}"
                 )
-                if ssh.check_remote_file(flag_file):
+                if ssh.check_remote_file(mesh_file):
                     return True
-                mesh_name = get_step_filename("Meshing", config_name)
-                if mesh_name:
-                    mesh_file = (
-                        f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
-                        f"/{mesh_name}"
-                    )
-                    if ssh.check_remote_file(mesh_file):
-                        return True
         except Exception:
             pass
         return False

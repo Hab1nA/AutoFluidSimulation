@@ -283,26 +283,11 @@ class WorkerPoolManager:
     def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:
         """Transfer 失败时，将 Meshing 标记为 Error（若尚未完成）。"""
         meshing_st = self.state.get_step_status(config_name, "Meshing")
-        if meshing_st in (STATUS_COMPLETED, STATUS_ERROR):
-            return
-
-        sc_st = self.state.get_step_status(config_name, "SC")
-        transfer_st = self.state.get_step_status(config_name, "Transfer")
-
-        if transfer_st == STATUS_COMPLETED:
-            return
-
-        if sc_st == STATUS_ERROR:
-            upstream_step = "SC"
-        elif transfer_st == STATUS_ERROR:
-            upstream_step = "Transfer"
-        else:
-            return
-
-        self.state.set_step_status(
-            config_name, "Meshing", STATUS_ERROR,
-            f"上游 {upstream_step} 失败: {reason}",
-        )
-        logger.info(
-            f"构型{config_name} Meshing 因 {upstream_step} 失败标记为 Error"
-        )
+        if meshing_st not in (STATUS_COMPLETED, STATUS_ERROR):
+            self.state.set_step_status(
+                config_name, "Meshing", STATUS_ERROR,
+                f"上游 Transfer 失败: {reason}",
+            )
+            logger.info(
+                f"构型{config_name} Meshing 因 Transfer 失败标记为 Error"
+            )
