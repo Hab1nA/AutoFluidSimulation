@@ -9,10 +9,7 @@ mod daemon_mgr;
 mod utils;
 
 use std::io;
-use std::sync::mpsc;
 use std::time::Duration;
-
-use serde_json::Value as JsonValue;
 
 use crossterm::event::{self as crossterm_event, Event as CrosstermEvent, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -24,6 +21,7 @@ use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::UiMode;
 use state::log_buffer::LogEntry;
+use daemon_mgr::DaemonManager;
 use ui::layout::AppLayout;
 use event_handler::key_handler;
 use event_handler::command;
@@ -117,130 +115,6 @@ pub fn generate_request_id() -> String {
 
 // ====================================================================
 // IPC 后台轮询线程
-// ====================================================================
-
-/// IPC 轮询线程发送给主循环的状态更新。
-enum IpcPollUpdate {
-    /// 周期性状态拉取结果
-    Poll {
-        status_data: Option<JsonValue>,
-        engine_data: Option<JsonValue>,
-        log_entries: Vec<LogEntry>,
-        latest_id: u64,
-    },
-    /// IPC 连接状态变化（由轮询线程自动检测）
-    ConnectionChanged { connected: bool },
-}
-
-/// 启动 IPC 后台轮询线程，返回接收端。
-///
-/// 轮询线程拥有独立的 tokio 运行时和 IpcClient，通过 mpsc 通道
-/// 将状态更新发送给主循环。主线程不再因 IPC 网络阻塞而卡顿。
-fn spawn_ipc_poll_thread() -> mpsc::Receiver<IpcPollUpdate> {
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::Builder::new()
-        .name("IPC-Poll".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("IPC 轮询线程 tokio 运行时创建失败: {e}");
-                    return;
-                }
-            };
-
-            let mut ipc = IpcClient::new(None, None);
-            let mut connected = false;
-            let mut poll_counter: u64 = 0;
-            let mut last_log_id: u64 = 0;
-
-            // 初始连接
-            if rt.block_on(ipc.connect()).is_ok() {
-                connected = true;
-                let _ = tx.send(IpcPollUpdate::ConnectionChanged { connected: true });
-            }
-
-            loop {
-                // 1s 轮询周期（与原主循环保持一致）
-                std::thread::sleep(Duration::from_secs(1));
-
-                // 尝试连接（如果断开）
-                if !connected {
-                    match rt.block_on(ipc.connect()) {
-                        Ok(()) => {
-                            connected = true;
-                            let _ = tx.send(IpcPollUpdate::ConnectionChanged { connected: true });
-                        }
-                        Err(_) => continue,
-                    }
-                }
-
-                // 拉取状态
-                let status_data = match rt.block_on(ipc.get_all_status()) {
-                    Ok(resp) if resp.is_ok() => Some(resp.data),
-                    Ok(_) => None,
-                    Err(_) => {
-                        connected = false;
-                        let _ = tx.send(IpcPollUpdate::ConnectionChanged { connected: false });
-                        continue;
-                    }
-                };
-
-                poll_counter += 1;
-                let engine_data = if poll_counter >= 5 {
-                    poll_counter = 0;
-                    match rt.block_on(ipc.get_engine_status()) {
-                        Ok(resp) if resp.is_ok() => Some(resp.data),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-
-                let mut log_entries = Vec::new();
-                match rt.block_on(ipc.get_log_entries(last_log_id, 50, None, None)) {
-                    Ok(resp) if resp.is_ok() => {
-                        if let Some(obj) = resp.data.as_object() {
-                            if let Some(entries) = obj.get("entries").and_then(|v| v.as_array()) {
-                                for val in entries {
-                                    if let Some(entry) = LogEntry::from_dict(val) {
-                                        last_log_id = last_log_id.max(entry.id);
-                                        log_entries.push(entry);
-                                    }
-                                }
-                            }
-                            if let Some(lid) = obj.get("latest_id").and_then(|v| v.as_u64()) {
-                                last_log_id = last_log_id.max(lid);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        connected = false;
-                        let _ = tx.send(IpcPollUpdate::ConnectionChanged { connected: false });
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                if tx.send(IpcPollUpdate::Poll {
-                    status_data,
-                    engine_data,
-                    log_entries,
-                    latest_id: last_log_id,
-                }).is_err() {
-                    break; // 主线程已关闭接收端
-                }
-            }
-        })
-        .expect("无法启动 IPC 轮询线程");
-
-    rx
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_file_logger();
     crossterm::terminal::enable_raw_mode()?;
@@ -284,12 +158,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         state.update_terminal_size(size.width, size.height);
     }
 
-    // ★ 启动 IPC 后台轮询线程（非阻塞，独立 tokio 运行时）
-    let ipc_poll_rx = spawn_ipc_poll_thread();
+    // 主线程直接连接 IPC（单连接架构，轮询在主循环中进行）
+    match rt.block_on(ipc.connect()) {
+        Ok(()) => {
+            state.connected = true;
+            log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+        }
+        Err(_) => {
+            state.connected = false;
+            log_buffer.push_info("❌ 无法连接到后台引擎，请先启动 start_daemon.py".to_string());
+            log_buffer.push_info("提示: 界面将在无后台连接的情况下运行，部分功能不可用".to_string());
+        }
+    }
 
     let mut full_quit = false;
+    let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
+    let mut last_ipc_poll = std::time::Instant::now();
     let mut last_clock_refresh = std::time::Instant::now();
+    let mut poll_counter: u64 = 0;
 
     loop {
         if state.should_quit {
@@ -313,12 +200,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     state.should_quit = true;
                 }
                 command::CommandResult::StartDaemon => {
-                    if state.connected {
+                    if ipc.is_connected() {
                         log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                     } else {
                         match daemon.launch(&project_dir) {
                             Ok(pid) => {
-                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，IPC 将自动连接...", pid));
+                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                DaemonManager::reconnect_ipc_after_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
                             }
                             Err(e) => {
                                 log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -327,29 +215,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                     }
                 }
                 command::CommandResult::RestartDaemon => {
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
-                        rt.block_on(ipc.disconnect());
-                    }
-                    let _ = daemon.stop(&project_dir);
-                    match daemon.launch(&project_dir) {
-                        Ok(pid) => {
-                            log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，IPC 将自动连接...", pid));
-                        }
-                        Err(e) => {
-                            log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
-                        }
-                    }
-                    state.connected = false;
+                    daemon.restart_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 command::CommandResult::StopDaemon => {
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
-                        rt.block_on(ipc.disconnect());
-                    }
-                    let _ = daemon.stop(&project_dir);
-                    state.connected = false;
-                    log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                    daemon.stop_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
                 }
                 _ => {}
             }
@@ -371,32 +240,51 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             state.needs_redraw = false;
         }
 
-        // ★ 非阻塞接收 IPC 轮询线程的状态更新
-        while let Ok(update) = ipc_poll_rx.try_recv() {
-            match update {
-                IpcPollUpdate::Poll { status_data, engine_data, log_entries, latest_id } => {
-                    if let Some(data) = status_data {
-                        state.update_status_data(&data);
-                    }
-                    if let Some(data) = engine_data {
-                        state.update_engine_info(&data);
-                    }
-                    for entry in log_entries {
-                        log_buffer.push_detail(entry);
-                    }
-                    state.last_log_id = state.last_log_id.max(latest_id);
-                    state.needs_redraw = true;
-                }
-                IpcPollUpdate::ConnectionChanged { connected } => {
-                    if connected && !state.connected {
-                        log_buffer.push_info("✅ 已连接到后台引擎".to_string());
-                    } else if !connected && state.connected {
-                        log_buffer.push_info("⚠️ 与后台引擎的连接已断开，正在重试...".to_string());
-                    }
-                    state.connected = connected;
-                    state.needs_redraw = true;
+        // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
+        if ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
+            // 拉取所有构型状态
+            if let Ok(resp) = rt.block_on(ipc.get_all_status()) {
+                if resp.is_ok() {
+                    state.update_status_data(&resp.data);
                 }
             }
+
+            // 每 5 轮拉取一次引擎状态
+            poll_counter += 1;
+            if poll_counter >= 5 {
+                poll_counter = 0;
+                if let Ok(resp) = rt.block_on(ipc.get_engine_status()) {
+                    if resp.is_ok() {
+                        state.update_engine_info(&resp.data);
+                    }
+                }
+            }
+
+            // 增量拉取日志
+            if let Ok(resp) = rt.block_on(ipc.get_log_entries(
+                state.last_log_id, 50,
+                state.log_filter_level.as_deref(),
+                state.log_filter_source.as_deref(),
+            )) {
+                if resp.is_ok() {
+                    if let Some(data_obj) = resp.data.as_object() {
+                        if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
+                            for entry_val in entries {
+                                if let Some(entry) = LogEntry::from_dict(entry_val) {
+                                    state.last_log_id = state.last_log_id.max(entry.id);
+                                    log_buffer.push_detail(entry);
+                                }
+                            }
+                        }
+                        if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64()) {
+                            state.last_log_id = state.last_log_id.max(latest);
+                        }
+                    }
+                }
+            }
+
+            last_ipc_poll = std::time::Instant::now();
+            state.needs_redraw = true;
         }
 
         if last_clock_refresh.elapsed() >= clock_interval {
@@ -405,8 +293,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
     }
 
-    // IPC 轮询线程会在 rx 被 drop 时自动退出
-    drop(ipc_poll_rx);
+    rt.block_on(ipc.disconnect());
 
     if full_quit {
         let _ = daemon.stop(&project_dir);
@@ -449,12 +336,13 @@ fn process_event(
                             state.should_quit = true;
                         }
                         command::CommandResult::StartDaemon => {
-                            if state.connected {
+                            if ipc.is_connected() {
                                 log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                             } else {
                                 match daemon.launch(project_dir) {
                                     Ok(pid) => {
-                                        log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，IPC 将自动连接...", pid));
+                                        log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                        DaemonManager::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -463,29 +351,10 @@ fn process_event(
                             }
                         }
                         command::CommandResult::RestartDaemon => {
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                                rt.block_on(ipc.disconnect());
-                            }
-                            let _ = daemon.stop(project_dir);
-                            match daemon.launch(project_dir) {
-                                Ok(pid) => {
-                                    log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，IPC 将自动连接...", pid));
-                                }
-                                Err(e) => {
-                                    log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
-                                }
-                            }
-                            state.connected = false;
+                            daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);
                         }
                         command::CommandResult::StopDaemon => {
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                                rt.block_on(ipc.disconnect());
-                            }
-                            let _ = daemon.stop(project_dir);
-                            state.connected = false;
-                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
                         }
                         _ => {}
                     }
@@ -503,13 +372,7 @@ fn process_event(
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
-                                if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.full_quit());
-                                    rt.block_on(ipc.disconnect());
-                                }
-                                let _ = daemon.stop(project_dir);
-                                state.connected = false;
-                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                                daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
                             }
                             _ => {}
                         }
