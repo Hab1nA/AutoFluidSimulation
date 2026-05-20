@@ -588,88 +588,200 @@ if self.state.all_configs_completed_at_step("Meshing"):
 
 语义：**所有**构型的 Meshing 完成后，才解锁所有 Solver。这是一道全局屏障。
 
-#### 4.3.2 目标：工作站级屏障
+#### 4.3.2 目标：动态分配 + 自感知屏障
 
-将全局屏障降级为工作站级屏障。每台工作站独立等待自己的构型子集完成 Meshing 后立即启动该站的 Solver，不必等其他工作站。
+采用**动态任务分配 + 工作站自感知屏障**机制，替代静态分配方案：
+
+**核心设计思想**：
+- 将三个工作站视为类似于 SpaceClaim 的三个槽位池
+- 待处理的构型排成一个序列，哪个槽位完成就将序列首项推入该工作站
+- 当工作站发现不再接收到新的 Meshing 请求时，自动判定屏障通过
+
+**工作流程**：
 
 ```
-工作站 A: 构型 [1,4,7,...,28]  →  Meshing屏障(10个全完成)  →  Solver(10个并行)
-工作站 B: 构型 [2,5,8,...,29]  →  Meshing屏障(10个全完成)  →  Solver(10个并行)
-工作站 C: 构型 [3,6,9,...,30]  →  Meshing屏障(10个全完成)  →  Solver(10个并行)
+┌─────────────────────────────────────────────────────────────┐
+│              分配模块 (MeshingAssigner)                      │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ 构型序列: [1, 2, 3, 4, 5, 6, ..., N] (已知总数N)    │   │
+│  └────────────────────────┬─────────────────────────────┘   │
+│                           │                                 │
+│           ┌───────────────┼───────────────┐                │
+│           ▼               ▼               ▼                │
+│    ┌───────────┐   ┌───────────┐   ┌───────────┐          │
+│    │ 工作站 A  │   │ 工作站 B  │   │ 工作站 C  │          │
+│    │  [Slot1-3]│   │  [Slot1-3]│   │  [Slot1-3]│          │
+│    └─────┬─────┘   └─────┬─────┘   └─────┬─────┘          │
+│          │               │               │                  │
+│          ▼               ▼               ▼                  │
+│    [1]处理中        [2]处理中        [3]处理中              │
+│          │               │               │                  │
+│          ▼               ▼               ▼                  │
+│    完成→请求下一个   完成→请求下一个   完成→请求下一个        │
+│          │               │               │                  │
+│          ▼               ▼               ▼                  │
+│    [4]处理中        [5]处理中        [6]处理中              │
+│          │               │               │                  │
+│          ...             ...             ...                │
+│                                                            │
+│  所有构型分配完毕后：                                        │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ 分配模块向各工作站发送 MESHING_COMPLETE 信号         │   │
+│  └────────────────────────┬─────────────────────────────┘   │
+│                           │                                 │
+│           ┌───────────────┼───────────────┐                │
+│           ▼               ▼               ▼                │
+│    收到信号+槽位全空   收到信号+槽位全空   收到信号+槽位全空  │
+│    → 触发屏障          → 触发屏障          → 触发屏障       │
+│    → 启动Solver       → 启动Solver       → 启动Solver      │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.3.3 代码改造要点
+**时序示例**（假设有9个构型）：
 
-**`_barrier_passed` 从单个 Event 改为 dict**：
+| 时间点 | 工作站 A | 工作站 B | 工作站 C | 序列状态 |
+|--------|---------|---------|---------|---------|
+| t0 | [1] | [2] | [3] | [4,5,6,7,8,9] |
+| t1 | [1]→完成→[4] | [2] | [3] | [5,6,7,8,9] |
+| t2 | [4] | [2]→完成→[5] | [3] | [6,7,8,9] |
+| t3 | [4] | [5] | [3]→完成→[6] | [7,8,9] |
+| t4 | [4]→完成→[7] | [5]→完成→[8] | [6]→完成→[9] | [] |
+| t5 | [7] | [8] | [9] | [] (分配完成) |
+| t6 | 发送 MESHING_COMPLETE | 发送 MESHING_COMPLETE | 发送 MESHING_COMPLETE | - |
+| t7 | [7]→完成→空→屏障通过 | [8]→完成→空→屏障通过 | [9]→完成→空→屏障通过 | - |
+| t8 | 启动Solver(1,4,7) | 启动Solver(2,5,8) | 启动Solver(3,6,9) | - |
+
+#### 4.3.3 关键设计要点
+
+**1. 分配模块核心逻辑**：
 
 ```python
-# 当前
-self._barrier_passed = threading.Event()
-
-# 改造后
-self._barrier_passed: dict[str, threading.Event] = {
-    ws_id: threading.Event() for ws_id in workstation_ids
-}
+class MeshingAssigner:
+    def __init__(self, configs: list[int], workstations: list[str]):
+        self._configs = deque(sorted(configs))  # 有序构型队列
+        self._total = len(configs)
+        self._assigned = 0
+        self._ws_slots = {ws: [None, None, None] for ws in workstations}
+        self._ws_idle_count = {ws: 3 for ws in workstations}
+    
+    def assign_next(self, workstation_id: str) -> Optional[int]:
+        """尝试为空闲工作站分配下一个构型"""
+        if not self._configs:
+            return None  # 无更多构型
+        if self._ws_idle_count[workstation_id] == 0:
+            return None  # 该工作站无空闲槽位
+        
+        config = self._configs.popleft()
+        self._assigned += 1
+        slot_idx = self._ws_slots[workstation_id].index(None)
+        self._ws_slots[workstation_id][slot_idx] = config
+        self._ws_idle_count[workstation_id] -= 1
+        return config
+    
+    def finalize(self):
+        """所有构型分配完毕，向各工作站发送结束信号"""
+        for ws in self._workstations:
+            self.send(ws, "MESHING_COMPLETE")
 ```
 
-**`_barrier_monitor_loop` 改为每工作站一个**：
+**2. 工作站自感知屏障逻辑**：
 
 ```python
-def _barrier_monitor_loop(self, workstation_id: str):
-    assigned = self._config_assigner.get_configs(workstation_id)
-    while not self._stopped.is_set():
-        if all(self.state.get_step_status(cn, "Meshing") == STATUS_COMPLETED
-               for cn in assigned):
-            self._barrier_passed[workstation_id].set()
-            self._dispatch_solver_tasks(workstation_id)
-            break
-        time.sleep(5.0)
+class WorkstationMesher:
+    def __init__(self, workstation_id: str):
+        self._ws_id = workstation_id
+        self._slots = [None, None, None]
+        self._finalized = False  # 是否已收到结束信号
+    
+    def on_assign(self, config: int):
+        """收到分配任务"""
+        slot_idx = self._slots.index(None)
+        self._slots[slot_idx] = config
+        self._execute_meshing(config, slot_idx)
+    
+    def on_slot_completed(self, slot_idx: int, config: int):
+        """槽位处理完成"""
+        self._slots[slot_idx] = None
+        
+        # 尝试获取下一个任务
+        next_config = self._assigner.assign_next(self._ws_id)
+        if next_config:
+            self.on_assign(next_config)
+        elif self._finalized:
+            # 无任务且收到结束信号 → 检查屏障条件
+            self._check_barrier()
+    
+    def on_finalize(self):
+        """收到结束信号"""
+        self._finalized = True
+        self._check_barrier()
+    
+    def _check_barrier(self):
+        """检查屏障条件：收到结束信号 + 所有槽位空闲"""
+        if self._finalized and all(slot is None for slot in self._slots):
+            self._trigger_barrier()
+    
+    def _trigger_barrier(self):
+        """启动本工作站的Solver阶段"""
+        assigned_configs = self._get_processed_configs()
+        for config in assigned_configs:
+            self._start_solver(config)
 ```
 
-**`_dispatch_solver_tasks` 按工作站分发**：
+**3. 容错机制**：
 
-```python
-def _dispatch_solver_tasks(self, workstation_id: str):
-    assigned = self._config_assigner.get_configs(workstation_id)
-    for cn in assigned:
-        if self.state.get_step_status(cn, "Solver") in (STATUS_WAITING, ...):
-            t = threading.Thread(
-                target=self._execute_solver_for_config,
-                args=(cn, workstation_id),
-                daemon=True,
-            )
-            t.start()
-```
+| 风险场景 | 缓解措施 |
+|---------|---------|
+| 工作站崩溃 | 文件检测完成后探测工作站存活；心跳超时触发告警 |
+| 网络中断 | 使用 `FileStableDetector` 确保文件写入完成后再触发完成事件 |
+| 重复分配 | 每次只分配一个构型；工作站空闲状态双重确认 |
 
-**StateManager 扩展**：
+**4. 状态持久化**：
 
-`all_configs_completed_at_step()` 需支持按工作站过滤：
+`steps` 表需新增字段：
 
-```python
-def configs_completed_at_step_for_workstation(
-    self, step_name: str, config_names: list[int]
-) -> bool:
-    with self._get_connection() as conn:
-        placeholders = ",".join("?" * len(config_names))
-        row = conn.execute(
-            f"SELECT COUNT(*) as cnt FROM steps "
-            f"WHERE step_name = ? AND status != ? AND config_name IN ({placeholders})",
-            [step_name, STATUS_COMPLETED] + config_names
-        ).fetchone()
-        return row["cnt"] == 0
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `workstation_id` | TEXT | 构型分配到的工作站ID |
+| `slot_id` | INTEGER | 槽位编号（0-2） |
+| `processed` | INTEGER | 是否已在此工作站处理（用于恢复） |
 
-状态表 `steps` 需新增 `workstation_id` 列，记录构型分配信息。
+#### 4.3.4 与现有架构的集成
 
-#### 4.3.4 关于"屏障阈值 = N/3"的讨论
+**新增模块**：
 
-另一种思路是保留全局屏障但将阈值从 N 降为 N/3，含义是"只要有 N/3 个构型 Meshing 完成就开始 Solver"。这在逻辑上可行（每个 Solver 只需自己的 mesh 文件），但比工作站级屏障更复杂：
+| 模块 | 文件路径 | 职责 |
+|------|---------|------|
+| `MeshingAssigner` | `engine/scheduler/meshing_assigner.py` | 动态任务分配核心逻辑 |
+| `WorkstationMesher` | `engine/scheduler/workstation_mesher.py` | 工作站Meshing状态管理 |
 
-- 需动态追踪哪些构型已就绪、哪些 Solver 已启动
-- 需防止同一构型被重复启动 Solver
-- 工作站负载不均衡时可能导致某些工作站堆积大量 Solver 任务
+**修改模块**：
 
-**建议**：先实现工作站级屏障（逻辑清晰、实现简单），如后续发现工作站间负载差异大，再考虑放宽为全局阈值屏障。
+| 模块 | 修改内容 |
+|------|---------|
+| `engine/scheduler/main.py` | 将 `_barrier_monitor_loop` 改为调用 `MeshingAssigner` |
+| `engine/scheduler/barrier.py` | `_barrier_passed` 改为 dict，支持每工作站独立屏障 |
+| `engine/state_manager.py` | `steps` 表新增 `workstation_id`、`slot_id` 字段 |
+| `engine/task_runner.py` | `execute_meshing()` 增加 `workstation_id` 参数 |
+
+#### 4.3.5 方案优势
+
+| 维度 | 优势 |
+|------|------|
+| **负载均衡** | 动态适应各构型耗时差异，避免静态分配的"短板效应" |
+| **资源利用率** | 始终保持三个槽位满载，最大化并行度 |
+| **容错性** | 文件检测+心跳双重保障，工作站故障可及时发现 |
+| **扩展性** | 工作站数量变化时自动适配，无需重新计算分配策略 |
+| **屏障判定** | 分布式自感知，无单点瓶颈 |
+
+#### 4.3.6 潜在风险与缓解
+
+| 风险 | 严重度 | 缓解措施 |
+|------|:------:|---------|
+| 重置场景状态恢复 | 🔴 高 | 分配状态持久化到数据库；重置时重建分配队列 |
+| 时序竞态 | 🟡 中 | 结束信号仅在所有构型分配完毕后发送；文件检测使用稳定性判定 |
+| 工作站故障 | 🔴 高 | 心跳机制+超时检测；故障后可将构型重新分配到其他工作站 |
+| 大文件传输中断 | 🟡 中 | 使用断点续传；记录已传输字节数 |
 
 ---
 
@@ -973,37 +1085,38 @@ P1: 工作站级屏障 ◄──────────────────
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
-| R12 | **工作站级屏障与全局状态不一致** | 🔴 高 | `is_global_barrier_met()` 在多处被引用（`daemon.py`、`scheduler/main.py`），改为工作站级后语义变化 | 全面搜索 `barrier` 相关引用，逐一适配；`is_global_barrier_met()` 改为 `all_workstation_barriers_met()` 或保留全局语义（所有工作站屏障都通过） |
-| R13 | **reset 操作后屏障状态未正确清理** | 🟡 中 | `reset_config()` 中 `_barrier_passed.clear()` 只清理了单个 Event，改为 dict 后需清理对应工作站的 Event | `reset_config` 遍历受影响工作站的 `_barrier_passed[ws_id]` 并 clear |
-| R14 | **断点续传时工作站分配变化** | 🟡 中 | 重启后 WORKSTATIONS 列表顺序变化导致同一构型分配到不同工作站 | 构型分配结果持久化到 `steps` 表的 `workstation_id` 列；断点续传时优先使用已记录的分配 |
-| R15 | **Solver 与 PostProcess 的完成判断时机** | 🟡 中 | 由于仿真脚本内嵌后处理，如果不以文件产出为判断依据，会导致 Solver/PostProcess 完成状态提前标记 | Meshing 屏障通过后启动 Solver；Solver 和 PostProcess 均以检测结果文件（.cas/.dat 及后处理输出文件）为完成信号，而非 Python 程序退出信号 |
+| R12 | **动态分配状态丢失** | 🔴 高 | Daemon 重启后，动态分配的构型→工作站映射关系丢失 | 分配状态持久化到 `steps` 表（`workstation_id`、`slot_id`、`processed` 字段）；断点续传时重建分配队列 |
+| R13 | **reset 操作后屏障状态未正确清理** | 🟡 中 | `reset_config()` 需清理动态分配状态和屏障状态 | `reset_config` 遍历所有工作站的 `_barrier_passed[ws_id]` 并 clear；重置 `MeshingAssigner` 的分配队列 |
+| R14 | **时序竞态** | 🟡 中 | 结束信号与最后一个任务的时序问题 | 结束信号仅在所有构型分配完毕后发送；文件检测使用 `FileStableDetector` 稳定性判定 |
+| R15 | **工作站故障导致死锁** | 🔴 高 | 工作站崩溃但分配模块继续等待其完成信号 | 心跳机制+超时检测；故障后将未完成构型重新分配到其他工作站 |
+| R16 | **Solver 与 PostProcess 的完成判断时机** | 🟡 中 | 由于仿真脚本内嵌后处理，如果不以文件产出为判断依据，会导致 Solver/PostProcess 完成状态提前标记 | Meshing 屏障通过后启动 Solver；Solver 和 PostProcess 均以检测结果文件（.cas/.dat 及后处理输出文件）为完成信号，而非 Python 程序退出信号 |
 
 ### 7.4 PostProcess 相关
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
-| R16 | **后处理脚本无幂等性** | 🟡 中 | PostProcess 失败重试时重复处理已有结果 | 后处理脚本应实现幂等（检查输出是否已存在）；或每次执行前清理旧输出 |
-| R17 | **PostProcess 结果文件格式待定** | 🟡 中 | 后处理由仿真脚本内嵌执行，但输出文件的格式/命名尚未确定，导致完成检测逻辑无法落地 | 待后续确认后处理脚本的实际输出文件格式后，补充到 `STEP_COMPLETION_FILES["PostProcess"]` 配置中 |
-| R18 | **后处理输出文件名不确定** | 🟢 低 | 后处理脚本输出文件名可能包含时间戳等不确定因素 | 约定后处理脚本输出到固定目录，Daemon 拉取整个目录而非逐文件 |
+| R17 | **后处理脚本无幂等性** | 🟡 中 | PostProcess 失败重试时重复处理已有结果 | 后处理脚本应实现幂等（检查输出是否已存在）；或每次执行前清理旧输出 |
+| R18 | **PostProcess 结果文件格式待定** | 🟡 中 | 后处理由仿真脚本内嵌执行，但输出文件的格式/命名尚未确定，导致完成检测逻辑无法落地 | 待后续确认后处理脚本的实际输出文件格式后，补充到 `STEP_COMPLETION_FILES["PostProcess"]` 配置中 |
+| R19 | **后处理输出文件名不确定** | 🟢 低 | 后处理脚本输出文件名可能包含时间戳等不确定因素 | 约定后处理脚本输出到固定目录，Daemon 拉取整个目录而非逐文件 |
 
 ### 7.5 Collect 相关
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
-| R19 | **暂存区磁盘空间耗尽** | 🔴 高 | 大量结果未交付堆积 | 设置暂存区磁盘使用阈值告警；自动清理已交付且超期的文件；紧急时暂停流水线 |
-| R20 | **交付确认丢失导致重复推送** | 🟡 中 | 本地 PC 接收完成但确认消息丢失 | 实现幂等推送：本地 PC 检查文件是否已存在，存在则跳过；Daemon 侧超时重试 |
-| R21 | **大文件传输中断** | 🟡 中 | 网络不稳定导致文件传输中断 | 实现断点续传（记录已传输字节数）；或使用 rsync 等工具替代 SFTP |
-| R22 | **本地 PC 长期离线导致暂存区无限增长** | 🟡 中 | 本地 PC 数周不在线 | 暂存文件设置最大保留天数（如 30 天）；超期后仅保留元数据（文件名、大小、校验和），实际文件删除 |
-| R23 | **多批次结果混合** | 🟢 低 | 多次运行流水线，不同批次的结果混在一起 | 暂存目录按运行批次（session timestamp）隔离 |
+| R20 | **暂存区磁盘空间耗尽** | 🔴 高 | 大量结果未交付堆积 | 设置暂存区磁盘使用阈值告警；自动清理已交付且超期的文件；紧急时暂停流水线 |
+| R21 | **交付确认丢失导致重复推送** | 🟡 中 | 本地 PC 接收完成但确认消息丢失 | 实现幂等推送：本地 PC 检查文件是否已存在，存在则跳过；Daemon 侧超时重试 |
+| R22 | **大文件传输中断** | 🟡 中 | 网络不稳定导致文件传输中断 | 实现断点续传（记录已传输字节数）；或使用 rsync 等工具替代 SFTP |
+| R23 | **本地 PC 长期离线导致暂存区无限增长** | 🟡 中 | 本地 PC 数周不在线 | 暂存文件设置最大保留天数（如 30 天）；超期后仅保留元数据（文件名、大小、校验和），实际文件删除 |
+| R24 | **多批次结果混合** | 🟢 低 | 多次运行流水线，不同批次的结果混在一起 | 暂存目录按运行批次（session timestamp）隔离 |
 
 ### 7.6 跨模块交互风险
 
 | # | 风险 | 严重度 | 触发场景 | 缓解措施 |
 |---|------|:------:|---------|---------|
-| R24 | **Python 端与 Rust 端协议不同步** | 🟡 中 | Python 端新增命令但 Rust 端未更新 | 协议版本号机制；Rust 端对未知命令优雅降级（显示原始消息） |
-| R25 | **STEP_NAMES 长度变化导致 TUI 表格溢出** | 🟢 低 | 从 5 个步骤扩展到 7 个，终端宽度不足 | Rust TUI 表格列宽动态计算；窄终端时省略部分列或横向滚动 |
-| R26 | **SQLite 数据库迁移** | 🟡 中 | `steps` 表新增 `workstation_id` 列，`result_delivery` 表新建 | 使用 `ALTER TABLE ADD COLUMN`（SQLite 支持）；新表使用 `CREATE TABLE IF NOT EXISTS`；编写数据库迁移脚本 |
-| R27 | **环境变量命名冲突** | 🟢 低 | 新增多工作站的 `AUTOFLUID_WS_A_PASSWORD` 等环境变量 | 遵循现有 `AUTOFLUID_` 前缀命名规范；在 `.env` 文件中统一管理 |
+| R25 | **Python 端与 Rust 端协议不同步** | 🟡 中 | Python 端新增命令但 Rust 端未更新 | 协议版本号机制；Rust 端对未知命令优雅降级（显示原始消息） |
+| R26 | **STEP_NAMES 长度变化导致 TUI 表格溢出** | 🟢 低 | 从 5 个步骤扩展到 7 个，终端宽度不足 | Rust TUI 表格列宽动态计算；窄终端时省略部分列或横向滚动 |
+| R27 | **SQLite 数据库迁移** | 🟡 中 | `steps` 表新增 `workstation_id` 列，`result_delivery` 表新建 | 使用 `ALTER TABLE ADD COLUMN`（SQLite 支持）；新表使用 `CREATE TABLE IF NOT EXISTS`；编写数据库迁移脚本 |
+| R28 | **环境变量命名冲突** | 🟢 低 | 新增多工作站的 `AUTOFLUID_WS_A_PASSWORD` 等环境变量 | 遵循现有 `AUTOFLUID_` 前缀命名规范；在 `.env` 文件中统一管理 |
 
 ---
 
@@ -1049,8 +1162,10 @@ P1: 工作站级屏障 ◄──────────────────
 | IPC 本地监听 | `engine/config.py` | `IPC_CONFIG` | `"host": "127.0.0.1"` |
 | 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["SW", "SC", "Transfer", "Meshing", "Solver"]` |
 | 全局屏障检查 | `engine/scheduler/main.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成 |
-| 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `threading.Event()` |
+| 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `dict[str, threading.Event]`（每工作站一个） |
 | Worker 线程数 | `engine/scheduler/worker_pool.py` | `_num_workers` | `= 3` |
+| 动态分配器 | `engine/scheduler/meshing_assigner.py` | `MeshingAssigner` | 动态任务分配核心逻辑 |
+| 工作站 Mesher | `engine/scheduler/workstation_mesher.py` | `WorkstationMesher` | 工作站 Meshing 状态管理 |
 | 屏障状态持久化 | `engine/scheduler/main.py` | `is_global_barrier_met` | 启动时恢复屏障状态 |
 | 全局屏障查询 | `engine/daemon.py` | `barrier_passed` | IPC 响应中包含屏障状态 |
 | Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | `STEP_NAMES` | `pub const STEP_NAMES: [&str; 5]` |
@@ -1070,8 +1185,12 @@ P1: 工作站级屏障 ◄──────────────────
 |------|------|
 | Daemon | 后台守护进程，流水线调度核心 |
 | LocalWorker | 本地 PC 上的工作进程，执行 SW/SC 等本地任务 |
-| 工作站级屏障 | 仅检查分配给特定工作站的构型子集是否全部完成 |
-| 全局屏障 | 检查所有构型是否全部完成（当前实现） |
+| 工作站级屏障 | 每台工作站独立判断自身 Meshing 是否全部完成，完成后立即启动 Solver |
+| 全局屏障 | 检查所有构型是否全部完成（当前实现，改造后不再使用） |
 | 暂存区 (Staging) | 服务器 A 上临时存储后处理结果的目录 |
 | 交付确认 (Delivery Ack) | 本地 PC 确认已成功接收结果的机制 |
-| ConfigAssigner | 构型分配器，决定哪些构型分配到哪台工作站 |
+| ConfigAssigner | 构型分配器，决定哪些构型分配到哪台工作站（静态分配策略） |
+| MeshingAssigner | 动态任务分配器，将构型序列动态分配到空闲工作站槽位 |
+| WorkstationMesher | 工作站 Meshing 状态管理器，负责接收任务、处理完成、自感知屏障 |
+| 动态分配 | 构型按序列排队，哪个工作站槽位空闲就分配下一个构型 |
+| 自感知屏障 | 工作站收到结束信号且所有槽位空闲时，自动判定屏障通过 |
