@@ -30,7 +30,7 @@ class IPCServer:
     收到命令后，调用注册的回调函数进行处理。
     """
 
-    def __init__(self, host: str = None, port: int = None):
+    def __init__(self, host: str | None = None, port: int | None = None):
         """
         初始化 IPC 服务器。
 
@@ -73,25 +73,25 @@ class IPCServer:
             daemon: PipelineDaemon 实例
         """
         # 引擎控制
-        self.register_handler(CMD_START, lambda p: daemon.handle_start(p))
-        self.register_handler(CMD_PAUSE, lambda p: daemon.handle_pause(p))
-        self.register_handler(CMD_STOP, lambda p: daemon.handle_stop(p))
-        self.register_handler(CMD_CHECK, lambda p: daemon.handle_check(p))
+        self.register_handler(CMD_START, daemon.handle_start)
+        self.register_handler(CMD_PAUSE, daemon.handle_pause)
+        self.register_handler(CMD_STOP, daemon.handle_stop)
+        self.register_handler(CMD_CHECK, daemon.handle_check)
 
         # 查询
-        self.register_handler(CMD_GET_ALL_STATUS, lambda p: daemon.handle_get_all_status(p))
-        self.register_handler(CMD_GET_STATISTICS, lambda p: daemon.handle_get_statistics(p))
-        self.register_handler(CMD_GET_ENGINE_STATUS, lambda p: daemon.handle_get_engine_status(p))
-        self.register_handler(CMD_GET_LOG_ENTRIES, lambda p: daemon.handle_get_log_entries(p))
+        self.register_handler(CMD_GET_ALL_STATUS, daemon.handle_get_all_status)
+        self.register_handler(CMD_GET_STATISTICS, daemon.handle_get_statistics)
+        self.register_handler(CMD_GET_ENGINE_STATUS, daemon.handle_get_engine_status)
+        self.register_handler(CMD_GET_LOG_ENTRIES, daemon.handle_get_log_entries)
 
         # 重置
-        self.register_handler(CMD_RESET_STEP, lambda p: daemon.handle_reset_step(p))
+        self.register_handler(CMD_RESET_STEP, daemon.handle_reset_step)
 
         # 清理
-        self.register_handler(CMD_CLEAN_STEP, lambda p: daemon.handle_clean_step(p))
+        self.register_handler(CMD_CLEAN_STEP, daemon.handle_clean_step)
 
         # 配置重载
-        self.register_handler(CMD_RELOAD_CONFIG, lambda p: daemon.handle_reload_config(p))
+        self.register_handler(CMD_RELOAD_CONFIG, daemon.handle_reload_config)
 
     # ------------------------------------------------------------------
     # 服务器生命周期

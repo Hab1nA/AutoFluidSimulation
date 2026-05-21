@@ -1,23 +1,24 @@
 use ratatui::Frame;
 use ratatui::layout::Alignment;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::state::app_state::AppState;
 use crate::utils::format_local_time;
 
-pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, _state: &AppState) {
+pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let theme = &state.theme;
     let time_str = format_local_time("%H:%M:%S");
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(15, 52, 96)))
-        .style(Style::default().bg(Color::Rgb(22, 33, 62)));
+        .border_style(Style::default().fg(theme.secondary))
+        .style(Style::default().bg(theme.bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序")
-        .style(Style::default().fg(Color::Rgb(233, 69, 96)).add_modifier(Modifier::BOLD))
+        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
         .alignment(Alignment::Center);
     frame.render_widget(title, inner);
 
@@ -29,15 +30,16 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, _state: &Ap
     };
 
     let time = Paragraph::new(time_str)
-        .style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(22, 33, 62)).add_modifier(Modifier::BOLD))
+        .style(Style::default().fg(theme.gray_5).bg(theme.bg).add_modifier(Modifier::BOLD))
         .alignment(Alignment::Right);
     frame.render_widget(time, time_area);
 }
 
 pub fn render_info_bar(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let theme = &state.theme;
     let text = state.info_bar_text();
     let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(Color::Rgb(200, 200, 200)).bg(Color::Rgb(15, 52, 96)))
+        .style(Style::default().fg(theme.gray_5).bg(theme.secondary))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
 }

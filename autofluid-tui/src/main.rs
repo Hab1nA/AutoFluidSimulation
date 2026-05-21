@@ -1,6 +1,8 @@
 mod ipc;
 mod settings;
 mod state;
+mod text_buffer;
+mod theme;
 mod ui;
 mod event_handler;
 mod daemon_mgr;
@@ -15,36 +17,106 @@ use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use daemon_mgr::DaemonManager;
 use ipc::client::IpcClient;
 use state::{AppState, LogBuffer};
 use state::app_state::UiMode;
+use state::log_buffer::LogEntry;
+use daemon_mgr::DaemonManager;
 use ui::layout::AppLayout;
 use event_handler::key_handler;
 use event_handler::command;
 
 pub use utils::format_local_time;
 
-// Daemon 生命周期函数已迁入 daemon_mgr::DaemonManager:
-//   DaemonManager::reconnect_ipc_after_launch()
-//   daemon.stop_with_ipc()
-//   daemon.restart_with_ipc()
+/// 初始化文件日志。
+/// 优先使用 AUTOFLUID_SESSION_LOG_DIR 环境变量（由 Python 启动器设置）；
+/// 若未设置，尝试查找 logs/client/ 下最新的时间戳子目录；
+/// 若均不可用，回退到 stderr-only 模式。
+fn init_file_logger() {
+    use log::LevelFilter;
+    use std::fs::OpenOptions;
+    use std::path::PathBuf;
+
+    let log_dir: Option<PathBuf> = std::env::var("AUTOFLUID_SESSION_LOG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(find_latest_client_session_dir);
+
+    match log_dir {
+        Some(dir) => {
+            let log_path = dir.join("autofluid-tui.log");
+            match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                Ok(file) => {
+                    env_logger::Builder::new()
+                        .filter_level(LevelFilter::Info)
+                        .target(env_logger::Target::Pipe(Box::new(file)))
+                        .format_timestamp_millis()
+                        .init();
+                    log::info!("AutoFluid TUI v{} 启动，日志文件: {:?}", env!("CARGO_PKG_VERSION"), log_path);
+                }
+                Err(e) => {
+                    eprintln!("警告: 无法创建日志文件 {:?}: {}", log_path, e);
+                    init_stderr_logger();
+                }
+            }
+        }
+        None => init_stderr_logger(),
+    }
+}
+
+fn init_stderr_logger() {
+    env_logger::Builder::new()
+        .filter_level(log::LevelFilter::Info)
+        .target(env_logger::Target::Stderr)
+        .format_timestamp_millis()
+        .init();
+    log::info!("AutoFluid TUI v{} 启动 (stderr-only 日志)", env!("CARGO_PKG_VERSION"));
+}
+
+/// 查找 logs/client/ 下最新的时间戳子目录
+fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
+    let client_dir = std::env::current_dir()
+        .ok()?
+        .join("logs")
+        .join("client");
+    if !client_dir.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(&client_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+    entries.first().map(|e| e.path())
+}
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
+    let count = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let t = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let mut s = String::with_capacity(8);
-    for i in 0..8 {
-        let nibble = ((t >> (i * 4)) ^ (t >> ((i + 8) * 4))) as u8 & 0x0f;
-        s.push(std::char::from_digit(nibble as u32, 16).unwrap_or('0'));
-    }
-    s
+    // 结合时间戳低位和原子计数器，确保唯一性
+    let time_part = ((t as u64) ^ ((t >> 32) as u64)) & 0xFFFF_FFFF;
+    let combined = time_part.wrapping_add(count);
+    format!("{:08x}", combined)
 }
 
+// ====================================================================
+// IPC 后台轮询线程
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_file_logger();
     crossterm::terminal::enable_raw_mode()?;
 
     let mut stdout = io::stdout();
@@ -86,6 +158,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         state.update_terminal_size(size.width, size.height);
     }
 
+    // 主线程直接连接 IPC（单连接架构，轮询在主循环中进行）
     match rt.block_on(ipc.connect()) {
         Ok(()) => {
             state.connected = true;
@@ -110,44 +183,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             break;
         }
 
-        if let Some(ct) = state.click_time {
-            if state.clicked_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_button = None;
-                state.click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.daemon_menu_click_time {
-            if state.clicked_daemon_menu_item.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_daemon_menu_item = None;
-                state.daemon_menu_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.dialog_click_time {
-            if state.clicked_dialog_button.is_some() && ct.elapsed() > Duration::from_millis(120) {
-                state.clicked_dialog_button = None;
-                state.dialog_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = state.detail_click_time {
-            if state.clicked_detail_row.is_some() && ct.elapsed() > Duration::from_millis(20) {
-                state.clicked_detail_row = None;
-                state.detail_click_time = None;
-                state.needs_redraw = true;
-            }
-        }
-        // 设置页面字段点击动画超时
-        if let Some(ref mut ss) = state.settings_state {
-            if let Some(ct) = ss.field_click_time {
-                if ss.clicked_field.is_some() && ct.elapsed() > Duration::from_millis(20) {
-                    ss.clicked_field = None;
-                    ss.field_click_time = None;
-                    state.needs_redraw = true;
-                }
-            }
-        }
+        state.tick();
 
         if let Some(cmd) = state.pending_command.take() {
             let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
@@ -204,29 +240,37 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             state.needs_redraw = false;
         }
 
+        // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
+            // 拉取所有构型状态
             if let Ok(resp) = rt.block_on(ipc.get_all_status()) {
                 if resp.is_ok() {
                     state.update_status_data(&resp.data);
                 }
             }
 
+            // 每 5 轮拉取一次引擎状态
             poll_counter += 1;
             if poll_counter >= 5 {
+                poll_counter = 0;
                 if let Ok(resp) = rt.block_on(ipc.get_engine_status()) {
                     if resp.is_ok() {
                         state.update_engine_info(&resp.data);
                     }
                 }
-                poll_counter = 0;
             }
 
-            if let Ok(resp) = rt.block_on(ipc.get_log_entries(state.last_log_id, 50, state.log_filter_level.as_deref(), state.log_filter_source.as_deref())) {
+            // 增量拉取日志
+            if let Ok(resp) = rt.block_on(ipc.get_log_entries(
+                state.last_log_id, 50,
+                state.log_filter_level.as_deref(),
+                state.log_filter_source.as_deref(),
+            )) {
                 if resp.is_ok() {
                     if let Some(data_obj) = resp.data.as_object() {
                         if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
                             for entry_val in entries {
-                                if let Some(entry) = crate::state::log_buffer::LogEntry::from_dict(entry_val) {
+                                if let Some(entry) = LogEntry::from_dict(entry_val) {
                                     state.last_log_id = state.last_log_id.max(entry.id);
                                     log_buffer.push_detail(entry);
                                 }
@@ -250,6 +294,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     rt.block_on(ipc.disconnect());
+
     if full_quit {
         let _ = daemon.stop(&project_dir);
     }
@@ -320,6 +365,10 @@ fn process_event(
                         match result {
                             command::CommandResult::FullQuit => {
                                 *full_quit = true;
+                                if ipc.is_connected() {
+                                    let _ = rt.block_on(ipc.full_quit());
+                                }
+                                rt.block_on(ipc.disconnect());
                                 state.should_quit = true;
                             }
                             command::CommandResult::StopDaemon => {
@@ -380,7 +429,7 @@ fn do_redraw(
 
         state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer);
+        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
         let info_visual_count = info_lines.0.len();
         let info_max_width = info_lines.1;
         let detail_lines = ui::logs::compute_detail_lines_no_wrap(log_buffer, &state.log_filter_level, &state.log_filter_source);
@@ -518,7 +567,7 @@ fn do_redraw(
         ui::header::render_header(frame, layout.header, state);
         ui::header::render_info_bar(frame, layout.info_bar, state);
         ui::table::render_table(frame, layout.status_table, state);
-        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll);
+        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll, &state.theme);
         ui::logs::render_detail_panel(
         frame,
         layout.detail_panel,
@@ -532,6 +581,7 @@ fn do_redraw(
             hovered_detail_row: state.hovered_detail_row,
             clicked_detail_row: state.clicked_detail_row,
             hscroll: state.detail_log_hscroll,
+            theme: &state.theme,
         },
     );
         ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);
@@ -539,7 +589,7 @@ fn do_redraw(
         match state.ui_mode {
             UiMode::ConfirmDialog => {
                 if let Some(ref msg) = state.confirm_message {
-                    let info = ui::dialogs::render_confirm_dialog(frame, area, msg, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button);
+                    let info = ui::dialogs::render_confirm_dialog(frame, area, msg, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
                         Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
                     } else {
@@ -550,7 +600,7 @@ fn do_redraw(
             }
             UiMode::CheckResult => {
                 if let Some(ref data) = state.check_data {
-                    let info = ui::dialogs::render_check_result(frame, area, data, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button);
+                    let info = ui::dialogs::render_check_result(frame, area, data, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
                         Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
                     } else {
@@ -568,6 +618,7 @@ fn do_redraw(
                         ss,
                         state.hovered_dialog_button,
                         state.clicked_dialog_button,
+                        &state.theme,
                     );
                     ss.field_positions = info.field_positions;
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {

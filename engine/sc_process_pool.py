@@ -1,10 +1,29 @@
+"""
+SpaceClaim 进程池 — 常驻模式实现。
+
+SpaceClaim 进程在处理完一个构型后不退出，等待下一个构型命令。
+通过文件协议 IPC 与 Bridge 通信，消除每次 15-30s 的 GUI 启动开销。
+
+架构：
+  SCProcessPool → PersistentSlot(最多 MAX_SLOTS 个)
+    → Bridge(--persistent) → SpaceClaim.exe(/RunScript)
+    → transit.py(_persistent_loop: 轮询命令文件 → 执行转换 → 写入结果文件)
+
+文件协议 IPC：
+  命令: {cmd_dir}/sc_cmd_{slot_id}.json              -> {"command":"process","run_id":"...","config":3,...}
+  结果: {cmd_dir}/sc_result_{slot_id}_{run_id}.json  -> {"config":"3","run_id":"...","success":true,...}
+  就绪: {cmd_dir}/sc_ready_{slot_id}.json            -> {"ready":true,"slot_id":0}
+  退出: sc_cmd_{slot_id}.json                        -> {"command":"quit"}
+"""
+
 import json
 import os
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, asdict
-from typing import Optional, Dict, List
+import uuid
+from dataclasses import dataclass, field
+from typing import Optional, Dict
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import setup_logger
@@ -13,95 +32,85 @@ logger = setup_logger(__name__)
 
 
 @dataclass
-class SCSlot:
+class PersistentSlot:
+    """常驻模式的持久进程槽位。"""
     slot_id: int
+    process: Optional[subprocess.Popen] = field(default=None, repr=False)
     pid: Optional[int] = None
-    status: str = "idle"
-    config_name: Optional[int] = None
+    cmd_dir: str = ""
+    status: str = "idle"  # idle | starting | ready | busy
+    current_config: Optional[int] = None
     started_at: Optional[float] = None
-    completed_at: Optional[float] = None
 
 
 class SCProcessPool:
-    """SpaceClaim 进程池，管理最多 MAX_SLOTS 个并发 SC 实例。
+    """SpaceClaim 进程池，管理最多 MAX_SLOTS 个常驻 SC 实例。
 
-    设计说明：
-    - 控制事件（paused_event / stopped_event）通过方法参数传递，
-      而非实例属性存储。这避免了与 TaskRunner.set_control_events
-      的状态同步问题——SCProcessPool 是无状态的工具类，每次调用
-      都从调用方获取最新的控制事件。
+    SpaceClaim 进程在处理完一个构型后不退出，等待下一个构型命令。
+    通过文件协议 IPC 与 Bridge 通信，消除每次 15-30s 的 GUI 启动开销。
     """
+
     MAX_SLOTS = 3
 
     def __init__(self):
         self._data_dir = LOCAL_PATHS.get("data_dir", "data")
         os.makedirs(self._data_dir, exist_ok=True)
-        self._pool_file = os.path.join(self._data_dir, "sc_process_pool.json")
         self._lock = threading.RLock()
-        self._wait_cv = threading.Condition(self._lock)
-        self._wait_queue: List[int] = []
         self._first_cleanup_done = False
         self._final_cleanup_done = False
-        self._slots: Dict[int, SCSlot] = {}
-        self._next_slot_id = 1
 
         self._bridge_path = LOCAL_PATHS.get("sc_bridge", "")
-        self._sc_exe = LOCAL_PATHS.get("sc_exe", "")
         self._sc_script = LOCAL_PATHS.get("sc_script", "")
 
-        self._load_pool()
+        self._persistent_slots: Dict[int, PersistentSlot] = {}
+        self._persistent_cmd_dir = os.path.join(self._data_dir, "sc_ipc")
+        os.makedirs(self._persistent_cmd_dir, exist_ok=True)
+        self._next_slot_id = 1  # 自增槽位 ID 计数器
 
-    def _load_pool(self):
-        if os.path.exists(self._pool_file):
-            try:
-                with open(self._pool_file, "r") as f:
-                    data = json.load(f)
-                for slot_data in data.get("slots", []):
-                    slot = SCSlot(**slot_data)
-                    self._check_process_alive(slot)
-                    self._slots[slot.slot_id] = slot
-                self._next_slot_id = data.get("next_slot_id", 1)
-                logger.info(
-                    f"[SC-Pool] 已加载 {len(self._slots)} 个槽位 "
-                    f"(max={self.MAX_SLOTS})"
-                )
-            except FileNotFoundError:
-                # 防御：os.path.exists 可能因 mock/TOCTOU 返回 True 但文件实际不存在
-                logger.info("[SC-Pool] 池文件不存在，初始化空池")
-                self._slots = {}
-                self._next_slot_id = 1
-            except (json.JSONDecodeError, TypeError, KeyError) as e:
-                logger.warning(f"[SC-Pool] 池文件损坏，使用空池: {e}")
-                self._slots = {}
-                self._next_slot_id = 1
-        else:
-            logger.info("[SC-Pool] 池文件不存在，初始化空池")
+    # ==================================================================
+    # 执行入口
+    # ==================================================================
 
-    def _save_pool(self):
+    def run_config(self, config_name: int,
+                   paused_event: Optional[threading.Event] = None,
+                   stopped_event: Optional[threading.Event] = None) -> bool:
+        """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
+        with self._lock:
+            # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
+            #   而非在 SW 阶段或 start_pipeline 时过早执行。
+            #   注意：调用 _shutdown_all_internal() 而非 shutdown_all()，
+            #   因为当前已持有 _lock，shutdown_all() 会再次获取锁导致死锁。
+            if not self._first_cleanup_done:
+                logger.info("[SC-Pool] === 首次全体 SC 进程清理（首个构型进入 SC 步骤时）===")
+                self._shutdown_all_internal()
+                self._first_cleanup_done = True
+
+            slot = self._get_or_create_persistent_slot()
+            if slot is None:
+                return False
+
+        # ★ 槽位就绪等待：在锁外执行，避免长时间阻塞其他线程。
+        #   新创建的槽位处于 "starting" 状态，需等待 Bridge 写入就绪文件；
+        #   已就绪的槽位直接跳过。
+        if slot.status == "starting":
+            if not self._wait_for_slot_ready(slot):
+                return False
+
+        with self._lock:
+            # double-check：等待期间槽位可能已被其他操作清理
+            if slot.slot_id not in self._persistent_slots:
+                logger.error(f"[SC-Pool] 槽位{slot.slot_id} 在等待期间被清理")
+                return False
+            slot.status = "busy"
+            slot.current_config = config_name
+
         try:
-            data = {
-                "slots": [asdict(s) for s in self._slots.values()],
-                "next_slot_id": self._next_slot_id,
-            }
-            with open(self._pool_file, "w") as f:
-                json.dump(data, f, indent=2, default=str)
-        except OSError as e:
-            logger.error(f"[SC-Pool] 写入池文件失败: {e}")
-
-    def _check_process_alive(self, slot: SCSlot):
-        if slot.pid is None or slot.status == "idle":
-            return
-        try:
-            os.kill(slot.pid, 0)
-        except (OSError, ProcessLookupError):
-            logger.info(
-                f"[SC-Pool] 槽位{slot.slot_id} PID={slot.pid} "
-                f"已不存在，重置为 idle"
-            )
-            slot.pid = None
-            slot.status = "idle"
-            slot.config_name = None
-            self._save_pool()
+            return self._send_persistent_command(slot, config_name, paused_event, stopped_event)
+        finally:
+            with self._lock:
+                if slot.slot_id in self._persistent_slots:
+                    slot.status = "ready"
+                    slot.current_config = None
 
     # ==================================================================
     # 全量清理（首次/末次）
@@ -109,15 +118,18 @@ class SCProcessPool:
 
     def shutdown_all(self):
         with self._lock:
-            logger.info("[SC-Pool] 执行全量 SpaceClaim 进程清理...")
-            self._kill_all_sc_processes()
-            for slot in self._slots.values():
-                slot.pid = None
-                slot.status = "idle"
-                slot.config_name = None
-                slot.completed_at = time.time()
-            self._save_pool()
-            logger.info("[SC-Pool] 全量清理完成，所有槽位重置为 idle")
+            self._shutdown_all_internal()
+            # 重置首次清理标志：下次进入 SC 阶段时需重新清理残留进程
+            # （修复：stop() 后同一 Daemon 再次 start 时跳过清理的问题）
+            self._first_cleanup_done = False
+
+    def _shutdown_all_internal(self):
+        """全量清理（内部版本，调用方须已持有 _lock）。"""
+        logger.info("[SC-Pool] 执行全量 SpaceClaim 进程清理...")
+        for slot in self._persistent_slots.values():
+            self._shutdown_persistent_slot(slot)
+        self._kill_all_sc_processes()
+        logger.info("[SC-Pool] 全量清理完成")
 
     def _kill_all_sc_processes(self):
         if os.name != "nt":
@@ -135,302 +147,405 @@ class SCProcessPool:
         with self._lock:
             if not self._first_cleanup_done:
                 logger.info("[SC-Pool] === 首次全体 SC 进程清理（进入 SC 阶段前）===")
-                self.shutdown_all()
+                self._shutdown_all_internal()
                 self._first_cleanup_done = True
 
     def do_final_cleanup(self):
         with self._lock:
             if not self._final_cleanup_done:
                 logger.info("[SC-Pool] === 末次全体 SC 进程清理（SC 阶段全部完成后）===")
-                self.shutdown_all()
+                self._shutdown_all_internal()
                 self._final_cleanup_done = True
 
     def reset(self):
         with self._lock:
             self._first_cleanup_done = False
             self._final_cleanup_done = False
-            self._wait_queue.clear()
-            self._slots.clear()
+            for slot in self._persistent_slots.values():
+                self._cleanup_persistent_slot(slot)
+            self._persistent_slots.clear()
             self._next_slot_id = 1
-            self._save_pool()
-            logger.info("[SC-Pool] 已重置：清理标志/等待队列/槽位全部归零")
+            logger.info("[SC-Pool] 已重置：常驻进程全部归零")
 
     # ==================================================================
-    # 槽位获取与释放
+    # 常驻槽位管理
     # ==================================================================
 
-    def acquire(self, config_name: int,
-                paused_event: Optional[threading.Event] = None,
-                stopped_event: Optional[threading.Event] = None) -> Optional[int]:
-        with self._lock:
-            self._cleanup_dead_slots()
+    def _get_or_create_persistent_slot(self) -> Optional[PersistentSlot]:
+        """获取空闲的常驻槽位，若无则创建新槽位。调用方须持有 _lock。"""
+        for slot in self._persistent_slots.values():
+            if slot.status == "ready":
+                if slot.process is not None and slot.process.poll() is None:
+                    return slot
+                else:
+                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} 进程已死亡，清理")
+                    self._cleanup_persistent_slot(slot)
+            elif slot.status == "busy":
+                if slot.process is not None and slot.process.poll() is not None:
+                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理复用")
+                    self._cleanup_persistent_slot(slot)
+                    return slot
 
-            idle_slot = self._find_idle_slot()
-            if idle_slot is not None:
-                return self._assign_slot(idle_slot, config_name)
-
-            if len(self._slots) < self.MAX_SLOTS:
-                return self._create_and_assign_slot(config_name)
-
-            self._wait_queue.append(config_name)
-            logger.info(
-                f"[SC-Pool] 构型{config_name} 加入等待队列 "
-                f"(当前等待: {len(self._wait_queue)}人, "
-                f"活跃槽位: {len(self._slots)}/{self.MAX_SLOTS})"
-            )
-
-        return self._wait_for_slot(config_name, paused_event, stopped_event)
-
-    def _cleanup_dead_slots(self):
-        for slot in list(self._slots.values()):
-            self._check_process_alive(slot)
-
-    def _find_idle_slot(self) -> Optional[SCSlot]:
-        for slot in self._slots.values():
-            if slot.status == "idle":
-                return slot
-        return None
-
-    def _assign_slot(self, slot: SCSlot, config_name: int) -> int:
-        slot.status = "in_use"
-        slot.config_name = config_name
-        self._save_pool()
-        logger.info(
-            f"[SC-Pool] 槽位{slot.slot_id} 分配给构型{config_name}"
+        active_slots = sum(
+            1 for s in self._persistent_slots.values()
+            if s.status in ("starting", "ready", "busy")
+            and (s.process is None or s.process.poll() is None)
         )
-        return slot.slot_id
+        if active_slots >= self.MAX_SLOTS:
+            logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self.MAX_SLOTS})")
+            return None
 
-    def _create_and_assign_slot(self, config_name: int) -> int:
-        slot = SCSlot(
-            slot_id=self._next_slot_id,
-            status="in_use",
-            config_name=config_name,
-        )
-        self._slots[slot.slot_id] = slot
+        slot_id = self._next_slot_id
         self._next_slot_id += 1
-        self._save_pool()
-        logger.info(
-            f"[SC-Pool] 创建新槽位{slot.slot_id} → 构型{config_name} "
-            f"(池:{len(self._slots)}/{self.MAX_SLOTS})"
-        )
-        return slot.slot_id
+        slot = PersistentSlot(slot_id=slot_id, cmd_dir=self._persistent_cmd_dir)
+        self._persistent_slots[slot_id] = slot
 
-    def _wait_for_slot(self, config_name: int,
-                       paused_event: Optional[threading.Event],
-                       stopped_event: Optional[threading.Event]) -> Optional[int]:
-        while True:
-            if stopped_event is not None and stopped_event.is_set():
-                with self._lock:
-                    if config_name in self._wait_queue:
-                        self._wait_queue.remove(config_name)
-                        self._save_pool()
-                logger.info(f"[SC-Pool] 构型{config_name} 因引擎停止取消等待")
-                return None
+        if not self._launch_persistent_process(slot):
+            return None
 
-            if paused_event is not None and paused_event.is_set():
-                time.sleep(1)
-                continue
+        return slot
 
-            with self._lock:
-                self._cleanup_dead_slots()
-                idle_slot = self._find_idle_slot()
-                if idle_slot is not None and config_name in self._wait_queue:
-                    self._wait_queue.remove(config_name)
-                    return self._assign_slot(idle_slot, config_name)
-
-            with self._wait_cv:
-                self._wait_cv.wait(timeout=5.0)
-
-    def release(self, slot_id: int):
-        with self._lock:
-            slot = self._slots.get(slot_id)
-            if slot is None:
-                logger.warning(f"[SC-Pool] 释放失败: 槽位{slot_id} 不存在")
-                return
-
-            config_name = slot.config_name
-            slot.pid = None
-            slot.status = "idle"
-            slot.config_name = None
-            slot.completed_at = time.time()
-            self._save_pool()
-
-            logger.info(
-                f"[SC-Pool] 槽位{slot_id} 已释放 (构型{config_name})"
-            )
-
-            if self._wait_queue:
-                next_config = self._wait_queue[0]
-                logger.info(
-                    f"[SC-Pool] 等待队列首位 构型{next_config} "
-                    f"将被唤醒 (剩余等待: {len(self._wait_queue)-1}人)"
-                )
-
-        with self._wait_cv:
-            self._wait_cv.notify_all()
-
-    def update_pid(self, slot_id: int, pid: int):
-        with self._lock:
-            slot = self._slots.get(slot_id)
-            if slot:
-                slot.pid = pid
-                slot.started_at = time.time()
-                self._save_pool()
-                logger.info(f"[SC-Pool] 槽位{slot_id} PID={pid}")
-
-    # ==================================================================
-    # 执行入口：一体化 launch + monitor + release
-    # ==================================================================
-
-    def run_config(self, config_name: int,
-                   paused_event: Optional[threading.Event] = None,
-                   stopped_event: Optional[threading.Event] = None) -> bool:
-        slot_id = self.acquire(config_name, paused_event, stopped_event)
-        if slot_id is None:
+    def _launch_persistent_process(self, slot: PersistentSlot) -> bool:
+        """启动常驻 Bridge 进程。调用方须持有 _lock。"""
+        if not self._bridge_path or not os.path.exists(self._bridge_path):
+            logger.error("[SC-Pool] 常驻模式需要 Bridge (SpaceClaimBridge.exe)")
             return False
 
-        try:
-            return self._execute_in_slot(slot_id, config_name, paused_event, stopped_event)
-        finally:
-            self.release(slot_id)
+        cmd = [
+            self._bridge_path,
+            "--persistent",
+            "--script", self._sc_script,
+            "--cmddir", self._persistent_cmd_dir,
+            "--slotid", str(slot.slot_id),
+        ]
 
-    def _execute_in_slot(self, slot_id: int, config_name: int,
-                         paused_event: Optional[threading.Event],
-                         stopped_event: Optional[threading.Event]) -> bool:
-        step_dir = LOCAL_PATHS["step_dir"]
-        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
-
-        scdoc_name = get_step_filename("SC", config_name)
-        if not scdoc_name:
-            logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
-            return False
-        scdoc_file = os.path.join(scdoc_dir, scdoc_name)
-
-        os.makedirs(scdoc_dir, exist_ok=True)
-
-        cmd = self._build_command(config_name, step_dir, scdoc_dir)
-        if cmd is None:
-            return False
+        slot.status = "starting"
 
         sc_env = os.environ.copy()
         sc_env["AUTOFLUID_SC_NOEXIT"] = "1"
-        sc_env["AUTOFLUID_SC_CONFIG"] = str(config_name)
-        sc_env["AUTOFLUID_SC_STEP_DIR"] = step_dir
-        sc_env["AUTOFLUID_SC_SCDOC_DIR"] = scdoc_dir
+        sc_env["AUTOFLUID_SC_PERSISTENT"] = "1"
+        sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
+        sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
 
-        logger.info(
-            f"[SC-Pool] 启动 Bridge: 构型{config_name} 槽位{slot_id}"
+        # 传递 SC 启动超时配置给 Bridge
+        sc_env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_process_appear_timeout", 120)
         )
+        sc_env["AUTOFLUID_SC_GUI_READY_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_ready_timeout", 30)
+        )
+        sc_env["AUTOFLUID_SC_GUI_STABLE_DELAY"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_stable_delay", 15)
+        )
+
+        logger.info(f"[SC-Pool] 启动常驻 Bridge: 槽位{slot.slot_id}")
         logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
+
+        self._cleanup_ipc_files(slot.slot_id)
+
+        # ★ 显式删除旧 ready 文件：防止前次运行的残留文件误导就绪检测
+        ready_file = os.path.join(self._persistent_cmd_dir, f"sc_ready_{slot.slot_id}.json")
+        try:
+            if os.path.exists(ready_file):
+                os.remove(ready_file)
+                logger.debug(f"[SC-Pool] 已清理旧 ready 文件: {ready_file}")
+        except OSError:
+            pass
 
         try:
             creation_flags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                if os.name == "nt" else 0
+                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
             process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=creation_flags,
-                env=sc_env,
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=creation_flags, env=sc_env,
             )
-
-            if process.pid:
-                self.update_pid(slot_id, process.pid)
-
-            timeout = ENGINE_CONFIG["sc_timeout"]
-            deadline = time.time() + timeout
-            poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
-
-            while True:
-                retcode = process.poll()
-                if retcode is not None:
-                    if retcode != 0:
-                        logger.error(
-                            f"[SC-Pool] Bridge 失败 构型{config_name} "
-                            f"(exit={retcode})"
-                        )
-                        return False
-                    break
-
-                if paused_event is not None and paused_event.is_set():
-                    logger.info(
-                        f"[SC-Pool] 构型{config_name} 因暂停被终止"
-                    )
-                    self._terminate_bridge_and_sc(process, config_name)
-                    return False
-
-                if stopped_event is not None and stopped_event.is_set():
-                    logger.info(
-                        f"[SC-Pool] 构型{config_name} 因停止被终止"
-                    )
-                    self._terminate_bridge_and_sc(process, config_name)
-                    return False
-
-                if time.time() >= deadline:
-                    logger.error(
-                        f"[SC-Pool] 构型{config_name} Bridge 超时 ({timeout}s)"
-                    )
-                    self._terminate_bridge_and_sc(process, config_name)
-                    return False
-
-                time.sleep(poll_interval)
-
-            if os.path.exists(scdoc_file):
-                file_size = os.path.getsize(scdoc_file)
-                logger.info(
-                    f"[SC-Pool] ✓ 构型{config_name} SCDOC: "
-                    f"{os.path.basename(scdoc_file)} ({file_size} bytes)"
-                )
-                return True
-            else:
-                logger.error(
-                    f"[SC-Pool] ✗ 构型{config_name} SCDOC 未生成"
-                )
-                return False
+            slot.process = process
+            slot.pid = process.pid
+            slot.started_at = time.time()
+            logger.info(f"[SC-Pool] 常驻 Bridge PID={process.pid}")
+            return True
 
         except OSError as e:
-            logger.error(f"[SC-Pool] 构型{config_name} IO错误: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"[SC-Pool] 构型{config_name} 未知错误: {e}", exc_info=True)
+            logger.error(f"[SC-Pool] 常驻 Bridge 启动失败: {e}")
+            self._cleanup_persistent_slot(slot)
             return False
 
-    def _terminate_bridge_and_sc(self, bridge_process, config_name: int):
+    def _wait_for_slot_ready(self, slot: PersistentSlot) -> bool:
+        """等待槽位就绪（不持有 _lock，由调用方在锁外调用）。
+
+        新创建的槽位处于 "starting" 状态，Bridge 启动 SpaceClaim 后
+        会写入 ready 文件。本方法轮询等待 ready 文件出现。
+
+        Returns:
+            True 表示槽位已就绪，False 表示超时或进程异常退出。
+        """
+        ready_file = os.path.join(self._persistent_cmd_dir, f"sc_ready_{slot.slot_id}.json")
+        ready_timeout = ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
+        deadline = time.time() + ready_timeout
+
+        logger.info(f"[SC-Pool] 等待槽位{slot.slot_id} 就绪 (超时 {ready_timeout}s)...")
+
+        while time.time() < deadline:
+            # 进程存活检查
+            if slot.process is not None and slot.process.poll() is not None:
+                logger.error(
+                    f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
+                    f"(exit={slot.process.returncode})"
+                )
+                with self._lock:
+                    self._cleanup_persistent_slot(slot)
+                return False
+            # ready 文件检查
+            if os.path.exists(ready_file):
+                logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
+                with self._lock:
+                    slot.status = "ready"
+                return True
+            time.sleep(2)
+
+        logger.error(
+            f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 ({ready_timeout}s)"
+        )
+        with self._lock:
+            self._cleanup_persistent_slot(slot)
+        return False
+
+    # ==================================================================
+    # 命令发送与结果等待
+    # ==================================================================
+
+    def _send_persistent_command(self, slot: PersistentSlot, config_name: int,
+                                 paused_event: Optional[threading.Event],
+                                 stopped_event: Optional[threading.Event]) -> bool:
+        """向常驻进程发送命令，通过 SCDOC 文件检测判定完成。
+
+        ★ 核心设计：与 SW 步骤的 FileStableDetector 统一，直接轮询
+        SCDOC 输出文件。SaveAs() 是 SpaceClaim 内核操作，完成后
+        SCDOC 文件立即可用——不需要等脚本写结果文件、不需要等
+        window.Close()。
+
+        完成条件：SCDOC 文件存在 + mtime >= 命令发送时刻 + 大小稳定 3s。
+        失败信号：脚本写入 success=false 的结果文件 → 提前返回。
+        """
+        step_dir = LOCAL_PATHS["step_dir"]
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        scdoc_name = get_step_filename("SC", config_name)
+
+        if not scdoc_name:
+            logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
+            return False
+
+        scdoc_file = os.path.join(scdoc_dir, scdoc_name)
+        os.makedirs(scdoc_dir, exist_ok=True)
+
+        # per-run 结果文件（仅用于接收错误信号）
+        run_id = uuid.uuid4().hex[:12]
+        cmd_file = os.path.join(self._persistent_cmd_dir, f"sc_cmd_{slot.slot_id}.json")
+        result_file = os.path.join(self._persistent_cmd_dir,
+                                   f"sc_result_{slot.slot_id}_{run_id}.json")
+
+        # ★ 记录命令发送时刻：仅接受此时刻之后创建/修改的 SCDOC 文件
+        command_sent_at = time.time()
+
+        cmd_data = {
+            "command": "process",
+            "run_id": run_id,
+            "config": config_name,
+            "stepdir": step_dir,
+            "scdocdir": scdoc_dir,
+        }
         try:
-            bridge_process.kill()
-        except (ProcessLookupError, OSError):
+            with open(cmd_file, "w") as f:
+                json.dump(cmd_data, f)
+        except OSError as e:
+            logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
+            return False
+
+        logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})")
+
+        timeout = ENGINE_CONFIG["sc_timeout"]
+        deadline = time.time() + timeout
+        poll_interval = OPERATION_TIMEOUTS["sc_poll_interval"]
+        scdoc_stable_seconds = ENGINE_CONFIG.get("sc_scdoc_stable_seconds", 3.0)
+
+        # 用于稳定性检测的上一次采样
+        last_size = -1
+        last_size_stable_since = 0.0
+
+        while True:
+            # ---- 进程存活检查 ----
+            if slot.process is not None and slot.process.poll() is not None:
+                logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 "
+                             f"(exit={slot.process.returncode})")
+                self._cleanup_run_files(slot.slot_id, run_id)
+                return False
+
+            # ---- 暂停/停止检查 ----
+            if paused_event is not None and paused_event.is_set():
+                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因暂停取消")
+                self._cleanup_run_files(slot.slot_id, run_id)
+                return False
+
+            if stopped_event is not None and stopped_event.is_set():
+                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消")
+                self._cleanup_run_files(slot.slot_id, run_id)
+                return False
+
+            # ---- 错误提前信号：脚本写入 success=false 的结果文件 ----
+            if os.path.exists(result_file):
+                try:
+                    with open(result_file, "r") as f:
+                        result_data = json.load(f)
+                    success = result_data.get("success", False)
+                    message = result_data.get("message", "")
+                    try:
+                        os.remove(result_file)
+                    except OSError:
+                        pass
+                    if not success:
+                        logger.error(f"[SC-Pool] FAIL 构型{config_name} 脚本报错: {message}")
+                        return False
+                except (ValueError, IOError, OSError):
+                    try:
+                        os.remove(result_file)
+                    except OSError:
+                        pass
+
+            # ---- 主判定：SCDOC 文件检测（与 SW 步骤统一） ----
+            if os.path.exists(scdoc_file):
+                try:
+                    file_mtime = os.path.getmtime(scdoc_file)
+                    file_size = os.path.getsize(scdoc_file)
+                except OSError:
+                    time.sleep(poll_interval)
+                    continue
+
+                # mtime 早于命令发送 → 旧文件残留，跳过
+                if file_mtime < command_sent_at - 1.0:
+                    time.sleep(poll_interval)
+                    continue
+
+                if file_size <= 0:
+                    time.sleep(poll_interval)
+                    continue
+
+                # 稳定性检测：大小在 scdoc_stable_seconds 内不变
+                now = time.time()
+                if file_size != last_size:
+                    last_size = file_size
+                    last_size_stable_since = now
+                elif now - last_size_stable_since >= scdoc_stable_seconds:
+                    # SCDOC 文件大小已稳定 → SaveAs 完成
+                    logger.info(f"[SC-Pool] OK 构型{config_name} SCDOC: "
+                                f"{os.path.basename(scdoc_file)} ({file_size} bytes)")
+                    self._cleanup_run_files(slot.slot_id, run_id)
+                    return True
+
+            # ---- 超时 ----
+            if time.time() >= deadline:
+                # 最后一次检查：SCDOC 可能在超时瞬间刚好完成
+                if os.path.exists(scdoc_file):
+                    try:
+                        mt = os.path.getmtime(scdoc_file)
+                        sz = os.path.getsize(scdoc_file)
+                        if mt >= command_sent_at - 1.0 and sz > 0:
+                            logger.warning(
+                                f"[SC-Pool] 构型{config_name} 超时但 SCDOC 已存在，接受 "
+                                f"({sz} bytes)")
+                            self._cleanup_run_files(slot.slot_id, run_id)
+                            return True
+                    except OSError:
+                        pass
+                logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}")
+                self._cleanup_run_files(slot.slot_id, run_id)
+                return False
+
+            time.sleep(poll_interval)
+
+    # ==================================================================
+    # 槽位生命周期
+    # ==================================================================
+
+    def _cleanup_run_files(self, slot_id: int, run_id: str) -> None:
+        """清理单次运行的结果文件（不清理 ready 文件和槽位级命令文件）。"""
+        for suffix in [f"sc_result_{slot_id}_{run_id}.json",
+                       f"sc_result_{slot_id}_{run_id}.json.tmp"]:
+            path = os.path.join(self._persistent_cmd_dir, suffix)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+
+    def _cleanup_ipc_files(self, slot_id: int) -> None:
+        """清理槽位相关的所有 IPC 文件（命令、结果、就绪标志）。
+
+        用于槽位整体关闭/重置场景（shutdown_all / reset），
+        不在单次命令超时时调用——避免误删 ready 文件。
+        """
+        # 兼容清理：旧格式固定结果文件 + 本次改动后不再产生的 per-run 结果
+        for suffix in [f"sc_cmd_{slot_id}.json",
+                       f"sc_result_{slot_id}.json",
+                       f"sc_result_{slot_id}.json.tmp",
+                       f"sc_ready_{slot_id}.json"]:
+            path = os.path.join(self._persistent_cmd_dir, suffix)
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        # 清理所有 per-run 结果文件
+        try:
+            prefix = f"sc_result_{slot_id}_"
+            for name in os.listdir(self._persistent_cmd_dir):
+                if name.startswith(prefix) and name.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(self._persistent_cmd_dir, name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _cleanup_persistent_slot(self, slot: PersistentSlot) -> None:
+        """清理常驻槽位（终止进程、清理文件）。调用方须持有 _lock。"""
+        if slot.process is not None:
+            try:
+                slot.process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                slot.process.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                pass
+            slot.process = None
+        slot.pid = None
+        slot.status = "idle"
+        slot.current_config = None
+        self._cleanup_ipc_files(slot.slot_id)
+
+    def _shutdown_persistent_slot(self, slot: PersistentSlot) -> None:
+        """关闭常驻槽位（发送 quit 命令，等待退出，兜底 taskkill）。"""
+        if slot.process is None:
+            return
+        quit_file = os.path.join(self._persistent_cmd_dir, f"sc_cmd_{slot.slot_id}.json")
+        try:
+            with open(quit_file, "w") as f:
+                json.dump({"command": "quit"}, f)
+        except OSError:
             pass
         try:
-            bridge_process.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, ProcessLookupError):
-            pass
-
-        self._kill_all_sc_processes()
-        logger.info(f"[SC-Pool] 已终止 构型{config_name} 的 Bridge 及关联 SC 进程")
-
-    def _build_command(self, config_name: int, step_dir: str, scdoc_dir: str):
-        if self._bridge_path and os.path.exists(self._bridge_path):
-            return [
-                self._bridge_path,
-                "--script", self._sc_script,
-                "--config", str(config_name),
-                "--stepdir", step_dir,
-                "--scdocdir", scdoc_dir,
-            ]
-
-        if self._sc_exe and os.path.exists(self._sc_exe) and self._sc_script and os.path.exists(self._sc_script):
-            return [
-                self._sc_exe,
-                '/RunScript="{}"'.format(self._sc_script),
-                "/Splash=False",
-                "/Welcome=False",
-                "/ExitAfterScript=True",
-            ]
-
-        logger.error("[SC-Pool] 无可用的 SC 调用方式 (Bridge/SC exe 均缺失)")
-        return None
+            slot.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            try:
+                slot.process.kill()
+                slot.process.communicate(timeout=5)
+            except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+                pass
+        slot.process = None
+        slot.pid = None
+        slot.status = "idle"
+        self._cleanup_ipc_files(slot.slot_id)
 
     # ==================================================================
     # 状态查询
@@ -438,14 +553,15 @@ class SCProcessPool:
 
     def get_pool_status(self) -> dict:
         with self._lock:
-            idle_count = sum(1 for s in self._slots.values() if s.status == "idle")
-            in_use_count = sum(1 for s in self._slots.values() if s.status == "in_use")
+            ready_count = sum(1 for s in self._persistent_slots.values() if s.status == "ready")
+            busy_count = sum(1 for s in self._persistent_slots.values() if s.status == "busy")
             return {
-                "total_slots": len(self._slots),
                 "max_slots": self.MAX_SLOTS,
-                "idle": idle_count,
-                "in_use": in_use_count,
-                "wait_queue_size": len(self._wait_queue),
-                "slots": {sid: asdict(s) for sid, s in self._slots.items()},
-                "wait_queue": list(self._wait_queue),
+                "ready": ready_count,
+                "busy": busy_count,
+                "slots": {
+                    sid: {"slot_id": s.slot_id, "status": s.status,
+                          "pid": s.pid, "current_config": s.current_config}
+                    for sid, s in self._persistent_slots.items()
+                },
             }

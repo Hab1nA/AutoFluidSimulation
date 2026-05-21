@@ -17,7 +17,7 @@ impl DaemonManager {
     }
 
     pub fn launch(&mut self, project_dir: &str) -> Result<u32, String> {
-        let daemon_script = format!("{}/start_daemon.py", project_dir);
+        let daemon_script = PathBuf::from(project_dir).join("start_daemon.py");
         let python = std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
 
         let mut cmd = Command::new(&python);
@@ -40,83 +40,6 @@ impl DaemonManager {
                 Ok(pid)
             }
             Err(e) => Err(format!("启动后台引擎失败: {}", e)),
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // IPC 生命周期集成方法（从 main.rs 迁入）
-    // ------------------------------------------------------------------
-
-    /// 后台引擎启动后重连 IPC，阻塞等待至超时。
-    pub fn reconnect_ipc_after_launch(
-        rt: &tokio::runtime::Runtime,
-        ipc: &mut IpcClient,
-        state: &mut AppState,
-        log_buffer: &mut LogBuffer,
-    ) {
-        let timeout = Duration::from_secs(10);
-        let deadline = std::time::Instant::now() + timeout;
-
-        while std::time::Instant::now() < deadline {
-            if ipc.is_connected() {
-                state.connected = true;
-                return;
-            }
-
-            match rt.block_on(ipc.connect()) {
-                Ok(()) => {
-                    state.connected = true;
-                    log_buffer.push_info("✅ 已连接到后台引擎".to_string());
-                    return;
-                }
-                Err(_) => {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-        }
-
-        state.connected = false;
-        log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
-    }
-
-    /// 停止后台引擎并通过 IPC 通知对端退出，然后断开 IPC。
-    pub fn stop_with_ipc(
-        &mut self,
-        ipc: &mut IpcClient,
-        rt: &tokio::runtime::Runtime,
-        state: &mut AppState,
-        log_buffer: &mut LogBuffer,
-        project_dir: &str,
-    ) {
-        if ipc.is_connected() {
-            let _ = rt.block_on(ipc.full_quit());
-            rt.block_on(ipc.disconnect());
-        }
-
-        let _ = self.stop(project_dir);
-        state.connected = false;
-        log_buffer.push_info("✅ 后台引擎已停止".to_string());
-    }
-
-    /// 重启后台引擎：停止 → 启动 → 等待 IPC 就绪。
-    pub fn restart_with_ipc(
-        &mut self,
-        ipc: &mut IpcClient,
-        rt: &tokio::runtime::Runtime,
-        state: &mut AppState,
-        log_buffer: &mut LogBuffer,
-        project_dir: &str,
-    ) {
-        self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
-
-        match self.launch(project_dir) {
-            Ok(pid) => {
-                log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
-                Self::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
-            }
-            Err(e) => {
-                log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
-            }
         }
     }
 
@@ -184,5 +107,77 @@ impl DaemonManager {
 
         Self::remove_pid_file(project_dir);
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // IPC 生命周期集成方法
+    // ------------------------------------------------------------------
+
+    /// 后台引擎启动后重连 IPC，阻塞等待至超时。
+    pub fn reconnect_ipc_after_launch(
+        rt: &tokio::runtime::Runtime,
+        ipc: &mut IpcClient,
+        state: &mut AppState,
+        log_buffer: &mut LogBuffer,
+    ) {
+        let timeout = Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if ipc.is_connected() {
+                state.connected = true;
+                return;
+            }
+            match rt.block_on(ipc.connect()) {
+                Ok(()) => {
+                    state.connected = true;
+                    log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+                    return;
+                }
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+        state.connected = false;
+        log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
+    }
+
+    /// 停止后台引擎并通过 IPC 通知对端退出，然后断开 IPC。
+    pub fn stop_with_ipc(
+        &mut self,
+        ipc: &mut IpcClient,
+        rt: &tokio::runtime::Runtime,
+        state: &mut AppState,
+        log_buffer: &mut LogBuffer,
+        project_dir: &str,
+    ) {
+        if ipc.is_connected() {
+            let _ = rt.block_on(ipc.full_quit());
+            rt.block_on(ipc.disconnect());
+        }
+        let _ = self.stop(project_dir);
+        state.connected = false;
+        log_buffer.push_info("✅ 后台引擎已停止".to_string());
+    }
+
+    /// 重启后台引擎：停止 → 启动 → 等待 IPC 就绪。
+    pub fn restart_with_ipc(
+        &mut self,
+        ipc: &mut IpcClient,
+        rt: &tokio::runtime::Runtime,
+        state: &mut AppState,
+        log_buffer: &mut LogBuffer,
+        project_dir: &str,
+    ) {
+        self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
+        match self.launch(project_dir) {
+            Ok(pid) => {
+                log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
+                Self::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
+            }
+            Err(e) => {
+                log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
+            }
+        }
     }
 }

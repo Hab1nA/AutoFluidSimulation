@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -8,29 +8,7 @@ use super::{SettingCategory, SettingsState};
 use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
 use crate::utils::{truncate_for_display, pad_label_by_display_width};
-
-const DIALOG_BG: Color = Color::Rgb(22, 33, 62);
-const ACCENT_RED: Color = Color::Rgb(233, 69, 96);
-const GREEN: Color = Color::Rgb(0, 255, 136);
-const FIELD_LABEL: Color = Color::Rgb(200, 200, 200);
-const FIELD_VALUE: Color = Color::Rgb(180, 180, 180);
-const SECTION_HEADER: Color = Color::Rgb(0, 255, 136);
-const HINT_COLOR: Color = Color::Rgb(80, 80, 80);
-const ERROR_COLOR: Color = Color::Rgb(255, 69, 58);
-const WARN_COLOR: Color = Color::Rgb(255, 170, 0);
-const HOVER_BG: Color = Color::Rgb(30, 45, 80);
-
-const BTN_NORMAL: Style = Style::new()
-    .fg(Color::Rgb(224, 224, 224))
-    .bg(Color::Rgb(15, 52, 96));
-const BTN_HOVER: Style = Style::new()
-    .fg(Color::Rgb(255, 255, 255))
-    .bg(Color::Rgb(233, 69, 96))
-    .add_modifier(Modifier::BOLD);
-const BTN_CLICKED: Style = Style::new()
-    .fg(Color::Rgb(0, 0, 0))
-    .bg(Color::Rgb(255, 255, 255))
-    .add_modifier(Modifier::BOLD);
+use crate::theme::AppTheme;
 
 pub struct SettingsRenderInfo {
     pub content_total_lines: usize,
@@ -41,30 +19,21 @@ pub struct SettingsRenderInfo {
     pub field_positions: Vec<(usize, usize, u16)>,
 }
 
-fn btn_style(idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {
-    if clicked == Some(idx) {
-        BTN_CLICKED
-    } else if hovered == Some(idx) {
-        BTN_HOVER
-    } else {
-        BTN_NORMAL
-    }
-}
-
 pub fn render_settings_dialog(
     frame: &mut Frame,
     area: Rect,
     ss: &SettingsState,
     hovered_dialog_button: Option<u8>,
     clicked_dialog_button: Option<u8>,
+    theme: &AppTheme,
 ) -> SettingsRenderInfo {
     let dialog_area = centered_rect(90, 90, area);
     clear_dialog_background(frame, dialog_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT_RED))
-        .style(Style::default().bg(DIALOG_BG));
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.bg));
     frame.render_widget(block, dialog_area);
 
     let inner = Rect {
@@ -96,7 +65,7 @@ pub fn render_settings_dialog(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {}", title_text),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ))),
         title_chunks[0],
     );
@@ -104,14 +73,14 @@ pub fn render_settings_dialog(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             hint_text,
-            Style::default().fg(HINT_COLOR),
+            Style::default().fg(theme.muted),
         )))
         .alignment(Alignment::Right),
         title_chunks[1],
     );
 
     // Separator after title
-    let sep_style = Style::default().fg(Color::Rgb(60, 60, 60));
+    let sep_style = Style::default().fg(theme.gray_1);
     let sep = "─".repeat(inner.width as usize);
     let sep_y = inner.y + 1;
     frame.render_widget(
@@ -163,7 +132,7 @@ pub fn render_settings_dialog(
         };
         raw_lines.push(Line::from(Span::styled(
             format!("  {}{}", header_str, header_pad),
-            Style::default().fg(SECTION_HEADER).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
         )));
         raw_lines.push(Line::from(""));
 
@@ -182,33 +151,33 @@ pub fn render_settings_dialog(
 
             // Pre-compute row background
             let row_bg = if is_clicked {
-                Color::Rgb(15, 52, 96)
+                theme.secondary
             } else if is_hovered {
-                HOVER_BG
+                theme.selection
             } else {
-                DIALOG_BG
+                theme.bg
             };
 
             let label_style = if is_focused {
-                Style::default().fg(GREEN).add_modifier(Modifier::BOLD).bg(row_bg)
+                Style::default().fg(theme.success).add_modifier(Modifier::BOLD).bg(row_bg)
             } else {
-                Style::default().fg(FIELD_LABEL).bg(row_bg)
+                Style::default().fg(theme.gray_4).bg(row_bg)
             };
 
             let value_style = if is_current_field {
-                Style::default().fg(GREEN).bg(row_bg)
+                Style::default().fg(theme.success).bg(row_bg)
             } else if is_focused {
-                Style::default().fg(Color::White).bg(Color::Rgb(15, 52, 96))
+                Style::default().fg(theme.fg).bg(theme.secondary)
             } else if is_hovered {
-                Style::default().fg(Color::White).bg(row_bg)
+                Style::default().fg(theme.fg).bg(row_bg)
             } else {
-                Style::default().fg(FIELD_VALUE).bg(row_bg)
+                Style::default().fg(theme.gray_3).bg(row_bg)
             };
 
             // Selection highlight style (inverted: bright bg, dark fg)
             let sel_style = Style::default()
-                .fg(Color::Rgb(22, 33, 62))
-                .bg(Color::Rgb(0, 255, 136));
+                .fg(theme.bg)
+                .bg(theme.success);
 
             let mut spans: Vec<Span<'_>> = vec![
                 Span::styled("  ", Style::default().bg(row_bg)),
@@ -221,12 +190,14 @@ pub fn render_settings_dialog(
             if is_current_field {
                 // Editing mode – use styled spans with selection highlight
                 let edit_spans = build_edit_spans(
-                    &ss.edit_buffer,
-                    ss.edit_cursor,
-                    ss.selection_anchor,
+                    &ss.buffer.text,
+                    ss.buffer.cursor,
+                    ss.buffer.selection_anchor,
                     field_content_width,
                     value_style,
                     sel_style,
+                    Style::default().fg(theme.cursor_fg).bg(theme.success).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.success),
                 );
                 spans.extend(edit_spans);
             } else {
@@ -248,9 +219,9 @@ pub fn render_settings_dialog(
             // Path status check
             if let Some(exists) = ss.path_status.get(&field_name) {
                 let (icon, color) = if *exists {
-                    (" ✅", GREEN)
+                    (" ✅", theme.success)
                 } else {
-                    (" ❌", ERROR_COLOR)
+                    (" ❌", theme.error)
                 };
                 spans.push(Span::styled(icon, Style::default().fg(color).bg(row_bg)));
             }
@@ -258,9 +229,9 @@ pub fn render_settings_dialog(
             // Validation error
             if let Some(err) = ss.validation_errors.iter().find(|e| e.field_name == field_name) {
                 let color = if matches!(err.severity, super::validation::Severity::Error) {
-                    ERROR_COLOR
+                    theme.error
                 } else {
-                    WARN_COLOR
+                    theme.warning
                 };
                 spans.push(Span::styled(format!("  ⚠ {}", err.message), Style::default().fg(color).bg(row_bg)));
             }
@@ -274,7 +245,7 @@ pub fn render_settings_dialog(
                 };
                 spans.push(Span::styled(
                     hint,
-                    Style::default().fg(HINT_COLOR).bg(row_bg),
+                    Style::default().fg(theme.muted).bg(row_bg),
                 ));
             }
 
@@ -297,6 +268,8 @@ pub fn render_settings_dialog(
             total: total_lines,
             visible,
             scroll: scroll_offset,
+            track_color: Some(theme.scrollbar_track),
+            thumb_color: Some(theme.scrollbar_thumb),
         };
         frame.render_widget(sb, scrollbar_area);
     }
@@ -314,21 +287,21 @@ pub fn render_settings_dialog(
     let cancel_label = " 取消 (Esc) ";
     let gap: u16 = 4;
 
-    let save_style = btn_style(0, hovered_dialog_button, clicked_dialog_button);
-    let cancel_style = btn_style(1, hovered_dialog_button, clicked_dialog_button);
+    let save_style = theme.dialog_btn_style(0, hovered_dialog_button, clicked_dialog_button);
+    let cancel_style = theme.dialog_btn_style(1, hovered_dialog_button, clicked_dialog_button);
 
     let mut btn_spans = vec![
         Span::styled(save_label.to_string(), save_style),
-        Span::styled(" ".repeat(gap as usize), Style::default().bg(DIALOG_BG)),
+        Span::styled(" ".repeat(gap as usize), Style::default().bg(theme.bg)),
         Span::styled(cancel_label.to_string(), cancel_style),
     ];
 
     if let Some(ref err) = ss.save_error {
         btn_spans.push(Span::raw("  "));
-        btn_spans.push(Span::styled(err, Style::default().fg(ERROR_COLOR)));
+        btn_spans.push(Span::styled(err, Style::default().fg(theme.error)));
     } else if ss.saved {
         btn_spans.push(Span::raw("  "));
-        btn_spans.push(Span::styled("✅ 已保存", Style::default().fg(GREEN)));
+        btn_spans.push(Span::styled("✅ 已保存", Style::default().fg(theme.success)));
     }
 
     frame.render_widget(
@@ -352,17 +325,20 @@ fn make_field_name(cat: SettingCategory, fi: usize) -> String {
             format!("remote_config.{}", cat.field_name(fi))
         }
         SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
-        SettingCategory::EngineConfig => format!("engine_config.{}", cat.field_name(fi)),
-        SettingCategory::OperationTimeouts => format!("operation_timeouts.{}", cat.field_name(fi)),
+        SettingCategory::SolidWorks => format!("solidworks.{}", cat.field_name(fi)),
+        SettingCategory::SpaceClaim => format!("spaceclaim.{}", cat.field_name(fi)),
+        SettingCategory::GlobalSettings => format!("global_settings.{}", cat.field_name(fi)),
     }
 }
 
 /// Build styled spans for the edit field display.
 ///
 /// When a selection is active (`selection_anchor` is Some and differs from
-/// `cursor`), the selected region is rendered with an inverted style
-/// (background highlight).  The cursor is shown as a `│` character between
-/// the spans.
+/// `cursor`), the selected region is rendered with `sel_style`.  The
+/// character at the cursor position is highlighted with `cursor_style`
+/// (inverted colors); if the cursor is past the last character, a `▎`
+/// indicator is appended.
+#[allow(clippy::too_many_arguments)]
 fn build_edit_spans(
     buffer: &str,
     cursor: usize,
@@ -370,9 +346,11 @@ fn build_edit_spans(
     max_width: usize,
     base_style: Style,
     sel_style: Style,
+    cursor_style: Style,
+    cursor_bar_style: Style,
 ) -> Vec<Span<'static>> {
     if buffer.is_empty() {
-        return vec![Span::styled("▎".to_string(), base_style)];
+        return vec![Span::styled("▎".to_string(), cursor_bar_style)];
     }
 
     // Determine selection range (start <= end)
@@ -390,23 +368,21 @@ fn build_edit_spans(
     let len = chars.len();
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    // We need to truncate to max_width display-wise.  Build spans first,
-    // then we'll truncate if needed.
     #[allow(clippy::needless_range_loop)] // i 用于 cursor/selection 比较，迭代器不更清晰
-    for i in 0..=len {
-        // Insert cursor marker before character i (or at end)
-        if i == cursor {
-            spans.push(Span::styled("│".to_string(), base_style));
-        }
-        if i == len {
-            break;
-        }
+    for i in 0..len {
         let ch = chars[i];
-        let style = match sel {
-            Some((s, e)) if i >= s && i < e => sel_style,
-            _ => base_style,
+        let style = if i == cursor {
+            cursor_style
+        } else if let Some((s, e)) = sel {
+            if i >= s && i < e { sel_style } else { base_style }
+        } else {
+            base_style
         };
         spans.push(Span::styled(ch.to_string(), style));
+    }
+    // Cursor past last character → show bar indicator (plain fg, not inverted)
+    if cursor >= len {
+        spans.push(Span::styled("▎".to_string(), cursor_bar_style));
     }
 
     // Truncate to max_width by measuring display width of spans

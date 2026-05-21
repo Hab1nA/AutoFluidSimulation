@@ -3,8 +3,8 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::Widget;
 
-const TRACK_STYLE: Style = Style::new().fg(Color::Rgb(80, 80, 80));
-const THUMB_STYLE: Style = Style::new().fg(Color::Rgb(160, 160, 160));
+const DEFAULT_TRACK: Color = Color::Rgb(80, 80, 80);
+const DEFAULT_THUMB: Color = Color::Rgb(160, 160, 160);
 
 fn calc_thumb_size(visible: usize, total: usize, track_length: usize) -> usize {
     let size = ((visible as f64 / total as f64) * track_length as f64).round() as usize;
@@ -51,6 +51,8 @@ pub struct VerticalScrollbar {
     pub total: usize,
     pub visible: usize,
     pub scroll: usize,
+    pub track_color: Option<Color>,
+    pub thumb_color: Option<Color>,
 }
 
 impl VerticalScrollbar {
@@ -70,13 +72,15 @@ impl Widget for VerticalScrollbar {
             Some(ti) => ti,
             None => return,
         };
+        let track_style = Style::default().fg(self.track_color.unwrap_or(DEFAULT_TRACK));
+        let thumb_style = Style::default().fg(self.thumb_color.unwrap_or(DEFAULT_THUMB));
         let x = area.x;
         for i in 0..track_height {
             let y = area.y + i as u16;
             if i >= ti.thumb_start && i < ti.thumb_start + ti.thumb_size {
-                buf.set_string(x, y, "█", THUMB_STYLE);
+                buf.set_string(x, y, "█", thumb_style);
             } else {
-                buf.set_string(x, y, "│", TRACK_STYLE);
+                buf.set_string(x, y, "│", track_style);
             }
         }
     }
@@ -86,6 +90,8 @@ pub struct HorizontalScrollbar {
     pub total: usize,
     pub visible: usize,
     pub scroll: usize,
+    pub track_color: Option<Color>,
+    pub thumb_color: Option<Color>,
 }
 
 impl HorizontalScrollbar {
@@ -105,13 +111,15 @@ impl Widget for HorizontalScrollbar {
             Some(ti) => ti,
             None => return,
         };
+        let track_style = Style::default().fg(self.track_color.unwrap_or(DEFAULT_TRACK));
+        let thumb_style = Style::default().fg(self.thumb_color.unwrap_or(DEFAULT_THUMB));
         let y = area.y;
         for i in 0..track_width {
             let x = area.x + i as u16;
             if i >= ti.thumb_start && i < ti.thumb_start + ti.thumb_size {
-                buf.set_string(x, y, "█", THUMB_STYLE);
+                buf.set_string(x, y, "█", thumb_style);
             } else {
-                buf.set_string(x, y, "─", TRACK_STYLE);
+                buf.set_string(x, y, "─", track_style);
             }
         }
     }

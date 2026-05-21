@@ -79,7 +79,8 @@ class FileStableDetector:
 
         # 只保留最近 stable_time 秒内的记录
         cutoff = now - self.stable_time
-        history[:] = [(t, s) for t, s in history if t >= cutoff]
+        self._history[filepath] = [(t, s) for t, s in history if t >= cutoff]
+        history = self._history[filepath]
 
         # 如果历史记录不足 stable_time，说明文件可能还在写入
         if len(history) < 2:
@@ -151,7 +152,8 @@ class StepFileMonitor:
         return cls._FILENAME_REGEX
 
     def __init__(self, step_dir: str | None = None,
-                 on_file_ready: Callable[[int, str], None] | None = None):
+                 on_file_ready: Callable[[int, str], None] | None = None,
+                 shared_paused_event: threading.Event | None = None):
         self.step_dir = step_dir or LOCAL_PATHS["step_dir"]
         self.on_file_ready = on_file_ready
         self._running = False
@@ -162,12 +164,15 @@ class StepFileMonitor:
         )
         self._processed_files: Set[str] = set()
         self._known_files: Set[str] = set()
-        # 暂停控制：_paused事件控制监控循环暂停，_wake_event用于唤醒等待，_need_reset标记恢复时需要重置状态
-        self._paused = threading.Event()
+        # 暂停控制：优先使用调度器传入的共享 Event，实现暂停标志同步
+        self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
 
-        self._get_filename_regex()
+        # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
+        if StepFileMonitor._FILENAME_REGEX is None:
+            sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
 
     @property
     def is_running(self) -> bool:
@@ -278,6 +283,16 @@ class StepFileMonitor:
         self._paused.clear()
         self._wake_event.set()
         logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
+
+    def resume_only(self):
+        """仅恢复监控，不重置已处理文件集合。
+
+        用于 pause→resume 场景：_resume_paused_steps() 已完成断点续传扫描，
+        文件监控器只需继续检测新写入的 STEP 文件，无需重新扫描旧文件。
+        """
+        self._paused.clear()
+        self._wake_event.set()
+        logger.info("STEP 文件监控已恢复（仅清除暂停标志）")
 
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""

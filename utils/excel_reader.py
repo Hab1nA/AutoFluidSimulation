@@ -13,6 +13,9 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+# Excel 参数列范围（第2-5列，共4个参数）
+PARAM_COLUMN_RANGE = range(1, 5)
+
 # 延迟导入 openpyxl，仅在函数被调用时才导入，避免在模块导入时失败
 _openpyxl_imported = False
 _openpyxl = None
@@ -67,11 +70,11 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
 
             try:
                 config_name = int(row[0])  # 第1列：构型名称（整数）
-                params = [float(row[i]) for i in range(1, 5)]  # 第2-5列：参数
+                params = [float(row[i]) for i in PARAM_COLUMN_RANGE]  # 第2-5列：参数
                 configs[config_name] = params
-                logger.debug(f"  读取构型 {config_name}: 参数 = {params}")
+                logger.debug(f"读取构型 {config_name}: 参数 = {params}")
             except (ValueError, TypeError, IndexError) as e:
-                logger.warning(f"  跳过无效行: {row}, 错误: {e}")
+                logger.warning(f"跳过无效行: {row}, 错误: {e}")
                 continue
     finally:
         if wb is not None:

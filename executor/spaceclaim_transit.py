@@ -25,6 +25,9 @@
 import os
 import sys
 import io
+import codecs
+import json
+import time
 import traceback
 from datetime import datetime
 
@@ -67,11 +70,31 @@ class _SpaceClaimLogger(object):
         level_name = self._LEVEL_NAMES.get(level, "INFO")
         line = "[{}] [{}] [{}] {}".format(timestamp, level_name, self._name, msg)
         try:
-            with io.open(self._log_file, "a", encoding="utf-8") as f:
+            # 使用 codecs.open 替代 io.open：
+            # IronPython 2.7 的 io.open 不一定将 errors 参数传递到底层 StreamWriter，
+            # 导致 errors="replace" 不生效，遇到 \x00 等字符时仍抛 UnicodeEncodeError。
+            # codecs.open 在 Python 2 中对 errors 参数的支持更可靠。
+            with codecs.open(self._log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line + "\n")
+        except UnicodeEncodeError:
+            # codecs.open 的 errors="replace" 在 IronPython 2.7 中仍可能失效（
+            # .NET StreamWriter 编码设为 'unknown' 时），降级为 ASCII 写入。
+            try:
+                safe = line.encode("ascii", "replace").decode("ascii")
+                with codecs.open(self._log_file, "a", encoding="ascii", errors="replace") as f:
+                    f.write(safe + "\n")
+            except Exception:
+                pass
         except (IOError, OSError):
             pass
-        print(line)
+        try:
+            print(line)
+        except (UnicodeEncodeError, IOError, OSError):
+            # IronPython print 在某些编码环境下也可能失败
+            try:
+                print(line.encode("ascii", "replace").decode("ascii"))
+            except Exception:
+                pass
 
     def debug(self, msg):
         """记录 DEBUG 级别日志。"""
@@ -210,6 +233,51 @@ def _get_script_args():
 
 
 # ============================================================================
+# 文档关闭辅助
+# ============================================================================
+
+def _close_document(doc):
+    """关闭 SpaceClaim 文档，释放内部资源。
+
+    SpaceClaim API V23 的 Document 对象没有 Close() 方法。
+    通过多种方式尝试关闭，确保资源被释放：
+
+    1. Command.Execute("CloseWindow") — 通过 SpaceClaim 命令系统关闭当前窗口
+    2. doc.Window.Close() — 通过文档关联的 Window 对象关闭
+    3. Window.ActiveWindow.Close() — 关闭当前活动窗口
+
+    Args:
+        doc: SpaceClaim Document 对象（Document.Open 返回值）
+    """
+    # 方式1: 通过命令系统关闭（最可靠，与 Command.Execute("Exit") 同一体系）
+    try:
+        Command.Execute("CloseWindow")
+        return
+    except Exception:
+        pass
+
+    # 方式2: 通过文档的 Window 属性关闭
+    try:
+        window = doc.Window
+        if window is not None:
+            window.Close()
+            return
+    except Exception:
+        pass
+
+    # 方式3: 关闭当前活动窗口
+    try:
+        window = Window.ActiveWindow
+        if window is not None:
+            window.Close()
+            return
+    except Exception:
+        pass
+
+    logger.warning("所有文档关闭方式均失败，资源可能未释放")
+
+
+# ============================================================================
 # 主处理逻辑
 # ============================================================================
 
@@ -229,7 +297,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     step_path = os.path.join(step_dir, step_filename)
 
     logger.info("正在处理构型 {}".format(file_index))
-    logger.info("  输入文件: {}".format(step_path))
+    logger.info("输入文件: {}".format(step_path))
 
     # ------------------------------------------------------------------
     # 1. 检查输入文件
@@ -239,7 +307,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         return False
 
     file_size = os.path.getsize(step_path)
-    logger.info("  文件大小: {} bytes".format(file_size))
+    logger.info("文件大小: {} bytes".format(file_size))
 
     # ------------------------------------------------------------------
     # 2. 打开文档
@@ -331,9 +399,9 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for i, (lo, hi) in enumerate(selection_specs, 1):
         result = _create_named_selection(lo, hi)
         if result is not None:
-            logger.info("  组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.info("组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
         else:
-            logger.error("  组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
+            logger.error("组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
 
     # ------------------------------------------------------------------
     # 4b. 合并组4和组5（wall_chamber 和 wall_throat 的过渡段合并）
@@ -341,7 +409,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     logger.info("正在合并 组4 和 组5...")
     try:
         NamedSelection.Merge("组4", "组5")
-        logger.info("  组4+组5 合并成功")
+        logger.info("组4+组5 合并成功")
     except Exception as e:
         logger.warning("合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
         logger.warning("将跳过合并，这可能导致后续重命名映射偏移")
@@ -359,9 +427,9 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     for lo, hi in remaining_specs:
         result = _create_named_selection(lo, hi)
         if result is not None:
-            logger.info("  选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
+            logger.info("选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
         else:
-            logger.error("  选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
+            logger.error("选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
 
     # ------------------------------------------------------------------
     # 5. 重命名选择集为英文名
@@ -388,7 +456,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
             logger.info("  {} → {}".format(old_name, new_name))
             rename_success += 1
         except Exception as e:
-            logger.warning("  重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
+            logger.warning("重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
             rename_fail += 1
 
     if rename_fail > 0:
@@ -427,29 +495,237 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         return False
 
     # ------------------------------------------------------------------
-    # 8. 关闭文档
+    # 8. 关闭文档释放资源
     # ------------------------------------------------------------------
-    logger.info("正在关闭文档...")
+    # 不关闭文档会导致 SpaceClaim 内部文档句柄/内存累积，
+    # 约 2-3 个文档后进程因资源耗尽崩溃。
+    # SpaceClaim API V23 的 Document 对象没有 Close() 方法，
+    # 需要通过 Command.Execute("CloseWindow") 或 Window 对象关闭。
     try:
-        window = Window.ActiveWindow
-        if window is not None:
-            window.Close()
+        if doc is not None:
+            _close_document(doc)
             logger.info("文档已关闭")
-        else:
-            logger.info("无活动窗口（可能已自动关闭）")
     except Exception as e:
-        logger.info("关闭窗口时异常（可忽略）: {}: {}".format(type(e).__name__, e))
+        logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
 
     logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
     return True
 
 
-# ============================================================================
+# ===========================================================================
 # 脚本入口
 # ============================================================================
 # 说明：SpaceClaim 在 /RunScript 模式下会执行整个脚本文件。
 #       脚本末尾的 Main() 调用确保在作为 .py 文件直接运行时也能正常工作。
 #       SpaceClaim 不会自动调用 Main()，因此不存在双重执行问题。
+
+# ---- 常驻模式：文件协议 IPC ----
+# Bridge 启动 SpaceClaim 时设置 AUTOFLUID_SC_PERSISTENT=1，
+# 脚本进入命令轮询循环，SpaceClaim 进程不退出。
+#
+# 文件协议：
+#   命令: sc_cmd_{slot_id}.json              -> {"command":"process","run_id":"...","config":3,...}
+#   结果: sc_result_{slot_id}_{run_id}.json  -> {"config":"3","run_id":"...","success":true,...}
+#   就绪: sc_ready_{slot_id}.json            -> {"ready":true,"slot_id":0}
+#   退出: sc_cmd_{slot_id}.json              -> {"command":"quit"}
+_persistent_initialized = False
+
+def _persistent_loop():
+    """常驻模式主循环：轮询命令文件，执行转换，写入 per-run 结果文件。"""
+    global _persistent_initialized
+    if _persistent_initialized:
+        return
+    _persistent_initialized = True
+
+    cmd_dir = os.environ.get("AUTOFLUID_SC_CMD_DIR", "")
+    slot_id = os.environ.get("AUTOFLUID_SC_SLOT_ID", "0")
+
+    if not cmd_dir:
+        logger.error("常驻模式: AUTOFLUID_SC_CMD_DIR 未设置")
+        return
+
+    cmd_file = os.path.join(cmd_dir, "sc_cmd_{}.json".format(slot_id))
+    ready_file = os.path.join(cmd_dir, "sc_ready_{}.json".format(slot_id))
+
+    # 写入就绪标志
+    try:
+        with open(ready_file, "w") as f:
+            f.write('{"ready":true,"slot_id":' + str(slot_id) + '}\n')
+        logger.info("常驻模式: 就绪标志已写入 {}".format(ready_file))
+    except (IOError, OSError) as e:
+        logger.error("常驻模式: 写入就绪标志失败: {}".format(e))
+        return
+
+    poll_interval = 1.0
+    logger.info("常驻模式: 开始轮询命令文件 {}".format(cmd_file))
+
+    # result_file 在每条命令中按 run_id 动态计算
+    result_file = ""
+
+    while True:
+        try:
+            if not os.path.exists(cmd_file):
+                time.sleep(poll_interval)
+                continue
+
+            # 读取命令
+            try:
+                with open(cmd_file, "r") as f:
+                    cmd_data = json.load(f)
+            except (ValueError, IOError, OSError) as e:
+                logger.error("常驻模式: 读取命令文件失败: {}".format(e))
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                continue
+
+            # 检查退出命令
+            if cmd_data.get("command") == "quit":
+                logger.info("常驻模式: 收到退出命令")
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                break
+
+            config_name = str(cmd_data.get("config", ""))
+            step_dir = cmd_data.get("stepdir", "")
+            scdoc_dir = cmd_data.get("scdocdir", "")
+            run_id = cmd_data.get("run_id", "")
+
+            # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
+            if run_id:
+                result_file = os.path.join(
+                    cmd_dir, "sc_result_{}_{}".format(slot_id, run_id))
+            else:
+                # 兼容无 run_id 的旧命令格式
+                result_file = os.path.join(
+                    cmd_dir, "sc_result_{}".format(slot_id))
+
+            if not config_name or not step_dir or not scdoc_dir:
+                logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))
+                _write_result(result_file, config_name, False,
+                              "命令缺少必要字段", run_id=run_id)
+                try:
+                    os.remove(cmd_file)
+                except (IOError, OSError):
+                    pass
+                continue
+
+            # 清理命令文件（已读取）
+            try:
+                os.remove(cmd_file)
+            except (IOError, OSError):
+                pass
+
+            logger.info("=" * 40)
+            logger.info("常驻模式: 开始处理构型 {} (run={})".format(
+                config_name, run_id))
+            logger.info("STEP 目录: {}".format(step_dir))
+            logger.info("SCDOC 目录: {}".format(scdoc_dir))
+
+            success = process_step_file(config_name, step_dir, scdoc_dir)
+
+            _write_result(result_file, config_name, success,
+                          "转换成功" if success else "转换失败",
+                          run_id=run_id)
+
+            # ★ 日志调用单独包裹：即使日志器因编码问题崩溃，
+            #   也不会导致异常传播到外层 except（那会覆盖已写入的结果文件）
+            try:
+                if success:
+                    logger.info("常驻模式: 构型 {} 转换成功".format(config_name))
+                else:
+                    logger.error("常驻模式: 构型 {} 转换失败".format(config_name))
+            except Exception:
+                pass
+
+        except BaseException as e:
+            # ★ 使用 BaseException 而非 Exception：
+            #   在 IronPython/SpaceClaim 环境中，traceback.print_exc() 可能抛出
+            #   .NET 层面的 SystemException 等非 Python Exception 子类。
+            #   若仅捕获 Exception，这些异常会绕过处理器直接终止脚本。
+            try:
+                logger.critical("常驻模式: 主循环异常: {}: {}".format(
+                    type(e).__name__, e))
+            except Exception:
+                pass
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+            # 写入错误结果（使用最近的 result_file）
+            try:
+                _write_result(result_file, "", False,
+                              "主循环异常: {}: {}".format(type(e).__name__, e))
+            except Exception:
+                pass
+
+    logger.info("常驻模式: 退出命令循环")
+
+
+def _write_result(result_file, config_name, success, message="",
+                  run_id=None):
+    """写入结果文件。
+
+    使用原子写入模式：先写 .tmp 文件再 rename，确保 Python 端
+    不会读到半写状态的文件。写入后立即 flush + fsync，确保数据
+    落盘——即使后续代码抛出异常，结果文件也已可被 Python 端检测。
+    """
+    result = {
+        "config": config_name,
+        "success": bool(success),
+        "message": str(message),
+        "timestamp": time.time(),
+    }
+    if run_id:
+        result["run_id"] = run_id
+    try:
+        # 先写临时文件再重命名，确保原子性
+        tmp_file = result_file + ".tmp"
+        with io.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
+            json.dump(result, f)
+            f.write("\n")
+            # ★ 立即 flush + fsync：确保数据落盘，
+            #   即使后续代码抛出异常，Python 端也能读到完整结果
+            f.flush()
+            os.fsync(f.fileno())
+        # Windows 下 rename 目标存在时会报错，先删除
+        try:
+            if os.path.exists(result_file):
+                os.remove(result_file)
+        except (IOError, OSError):
+            pass
+        os.rename(tmp_file, result_file)
+        logger.debug("结果文件已写入: {}".format(result_file))
+    except Exception as e:
+        # 捕获所有异常（包括 UnicodeEncodeError），确保不会因编码问题
+        # 导致结果文件完全丢失。尝试以纯 ASCII 方式降级写入。
+        logger.error("写入结果文件失败: {}: {}".format(type(e).__name__, e))
+        try:
+            fallback = {
+                "config": config_name,
+                "success": bool(success),
+                "message": "result_write_error",
+                "timestamp": time.time(),
+            }
+            tmp_file = result_file + ".tmp"
+            with io.open(tmp_file, "w", encoding="ascii", errors="replace") as f:
+                json.dump(fallback, f)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                if os.path.exists(result_file):
+                    os.remove(result_file)
+            except (IOError, OSError):
+                pass
+            os.rename(tmp_file, result_file)
+            logger.info("降级写入结果文件成功: {}".format(result_file))
+        except Exception as e2:
+            logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
+
 
 def Main():
     """脚本主入口。由脚本末尾显式调用。"""
@@ -472,9 +748,9 @@ def Main():
 
         logger.info("=" * 60)
         logger.info("SpaceClaim Transit Script V23")
-        logger.info("  构型编号: {}".format(config_name))
-        logger.info("  STEP 目录: {}".format(step_dir))
-        logger.info("  SCDOC 目录: {}".format(scdoc_dir))
+        logger.info("构型编号: {}".format(config_name))
+        logger.info("STEP 目录: {}".format(step_dir))
+        logger.info("SCDOC 目录: {}".format(scdoc_dir))
         logger.info("=" * 60)
 
         success = process_step_file(config_name, step_dir, scdoc_dir)
@@ -504,6 +780,10 @@ def Main():
             logger.info("AUTOFLUID_SC_NOEXIT=1，跳过退出 SpaceClaim")
 
 
-# 显式调用 Main() —— SpaceClaim 不会自动调用，此处确保脚本执行
-Main()
-
+# ---- 脚本入口分发 ----
+# 常驻模式（AUTOFLUID_SC_PERSISTENT=1）：进入文件协议 IPC 循环
+# 一次性模式（默认）：执行 Main()
+if os.environ.get("AUTOFLUID_SC_PERSISTENT", "") == "1":
+    _persistent_loop()
+else:
+    Main()

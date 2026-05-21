@@ -18,6 +18,7 @@ from engine.config import (
     IPC_CONFIG,
 )
 from engine.scheduler.retry import RetryManager
+from engine.scheduler.utils import pause_aware_sleep
 
 
 # ====================================================================
@@ -113,7 +114,7 @@ class TestRetryManager:
     def test_pause_aware_sleep_completes(self):
         """无中断时 pause_aware_sleep 应正常完成。"""
         start = time.time()
-        result = self.retry_mgr.pause_aware_sleep(0.2)
+        result = pause_aware_sleep(0.2, self.paused, self.stopped)
         elapsed = time.time() - start
         assert result is True
         assert elapsed >= 0.15  # 允许一定误差
@@ -125,7 +126,7 @@ class TestRetryManager:
             self.stopped.set()
 
         threading.Thread(target=set_stopped, daemon=True).start()
-        result = self.retry_mgr.pause_aware_sleep(5.0)
+        result = pause_aware_sleep(5.0, self.paused, self.stopped)
         assert result is False
 
     def test_pause_aware_sleep_paused_then_resumed(self):
@@ -137,7 +138,7 @@ class TestRetryManager:
 
         threading.Thread(target=pause_and_resume, daemon=True).start()
         start = time.time()
-        result = self.retry_mgr.pause_aware_sleep(0.2)
+        result = pause_aware_sleep(0.2, self.paused, self.stopped)
         elapsed = time.time() - start
         assert result is True
         assert elapsed >= 0.15  # 应等待暂停期间

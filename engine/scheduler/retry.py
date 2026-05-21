@@ -5,7 +5,6 @@
 """
 
 import threading
-import time
 
 from engine.config import (
     STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
@@ -14,7 +13,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from utils.logger import setup_logger
 
-from .utils import pause_aware_sleep
+from .utils import pause_aware_sleep, wait_unless_paused_or_stopped
 
 logger = setup_logger(__name__)
 
@@ -72,9 +71,7 @@ class RetryManager:
                 return False
 
             # 检查暂停（在设置状态前检查，避免竞态）
-            while self._paused.is_set() and not self._stopped.is_set():
-                time.sleep(1)
-            if self._stopped.is_set():
+            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return False
 
             # 设置 Running 状态
@@ -84,9 +81,7 @@ class RetryManager:
             # 防止 pause() 在 set_step_status 之后被调用导致的竞态窗口
             if self._paused.is_set():
                 self.state.set_step_status(config_name, step_name, STATUS_PAUSED)
-                while self._paused.is_set() and not self._stopped.is_set():
-                    time.sleep(1)
-                if self._stopped.is_set():
+                if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                     return False
                 # 恢复后重新设置运行状态
                 self.state.set_step_status(config_name, step_name, STATUS_RUNNING)
@@ -96,6 +91,21 @@ class RetryManager:
             try:
                 success = execute_func(config_name)
                 if success:
+                    # ★ 执行成功后检查暂停标志：防止 pause 在 execute_func 执行期间
+                    #   被触发，导致 set_all_running_to_paused() 已将状态改为 PAUSED
+                    #   但此处又覆盖为 COMPLETED 的竞态。
+                    #   SC 步骤通过内部轮询循环检测 pause 并返回 False 来避免此问题，
+                    #   但 Transfer 等同步步骤无法中途检测 pause，因此在此统一保护。
+                    if self._paused.is_set():
+                        self.state.set_step_status(
+                            config_name, step_name, STATUS_PAUSED,
+                            "执行完成但系统已暂停"
+                        )
+                        logger.info(
+                            f"[{step_name}] 构型{config_name} 执行成功但系统已暂停，"
+                            f"标记为 Paused 而非 Completed"
+                        )
+                        return False
                     # 对于 Meshing 和 Solver，状态由调用者设置（因为需要等待远程完成）
                     if step_name not in ("Meshing", "Solver"):
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
@@ -128,7 +138,7 @@ class RetryManager:
                         # ★ 使用暂停感知 sleep：若暂停被触发，sleep 期间状态
                         #    会被 set_all_running_to_paused() 改为 Paused，
                         #    恢复后下一轮迭代会检测 _paused 并正确等待
-                        if not self.pause_aware_sleep(5 * attempt):
+                        if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                             return False  # stopped
             except (RuntimeError, ValueError, OSError) as e:
                 logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
@@ -137,17 +147,10 @@ class RetryManager:
                         config_name, step_name, STATUS_RETRYING,
                         f"异常重试 {attempt + 1}/{max_retries}: {e}"
                     )
-                    if not self.pause_aware_sleep(5 * attempt):
+                    if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                         return False  # stopped
 
         # 所有重试均失败
         self.state.set_step_status(config_name, step_name, STATUS_ERROR,
                                     f"重试 {max_retries} 次后仍然失败")
         return False
-
-    def pause_aware_sleep(self, duration: float, check_interval: float = 1.0) -> bool:
-        """可响应暂停/停止的 sleep 替代方法。
-
-        委托给共享函数 pause_aware_sleep。
-        """
-        return pause_aware_sleep(duration, self._paused, self._stopped, check_interval)

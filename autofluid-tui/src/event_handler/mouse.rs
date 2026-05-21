@@ -935,7 +935,7 @@ pub fn sb_vertical_hit(area: &ratatui::layout::Rect, total: usize, visible: usiz
     if col != area.x || row < area.y || row >= area.y + area.height {
         return None;
     }
-    let sb = VerticalScrollbar { total, visible, scroll };
+    let sb = VerticalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
     let ti = sb.thumb_info(area.height as usize)?;
     let rel = (row - area.y) as usize;
     if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
@@ -949,7 +949,7 @@ pub fn sb_horizontal_hit(area: &ratatui::layout::Rect, total: usize, visible: us
     if row != area.y || col < area.x || col >= area.x + area.width {
         return None;
     }
-    let sb = HorizontalScrollbar { total, visible, scroll };
+    let sb = HorizontalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
     let ti = sb.thumb_info(area.width as usize)?;
     let rel = (col - area.x) as usize;
     if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
@@ -968,7 +968,7 @@ pub fn sb_horizontal_track_hit(area: &ratatui::layout::Rect, col: u16, row: u16)
 }
 
 pub fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, row: u16) -> u16 {
-    let sb = VerticalScrollbar { total, visible, scroll };
+    let sb = VerticalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
     let rel = (row.saturating_sub(area.y)) as usize;
     let track_length = area.height as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
@@ -981,7 +981,7 @@ pub fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize,
 }
 
 pub fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16) -> u16 {
-    let sb = HorizontalScrollbar { total, visible, scroll };
+    let sb = HorizontalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
     let rel = (col.saturating_sub(area.x)) as usize;
     let track_length = area.width as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
@@ -994,7 +994,7 @@ pub fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usiz
 }
 
 pub fn sb_vertical_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
-    let sb = VerticalScrollbar { total, visible, scroll: start_scroll as usize };
+    let sb = VerticalScrollbar { total, visible, scroll: start_scroll as usize, track_color: None, thumb_color: None };
     let track_length = area.height as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let delta = current_pos as i32 - start_pos as i32;
@@ -1006,7 +1006,7 @@ pub fn sb_vertical_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, 
 }
 
 pub fn sb_horizontal_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
-    let sb = HorizontalScrollbar { total, visible, scroll: start_scroll as usize };
+    let sb = HorizontalScrollbar { total, visible, scroll: start_scroll as usize, track_color: None, thumb_color: None };
     let track_length = area.width as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let delta = current_pos as i32 - start_pos as i32;

@@ -15,7 +15,8 @@ from .worker_pool import WorkerPoolManager
 from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
-from .utils import pause_aware_sleep
+from .meshing_monitor import MeshingMonitor
+from .utils import pause_aware_sleep, wait_unless_paused_or_stopped, check_step_output_exists
 
 __all__ = [
     "PipelineScheduler",
@@ -23,5 +24,8 @@ __all__ = [
     "BarrierCoordinator",
     "SWPhaseHandler",
     "RetryManager",
+    "MeshingMonitor",
     "pause_aware_sleep",
+    "wait_unless_paused_or_stopped",
+    "check_step_output_exists",
 ]

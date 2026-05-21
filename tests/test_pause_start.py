@@ -53,6 +53,26 @@ class _MockSCPool:
     def run_config(self, *args, **kwargs): return True
 
 
+class _MockRemoteExecutor:
+    """Mock for RemoteExecutor, used by MeshingMonitor in tests."""
+    def __init__(self, state_manager):
+        self.state = state_manager
+        self._ssh_lock = threading.RLock()
+
+    def _get_ssh(self):
+        return None
+
+    def start_meshing(self, config_name: int) -> bool:
+        return True
+
+    def check_meshing_done(self, config_name: int) -> bool:
+        return False
+
+    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        time.sleep(0.1)
+        return True
+
+
 class MockTaskRunner:
     def __init__(self, state_manager: StateManager):
         self.state = state_manager
@@ -61,6 +81,7 @@ class MockTaskRunner:
         self._sw_call_count = 0
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
+        self._remote_executor = _MockRemoteExecutor(self.state)
 
     def execute_sw_step(self) -> bool:
         self._sw_call_count += 1
@@ -71,14 +92,23 @@ class MockTaskRunner:
             steps = int(self._sw_delay / 0.5)
             for _ in range(steps):
                 time.sleep(0.5)
+                # 暂停感知：模拟生产代码的 pause_aware_sleep
+                stopped = getattr(self, "_stopped_event", None)
+                if stopped is not None and stopped.is_set():
+                    return False
                 if self._pause_check_callback:
                     self._pause_check_callback()
 
         if self._sw_should_fail:
             print("  [MockTaskRunner] SW 宏模拟失败!")
             all_configs = self.state.get_all_configs()
-            for cn in all_configs:
-                self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
+            # 暂停期间失败：保留 Running 状态（与生产代码行为一致，
+            # 由 _execute_sw_macro 的暂停分支将 Running→Paused）
+            paused = getattr(self, "_paused_event", None)
+            is_paused = paused is not None and paused.is_set()
+            if not is_paused:
+                for cn in all_configs:
+                    self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
             self.state.set_sw_macro_started(False)
             return False
 
@@ -146,15 +176,18 @@ _OriginalStepFileMonitor = file_monitor_mod.StepFileMonitor
 class MockStepFileMonitor:
     _running = False
 
-    def __init__(self, step_dir=None, on_file_ready=None):
+    def __init__(self, step_dir=None, on_file_ready=None, shared_paused_event=None):
         self.step_dir = step_dir
         self.on_file_ready = on_file_ready
         self._processed_files = set()
-        self._paused = threading.Event()
+        self._known_files = set()
+        self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
         self._scan_count = 0
         self._scan_existing_count = 0
+        # 模拟 FileStableDetector，供 _prepare_sw_retry 清理追踪记录
+        self._detector = type("_MockDetector", (), {"_history": {}, "_first_seen": {}})()
 
     def start(self):
         self._running = True
@@ -164,9 +197,19 @@ class MockStepFileMonitor:
         self._running = False
         print("  [MockFileMonitor] 已停止")
 
+    @property
+    def is_running(self):
+        return self._running
+
     def pause(self):
         self._paused.set()
         print("  [MockFileMonitor] 已暂停")
+
+    def resume_only(self):
+        """仅恢复监控，不重置已处理文件集合。"""
+        self._paused.clear()
+        self._wake_event.set()
+        print("  [MockFileMonitor] 已恢复（仅清除暂停标志）")
 
     def resume_and_reset(self):
         self._need_reset = True
@@ -240,7 +283,7 @@ class TestContext:
     def run_pipeline_async(self):
         t = threading.Thread(target=self.scheduler.start_pipeline, daemon=True)
         t.start()
-        self.scheduler._pipeline_thread = t
+        self.scheduler.set_pipeline_thread(t)
         return t
 
     def wait_for_condition(self, condition, timeout: float = 10.0,

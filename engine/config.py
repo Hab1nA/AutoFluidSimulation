@@ -6,8 +6,7 @@
 """
 import os
 import sys
-import hashlib
-from typing import Any, Dict, List, Optional, TypedDict, cast
+from typing import Any, Optional, TypedDict, cast
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -85,6 +84,10 @@ class OperationTimeoutsConfig(TypedDict):
     ssh_connection: int
     dir_recursion_limit: int
     ssh_upload_max_retries: int
+    # SpaceClaim 启动相关超时
+    sc_process_appear_timeout: int  # 启动exe后等待进程出现(秒)
+    sc_gui_ready_timeout: int       # 进程出现后等待主窗口可交互(秒)
+    sc_gui_stable_delay: int        # 主窗口就绪后额外等待后台稳定(秒)
 
 
 class EngineConfig(TypedDict):
@@ -93,13 +96,14 @@ class EngineConfig(TypedDict):
     sw_close_doc_on_finish: bool
     sw_exit_on_finish: bool
     sw_visible: bool
-    sw_max_retries: int
     sc_timeout: int
     transfer_timeout: int
     meshing_timeout: int
     solver_timeout: int
     max_retries: int
     state_refresh_interval: float
+    sc_persistent_ready_timeout: int
+    sc_scdoc_stable_seconds: float
 
 
 # ============================================================================
@@ -273,30 +277,19 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     "dir_recursion_limit": 32,
     # 文件上传重试的最大次数
     "ssh_upload_max_retries": 3,
+    # SpaceClaim 启动相关超时
+    # 启动 exe 后等待进程在系统中出现的最大秒数
+    "sc_process_appear_timeout": 120,
+    # 进程出现后等待主窗口可交互的最大秒数
+    "sc_gui_ready_timeout": 30,
+    # 主窗口就绪后额外等待后台加载稳定的秒数
+    "sc_gui_stable_delay": 15,
 }
 
 # ============================================================================
-# 配置指纹与数据库分片
+# 配置指纹与数据库分片（实际实现已迁入 config_fingerprint.py）
 # ============================================================================
-
-def compute_config_fingerprint(configs: Dict[int, List[float]]) -> str:
-    """
-    计算构型组合的指纹（MD5 前 8 位）。
-
-    同一组构型组合产生相同指纹，用于数据库文件分片——
-    修改 Excel 设计表后构型组合变化，指纹随之变化，自动使用新数据库。
-    """
-    items = sorted(configs.items())
-    canonical = ";".join(
-        f"{name}:" + ",".join(f"{p:.6g}" for p in params)
-        for name, params in items
-    )
-    return hashlib.md5(canonical.encode()).hexdigest()[:8]
-
-
-def get_db_path_for_fingerprint(fingerprint: str) -> str:
-    """根据配置指纹生成对应的数据库文件路径。"""
-    return os.path.join(LOCAL_PATHS["data_dir"], f"pipeline_state_{fingerprint}.db")
+from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint  # noqa: F401
 
 
 # ============================================================================
@@ -314,8 +307,6 @@ ENGINE_CONFIG: EngineConfig = {
     "sw_close_doc_on_finish": True,
     "sw_exit_on_finish": True,
     "sw_visible": True,
-    # SW 宏执行最大重试次数（默认 1 = 不重试，SW 启动/执行开销大）
-    "sw_max_retries": 2,
     # SC 脚本执行超时（秒）
     "sc_timeout": 300,
     # 文件传输超时（秒）
@@ -328,6 +319,10 @@ ENGINE_CONFIG: EngineConfig = {
     "max_retries": 3,
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": 0.5,
+    # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
+    "sc_persistent_ready_timeout": 180,
+    # SC SCDOC 文件大小稳定判定窗口（秒）—— SaveAs 完成的判定依据
+    "sc_scdoc_stable_seconds": 3.0,
 }
 
 
@@ -418,16 +413,68 @@ def load_toml_config(toml_path: Optional[str] = None) -> dict[str, Any]:
         return {}
 
 
+def _expand_env_vars(value: Any) -> Any:
+    """展开字符串值中的 ${VAR} 环境变量引用。非字符串值原样返回。"""
+    if not isinstance(value, str):
+        return value
+    import re
+    def _replace(m: "re.Match[str]") -> str:
+        var_name = m.group(1)
+        return os.environ.get(var_name, m.group(0))  # 未定义则保留原文
+    return re.sub(r'\$\{(\w+)\}', _replace, value)
+
+
+def _expand_dict_env_vars(d: dict) -> dict:
+    """展开字典中所有字符串值的 ${VAR} 环境变量引用。"""
+    return {k: _expand_env_vars(v) for k, v in d.items()}
+
+
 def reload_config_from_toml() -> bool:
-    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。"""
+    """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。
+
+    TOML 中支持 ${VAR} 语法引用环境变量（如 ``password = "${AUTOFLUID_SSH_PASSWORD}"``）。
+    """
     toml_data = load_toml_config()
     if toml_data:
+        # 展开 ${VAR} 环境变量引用（如 password = "${AUTOFLUID_SSH_PASSWORD}"）
+        for section_key in toml_data:
+            if isinstance(toml_data[section_key], dict):
+                toml_data[section_key] = _expand_dict_env_vars(toml_data[section_key])
         if "local_paths" in toml_data:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:
             REMOTE_CONFIG.update(toml_data["remote_config"])
         if "step_file_patterns" in toml_data:
             STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
+        # 新分类格式：按工具维度拆分为 solidworks / spaceclaim / global_settings
+        if "solidworks" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["solidworks"].items()
+                 if k in ENGINE_CONFIG})
+            )
+            OPERATION_TIMEOUTS.update(
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["solidworks"].items()
+                 if k in OPERATION_TIMEOUTS})
+            )
+        if "spaceclaim" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in ENGINE_CONFIG})
+            )
+            OPERATION_TIMEOUTS.update(
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in OPERATION_TIMEOUTS})
+            )
+        if "global_settings" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["global_settings"].items()
+                 if k in ENGINE_CONFIG})
+            )
+            OPERATION_TIMEOUTS.update(
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["global_settings"].items()
+                 if k in OPERATION_TIMEOUTS})
+            )
+        # 向后兼容：旧格式 engine_config / operation_timeouts
         if "engine_config" in toml_data:
             ENGINE_CONFIG.update(toml_data["engine_config"])
         if "operation_timeouts" in toml_data:
@@ -438,7 +485,9 @@ def reload_config_from_toml() -> bool:
 
 
 # 启动时尝试加载 TOML 配置，合并到默认值中
-reload_config_from_toml()
+# 注：由 daemon 启动时通过 ensure_directories() + validate_config() 显式调用，
+# 避免模块加载时自动执行带来的测试副作用
+# reload_config_from_toml()
 
 
 def validate_config() -> list:

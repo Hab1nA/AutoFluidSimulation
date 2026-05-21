@@ -107,8 +107,17 @@ class RemoteWorkstation:
         logger.info("SSH 连接已断开")
 
     def is_connected(self) -> bool:
-        """检查 SSH 是否已连接。"""
-        return self._ssh is not None and self._ssh.get_transport() is not None and self._ssh.get_transport().is_active()
+        """检查 SSH 是否已连接（含心跳验证）。"""
+        if self._ssh is None:
+            return False
+        transport = self._ssh.get_transport()
+        if transport is None or not transport.is_active():
+            return False
+        try:
+            transport.send_ignore()
+            return True
+        except (OSError, EOFError):
+            return False
 
     def ensure_connected(self) -> bool:
         """确保连接有效，若断开则自动重连。"""
@@ -146,8 +155,9 @@ class RemoteWorkstation:
                 self._ensure_remote_dir(remote_dir)
 
                 logger.info(f"正在上传: {local_path} -> {remote_path}")
-                # 再次确认 SFTP 连接有效（防止类型检查器报错）
-                assert self._sftp is not None, "SFTP 连接已断开"
+                # 再次确认 SFTP 连接有效
+                if self._sftp is None:
+                    raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
                 self._sftp.put(local_path, remote_path)
                 logger.info(f"上传完成: {os.path.basename(local_path)}")
                 return True
@@ -216,7 +226,10 @@ class RemoteWorkstation:
 
     def delete_remote_file(self, remote_path: str) -> bool:
         """
-        删除远程工作站上的单个文件。
+        删除远程工作站上的单个文件（通过 SFTP 协议）。
+
+        使用 SFTP remove() 而非 shell 命令，避免依赖远程默认 shell 类型
+        （cmd.exe / PowerShell）导致的静默失败问题。
 
         Args:
             remote_path: 远程文件完整路径
@@ -226,11 +239,18 @@ class RemoteWorkstation:
         """
         if not self.ensure_connected():
             return False
+        if self._sftp is None:
+            logger.error(f"SFTP 未就绪，无法删除远程文件: {remote_path}")
+            return False
+        # SFTP 协议要求使用正斜杠
+        normalized = remote_path.replace("\\", "/")
         try:
-            # 使用 if exist + del /f 安全删除（/f 强制只读文件删除）
-            escaped = remote_path.replace('"', '\\"')
-            self.exec_command(f'if exist "{escaped}" del /f "{escaped}"')
+            self._sftp.remove(normalized)
             logger.info(f"远程文件已删除: {remote_path}")
+            return True
+        except FileNotFoundError:
+            # 文件本就不存在，视为成功
+            logger.debug(f"远程文件不存在（跳过）: {remote_path}")
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"远程文件删除失败: {remote_path}: {e}")
@@ -333,8 +353,8 @@ class RemoteWorkstation:
         logger.debug(f"标志文件: {flag_file}")
 
         try:
-            # 先清理旧的标志文件
-            self.exec_command(f'if exist "{flag_file}" del /f "{flag_file}"')
+            # 先清理旧的标志文件（使用 SFTP 删除，避免 shell 兼容性问题）
+            self.delete_remote_file(flag_file)
 
             # 通过 PowerShell 启动后台进程
             _, stderr, exit_code = self.exec_command(full_command, timeout=15)

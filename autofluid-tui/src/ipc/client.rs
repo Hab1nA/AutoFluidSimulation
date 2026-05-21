@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use super::protocol::{IpcRequest, IpcResponse};
@@ -7,6 +7,7 @@ use super::protocol::{IpcRequest, IpcResponse};
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9527;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB 行长度上限
 
 pub struct IpcClient {
     host: String,
@@ -60,15 +61,35 @@ impl IpcClient {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
 
-        // ★ 使用独立的 result 变量暂存结果，
-        //    以便在所有路径上都能将 stream 归还给 self.stream
-        let result = match tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_until(b'\n', &mut buffer)).await {
-            Ok(Ok(0)) => {
-                // 对端关闭连接 → stream 已不可用，丢弃
-                self.stream = None;
-                Err("连接已断开".to_string())
-            }
-            Ok(Ok(_)) => {
+        // 带长度限制的行读取：防止异常长响应导致内存溢出
+        let read_result = tokio::time::timeout(
+            DEFAULT_TIMEOUT,
+            async {
+                loop {
+                    let mut byte = [0u8; 1];
+                    match reader.read(&mut byte).await {
+                        Ok(0) => return Ok(false), // EOF
+                        Ok(_) => {
+                            buffer.push(byte[0]);
+                            if byte[0] == b'\n' {
+                                return Ok(true); // 行结束
+                            }
+                            if buffer.len() > MAX_RESPONSE_BYTES {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
+                                ));
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            },
+        ).await;
+
+        match read_result {
+            Ok(Ok(true)) => {
+                // 正常读取成功：从 reader 取回 stream 归还
                 let stream = reader.into_inner();
                 self.stream = Some(stream);
                 match IpcResponse::deserialize(&buffer) {
@@ -76,9 +97,14 @@ impl IpcClient {
                     None => Err("无效响应格式".to_string()),
                 }
             }
+            Ok(Ok(false)) => {
+                // 对端关闭连接 → stream 已不可用，丢弃
+                Err("连接已断开".to_string())
+            }
             Ok(Err(e)) => {
-                // 读取 I/O 错误：stream 可能已损坏
-                self.stream = None;
+                // 读取 I/O 错误（含超长响应拒绝）
+                let stream = reader.into_inner();
+                self.stream = Some(stream);
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
@@ -87,9 +113,7 @@ impl IpcClient {
                 self.stream = Some(stream);
                 Err("请求超时".to_string())
             }
-        };
-
-        result
+        }
     }
 
     pub async fn start_pipeline(&mut self) -> Result<IpcResponse, String> {

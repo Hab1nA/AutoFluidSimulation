@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::state::app_state::{AppState, FocusZone, UiMode};
-use crate::utils::char_to_byte_index;
 
 pub enum AppAction {
     None,
@@ -25,10 +24,6 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_quit = true;
-            AppAction::Quit
-        }
         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.should_quit = true;
             AppAction::Quit
@@ -55,60 +50,67 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
 fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
         KeyCode::Enter => {
-            let cmd = state.command_input.clone();
-            state.command_input.clear();
-            state.command_cursor = 0;
+            let cmd = state.command_buffer.text.clone();
+            state.command_buffer = Default::default();
             if !cmd.is_empty() {
                 AppAction::SubmitCommand(cmd)
             } else {
                 AppAction::None
             }
         }
+        // ── Clipboard shortcuts ──────────────────────────────────
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.select_all();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.copy_selection();
+            AppAction::None
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.cut_selection();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.paste_from_clipboard();
+            state.needs_redraw = true;
+            AppAction::None
+        }
+        // ── Regular editing ─────────────────────────────────────
         KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
+            state.command_buffer.input_char(c);
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Backspace => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.needs_redraw = true;
-            }
+            state.command_buffer.input_backspace();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Delete => {
-            if state.command_cursor < state.command_input.chars().count() {
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.needs_redraw = true;
-            }
+            state.command_buffer.input_delete();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Left => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                state.needs_redraw = true;
-            }
+            state.command_buffer.move_cursor_left();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Right => {
-            if state.command_cursor < state.command_input.chars().count() {
-                state.command_cursor += 1;
-                state.needs_redraw = true;
-            }
+            state.command_buffer.move_cursor_right();
+            state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::Home => {
-            state.command_cursor = 0;
+            state.command_buffer.move_cursor_home();
             state.needs_redraw = true;
             AppAction::None
         }
         KeyCode::End => {
-            state.command_cursor = state.command_input.chars().count();
+            state.command_buffer.move_cursor_end();
             state.needs_redraw = true;
             AppAction::None
         }
@@ -116,225 +118,139 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 }
 
-fn handle_table_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
-    match key.code {
-        KeyCode::Up => {
-            if state.table_scroll_offset > 0 {
-                state.table_scroll_offset -= 1;
-                state.needs_redraw = true;
-            }
-            AppAction::None
+/// 滚动区域的公共行为配置。
+/// 各区域通过实现此 trait 来定义自己的滚动偏移和自动滚动语义。
+trait ScrollArea {
+    /// 获取当前滚动偏移
+    fn offset(&self) -> u16;
+    /// 设置滚动偏移
+    fn set_offset(&mut self, val: u16);
+    /// 是否禁用自动滚动（Up/PageUp/Home 时调用）
+    fn disable_auto_scroll(&mut self) {}
+    /// End 键的自定义行为（默认：跳到底部）
+    fn handle_end(&mut self) {
+        self.set_offset(u16::MAX);
+    }
+}
+
+/// 处理滚动区域的 Up/Down/PageUp/PageDown/Home/End 键，返回是否需要重绘
+fn handle_scroll_keys(key: KeyCode, area: &mut dyn ScrollArea) -> bool {
+    match key {
+        KeyCode::Up if area.offset() > 0 => {
+            area.set_offset(area.offset() - 1);
+            area.disable_auto_scroll();
+            return true;
         }
         KeyCode::Down => {
-            state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
-            state.needs_redraw = true;
-            AppAction::None
+            area.set_offset(area.offset().saturating_add(1));
+            return true;
         }
         KeyCode::PageUp => {
-            if state.table_scroll_offset >= 10 {
-                state.table_scroll_offset -= 10;
-            } else {
-                state.table_scroll_offset = 0;
-            }
-            state.needs_redraw = true;
-            AppAction::None
+            let new = area.offset().saturating_sub(10);
+            area.set_offset(new);
+            area.disable_auto_scroll();
+            return true;
         }
         KeyCode::PageDown => {
-            state.table_scroll_offset = state.table_scroll_offset.saturating_add(10);
-            state.needs_redraw = true;
-            AppAction::None
+            area.set_offset(area.offset().saturating_add(10));
+            return true;
         }
         KeyCode::Home => {
-            state.table_scroll_offset = 0;
-            state.needs_redraw = true;
-            AppAction::None
+            area.set_offset(0);
+            area.disable_auto_scroll();
+            return true;
         }
         KeyCode::End => {
-            state.table_scroll_offset = u16::MAX;
-            state.needs_redraw = true;
-            AppAction::None
+            area.handle_end();
+            return true;
         }
+        _ => {}
+    }
+    false
+}
+
+/// 处理非焦点区域的 Enter/Char/Backspace 命令输入（切换到 CommandInput 焦点）
+fn handle_command_passthrough(key: KeyCode, state: &mut AppState) -> AppAction {
+    match key {
         KeyCode::Enter => {
-            let cmd = state.command_input.clone();
+            let cmd = state.command_buffer.text.clone();
             if !cmd.is_empty() {
-                state.command_input.clear();
-                state.command_cursor = 0;
-                AppAction::SubmitCommand(cmd)
-            } else {
-                AppAction::None
+                state.command_buffer = Default::default();
+                return AppAction::SubmitCommand(cmd);
             }
         }
         KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
+            state.command_buffer.input_char(c);
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
-            AppAction::None
         }
-        KeyCode::Backspace => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.focus_zone = FocusZone::CommandInput;
-                state.needs_redraw = true;
-            }
-            AppAction::None
+        KeyCode::Backspace if state.command_buffer.cursor > 0 => {
+            state.command_buffer.input_backspace();
+            state.focus_zone = FocusZone::CommandInput;
+            state.needs_redraw = true;
         }
-        _ => AppAction::None,
+        _ => {}
     }
+    AppAction::None
+}
+
+// ── 各区域的 ScrollArea 实现 ────────────────────────────────────
+
+struct TableScroll<'a>(&'a mut AppState);
+impl ScrollArea for TableScroll<'_> {
+    fn offset(&self) -> u16 { self.0.table_scroll_offset }
+    fn set_offset(&mut self, val: u16) { self.0.table_scroll_offset = val; }
+}
+
+struct InfoLogScroll<'a>(&'a mut AppState);
+impl ScrollArea for InfoLogScroll<'_> {
+    fn offset(&self) -> u16 { self.0.info_log_scroll }
+    fn set_offset(&mut self, val: u16) { self.0.info_log_scroll = val; }
+    fn disable_auto_scroll(&mut self) { self.0.info_log_auto_scroll = false; }
+    fn handle_end(&mut self) { self.0.info_log_auto_scroll = true; }
+}
+
+struct DetailLogScroll<'a>(&'a mut AppState);
+impl ScrollArea for DetailLogScroll<'_> {
+    fn offset(&self) -> u16 { self.0.detail_log_scroll }
+    fn set_offset(&mut self, val: u16) { self.0.detail_log_scroll = val; }
+    fn disable_auto_scroll(&mut self) { self.0.detail_log_auto_scroll = false; }
+    fn handle_end(&mut self) { self.0.detail_log_auto_scroll = true; }
+}
+
+// ── 简化后的各区域处理函数 ─────────────────────────────────────
+
+fn handle_table_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
+    let mut area = TableScroll(state);
+    if handle_scroll_keys(key.code, &mut area) {
+        state.needs_redraw = true;
+        return AppAction::None;
+    }
+    handle_command_passthrough(key.code, state)
 }
 
 fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
-    match key.code {
-        KeyCode::Up => {
-            if state.info_log_scroll > 0 {
-                state.info_log_scroll -= 1;
-                state.info_log_auto_scroll = false;
-                state.needs_redraw = true;
-            }
-            AppAction::None
-        }
-        KeyCode::Down => {
-            state.info_log_scroll = state.info_log_scroll.saturating_add(1);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageUp => {
-            if state.info_log_scroll >= 10 {
-                state.info_log_scroll -= 10;
-            } else {
-                state.info_log_scroll = 0;
-            }
-            state.info_log_auto_scroll = false;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageDown => {
-            state.info_log_scroll = state.info_log_scroll.saturating_add(10);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Home => {
-            state.info_log_scroll = 0;
-            state.info_log_auto_scroll = false;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::End => {
-            state.info_log_auto_scroll = true;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Enter => {
-            let cmd = state.command_input.clone();
-            if !cmd.is_empty() {
-                state.command_input.clear();
-                state.command_cursor = 0;
-                AppAction::SubmitCommand(cmd)
-            } else {
-                AppAction::None
-            }
-        }
-        KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
-            state.focus_zone = FocusZone::CommandInput;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Backspace => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.focus_zone = FocusZone::CommandInput;
-                state.needs_redraw = true;
-            }
-            AppAction::None
-        }
-        _ => AppAction::None,
+    let mut area = InfoLogScroll(state);
+    if handle_scroll_keys(key.code, &mut area) {
+        state.needs_redraw = true;
+        return AppAction::None;
     }
+    handle_command_passthrough(key.code, state)
 }
 
 fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
-    match key.code {
-        KeyCode::Up => {
-            if state.detail_log_scroll > 0 {
-                state.detail_log_scroll -= 1;
-                state.detail_log_auto_scroll = false;
-                state.needs_redraw = true;
-            }
-            AppAction::None
-        }
-        KeyCode::Down => {
-            state.detail_log_scroll = state.detail_log_scroll.saturating_add(1);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageUp => {
-            if state.detail_log_scroll >= 10 {
-                state.detail_log_scroll -= 10;
-            } else {
-                state.detail_log_scroll = 0;
-            }
-            state.detail_log_auto_scroll = false;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageDown => {
-            state.detail_log_scroll = state.detail_log_scroll.saturating_add(10);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Home => {
-            state.detail_log_scroll = 0;
-            state.detail_log_auto_scroll = false;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::End => {
-            state.detail_log_auto_scroll = true;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Char('t') => {
-            state.detail_log_auto_scroll = !state.detail_log_auto_scroll;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Enter => {
-            let cmd = state.command_input.clone();
-            if !cmd.is_empty() {
-                state.command_input.clear();
-                state.command_cursor = 0;
-                AppAction::SubmitCommand(cmd)
-            } else {
-                AppAction::None
-            }
-        }
-        KeyCode::Char(c) => {
-            let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-            state.command_input.insert(byte_pos, c);
-            state.command_cursor += 1;
-            state.focus_zone = FocusZone::CommandInput;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Backspace => {
-            if state.command_cursor > 0 {
-                state.command_cursor -= 1;
-                let byte_pos = char_to_byte_index(&state.command_input, state.command_cursor);
-                state.command_input.remove(byte_pos);
-                state.focus_zone = FocusZone::CommandInput;
-                state.needs_redraw = true;
-            }
-            AppAction::None
-        }
-        _ => AppAction::None,
+    let mut area = DetailLogScroll(state);
+    if handle_scroll_keys(key.code, &mut area) {
+        state.needs_redraw = true;
+        return AppAction::None;
     }
+    // detail_log 独有：'t' 键切换自动滚动
+    if key.code == KeyCode::Char('t') {
+        state.detail_log_auto_scroll = !state.detail_log_auto_scroll;
+        state.needs_redraw = true;
+        return AppAction::None;
+    }
+    handle_command_passthrough(key.code, state)
 }
 
 fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {

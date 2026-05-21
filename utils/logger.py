@@ -3,6 +3,11 @@
 支持会话管理：每次进程启动时通过 init_session() 创建独立的日志存放目录，
 实现按进程类型 (daemon/client) 和启动时间层级化组织日志文件。
 
+延迟日志文件创建：
+  当 init_session() 尚未被调用时，setup_logger() 不创建文件 handler，
+  而是附加 _BufferHandler 将日志缓冲到内存。init_session() 被调用后，
+  缓冲的日志回写到文件，确保测试脚本等非会话场景不会产生散落的日志文件。
+
 新增功能：
 - LogEntry 数据类：结构化日志条目，支持 IPC 传输
 - LogBroadcastHandler：将日志记录存入线程安全环形缓冲区，
@@ -19,6 +24,37 @@ from datetime import datetime, timezone
 _session_type: str | None = None
 _session_timestamp: str | None = None
 _session_log_dir: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# 延迟日志文件创建支持
+# ---------------------------------------------------------------------------
+
+
+class _BufferHandler(logging.Handler):
+    """临时日志处理器，将格式化后的消息缓冲到列表中。
+
+    当 init_session() 尚未被调用时，setup_logger() 使用此 handler
+    代替 FileHandler。init_session() 后，缓冲内容回写到文件。
+    """
+
+    def __init__(self, formatter: logging.Formatter):
+        super().__init__(level=logging.DEBUG)
+        self._formatter = formatter
+        self.buffer: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.buffer.append(self._formatter.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+# (logger, buffer_handler, formatter) — 等待 init_session() 后回写
+_deferred_loggers: list[
+    tuple[logging.Logger, _BufferHandler, logging.Formatter]
+] = []
+_deferred_lock = threading.Lock()
 
 
 def init_session(process_type: str, timestamp: str | None = None) -> str:
@@ -50,6 +86,9 @@ def init_session(process_type: str, timestamp: str | None = None) -> str:
     base_log_dir = _resolve_base_log_dir()
     _session_log_dir = os.path.join(base_log_dir, process_type, timestamp)
     os.makedirs(_session_log_dir, exist_ok=True)
+
+    # 会话目录已就绪，将之前缓冲的日志回写到文件
+    _flush_deferred_loggers()
 
     return _session_log_dir
 
@@ -118,13 +157,15 @@ def _infer_log_category(name: str) -> str:
     return "daemon"
 
 
-def setup_logger(name: str, log_file: str = None) -> logging.Logger:
+def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
     """创建并配置一个 logger 实例。
 
     若已通过 init_session() 初始化会话，日志文件将存放在会话目录下，
-    文件名为 {name}.log；否则根据模块名称自动推断分类，
-    回退到 ``logs/{category}/`` 目录，
-    文件名为 {name}_{时间戳}_{PID}.log。
+    文件名为 {name}.log；若 log_file 参数被显式指定则使用该路径。
+
+    当 init_session() 尚未被调用且未指定 log_file 时，不创建文件 handler，
+    而是附加 _BufferHandler 将日志缓冲到内存。待 init_session() 被调用后，
+    缓冲内容回写到文件，避免测试脚本等非会话场景在 logs/ 根目录产生散落文件。
     """
 
     logger = logging.getLogger(name)
@@ -145,14 +186,15 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
 
     if log_file is None:
         if _session_log_dir is not None:
+            # 会话已初始化，直接创建文件 handler
             log_file = os.path.join(_session_log_dir, f"{name}.log")
         else:
-            category = _infer_log_category(name)
-            log_dir = os.path.join(_resolve_base_log_dir(), category)
-            os.makedirs(log_dir, exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-            pid = os.getpid()
-            log_file = os.path.join(log_dir, f"{name}_{timestamp}_{pid}.log")
+            # 会话未初始化：附加临时 buffer handler，延迟写文件
+            buf_handler = _BufferHandler(formatter)
+            logger.addHandler(buf_handler)
+            with _deferred_lock:
+                _deferred_loggers.append((logger, buf_handler, formatter))
+            return logger
     else:
         log_parent = os.path.dirname(os.path.abspath(log_file))
         os.makedirs(log_parent, exist_ok=True)
@@ -163,6 +205,32 @@ def setup_logger(name: str, log_file: str = None) -> logging.Logger:
     logger.addHandler(file_handler)
 
     return logger
+
+
+def _flush_deferred_loggers() -> None:
+    """将缓冲的日志回写到文件，在 init_session() 内部调用。"""
+    with _deferred_lock:
+        deferred = list(_deferred_loggers)
+        _deferred_loggers.clear()
+
+    for logger, buf_handler, formatter in deferred:
+        log_file = os.path.join(_session_log_dir, f"{logger.name}.log")  # type: ignore[arg-type]
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+
+        # 先写入缓冲内容
+        for msg in buf_handler.buffer:
+            file_handler.emit(
+                logging.LogRecord(
+                    name=logger.name, level=logging.DEBUG, pathname="", lineno=0,
+                    msg=msg, args=(), exc_info=None,
+                )
+            )
+
+        # 替换 handler：移除 buffer，添加 file handler
+        logger.removeHandler(buf_handler)
+        logger.addHandler(file_handler)
 
 
 # ============================================================================
@@ -395,6 +463,9 @@ def get_broadcast_handler() -> LogBroadcastHandler | None:
         return _broadcast_handler
 
 
+_MAX_BROADCAST_CAPACITY: int = 2000
+
+
 def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     """创建并安装全局 LogBroadcastHandler 到 root logger。
 
@@ -402,7 +473,7 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     使用线程锁保护，防止多线程并发安装导致重复 handler。
 
     Args:
-        capacity: 环形缓冲区容量
+        capacity: 环形缓冲区容量（硬性上限为 2000 条）
 
     Returns:
         LogBroadcastHandler 实例
@@ -413,7 +484,8 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
         if _broadcast_handler is not None:
             return _broadcast_handler
 
-        _broadcast_handler = LogBroadcastHandler(capacity=capacity)
+        clamped = min(capacity, _MAX_BROADCAST_CAPACITY)
+        _broadcast_handler = LogBroadcastHandler(capacity=clamped)
 
         root_logger = logging.getLogger()
         root_logger.addHandler(_broadcast_handler)

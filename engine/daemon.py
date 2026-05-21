@@ -32,8 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, ensure_directories, validate_config,
-    compute_config_fingerprint, get_db_path_for_fingerprint,
 )
+from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
@@ -151,7 +151,9 @@ class PipelineDaemon:
             self._running = False
             return
 
-        # ---- 0.5 验证配置 ----
+        # ---- 0.5 加载 TOML 配置 & 验证 ----
+        from engine.config import reload_config_from_toml
+        reload_config_from_toml()
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")
@@ -192,6 +194,17 @@ class PipelineDaemon:
         self.runner = TaskRunner(self.state)
         self.scheduler = PipelineScheduler(self.state, self.runner)
 
+        # ---- 2.5 启动时状态一致性检查 ----
+        # 新进程没有调度器线程，残留的 paused/running 状态一定是不一致的
+        # （stop() 挂起或进程被杀导致 set_engine_status("stopped") 未执行）
+        stale_status = self.state.get_engine_status()
+        if stale_status in ("paused", "running"):
+            logger.warning(
+                f"检测到残留引擎状态 '{stale_status}'（可能是上次退出时 stop() 未完成），"
+                f"重置为 stopped"
+            )
+            self.state.set_engine_status("stopped")
+
         self.ipc_server = IPCServer()
         self.ipc_server.register_default_handlers(self)
 
@@ -218,7 +231,7 @@ class PipelineDaemon:
             while self._running:
                 time.sleep(1)
         except KeyboardInterrupt:
-            logger.info("收到中断信号")
+            logger.info("TUI 客户端退出，后台引擎关闭")
         finally:
             self.shutdown()
 
@@ -250,8 +263,8 @@ class PipelineDaemon:
             logger.info(f"收到信号 {signum}，正在关闭...")
             self._running = False
 
-        # Windows 上仅支持 SIGINT 和 SIGTERM（部分）
-        for sig in [signal.SIGINT, signal.SIGTERM]:
+        # 仅保留 SIGTERM —— Ctrl+C (SIGINT) 在 TUI 客户端中已被分配给复制功能
+        for sig in [signal.SIGTERM]:
             try:
                 signal.signal(sig, signal_handler)
             except (AttributeError, ValueError):
@@ -261,7 +274,7 @@ class PipelineDaemon:
     # IPC 命令处理器
     # ------------------------------------------------------------------
 
-    def handle_start(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_start(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 start 命令（启动或继续流水线）。
 
         状态机：
@@ -295,7 +308,7 @@ class PipelineDaemon:
                     name="SchedulerMain"
                 )
                 scheduler_thread.start()
-                self.scheduler._pipeline_thread = scheduler_thread
+                self.scheduler.set_pipeline_thread(scheduler_thread)
                 return True, None, "流水线已重新启动（从断点恢复）"
             # 正常暂停恢复：pipeline 存活或暂停标志正常置位
             self.scheduler.resume()
@@ -311,11 +324,11 @@ class PipelineDaemon:
             name="SchedulerMain"
         )
         scheduler_thread.start()
-        self.scheduler._pipeline_thread = scheduler_thread
+        self.scheduler.set_pipeline_thread(scheduler_thread)
 
         return True, None, "流水线已启动"
 
-    def handle_pause(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_pause(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 pause 命令。
 
         暂停行为取决于当前所处阶段：
@@ -332,24 +345,24 @@ class PipelineDaemon:
         self.scheduler.pause()
         return True, None, "流水线已暂停（当前运行步骤完成后不再取新任务）"
 
-    def handle_stop(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_stop(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
         # 在另一个线程中执行关闭，以便给客户端返回响应
         threading.Thread(target=self.shutdown, daemon=True).start()
         return True, None, "后台引擎正在安全退出..."
 
-    def handle_check(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_check(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 check 命令（系统自检）。"""
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
 
-    def handle_get_all_status(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_all_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取所有构型的状态。"""
         statuses = self.state.get_all_statuses()
         return True, statuses, ""
 
-    def handle_get_statistics(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_statistics(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取统计信息。"""
         stats = self.state.get_statistics()
         engine_status = self.state.get_engine_status()
@@ -358,7 +371,7 @@ class PipelineDaemon:
         stats["barrier_passed"] = self.state.is_global_barrier_met()
         return True, stats, ""
 
-    def handle_get_engine_status(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_get_engine_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取引擎状态。"""
         status = {
             "engine_status": self.state.get_engine_status(),
@@ -438,7 +451,7 @@ class PipelineDaemon:
                 msg += f" (构型{config_name})"
         return True, None, msg
 
-    def handle_reload_config(self, params: dict = None) -> Tuple[bool, Any, str]:
+    def handle_reload_config(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
         from engine.config import reload_config_from_toml
         if reload_config_from_toml():

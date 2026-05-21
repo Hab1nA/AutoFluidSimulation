@@ -21,8 +21,9 @@ pub fn validate_config(config: &SettingsConfig) -> Vec<ValidationError> {
     validate_remote_connection(config, &mut errors);
     validate_remote_dirs(config, &mut errors);
     validate_step_patterns(config, &mut errors);
-    validate_engine_config(config, &mut errors);
-    validate_operation_timeouts(config, &mut errors);
+    validate_solidworks(config, &mut errors);
+    validate_spaceclaim(config, &mut errors);
+    validate_global_settings(config, &mut errors);
     errors
 }
 
@@ -151,55 +152,91 @@ fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationEr
     }
 }
 
-fn validate_engine_config(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    if config.engine_config.watchdog_interval <= 0.0 {
+fn validate_solidworks(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if config.solidworks.sw_macro_timeout == 0 {
         errors.push(ValidationError {
-            field_name: "engine_config.watchdog_interval".to_string(),
-            message: "必须大于 0".to_string(),
+            field_name: "solidworks.sw_macro_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
             severity: Severity::Error,
         });
     }
-
-    let timeouts = [
-        ("engine_config.sw_macro_timeout", config.engine_config.sw_macro_timeout),
-        ("engine_config.sc_timeout", config.engine_config.sc_timeout),
-        ("engine_config.transfer_timeout", config.engine_config.transfer_timeout),
-        ("engine_config.meshing_timeout", config.engine_config.meshing_timeout),
-        ("engine_config.solver_timeout", config.engine_config.solver_timeout),
-    ];
-    for (name, val) in &timeouts {
-        if *val == 0 {
-            errors.push(ValidationError {
-                field_name: name.to_string(),
-                message: "超时值必须大于 0".to_string(),
-                severity: Severity::Error,
-            });
-        }
-    }
-
-    if config.engine_config.max_retries == 0 {
+    if config.solidworks.sw_startup == 0 {
         errors.push(ValidationError {
-            field_name: "engine_config.max_retries".to_string(),
-            message: "重试次数至少为 1".to_string(),
+            field_name: "solidworks.sw_startup".to_string(),
+            message: "超时值必须大于 0".to_string(),
             severity: Severity::Error,
         });
     }
-
-    if config.engine_config.state_refresh_interval <= 0.0 {
+    if config.solidworks.sw_dispatch_startup_delay == 0 {
         errors.push(ValidationError {
-            field_name: "engine_config.state_refresh_interval".to_string(),
-            message: "必须大于 0".to_string(),
+            field_name: "solidworks.sw_dispatch_startup_delay".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.solidworks.sw_exit_wait_seconds == 0 {
+        errors.push(ValidationError {
+            field_name: "solidworks.sw_exit_wait_seconds".to_string(),
+            message: "超时值必须大于 0".to_string(),
             severity: Severity::Error,
         });
     }
 }
 
-fn validate_operation_timeouts(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    let timeouts: [(&str, u64); 4] = [
-        ("operation_timeouts.sw_startup", config.operation_timeouts.sw_startup),
-        ("operation_timeouts.sw_dispatch_startup_delay", config.operation_timeouts.sw_dispatch_startup_delay),
-        ("operation_timeouts.sw_exit_wait_seconds", config.operation_timeouts.sw_exit_wait_seconds),
-        ("operation_timeouts.ssh_connection", config.operation_timeouts.ssh_connection),
+fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if config.spaceclaim.sc_timeout == 0 {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.spaceclaim.sc_poll_interval <= 0.0 {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_poll_interval".to_string(),
+            message: "轮询间隔必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.spaceclaim.sc_process_appear_timeout < 30
+        || config.spaceclaim.sc_process_appear_timeout > 600
+    {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_process_appear_timeout".to_string(),
+            message: "应在 30-600 秒之间".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+    if config.spaceclaim.sc_gui_ready_timeout < 10
+        || config.spaceclaim.sc_gui_ready_timeout > 120
+    {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_gui_ready_timeout".to_string(),
+            message: "应在 10-120 秒之间".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+    if config.spaceclaim.sc_gui_stable_delay > 60 {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_gui_stable_delay".to_string(),
+            message: "不应超过 60 秒".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+}
+
+fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if config.global_settings.watchdog_interval <= 0.0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.watchdog_interval".to_string(),
+            message: "必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    let timeouts = [
+        ("global_settings.transfer_timeout", config.global_settings.transfer_timeout),
+        ("global_settings.meshing_timeout", config.global_settings.meshing_timeout),
+        ("global_settings.solver_timeout", config.global_settings.solver_timeout),
     ];
     for (name, val) in &timeouts {
         if *val == 0 {
@@ -210,26 +247,37 @@ fn validate_operation_timeouts(config: &SettingsConfig, errors: &mut Vec<Validat
             });
         }
     }
-
-    if config.operation_timeouts.sc_poll_interval <= 0.0 {
+    if config.global_settings.max_retries == 0 {
         errors.push(ValidationError {
-            field_name: "operation_timeouts.sc_poll_interval".to_string(),
-            message: "轮询间隔必须大于 0".to_string(),
+            field_name: "global_settings.max_retries".to_string(),
+            message: "重试次数至少为 1".to_string(),
             severity: Severity::Error,
         });
     }
-
-    if config.operation_timeouts.dir_recursion_limit == 0 {
+    if config.global_settings.state_refresh_interval <= 0.0 {
         errors.push(ValidationError {
-            field_name: "operation_timeouts.dir_recursion_limit".to_string(),
+            field_name: "global_settings.state_refresh_interval".to_string(),
+            message: "必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.global_settings.ssh_connection == 0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.ssh_connection".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.global_settings.dir_recursion_limit == 0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.dir_recursion_limit".to_string(),
             message: "递归深度限制必须大于 0".to_string(),
             severity: Severity::Error,
         });
     }
-
-    if config.operation_timeouts.ssh_upload_max_retries == 0 {
+    if config.global_settings.ssh_upload_max_retries == 0 {
         errors.push(ValidationError {
-            field_name: "operation_timeouts.ssh_upload_max_retries".to_string(),
+            field_name: "global_settings.ssh_upload_max_retries".to_string(),
             message: "上传重试次数至少为 1".to_string(),
             severity: Severity::Error,
         });
@@ -242,7 +290,12 @@ mod tests {
 
     #[test]
     fn test_valid_config_passes() {
-        let config = SettingsConfig::default();
+        let mut config = SettingsConfig::default();
+        // 默认配置中的文件路径是示例值，在 CI 环境中不存在；
+        // 用当前可执行文件路径代替，确保路径有效性检查通过。
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        config.local_paths.sw_model = exe.clone();
+        config.local_paths.excel = exe;
         let errors = validate_config(&config);
         let critical: Vec<_> = errors.iter().filter(|e| matches!(e.severity, Severity::Error)).collect();
         assert!(critical.is_empty(), "默认配置不应有严重错误: {:?}", critical);
@@ -267,9 +320,9 @@ mod tests {
     #[test]
     fn test_zero_timeout_reports_error() {
         let mut config = SettingsConfig::default();
-        config.engine_config.solver_timeout = 0;
+        config.global_settings.solver_timeout = 0;
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "engine_config.solver_timeout" && matches!(e.severity, Severity::Error)));
+        assert!(errors.iter().any(|e| e.field_name == "global_settings.solver_timeout" && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
