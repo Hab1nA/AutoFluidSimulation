@@ -260,7 +260,7 @@ class MeshingMonitor:
         """检查远程标志文件或网格文件是否已存在。"""
         from engine.config import REMOTE_CONFIG
         try:
-            ssh = self._remote_executor._get_ssh()
+            ssh = self._remote_executor.get_ssh_connection()
             if not ssh.is_connected():
                 return False
             flag_file = (

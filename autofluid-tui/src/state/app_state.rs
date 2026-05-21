@@ -32,7 +32,7 @@ pub fn step_display_name(step: &str) -> &str {
 
 pub fn status_icon(status: &str) -> &str {
     match status {
-        STATUS_WAITING => "⏸️",
+        STATUS_WAITING => "🕐",
         STATUS_RUNNING => "⏳",
         STATUS_PAUSED => "⏸️",
         STATUS_RETRYING => "🔄",

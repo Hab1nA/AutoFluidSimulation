@@ -308,7 +308,7 @@ class PipelineDaemon:
                     name="SchedulerMain"
                 )
                 scheduler_thread.start()
-                self.scheduler._pipeline_thread = scheduler_thread
+                self.scheduler.set_pipeline_thread(scheduler_thread)
                 return True, None, "流水线已重新启动（从断点恢复）"
             # 正常暂停恢复：pipeline 存活或暂停标志正常置位
             self.scheduler.resume()
@@ -324,7 +324,7 @@ class PipelineDaemon:
             name="SchedulerMain"
         )
         scheduler_thread.start()
-        self.scheduler._pipeline_thread = scheduler_thread
+        self.scheduler.set_pipeline_thread(scheduler_thread)
 
         return True, None, "流水线已启动"
 

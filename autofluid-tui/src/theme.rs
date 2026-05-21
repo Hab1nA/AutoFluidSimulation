@@ -8,7 +8,6 @@ use ratatui::style::{Color, Modifier, Style};
 
 /// 核心语义色板（与 ratatui-themes ThemePalette 的 10 字段完全对齐）。
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // muted、selection 留待 dialogs/settings 模块迁移时使用
 pub struct ThemePalette {
     pub accent: Color,
     pub secondary: Color,
@@ -24,7 +23,6 @@ pub struct ThemePalette {
 
 /// AutoFluid TUI 完整主题。
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // 扩展字段留待 dialogs/settings 模块迁移时使用
 pub struct AppTheme {
     pub palette: ThemePalette,
     pub input_bg: Color,
@@ -35,6 +33,7 @@ pub struct AppTheme {
     pub gray_3: Color,
     pub gray_4: Color,
     pub gray_5: Color,
+    pub scrollbar_track: Color,
     pub scrollbar_thumb: Color,
     pub cursor_fg: Color,
     pub click_fg: Color,
@@ -70,6 +69,16 @@ impl AppTheme {
     pub fn hover_style(&self) -> Style {
         Style::default().bg(self.secondary).add_modifier(Modifier::BOLD)
     }
+    /// 对话框/设置页面通用按钮样式（hover/click/normal 三态）。
+    pub fn dialog_btn_style(&self, idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {
+        if clicked == Some(idx) {
+            self.btn_click()
+        } else if hovered == Some(idx) {
+            self.btn_hover()
+        } else {
+            self.btn_normal()
+        }
+    }
 }
 
 impl Default for AppTheme {
@@ -95,6 +104,7 @@ impl Default for AppTheme {
             gray_3: Color::Rgb(100, 160, 100),
             gray_4: Color::Rgb(180, 180, 180),
             gray_5: Color::Rgb(200, 200, 200),
+            scrollbar_track: Color::Rgb(80, 80, 80),
             scrollbar_thumb: Color::Rgb(160, 160, 160),
             cursor_fg: Color::Rgb(0, 0, 0),
             click_fg: Color::Rgb(0, 0, 0),

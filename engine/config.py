@@ -449,30 +449,30 @@ def reload_config_from_toml() -> bool:
         # 新分类格式：按工具维度拆分为 solidworks / spaceclaim / global_settings
         if "solidworks" in toml_data:
             ENGINE_CONFIG.update(
-                {k: v for k, v in toml_data["solidworks"].items()
-                 if k in ENGINE_CONFIG}
+                cast(EngineConfig, {k: v for k, v in toml_data["solidworks"].items()
+                 if k in ENGINE_CONFIG})
             )
             OPERATION_TIMEOUTS.update(
-                {k: v for k, v in toml_data["solidworks"].items()
-                 if k in OPERATION_TIMEOUTS}
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["solidworks"].items()
+                 if k in OPERATION_TIMEOUTS})
             )
         if "spaceclaim" in toml_data:
             ENGINE_CONFIG.update(
-                {k: v for k, v in toml_data["spaceclaim"].items()
-                 if k in ENGINE_CONFIG}
+                cast(EngineConfig, {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in ENGINE_CONFIG})
             )
             OPERATION_TIMEOUTS.update(
-                {k: v for k, v in toml_data["spaceclaim"].items()
-                 if k in OPERATION_TIMEOUTS}
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["spaceclaim"].items()
+                 if k in OPERATION_TIMEOUTS})
             )
         if "global_settings" in toml_data:
             ENGINE_CONFIG.update(
-                {k: v for k, v in toml_data["global_settings"].items()
-                 if k in ENGINE_CONFIG}
+                cast(EngineConfig, {k: v for k, v in toml_data["global_settings"].items()
+                 if k in ENGINE_CONFIG})
             )
             OPERATION_TIMEOUTS.update(
-                {k: v for k, v in toml_data["global_settings"].items()
-                 if k in OPERATION_TIMEOUTS}
+                cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["global_settings"].items()
+                 if k in OPERATION_TIMEOUTS})
             )
         # 向后兼容：旧格式 engine_config / operation_timeouts
         if "engine_config" in toml_data:

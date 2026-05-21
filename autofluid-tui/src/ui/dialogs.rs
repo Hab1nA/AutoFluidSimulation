@@ -1,32 +1,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::ui::scrollbar::VerticalScrollbar;
 use crate::utils::{truncate_for_display, pad_label_by_display_width};
-
-const BTN_NORMAL: Style = Style::new()
-    .fg(Color::Rgb(224, 224, 224))
-    .bg(Color::Rgb(15, 52, 96));
-const BTN_HOVER: Style = Style::new()
-    .fg(Color::Rgb(255, 255, 255))
-    .bg(Color::Rgb(233, 69, 96))
-    .add_modifier(Modifier::BOLD);
-const BTN_CLICKED: Style = Style::new()
-    .fg(Color::Rgb(0, 0, 0))
-    .bg(Color::Rgb(255, 255, 255))
-    .add_modifier(Modifier::BOLD);
-
-const DIALOG_BG: Color = Color::Rgb(22, 33, 62);
-const ACCENT_RED: Color = Color::Rgb(233, 69, 96);
-const GREEN: Color = Color::Rgb(0, 255, 136);
-const FIELD_LABEL: Color = Color::Rgb(200, 200, 200);
-const FIELD_VALUE: Color = Color::Rgb(180, 180, 180);
-const SECTION_HEADER: Color = Color::Rgb(0, 255, 136);
-const HINT_COLOR: Color = Color::Rgb(80, 80, 80);
-const ERROR_COLOR: Color = Color::Rgb(255, 69, 58);
+use crate::theme::AppTheme;
 
 fn symbol_is_wide(symbol: &str) -> bool {
     unicode_width::UnicodeWidthStr::width(symbol) > 1
@@ -54,16 +34,6 @@ pub fn clear_dialog_background(frame: &mut Frame, dialog_area: Rect) {
     }
 }
 
-fn button_style(idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {
-    if clicked == Some(idx) {
-        BTN_CLICKED
-    } else if hovered == Some(idx) {
-        BTN_HOVER
-    } else {
-        BTN_NORMAL
-    }
-}
-
 /// 对话框渲染信息
 ///
 /// - content_total_lines: 内容总行数
@@ -84,14 +54,15 @@ pub fn render_confirm_dialog(
     scroll: u16,
     hovered_dialog_button: Option<u8>,
     clicked_dialog_button: Option<u8>,
+    theme: &AppTheme,
 ) -> DialogRenderInfo {
     let dialog_area = centered_rect(80, 40, area);
     clear_dialog_background(frame, dialog_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(233, 69, 96)))
-        .style(Style::default().bg(DIALOG_BG));
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.bg));
     frame.render_widget(block, dialog_area);
 
     let inner = Rect {
@@ -123,7 +94,7 @@ pub fn render_confirm_dialog(
         .map(|line| {
             Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::Rgb(255, 170, 0)).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
             ))
         })
         .collect();
@@ -156,6 +127,8 @@ pub fn render_confirm_dialog(
             total: total_lines,
             visible,
             scroll: scroll_offset,
+            track_color: Some(theme.scrollbar_track),
+            thumb_color: Some(theme.scrollbar_thumb),
         };
         frame.render_widget(sb, scrollbar_area);
     }
@@ -163,7 +136,7 @@ pub fn render_confirm_dialog(
     let separator_y = inner.y + content_height;
     let separator: String = "─".repeat(inner.width as usize);
     frame.render_widget(
-        Paragraph::new(Span::styled(separator, Style::default().fg(Color::Rgb(60, 60, 60)))),
+        Paragraph::new(Span::styled(separator, Style::default().fg(theme.gray_1))),
         Rect { x: inner.x, y: separator_y, width: inner.width, height: 1 },
     );
 
@@ -171,12 +144,12 @@ pub fn render_confirm_dialog(
     let confirm_label = " 确认 [Y] ";
     let cancel_label = " 取消 [N] ";
     let gap: u16 = 3;
-    let confirm_style = button_style(0, hovered_dialog_button, clicked_dialog_button);
-    let cancel_style = button_style(1, hovered_dialog_button, clicked_dialog_button);
+    let confirm_style = theme.dialog_btn_style(0, hovered_dialog_button, clicked_dialog_button);
+    let cancel_style = theme.dialog_btn_style(1, hovered_dialog_button, clicked_dialog_button);
 
     let btn_line = Line::from(vec![
         Span::styled(confirm_label.to_string(), confirm_style),
-        Span::styled(" ".repeat(gap as usize), Style::default().bg(DIALOG_BG)),
+        Span::styled(" ".repeat(gap as usize), Style::default().bg(theme.bg)),
         Span::styled(cancel_label.to_string(), cancel_style),
     ]);
 
@@ -193,7 +166,7 @@ pub fn render_confirm_dialog(
     }
 }
 
-fn build_check_content_lines(data: &serde_json::Value, _content_width: usize) -> Vec<Line<'static>> {
+fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, theme: &AppTheme) -> Vec<Line<'static>> {
     let label_width: u16 = 20;
 
     struct CheckItem {
@@ -278,7 +251,7 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize) ->
         }
     }
 
-    fn render_section(raw_lines: &mut Vec<Line>, header: &str, target_header_w: usize, items: &[CheckItem], label_width: u16) {
+    fn render_section(raw_lines: &mut Vec<Line>, header: &str, target_header_w: usize, items: &[CheckItem], label_width: u16, theme: &AppTheme) {
         let header_dw = unicode_width::UnicodeWidthStr::width(header);
         let header_pad = if header_dw < target_header_w {
             "─".repeat(target_header_w - header_dw)
@@ -289,31 +262,31 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize) ->
         raw_lines.push(Line::from(""));
         raw_lines.push(Line::from(Span::styled(
             format!("  {}{}", header, header_pad),
-            Style::default().fg(SECTION_HEADER).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
         )));
         raw_lines.push(Line::from(""));
 
         for item in items {
             let icon = match item.exists {
-                Some(true) => (" ✅", GREEN),
-                Some(false) => (" ❌", ERROR_COLOR),
-                None => ("", DIALOG_BG),
+                Some(true) => (" ✅", theme.success),
+                Some(false) => (" ❌", theme.error),
+                None => ("", theme.bg),
             };
 
             let mut spans = vec![
-                Span::styled("  ", Style::default().bg(DIALOG_BG)),
+                Span::styled("  ", Style::default().bg(theme.bg)),
                 Span::styled(
                     pad_label_by_display_width(item.label, label_width),
-                    Style::default().fg(FIELD_LABEL).bg(DIALOG_BG),
+                    Style::default().fg(theme.gray_4).bg(theme.bg),
                 ),
                 Span::styled(
                     truncate_for_display(&item.value, 50),
-                    Style::default().fg(FIELD_VALUE).bg(DIALOG_BG),
+                    Style::default().fg(theme.gray_3).bg(theme.bg),
                 ),
             ];
 
             if !icon.0.is_empty() {
-                spans.push(Span::styled(icon.0, Style::default().fg(icon.1).bg(DIALOG_BG)));
+                spans.push(Span::styled(icon.0, Style::default().fg(icon.1).bg(theme.bg)));
             }
 
             raw_lines.push(Line::from(spans));
@@ -321,10 +294,10 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize) ->
     }
 
     if !local_items.is_empty() {
-        render_section(&mut raw_lines, local_header, target_header_w, &local_items, label_width);
+        render_section(&mut raw_lines, local_header, target_header_w, &local_items, label_width, theme);
     }
     if !remote_items.is_empty() {
-        render_section(&mut raw_lines, remote_header, target_header_w, &remote_items, label_width);
+        render_section(&mut raw_lines, remote_header, target_header_w, &remote_items, label_width, theme);
     }
 
     raw_lines
@@ -337,14 +310,15 @@ pub fn render_check_result(
     scroll: u16,
     hovered_dialog_button: Option<u8>,
     clicked_dialog_button: Option<u8>,
+    theme: &AppTheme,
 ) -> DialogRenderInfo {
     let dialog_area = centered_rect(90, 90, area);
     clear_dialog_background(frame, dialog_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT_RED))
-        .style(Style::default().bg(DIALOG_BG));
+        .border_style(Style::default().fg(theme.accent))
+        .style(Style::default().bg(theme.bg));
     frame.render_widget(block, dialog_area);
 
     let inner = Rect {
@@ -370,7 +344,7 @@ pub fn render_check_result(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {}", title_text),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ))),
         title_chunks[0],
     );
@@ -378,14 +352,14 @@ pub fn render_check_result(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "↑↓/滚轮 滚动 | Esc 关闭",
-            Style::default().fg(HINT_COLOR),
+            Style::default().fg(theme.muted),
         )))
         .alignment(Alignment::Right),
         title_chunks[1],
     );
 
     // Separator after title
-    let sep_style = Style::default().fg(Color::Rgb(60, 60, 60));
+    let sep_style = Style::default().fg(theme.gray_1);
     let sep = "─".repeat(inner.width as usize);
     let sep_y = inner.y + 1;
     frame.render_widget(
@@ -413,7 +387,7 @@ pub fn render_check_result(
         height: content_height,
     };
 
-    let content_lines = build_check_content_lines(data, content_area.width as usize);
+    let content_lines = build_check_content_lines(data, content_area.width as usize, theme);
     let total_lines = content_lines.len();
     let visible = content_height as usize;
     let max_scroll = total_lines.saturating_sub(visible);
@@ -429,6 +403,8 @@ pub fn render_check_result(
             total: total_lines,
             visible,
             scroll: scroll_offset,
+            track_color: Some(theme.scrollbar_track),
+            thumb_color: Some(theme.scrollbar_thumb),
         };
         frame.render_widget(sb, scrollbar_area);
     }
@@ -443,7 +419,7 @@ pub fn render_check_result(
     // Button bar — btn_y = inner.y + inner.height - 1
     let btn_y = inner.y + inner.height - 1;
     let close_label = " 关闭 (Esc) ";
-    let close_style = button_style(0, hovered_dialog_button, clicked_dialog_button);
+    let close_style = theme.dialog_btn_style(0, hovered_dialog_button, clicked_dialog_button);
 
     let btn_line = Line::from(vec![Span::styled(close_label.to_string(), close_style)]);
 

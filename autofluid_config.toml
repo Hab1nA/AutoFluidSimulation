@@ -46,6 +46,8 @@ sc_poll_interval = 2.0
 sc_process_appear_timeout = 120
 sc_gui_ready_timeout = 30
 sc_gui_stable_delay = 5
+sc_persistent_ready_timeout = 180
+sc_scdoc_stable_seconds = 3.0
 
 [global_settings]
 watchdog_interval = 1.0

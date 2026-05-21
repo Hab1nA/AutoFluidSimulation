@@ -7,6 +7,19 @@ using System.Threading;
 namespace AutoFluidSimulation.Bridge
 {
     /// <summary>
+    /// Bridge 退出码。
+    /// </summary>
+    enum ExitCode
+    {
+        Success = 0,
+        ScriptFailed = 1,
+        LaunchFailed = 2,
+        OutputValidationFailed = 3,
+        InvalidArgs = 4,
+        Timeout = 5,
+    }
+
+    /// <summary>
     /// SpaceClaim Bridge — C# 5 兼容版本，纯进程检测模式
     ///
     /// SpaceClaim 不向外部暴露 out-of-process COM 自动化接口（与 AutoCAD/SolidWorks 不同），
@@ -33,13 +46,13 @@ namespace AutoFluidSimulation.Bridge
             try
             {
                 Options opts = ParseArgs(args);
-                if (opts == null) return 4;
+                if (opts == null) return (int)ExitCode.InvalidArgs;
                 return Execute(opts);
             }
             catch (Exception ex)
             {
                 Console.Error.WriteLine("[BRIDGE_FATAL] " + ex.ToString());
-                return 1;
+                return (int)ExitCode.ScriptFailed;
             }
         }
 
@@ -134,7 +147,7 @@ namespace AutoFluidSimulation.Bridge
             if (!File.Exists(stepFile))
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] STEP file not found: " + stepFile);
-                return 3;
+                return (int)ExitCode.OutputValidationFailed;
             }
             Console.WriteLine(string.Format("[BRIDGE] STEP: {0} ({1} B)", stepFile, new FileInfo(stepFile).Length));
 
@@ -144,7 +157,7 @@ namespace AutoFluidSimulation.Bridge
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe not found");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             DateTime launchBaseline = DateTime.UtcNow;
@@ -178,7 +191,7 @@ namespace AutoFluidSimulation.Bridge
             catch (Exception ex)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] Failed to launch SpaceClaim: " + ex.Message);
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine("[BRIDGE] Waiting for SpaceClaim process to appear...");
@@ -186,7 +199,7 @@ namespace AutoFluidSimulation.Bridge
             if (workingProcess == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim process did not appear within 120s");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine(string.Format("[BRIDGE] SpaceClaim process found (PID={0}), waiting for GUI...", workingProcess.Id));
@@ -205,7 +218,7 @@ namespace AutoFluidSimulation.Bridge
                 {
                     FileInfo fi = new FileInfo(scdocFile);
                     Console.WriteLine(string.Format("[BRIDGE] OK SCDOC detected: {0} ({1} B)", scdocFile, fi.Length));
-                    return 0;
+                    return (int)ExitCode.Success;
                 }
 
                 bool processAlive = false;
@@ -230,17 +243,17 @@ namespace AutoFluidSimulation.Bridge
                     {
                         FileInfo fi = new FileInfo(scdocFile);
                         Console.WriteLine(string.Format("[BRIDGE] OK SCDOC: {0} ({1} B)", scdocFile, fi.Length));
-                        return 0;
+                        return (int)ExitCode.Success;
                     }
                     Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim exited but no SCDOC file generated");
-                    return 3;
+                    return (int)ExitCode.OutputValidationFailed;
                 }
 
                 Thread.Sleep(pollIntervalMs);
             }
 
             Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] Timeout ({0}s)", totalTimeout));
-            return 5;
+            return (int)ExitCode.Timeout;
         }
 
         static int ExecutePersistent(Options o)
@@ -253,7 +266,7 @@ namespace AutoFluidSimulation.Bridge
             if (string.IsNullOrEmpty(o.CmdDir))
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] Persistent mode requires --cmddir");
-                return 4;
+                return (int)ExitCode.InvalidArgs;
             }
 
             Directory.CreateDirectory(o.CmdDir);
@@ -262,7 +275,7 @@ namespace AutoFluidSimulation.Bridge
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe not found");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             DateTime launchBaseline = DateTime.UtcNow;
@@ -291,7 +304,7 @@ namespace AutoFluidSimulation.Bridge
             catch (Exception ex)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] Failed to launch SpaceClaim: " + ex.Message);
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine("[BRIDGE] Waiting for SpaceClaim process...");
@@ -299,7 +312,7 @@ namespace AutoFluidSimulation.Bridge
             if (workingProcess == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim process did not appear within 120s");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine(string.Format("[BRIDGE] SpaceClaim found (PID={0}), waiting for GUI...", workingProcess.Id));
@@ -324,7 +337,7 @@ namespace AutoFluidSimulation.Bridge
             if (!File.Exists(readyFile))
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] Script ready timeout (120s)");
-                return 5;
+                return (int)ExitCode.Timeout;
             }
 
             Console.WriteLine("[BRIDGE] Persistent mode ready, monitoring...");
@@ -349,7 +362,7 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine("[BRIDGE] Persistent mode exited");
-            return 0;
+            return (int)ExitCode.Success;
         }
 
         static string FindSpaceClaimExe()

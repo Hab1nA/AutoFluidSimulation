@@ -169,7 +169,10 @@ class StepFileMonitor:
         self._wake_event = threading.Event()
         self._need_reset = False
 
-        self._get_filename_regex()
+        # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
+        if StepFileMonitor._FILENAME_REGEX is None:
+            sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
 
     @property
     def is_running(self) -> bool:

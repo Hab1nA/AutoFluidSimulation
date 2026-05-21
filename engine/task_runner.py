@@ -215,3 +215,19 @@ class TaskRunner:
     def clean_step_files(self, step_name, config_name=None):
         """清理步骤文件（委托给 FileCleaner）。"""
         self._cleaner.clean_step_files(step_name, config_name)
+
+    # ------------------------------------------------------------------
+    # SC 进程池公共代理方法（避免外部模块直接访问 _sc_pool 私有属性）
+    # ------------------------------------------------------------------
+
+    def shutdown_sc_pool(self) -> None:
+        """全量清理 SpaceClaim 进程。"""
+        self._sc_pool.shutdown_all()
+
+    def do_sc_final_cleanup(self) -> None:
+        """末次 SC 全体清理（SC 阶段全部完成后调用）。"""
+        self._sc_pool.do_final_cleanup()
+
+    def reset_sc_pool(self) -> None:
+        """重置 SC 进程池状态。"""
+        self._sc_pool.reset()

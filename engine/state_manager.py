@@ -63,11 +63,14 @@ class StateManager:
     # ------------------------------------------------------------------
 
     @contextmanager
-    def _get_connection(self):
+    def _get_connection(self, readonly: bool = False):
         """获取数据库连接（上下文管理器，自动提交/关闭）。
 
         每个新连接设置必要的 per-connection PRAGMA（journal_mode 由
         _config_pragmas() 在数据库级持久化，无需重复设置）。
+
+        Args:
+            readonly: 若为 True，跳过 commit（适用于纯查询操作，减少 I/O 开销）
         """
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -76,12 +79,14 @@ class StateManager:
         conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
-            conn.commit()
+            if not readonly:
+                conn.commit()
         except Exception:
-            try:
-                conn.rollback()
-            except Exception as e:
-                logger.error("数据库回滚异常: %s", e)
+            if not readonly:
+                try:
+                    conn.rollback()
+                except Exception as e:
+                    logger.error("数据库回滚异常: %s", e)
             raise
         finally:
             try:
@@ -222,13 +227,13 @@ class StateManager:
 
     def get_all_configs(self) -> List[int]:
         """获取所有构型名称列表。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             rows = conn.execute("SELECT config_name FROM configs ORDER BY config_name").fetchall()
             return [row["config_name"] for row in rows]
 
     def get_config_params(self, config_name: int) -> Optional[List[float]]:
         """获取指定构型的参数。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT param1, param2, param3, param4 FROM configs WHERE config_name = ?",
                 (config_name,)
@@ -243,7 +248,7 @@ class StateManager:
 
     def get_step_status(self, config_name: int, step_name: str) -> str:
         """获取指定构型指定步骤的状态。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT status FROM steps WHERE config_name = ? AND step_name = ?",
                 (config_name, step_name)
@@ -275,7 +280,7 @@ class StateManager:
 
     def get_all_steps_for_config(self, config_name: int) -> Dict[str, dict]:
         """获取指定构型的所有步骤状态详情。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT step_name, status, retry_count, error_message FROM steps WHERE config_name = ?",
                 (config_name,)
@@ -296,7 +301,7 @@ class StateManager:
         Returns:
             {config_name: {step_name: status, ...}, ...}
         """
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT config_name, step_name, status FROM steps ORDER BY config_name, step_name"
             ).fetchall()
@@ -325,7 +330,7 @@ class StateManager:
 
     def get_step_retry_count(self, config_name: int, step_name: str) -> int:
         """查询指定构型指定步骤的当前重试次数。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
                 (config_name, step_name)
@@ -404,7 +409,7 @@ class StateManager:
 
     def get_engine_status(self) -> str:
         """获取引擎状态：stopped | running | paused。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT value FROM engine_state WHERE key = 'engine_status'"
             ).fetchone()
@@ -462,7 +467,7 @@ class StateManager:
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT value FROM engine_state WHERE key = 'sw_macro_started'"
             ).fetchone()
@@ -479,7 +484,7 @@ class StateManager:
 
     def is_global_barrier_met(self) -> bool:
         """检查全局屏障是否已通过。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT value FROM engine_state WHERE key = 'global_barrier_met'"
             ).fetchone()
@@ -500,7 +505,7 @@ class StateManager:
 
     def get_configs_at_step(self, step_name: str, status: str | None = None) -> List[int]:
         """获取处于指定步骤指定状态的构型列表。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             if status:
                 rows = conn.execute(
                     "SELECT config_name FROM steps WHERE step_name = ? AND status = ? ORDER BY config_name",
@@ -520,7 +525,7 @@ class StateManager:
         用于全局屏障判断：当所有构型的 Meshing 都 Completed 时，
         才能解锁 Solver。
         """
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status != ?",
                 (step_name, STATUS_COMPLETED)
@@ -529,7 +534,7 @@ class StateManager:
 
     def get_error_configs(self) -> List[Tuple[int, str, str]]:
         """获取所有处于 Error 状态的构型和步骤。"""
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
                 "SELECT config_name, step_name, error_message FROM steps WHERE status = ?",
                 (STATUS_ERROR,)
@@ -553,7 +558,7 @@ class StateManager:
             "error_count": 0,
         }
 
-        with self._get_connection() as conn:
+        with self._get_connection(readonly=True) as conn:
             # 总构型数
             row = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()
             stats["total_configs"] = row["cnt"] if row else 0

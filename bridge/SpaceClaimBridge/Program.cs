@@ -7,6 +7,19 @@ using System.Threading;
 namespace AutoFluidSimulation.Bridge
 {
     /// <summary>
+    /// Bridge 退出码。
+    /// </summary>
+    enum ExitCode
+    {
+        Success = 0,
+        ScriptFailed = 1,
+        LaunchFailed = 2,
+        OutputValidationFailed = 3,
+        InvalidArgs = 4,
+        Timeout = 5,
+    }
+
+    /// <summary>
     /// SpaceClaim Bridge — C# 中间衔接程序，纯进程检测模式
     ///
     /// SpaceClaim 不向外部暴露 out-of-process COM 自动化接口（与 AutoCAD/SolidWorks 不同），
@@ -46,7 +59,7 @@ namespace AutoFluidSimulation.Bridge
                 var options = ParseArguments(args);
                 if (options == null)
                 {
-                    return 4;
+                    return (int)ExitCode.InvalidArgs;
                 }
 
                 return Execute(options);
@@ -54,7 +67,7 @@ namespace AutoFluidSimulation.Bridge
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[BRIDGE_FATAL] 未处理的异常: {ex}");
-                return 1;
+                return (int)ExitCode.ScriptFailed;
             }
         }
 
@@ -166,7 +179,7 @@ namespace AutoFluidSimulation.Bridge
             if (!File.Exists(stepFile))
             {
                 Console.Error.WriteLine($"[BRIDGE_ERROR] STEP 文件不存在: {stepFile}");
-                return 3;
+                return (int)ExitCode.OutputValidationFailed;
             }
             Console.WriteLine($"[BRIDGE]   STEP文件: {stepFile} ({new FileInfo(stepFile).Length} bytes)");
 
@@ -176,7 +189,7 @@ namespace AutoFluidSimulation.Bridge
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             DateTime launchBaseline = DateTime.UtcNow;
@@ -209,7 +222,7 @@ namespace AutoFluidSimulation.Bridge
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 启动 SpaceClaim 失败: {ex.Message}");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
@@ -218,7 +231,7 @@ namespace AutoFluidSimulation.Bridge
             if (workingProcess == null)
             {
                 Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim 进程在 {processAppearTimeout}s 内未出现");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             try
@@ -240,7 +253,7 @@ namespace AutoFluidSimulation.Bridge
                     {
                         var fi = new FileInfo(scdocFile);
                         Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi.Length} bytes)");
-                        return 0;
+                        return (int)ExitCode.Success;
                     }
 
                     bool processAlive = false;
@@ -266,17 +279,17 @@ namespace AutoFluidSimulation.Bridge
                         {
                             var fi2 = new FileInfo(scdocFile);
                             Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi2.Length} bytes)");
-                            return 0;
+                            return (int)ExitCode.Success;
                         }
                         Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成 SCDOC 文件");
-                        return 3;
+                        return (int)ExitCode.OutputValidationFailed;
                     }
 
                     Thread.Sleep(pollIntervalMs);
                 }
 
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
-                return 5;
+                return (int)ExitCode.Timeout;
             }
             finally
             {
@@ -297,7 +310,7 @@ namespace AutoFluidSimulation.Bridge
             if (string.IsNullOrEmpty(opts.CmdDir))
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] 常驻模式需要 --cmddir 参数");
-                return 4;
+                return (int)ExitCode.InvalidArgs;
             }
 
             Directory.CreateDirectory(opts.CmdDir);
@@ -306,7 +319,7 @@ namespace AutoFluidSimulation.Bridge
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             DateTime launchBaseline = DateTime.UtcNow;
@@ -340,7 +353,7 @@ namespace AutoFluidSimulation.Bridge
             catch (Exception ex)
             {
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 启动 SpaceClaim 失败: {ex.Message}");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
@@ -349,7 +362,7 @@ namespace AutoFluidSimulation.Bridge
             if (workingProcess == null)
             {
                 Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim 进程在 {processAppearTimeout}s 内未出现");
-                return 2;
+                return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine($"[BRIDGE] SpaceClaim 进程已出现 (PID={workingProcess.Id}), 等待 GUI 就绪...");
@@ -373,7 +386,7 @@ namespace AutoFluidSimulation.Bridge
                     if (workingProcess.HasExited)
                     {
                         Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程已退出，脚本未就绪");
-                        return 2;
+                        return (int)ExitCode.LaunchFailed;
                     }
                 }
                 catch (Exception ex)
@@ -386,7 +399,7 @@ namespace AutoFluidSimulation.Bridge
             if (!File.Exists(readyFile))
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] 脚本就绪超时 (120s)");
-                return 5;
+                return (int)ExitCode.Timeout;
             }
 
             Console.WriteLine("[BRIDGE] 常驻模式就绪，开始命令循环...");
@@ -394,7 +407,7 @@ namespace AutoFluidSimulation.Bridge
             string cmdFile = Path.Combine(opts.CmdDir, $"sc_cmd_{opts.SlotId}.json");
 
             // 命令循环：监听 quit 文件命令或进程退出
-            int exitCode = 0;
+            int exitCode = (int)ExitCode.Success;
             try
             {
                 while (true)

@@ -589,7 +589,7 @@ fn do_redraw(
         match state.ui_mode {
             UiMode::ConfirmDialog => {
                 if let Some(ref msg) = state.confirm_message {
-                    let info = ui::dialogs::render_confirm_dialog(frame, area, msg, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button);
+                    let info = ui::dialogs::render_confirm_dialog(frame, area, msg, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
                         Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
                     } else {
@@ -600,7 +600,7 @@ fn do_redraw(
             }
             UiMode::CheckResult => {
                 if let Some(ref data) = state.check_data {
-                    let info = ui::dialogs::render_check_result(frame, area, data, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button);
+                    let info = ui::dialogs::render_check_result(frame, area, data, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
                         Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
                     } else {
@@ -618,6 +618,7 @@ fn do_redraw(
                         ss,
                         state.hovered_dialog_button,
                         state.clicked_dialog_button,
+                        &state.theme,
                     );
                     ss.field_positions = info.field_positions;
                     state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {

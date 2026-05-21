@@ -159,6 +159,8 @@ pub fn render_info_panel(
                 total,
                 visible: content_height,
                 scroll,
+                track_color: Some(theme.scrollbar_track),
+                thumb_color: Some(theme.scrollbar_thumb),
             },
             scrollbar_area,
         );
@@ -176,6 +178,8 @@ pub fn render_info_panel(
                 total: max_content_width,
                 visible: content_width,
                 scroll: hscroll as usize,
+                track_color: Some(theme.scrollbar_track),
+                thumb_color: Some(theme.scrollbar_thumb),
             },
             hscrollbar_area,
         );
@@ -293,6 +297,8 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
                 total,
                 visible: content_height,
                 scroll,
+                track_color: Some(theme.scrollbar_track),
+                thumb_color: Some(theme.scrollbar_thumb),
             },
             scrollbar_area,
         );
@@ -310,6 +316,8 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
                 total: max_content_width,
                 visible: content_width,
                 scroll: (*hscroll) as usize,
+                track_color: Some(theme.scrollbar_track),
+                thumb_color: Some(theme.scrollbar_thumb),
             },
             hscrollbar_area,
         );

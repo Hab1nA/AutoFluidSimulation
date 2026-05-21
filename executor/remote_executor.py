@@ -44,6 +44,10 @@ class RemoteExecutor:
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
 
+    def get_ssh_connection(self) -> "RemoteWorkstation":
+        """获取 SSH 连接实例（公共接口，供外部模块查询远程文件状态）。"""
+        return self._get_ssh()
+
     # ------------------------------------------------------------------
     # 文件传输
     # ------------------------------------------------------------------
@@ -105,7 +109,11 @@ class RemoteExecutor:
         return command, flag_file
 
     def execute_meshing(self, config_name: int) -> bool:
-        """在远程工作站启动网格划分后台任务。"""
+        """在远程工作站启动网格划分后台任务。
+
+        注意：本方法仅返回成功/失败，不设置步骤状态。
+        状态由调用方（RetryManager / MeshingMonitor）统一管理。
+        """
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
@@ -124,11 +132,10 @@ class RemoteExecutor:
                     logger.info(f"网格划分后台任务已启动: 构型{config_name}")
                     return True
                 else:
-                    self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, "远程任务启动失败")
+                    logger.error(f"网格划分远程任务启动失败: 构型{config_name}")
                     return False
             except (OSError, ConnectionError) as e:
                 logger.error(f"网格划分启动异常: {e}")
-                self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
                 return False
 
     def start_meshing(self, config_name: int) -> bool:
@@ -215,7 +222,11 @@ class RemoteExecutor:
     # ------------------------------------------------------------------
 
     def execute_solver(self, config_name: int) -> bool:
-        """在远程工作站启动仿真求解后台任务（全局屏障后调用）。"""
+        """在远程工作站启动仿真求解后台任务（全局屏障后调用）。
+
+        注意：本方法仅返回成功/失败，不设置步骤状态。
+        状态由调用方（RetryManager / BarrierCoordinator）统一管理。
+        """
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
@@ -237,11 +248,10 @@ class RemoteExecutor:
                     logger.info(f"仿真求解后台任务已启动: 构型{config_name}")
                     return True
                 else:
-                    self.state.set_step_status(config_name, "Solver", STATUS_ERROR, "远程求解启动失败")
+                    logger.error(f"远程求解启动失败: 构型{config_name}")
                     return False
             except (OSError, ConnectionError) as e:
                 logger.error(f"仿真求解启动异常: {e}")
-                self.state.set_step_status(config_name, "Solver", STATUS_ERROR, str(e))
                 return False
 
     def wait_solver_completion(

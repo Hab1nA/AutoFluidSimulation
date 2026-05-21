@@ -271,6 +271,10 @@ class SWExecutor:
             )
 
         # ---- 第3层: 直接启动 exe ----
+        logger.warning(
+            "[SW-COM] 前两层连接均失败，将强制终止所有残留 SW 进程后重新启动。"
+            "若您有其他 SolidWorks 窗口打开且包含未保存数据，请立即保存！"
+        )
         logger.info("[SW-COM] 正在启动 SolidWorks (第3层: subprocess)...")
         self._terminate_sw_processes()
         if not self._launch_sw_process():

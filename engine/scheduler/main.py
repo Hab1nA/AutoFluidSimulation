@@ -322,6 +322,10 @@ class PipelineScheduler:
         """公共只读属性：主调度线程是否存活（供外部模块查询）。"""
         return self._pipeline_thread is not None and self._pipeline_thread.is_alive()
 
+    def set_pipeline_thread(self, thread: threading.Thread) -> None:
+        """设置主调度线程引用（供外部模块在启动新线程后注入）。"""
+        self._pipeline_thread = thread
+
     def _resume_paused_steps(self):
         """
         断点续传扫描：对每个构型从 SW 开始逐步检查，
@@ -497,7 +501,7 @@ class PipelineScheduler:
 
         # 清理所有 SC 进程（容错：任何清理步骤失败不阻断整体停止流程）
         try:
-            self.runner._sc_pool.shutdown_all()
+            self.runner.shutdown_sc_pool()
         except Exception as e:
             logger.debug(f"SCPool 停止清理异常: {e}")
 
@@ -549,20 +553,20 @@ class PipelineScheduler:
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
-            self.runner._sc_pool.reset()
+            self.runner.reset_sc_pool()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
-                self.runner._sc_pool.reset()
+                self.runner.reset_sc_pool()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
-                self.runner._sc_pool.reset()
+                self.runner.reset_sc_pool()
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

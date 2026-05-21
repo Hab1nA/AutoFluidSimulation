@@ -283,7 +283,7 @@ class TestContext:
     def run_pipeline_async(self):
         t = threading.Thread(target=self.scheduler.start_pipeline, daemon=True)
         t.start()
-        self.scheduler._pipeline_thread = t
+        self.scheduler.set_pipeline_thread(t)
         return t
 
     def wait_for_condition(self, condition, timeout: float = 10.0,

@@ -83,6 +83,8 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
                 total: total_rows,
                 visible: visible_data_rows,
                 scroll,
+                track_color: Some(theme.scrollbar_track),
+                thumb_color: Some(theme.scrollbar_thumb),
             },
             scrollbar_area,
         );

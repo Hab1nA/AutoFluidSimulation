@@ -121,7 +121,7 @@ class BarrierCoordinator:
                 self.state.set_global_barrier_met(True)
 
                 # ★ 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理
-                self.runner._sc_pool.do_final_cleanup()
+                self.runner.do_sc_final_cleanup()
 
                 # 启动 Solver 调度
                 self._dispatch_solver_tasks()
