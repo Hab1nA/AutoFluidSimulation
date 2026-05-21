@@ -337,6 +337,40 @@ class StateManager:
             ).fetchone()
             return row["retry_count"] if row else 0
 
+    def set_meshing_running_if_idle(self, config_name: int) -> bool:
+        """原子设置 Meshing 为 Running，同一时刻只允许一个构型执行网格划分。
+
+        在同一个 self._lock 临界区内完成 SELECT + UPDATE，
+        确保不会有多个构型同时处于 Meshing Running 状态。
+
+        Args:
+            config_name: 要启动网格划分的构型名称
+
+        Returns:
+            True 表示成功设置为 Running；False 表示已有其他构型在执行
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM steps "
+                    "WHERE step_name = 'Meshing' AND status = ?",
+                    (STATUS_RUNNING,),
+                ).fetchone()
+                if (row["cnt"] or 0) > 0:
+                    logger.debug(
+                        f"set_meshing_running_if_idle({config_name}): "
+                        f"已有其他构型在执行网格划分，拒绝"
+                    )
+                    return False
+                conn.execute(
+                    "UPDATE steps SET status = ?, error_message = '', "
+                    "updated_at = strftime('%s','now') "
+                    "WHERE config_name = ? AND step_name = ?",
+                    (STATUS_RUNNING, config_name, "Meshing"),
+                )
+                logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
+                return True
+
     # ------------------------------------------------------------------
     # 批量状态操作（用于 reset 命令）
     # ------------------------------------------------------------------

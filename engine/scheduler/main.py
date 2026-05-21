@@ -198,11 +198,11 @@ class PipelineScheduler:
         # ---- 步骤 2: 启动文件监控 ----
         self._ensure_file_monitor_running()
 
-        # ---- 步骤 3: 启动工作线程池（仅在未启动时创建） ----
-        self.worker_pool.start_if_needed()
-
-        # ---- 步骤 3.5: 启动 MeshingMonitor ----
+        # ---- 步骤 3: 启动 MeshingMonitor（先于 Worker Pool，确保队列消费者就绪） ----
         self.meshing_monitor.start_if_needed()
+
+        # ---- 步骤 3.5: 启动工作线程池（仅在未启动时创建） ----
+        self.worker_pool.start_if_needed()
 
         # ---- 步骤 4: 启动全局屏障监控 ----
         self._ensure_barrier_monitor_running()
@@ -468,8 +468,8 @@ class PipelineScheduler:
 
         # 确保各组件线程存活（start_if_needed 内部已是幂等的，不会重复创建）
         self._ensure_file_monitor_running()
-        self.worker_pool.start_if_needed()
-        self.meshing_monitor.start_if_needed()
+        self.meshing_monitor.start_if_needed()   # 先启动 MeshingMonitor
+        self.worker_pool.start_if_needed()        # 再启动 Worker Pool
         self._ensure_barrier_monitor_running()
 
         # ★ 仅清除文件监控器的暂停标志，不重置已处理文件集合。

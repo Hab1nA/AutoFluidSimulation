@@ -18,12 +18,15 @@ from typing import Optional
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
-    STATUS_ERROR, STATUS_RETRYING, ENGINE_CONFIG, get_step_filename,
+    STATUS_ERROR, STATUS_RETRYING, ENGINE_CONFIG, REMOTE_CONFIG,
 )
 from engine.state_manager import StateManager
 from executor.remote_executor import RemoteExecutor
 from utils.logger import setup_logger
-from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped
+from engine.scheduler.utils import (
+    pause_aware_sleep, wait_unless_paused_or_stopped,
+    check_step_output_exists,
+)
 
 logger = setup_logger(__name__)
 
@@ -90,7 +93,13 @@ class MeshingMonitor:
         logger.info("[MeshingMonitor] 监控循环开始")
 
         # ---- 断点续传：扫描 DB 补充队列 ----
-        self._scan_db_for_pending()
+        try:
+            self._scan_db_for_pending()
+        except Exception as e:
+            logger.error(
+                f"[MeshingMonitor] 断点续传扫描异常（已跳过）: {e}",
+                exc_info=True,
+            )
 
         while not self._stopped.is_set():
             # 检查暂停
@@ -102,6 +111,11 @@ class MeshingMonitor:
                 config_name = self._meshing_queue.get(timeout=2)
             except queue.Empty:
                 continue
+
+            logger.info(
+                f"[MeshingMonitor] 从队列取出构型{config_name} "
+                f"(剩余队列深度: {self._meshing_queue.qsize()})"
+            )
 
             self._in_flight_config = config_name
             try:
@@ -138,7 +152,7 @@ class MeshingMonitor:
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
-        # ---- 断点续传：检查远程输出是否已存在 ----
+        # ---- 断点续传：检查远程输出是否已存在（复用共享工具函数） ----
         if self._check_remote_outputs_exist(config_name):
             self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 远程输出已存在，标记完成")
@@ -148,14 +162,16 @@ class MeshingMonitor:
         meshing_status = self.state.get_step_status(config_name, "Meshing")
         if meshing_status == STATUS_RUNNING:
             # Daemon 重启后发现 Meshing=Running，无法确定远程是否仍在运行
-            # 先检查标志文件，若不存在则重新启动
+            # 先检查标志文件，若不存在则重置为 Waiting 后重新启动
             if self._remote_executor.check_meshing_done(config_name):
                 self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
                 logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 重启后检测到完成标志")
                 return
+            # ★ 重置为 Waiting：清除孤儿 Running 状态，避免原子防护误判
+            self.state.set_step_status(config_name, "Meshing", STATUS_WAITING)
             logger.warning(
                 f"[MeshingMonitor] 构型{config_name} Meshing 重启后状态为 Running，"
-                f"无法确定远程状态，重新启动"
+                f"无法确定远程状态，重置为 Waiting 后重新启动"
             )
 
         # ---- 启动远程 Meshing（带重试） ----
@@ -166,7 +182,15 @@ class MeshingMonitor:
             if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
 
-            self.state.set_step_status(config_name, "Meshing", STATUS_RUNNING)
+            # ★ 原子防护：确保同一时刻只有一个构型处于 Meshing Running
+            if not self.state.set_meshing_running_if_idle(config_name):
+                logger.warning(
+                    f"[MeshingMonitor] 构型{config_name} 被跳过："
+                    f"另一个构型正在执行网格划分，重新入队"
+                )
+                self._meshing_queue.put(config_name)
+                return
+
             logger.info(
                 f"[MeshingMonitor] 启动构型{config_name} Meshing "
                 f"(尝试 {attempt}/{max_retries})"
@@ -257,26 +281,11 @@ class MeshingMonitor:
             logger.info("[MeshingMonitor] 断点续传: 无需补充的构型")
 
     def _check_remote_outputs_exist(self, config_name: int) -> bool:
-        """检查远程标志文件或网格文件是否已存在。"""
-        from engine.config import REMOTE_CONFIG
+        """检查远程标志文件或网格文件是否已存在（复用共享工具函数）。"""
         try:
             ssh = self._remote_executor.get_ssh_connection()
-            if not ssh.is_connected():
-                return False
-            flag_file = (
-                f"{REMOTE_CONFIG['flag_dir'].replace(chr(92), '/')}"
-                f"/meshing_done_{config_name}.txt"
+            return check_step_output_exists(
+                config_name, "Meshing", "", "", REMOTE_CONFIG, ssh,
             )
-            if ssh.check_remote_file(flag_file):
-                return True
-            mesh_name = get_step_filename("Meshing", config_name)
-            if mesh_name:
-                mesh_file = (
-                    f"{REMOTE_CONFIG['msh_dir'].replace(chr(92), '/')}"
-                    f"/{mesh_name}"
-                )
-                if ssh.check_remote_file(mesh_file):
-                    return True
         except Exception:
-            pass
-        return False
+            return False
