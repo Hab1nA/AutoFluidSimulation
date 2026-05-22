@@ -282,6 +282,7 @@ class PipelineDaemon:
         - paused  → 检查调度器状态后恢复或重启
         - stopped / 其他 → 全新启动
         """
+        assert self.state is not None and self.scheduler is not None
         engine_status = self.state.get_engine_status()
 
         if engine_status == "running":
@@ -336,6 +337,7 @@ class PipelineDaemon:
         - 下游步骤执行中：当前步骤完成后暂停
         - 空闲状态：直接标记为暂停
         """
+        assert self.state is not None and self.scheduler is not None
         engine_status = self.state.get_engine_status()
         if engine_status == "paused":
             return True, None, "流水线已在暂停状态"
@@ -354,16 +356,19 @@ class PipelineDaemon:
 
     def handle_check(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """处理 check 命令（系统自检）。"""
+        assert self.runner is not None
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
 
     def handle_get_all_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取所有构型的状态。"""
+        assert self.state is not None
         statuses = self.state.get_all_statuses()
         return True, statuses, ""
 
     def handle_get_statistics(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取统计信息。"""
+        assert self.state is not None
         stats = self.state.get_statistics()
         engine_status = self.state.get_engine_status()
         stats["engine_status"] = engine_status
@@ -373,6 +378,7 @@ class PipelineDaemon:
 
     def handle_get_engine_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
         """获取引擎状态。"""
+        assert self.state is not None
         status = {
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
@@ -396,6 +402,7 @@ class PipelineDaemon:
         if step_name is not None and step_name != "all" and step_name not in STEP_NAMES:
             return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"
 
+        assert self.scheduler is not None
         self.scheduler.reset_config(config_name, step_name)
 
         # 构建可读的消息
@@ -431,6 +438,7 @@ class PipelineDaemon:
             and (step_name == "all" or step_name in {"Meshing", "Solver"})
         )
 
+        assert self.runner is not None
         if needs_background:
             def _do_clean_step():
                 try:

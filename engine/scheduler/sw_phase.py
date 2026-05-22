@@ -34,7 +34,7 @@ class SWPhaseHandler:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue,
+        sc_queue: queue.Queue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         worker_pool_manager=None,

@@ -1,5 +1,5 @@
 /file/set-tui-version "24.1"
-(%py-exec "workflow.LoadWorkflow(FilePath=r'D:/xkz_1020/meshing_gen4.wft')")
+(%py-exec "workflow.LoadWorkflow(FilePath=r'{{REMOTE_ROOT}}/meshing_gen4.wft')")
 (%py-exec "workflow.TaskObject['Improve Volume Mesh'].ExecuteUpstreamNonExecutedAndThisTask()")
 
 (cx-gui-do cx-activate-item "MenuBar*ToolsSubMenu*Auto Node Move...")

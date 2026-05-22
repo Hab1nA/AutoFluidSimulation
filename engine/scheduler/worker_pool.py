@@ -33,7 +33,7 @@ class WorkerPoolManager:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue,
+        sc_queue: queue.Queue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         barrier_passed_event: threading.Event,

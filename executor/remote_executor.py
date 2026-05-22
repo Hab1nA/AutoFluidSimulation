@@ -34,6 +34,10 @@ REMOTE_SCRIPT_FILES = [
     "solver_gen4.jou",
     "solver_gen4.set",
     "solver_post_gen4.jou",
+    "fluent_chemkin_files/chemkin-import_chem.inp",
+    "fluent_chemkin_files/chemkin-import_therm.dat",
+    "fluent_chemkin_files/model_gen4.fla",
+    "fluent_chemkin_files/model_gen4.pdf",
 ]
 
 
@@ -451,12 +455,12 @@ class RemoteExecutor:
 
                 # 上传变更的文件（对包含硬编码路径的文本文件做动态替换）
                 logger.info(f"需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
-                path_aware_exts = {'.jou', '.set'}
+                path_aware_exts = {'.jou', '.set', '.wft'}
                 for filename in files_to_upload:
                     local_file = os.path.join(local_scripts_dir, filename)
                     remote_file = f"{remote_root}/{filename}"
 
-                    # 对包含硬编码路径的文本文件，上传时动态替换路径
+                    # 对包含 {{REMOTE_ROOT}} 占位符的文件，上传时动态替换路径
                     if os.path.splitext(filename)[1] in path_aware_exts:
                         if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file, remote_root):
                             return False
@@ -472,13 +476,11 @@ class RemoteExecutor:
                 logger.error(f"脚本同步异常: {e}")
                 return False
 
-    def _calculate_local_hashes(self, local_dir: str) -> Optional[dict]:
+    def _calculate_local_hashes(self, local_dir: str) -> Optional[dict[str, Optional[str]]]:
         """计算本地目录中脚本文件的 MD5 哈希值。
 
-        对于会进行路径替换的文件（.jou/.set），计算替换后的哈希值，
-        以便与远程文件哈希正确比较，避免每次都重新上传。
-
-        注意：.wft 文件不在此列，因为 batch_meshing_gen4.py 会在运行时动态覆盖其 FileName 字段。
+        对于包含 {{REMOTE_ROOT}} 占位符的文件（.jou/.set/.wft），
+        计算替换后的哈希值，以便与远程文件哈希正确比较，避免每次都重新上传。
 
         Args:
             local_dir: 本地目录路径
@@ -486,9 +488,9 @@ class RemoteExecutor:
         Returns:
             字典，键为文件名，值为 MD5 哈希值；失败返回 None
         """
-        path_aware_exts = {'.jou', '.set'}
+        path_aware_exts = {'.jou', '.set', '.wft'}
         remote_root = REMOTE_CONFIG["root_dir"]
-        result = {}
+        result: dict[str, Optional[str]] = {}
         try:
             for filename in REMOTE_SCRIPT_FILES:
                 filepath = os.path.join(local_dir, filename)
@@ -499,13 +501,10 @@ class RemoteExecutor:
 
                 ext = os.path.splitext(filename)[1]
                 if ext in path_aware_exts:
-                    # 对会做路径替换的文件，计算替换后内容的哈希
+                    # 对包含 {{REMOTE_ROOT}} 占位符的文件，计算替换后内容的哈希
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read()
-                    remote_root_escaped = remote_root.replace('\\', '\\\\')
-                    content = content.replace('D:\\\\xkz_1020', remote_root_escaped)
-                    content = content.replace(r'D:\xkz_1020', remote_root)
-                    content = content.replace(r'D:/xkz_1020', remote_root)
+                    content = content.replace('{{REMOTE_ROOT}}', remote_root)
                     file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 else:
                     # 普通文件直接计算原始内容哈希
@@ -526,10 +525,9 @@ class RemoteExecutor:
         remote_file: str,
         remote_root: str
     ) -> bool:
-        """上传文本文件，动态替换其中的硬编码路径。
+        """上传文本文件，将 {{REMOTE_ROOT}} 占位符替换为实际远程根目录。
 
-        适用于 .jou、.set 等包含路径引用的配置文件。
-        将 D:\\xkz_1020（双反斜杠）、D:/xkz_1020（正斜杠）等格式统一替换为 remote_root。
+        适用于 .jou、.set、.wft 等包含路径引用的配置文件。
 
         Args:
             ssh: SSH 连接实例
@@ -541,16 +539,11 @@ class RemoteExecutor:
             上传成功返回 True，失败返回 False
         """
         try:
-            # 读取本地文件内容
             with open(local_file, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            # 替换路径：将 D:\xkz_1020 替换为实际的远程根目录
-            # 处理不同格式的路径引用（双反斜杠、单反斜杠、正斜杠）
-            remote_root_escaped = remote_root.replace('\\', '\\\\')
-            content = content.replace('D:\\\\xkz_1020', remote_root_escaped)
-            content = content.replace(r'D:\xkz_1020', remote_root)
-            content = content.replace(r'D:/xkz_1020', remote_root)
+            # 替换占位符为实际远程根目录
+            content = content.replace('{{REMOTE_ROOT}}', remote_root)
 
             # 写入临时文件
             temp_file = local_file + '.tmp'

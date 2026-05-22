@@ -260,7 +260,7 @@ class RemoteWorkstation:
     # 远程命令执行
     # ------------------------------------------------------------------
 
-    def exec_command(self, command: str, timeout: int = 30) -> tuple:
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         """在远程工作站执行命令（同步等待完成）。"""
         if not self.ensure_connected():
             return ("", "SSH 未连接", -1)

@@ -9,7 +9,6 @@ Fluent Meshing 批处理脚本 - 参数化版本
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
@@ -120,19 +119,13 @@ def main() -> None:
         import_file_name = os.path.join(args.scdoc_dir, f"model_gen4_{config_id}.scdoc")
         print(f"[{config_id}] 输入文件: {import_file_name}")
 
-        # 2. 修改工作流 JSON 文件中的路径
-        print(f"[{config_id}] 正在修改工作流文件: {args.workflow_path}")
+        # 2. 更新工作流文件中的构型号（路径已由 sync_scripts 处理）
+        print(f"[{config_id}] 正在更新工作流文件中的构型号: {args.workflow_path}")
         with open(args.workflow_path, 'r', encoding='utf-8') as f:
-            workflow_data = json.load(f)
-
-        root_tasks = workflow_data.get('workflow', {}).get('ROOT', {})
-        for _key, task in root_tasks.items():
-            if task.get('CommandName', '') == 'ImportGeometry':
-                task['Arguments']['FileName'] = import_file_name
-                break
-
+            content = f.read()
+        content = content.replace('model_gen4_100', f'model_gen4_{config_id}')
         with open(args.workflow_path, 'w', encoding='utf-8') as f:
-            json.dump(workflow_data, f, indent=4)
+            f.write(content)
 
         # 3. 执行 Journal 文件
         print(f"[{config_id}] 正在执行 Journal 文件: {args.journal_path}")

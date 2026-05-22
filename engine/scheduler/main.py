@@ -75,7 +75,7 @@ class PipelineScheduler:
 
         # ---- 工作队列 ----
         # SC 处理队列：(config_name, step_file_path)
-        self._sc_queue: queue.Queue = queue.Queue()
+        self._sc_queue: queue.Queue[tuple[int, str]] = queue.Queue()
 
         # ---- 子模块 ----
         self.retry_manager = RetryManager(
