@@ -91,6 +91,8 @@ pub struct StepFilePatterns {
     pub meshing: String,
     #[serde(rename = "Solver")]
     pub solver: String,
+    #[serde(rename = "SolverData")]
+    pub solver_dat: String,
 }
 
 impl Default for StepFilePatterns {
@@ -101,6 +103,7 @@ impl Default for StepFilePatterns {
             transfer: None,
             meshing: "model_gen4_{config}.msh.h5".to_string(),
             solver: "model_gen4_{config}.cas.h5".to_string(),
+            solver_dat: "model_gen4_{config}.dat.h5".to_string(),
         }
     }
 }
@@ -235,7 +238,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 11,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
-            SettingCategory::StepPatterns => 4,
+            SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
             SettingCategory::GlobalSettings => 9,
@@ -260,7 +263,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver",
+                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver", 4 => "SolverData",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
@@ -300,7 +303,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板",
+                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板", 4 => "Solver数据模板",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
@@ -486,6 +489,7 @@ impl SettingsState {
                 1 => self.config.step_file_patterns.sc.clone(),
                 2 => self.config.step_file_patterns.meshing.clone(),
                 3 => self.config.step_file_patterns.solver.clone(),
+                4 => self.config.step_file_patterns.solver_dat.clone(),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -566,6 +570,7 @@ impl SettingsState {
                 1 => self.config.step_file_patterns.sc = value.to_string(),
                 2 => self.config.step_file_patterns.meshing = value.to_string(),
                 3 => self.config.step_file_patterns.solver = value.to_string(),
+                4 => self.config.step_file_patterns.solver_dat = value.to_string(),
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {

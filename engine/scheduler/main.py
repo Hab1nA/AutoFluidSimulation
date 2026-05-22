@@ -192,8 +192,8 @@ class PipelineScheduler:
             self.state.set_engine_status("paused")
             return
 
-        # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
-        self.sw_phase_handler.prescan_downstream_outputs()
+        # ---- 步骤 1.5: 同步下游步骤状态与文件系统 ----
+        self.sw_phase_handler.scan_completed_downstream()
 
         # ---- 步骤 2: 启动文件监控 ----
         self._ensure_file_monitor_running()

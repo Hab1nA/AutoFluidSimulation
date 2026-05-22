@@ -32,6 +32,7 @@ SW = "model_gen4.SLDPRT_{config}.step"
 SC = "model_gen4_{config}.scdoc"
 Meshing = "model_gen4_{config}.msh.h5"
 Solver = "model_gen4_{config}.cas.h5"
+SolverData = "model_gen4_{config}.dat.h5"
 
 [solidworks]
 sw_macro_timeout = 3600

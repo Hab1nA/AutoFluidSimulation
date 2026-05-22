@@ -141,6 +141,7 @@ fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationEr
         ("step_file_patterns.Transfer", &config.step_file_patterns.transfer.clone().unwrap_or_default(), false),
         ("step_file_patterns.Meshing", &config.step_file_patterns.meshing, true),
         ("step_file_patterns.Solver", &config.step_file_patterns.solver, true),
+        ("step_file_patterns.SolverData", &config.step_file_patterns.solver_dat, true),
     ];
     for (name, pattern, requires_placeholder) in &patterns {
         if *requires_placeholder && !pattern.contains("{config}") {

@@ -1,7 +1,7 @@
 """
 SW 阶段处理模块。
 
-负责 SolidWorks 阶段的执行、预扫描和重试准备。
+负责 SolidWorks 阶段的执行、下游步骤状态同步和重试准备。
 """
 
 import threading
@@ -27,7 +27,7 @@ class SWPhaseHandler:
     """
     SW 阶段处理器。
 
-    负责 SolidWorks 阶段的执行、预扫描和重试准备。
+    负责 SolidWorks 阶段的执行、下游步骤状态同步和重试准备。
     """
 
     def __init__(
@@ -325,28 +325,21 @@ class SWPhaseHandler:
         logger.info(f"构型{config_name} 已推入 SC 处理队列 (队列长度: {self._sc_queue.qsize()})")
 
     # ------------------------------------------------------------------
-    # 输出文件预扫描（断点续传核心）
+    # 同步下游步骤状态与文件系统（断点续传）
     # ------------------------------------------------------------------
 
-    def prescan_downstream_outputs(self):
+    def scan_completed_downstream(self):
         """
-        在启动下游工作线程之前，扫描所有构型各步骤的输出文件。
+        启动下游组件前，同步 DB 状态与文件系统。
 
-        若输出文件已存在于磁盘但数据库中该步骤仍为未完成状态，
-        则直接标记为 Completed，避免重复启动程序执行该步骤。
-
-        覆盖范围：
-        - SW: 本地 STEP 文件
-        - SC: 本地 SCDOC 文件
-        - Transfer: 远程 SCDOC 文件（需 SSH）
-        - Meshing: 远程标志文件 + 网格输出文件（需 SSH）
-        - Solver: 远程标志文件 + 求解输出文件（需 SSH）
+        扫描所有构型各步骤的输出文件，若文件已存在但步骤仍为未完成状态，
+        则直接标记为 Completed，避免下游组件重复执行。
         """
         all_configs = self.state.get_all_configs()
         if not all_configs:
             return
 
-        prescan_count = 0
+        skipped_count = 0
         ssh = None
 
         # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
@@ -362,8 +355,9 @@ class SWPhaseHandler:
 
         for cn in all_configs:
             for step in STEP_NAMES:
-                # 仅检查非 Completed 步骤
-                if self.state.get_step_status(cn, step) == STATUS_COMPLETED:
+                # 跳过已完成和错误状态（ERROR 为重试终态，留给 retry 机制处理）
+                status = self.state.get_step_status(cn, step)
+                if status in (STATUS_COMPLETED, STATUS_ERROR):
                     continue
 
                 # ---- 依赖链检查：仅在上游步骤已完成时才检查下游 ----
@@ -380,19 +374,14 @@ class SWPhaseHandler:
 
                 if check_step_output_exists(cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh):
                     self.state.set_step_status(cn, step, STATUS_COMPLETED)
-                    logger.info(
-                        f"[预扫描] 构型{cn} {step}: "
-                        f"输出文件已存在，标记为 Completed"
-                    )
-                    prescan_count += 1
+                    skipped_count += 1
 
-        if prescan_count > 0:
+        if skipped_count > 0:
             logger.info(
-                f"[预扫描] 共标记 {prescan_count} 个步骤为 Completed"
-                f"（输出文件已存在）"
+                f"[下游扫描] 共跳过 {skipped_count} 个步骤（输出文件已存在）"
             )
         else:
-            logger.info("[预扫描] 未发现可跳过的步骤")
+            logger.info("[下游扫描] 所有待执行步骤均无现成输出文件")
 
     # ------------------------------------------------------------------
     # SW 重试准备

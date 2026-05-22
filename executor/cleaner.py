@@ -104,8 +104,8 @@ class FileCleaner:
     def _clean_single_step(self, step_name: str, config_name: Optional[int] = None):
         """清理单个步骤的文件（内部方法）。"""
         local_patterns = {
-            "SW":       ("step_dir",  STEP_FILE_PATTERNS["SW"],       None),
-            "SC":       ("scdoc_dir", STEP_FILE_PATTERNS["SC"],       None),
+            "SW":       ("step_dir",  [STEP_FILE_PATTERNS["SW"]]),
+            "SC":       ("scdoc_dir", [STEP_FILE_PATTERNS["SC"]]),
             "Transfer": None,
             "Meshing":  None,
             "Solver":   None,
@@ -113,10 +113,10 @@ class FileCleaner:
 
         remote_patterns = {
             "SW":       None,
-            "SC":       ("scdoc_dir",  STEP_FILE_PATTERNS["SC"],      None),
+            "SC":       ("scdoc_dir",  [STEP_FILE_PATTERNS["SC"]]),
             "Transfer": None,
-            "Meshing":  ("msh_dir",    STEP_FILE_PATTERNS["Meshing"], None),
-            "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  (".cas.h5", ".dat.h5")),
+            "Meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["Meshing"]]),
+            "Solver":   ("result_dir", [STEP_FILE_PATTERNS["Solver"], STEP_FILE_PATTERNS["SolverData"]]),
         }
 
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
@@ -124,47 +124,33 @@ class FileCleaner:
         # ---- 清理本地文件 ----
         local_info = local_patterns.get(step_name)
         if local_info is not None:
-            dir_key, file_template, extra_suffix_pair = local_info
+            dir_key, file_templates = local_info
             target_dir = str(LOCAL_PATHS.get(dir_key, ""))
             for cn in configs:
-                filename = str(file_template).format(config=cn)
-                filepath = os.path.join(target_dir, filename)
-                try:
-                    os.remove(filepath)
-                    logger.info(f"已删除本地文件: {filepath}")
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    logger.warning(f"删除本地文件失败: {filepath}: {e}")
-                if extra_suffix_pair:
-                    old_suffix, new_suffix = extra_suffix_pair
-                    extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
-                    extra_path = os.path.join(target_dir, extra_filename)
+                for file_template in file_templates:
+                    filename = str(file_template).format(config=cn)
+                    filepath = os.path.join(target_dir, filename)
                     try:
-                        os.remove(extra_path)
-                        logger.info(f"已删除本地文件: {extra_path}")
+                        os.remove(filepath)
+                        logger.info(f"已删除本地文件: {filepath}")
                     except FileNotFoundError:
                         pass
                     except OSError as e:
-                        logger.warning(f"删除本地文件失败: {extra_path}: {e}")
+                        logger.warning(f"删除本地文件失败: {filepath}: {e}")
 
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)
         if remote_info is not None:
-            dir_key, file_template, extra_suffix_pair = remote_info
+            dir_key, file_templates = remote_info
             target_dir = str(REMOTE_CONFIG.get(dir_key, ""))
             try:
                 ssh = self._get_ssh()
                 if ssh.is_connected():
                     for cn in configs:
-                        filename = str(file_template).format(config=cn)
-                        remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
-                        ssh.delete_remote_file(remote_path)
-                        if extra_suffix_pair:
-                            old_suffix, new_suffix = extra_suffix_pair
-                            extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
-                            extra_remote_path = f"{target_dir.replace(chr(92), '/')}/{extra_filename}"
-                            ssh.delete_remote_file(extra_remote_path)
+                        for file_template in file_templates:
+                            filename = str(file_template).format(config=cn)
+                            remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
+                            ssh.delete_remote_file(remote_path)
                     logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
                     logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")

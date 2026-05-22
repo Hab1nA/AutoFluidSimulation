@@ -310,20 +310,38 @@ class RemoteExecutor:
         paused_event: Optional[threading.Event] = None,
         stopped_event: Optional[threading.Event] = None,
     ) -> bool:
-        """轮询等待仿真求解完成（逐次短暂持 SSH 锁）。"""
+        """轮询等待仿真求解完成（逐次短暂持 SSH 锁）。
+
+        检测到标志文件后，额外验证 .cas.h5 和 .dat.h5 是否都存在。
+        若仅存在一个文件，宽限 60s 等待另一个；超时则清理部分文件并返回错误。
+        """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+        result_dir = str(REMOTE_CONFIG["result_dir"]).replace(chr(92), "/")
+        cas_name = get_step_filename("Solver", config_name)
+        dat_name = get_step_filename("SolverData", config_name)
+        cas_file = f"{result_dir}/{cas_name}" if cas_name else None
+        dat_file = f"{result_dir}/{dat_name}" if dat_name else None
+
         timeout = ENGINE_CONFIG["solver_timeout"]
         poll_interval = 30
         start_time = time.time()
+        file_grace_period = 60
+        first_file_seen_time: Optional[float] = None
 
         logger.info(f"开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
         while time.time() - start_time < timeout:
+            # ---- 暂停/停止响应 ----
             if paused_event is not None:
+                pause_start = time.time()
                 while paused_event.is_set():
                     if stopped_event is not None and stopped_event.is_set():
                         return False
                     time.sleep(1)
+                # 暂停补偿：将 first_file_seen_time 向后推移暂停时长
+                pause_duration = time.time() - pause_start
+                if first_file_seen_time is not None and pause_duration > 0:
+                    first_file_seen_time += pause_duration
             if stopped_event is not None and stopped_event.is_set():
                 return False
 
@@ -331,9 +349,48 @@ class RemoteExecutor:
                 with self._ssh_lock:
                     ssh = self._get_ssh()
                     if ssh.check_remote_file(flag_file):
-                        logger.info(f"构型{config_name} 仿真求解完成")
-                        ssh.delete_remote_file(flag_file)
-                        return True
+                        # 标志文件存在，验证输出文件
+                        cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
+                        dat_exists = dat_file is not None and ssh.check_remote_file(dat_file)
+
+                        if cas_exists and dat_exists:
+                            ssh.delete_remote_file(flag_file)
+                            logger.info(f"构型{config_name} 仿真求解完成（cas+dat 均已保存）")
+                            return True
+
+                        # 部分文件缺失
+                        if first_file_seen_time is None:
+                            first_file_seen_time = time.time()
+                            missing = []
+                            if not cas_exists:
+                                missing.append("cas.h5")
+                            if not dat_exists:
+                                missing.append("dat.h5")
+                            logger.warning(
+                                f"构型{config_name} Solver: 标志文件已存在但缺少 "
+                                f"{', '.join(missing)}，等待 {file_grace_period}s"
+                            )
+
+                        if (first_file_seen_time is not None
+                                and time.time() - first_file_seen_time > file_grace_period):
+                            missing = []
+                            if not cas_exists:
+                                missing.append("cas.h5")
+                            if not dat_exists:
+                                missing.append("dat.h5")
+                            logger.error(
+                                f"构型{config_name} Solver: {', '.join(missing)} "
+                                f"{file_grace_period}s 内未生成，判定为导出错误"
+                            )
+                            # 清理部分文件 + 标志文件，确保 retry 从干净状态开始
+                            if cas_exists and cas_file:
+                                ssh.delete_remote_file(cas_file)
+                                logger.info(f"构型{config_name} Solver: 已清理部分文件 {cas_file}")
+                            if dat_exists and dat_file:
+                                ssh.delete_remote_file(dat_file)
+                                logger.info(f"构型{config_name} Solver: 已清理部分文件 {dat_file}")
+                            ssh.delete_remote_file(flag_file)
+                            return False
             except (OSError, ConnectionError) as e:
                 logger.warning(f"轮询构型{config_name} 求解状态异常: {e}")
 

@@ -82,7 +82,7 @@ def check_step_output_exists(
     """
     检查某构型某步骤的输出文件是否已存在。
 
-    统一了 prescan_downstream_outputs、_resume_paused_steps、
+    统一了 scan_completed_downstream、_resume_paused_steps、
     worker_pool._process_single_config、meshing_monitor 中的
     输出文件存在性检查逻辑。
 
@@ -160,17 +160,17 @@ def check_step_output_exists(
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/solver_done_{config_name}.txt"
         )
-        result_name = get_step_filename("Solver", config_name)
-        result_file = None
-        if result_name:
-            result_file = (
-                f"{remote_config['result_dir'].replace(chr(92), '/')}"
-                f"/{result_name}"
-            )
+        result_dir = remote_config['result_dir'].replace(chr(92), '/')
+        cas_name = get_step_filename("Solver", config_name)
+        dat_name = get_step_filename("SolverData", config_name)
+        cas_file = f"{result_dir}/{cas_name}" if cas_name else None
+        dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            return bool(ssh.check_remote_file(flag_file)) or (
-                result_file is not None and bool(ssh.check_remote_file(result_file))
-            )
+            if ssh.check_remote_file(flag_file):
+                return True
+            cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
+            dat_exists = dat_file is not None and ssh.check_remote_file(dat_file)
+            return cas_exists and dat_exists
         except Exception:
             return False
 

@@ -238,7 +238,8 @@ STEP_FILE_PATTERNS = {
     "SC": "model_gen4_{config}.scdoc",
     "Transfer": None,  # 传输不产生本地文件
     "Meshing": "model_gen4_{config}.msh.h5",
-    "Solver": "model_gen4_{config}.cas.h5",  # cas 和 dat 都会清理
+    "Solver": "model_gen4_{config}.cas.h5",
+    "SolverData": "model_gen4_{config}.dat.h5",
 }
 
 # ============================================================================
