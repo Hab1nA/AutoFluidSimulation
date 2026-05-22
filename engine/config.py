@@ -238,7 +238,7 @@ STEP_FILE_PATTERNS = {
     "SC": "model_gen4_{config}.scdoc",
     "Transfer": None,  # 传输不产生本地文件
     "Meshing": "model_gen4_{config}.msh.h5",
-    "Solver": "model_gen4_{config}.cas.h5",  # cas 和 dat 都会清理
+    "Solver": "model_gen4_{config}.cas.h5",  # Solver_dat 通过后缀替换自动推导
 }
 
 # ============================================================================
@@ -336,7 +336,21 @@ ENGINE_CONFIG: EngineConfig = {
 
 
 def get_step_filename(step_name: str, config_name: int) -> Optional[str]:
-    """根据 STEP_FILE_PATTERNS 生成文件名。"""
+    """根据 STEP_FILE_PATTERNS 生成文件名。
+
+    特殊处理："Solver_dat" 从 "Solver" 模板推导，将 .cas.h5 替换为 .dat.h5。
+    """
+    # Solver_dat 从 Solver 模板自动推导
+    if step_name == "Solver_dat":
+        cas_pattern = STEP_FILE_PATTERNS.get("Solver")
+        if not cas_pattern:
+            return None
+        dat_pattern = cas_pattern.replace(".cas.h5", ".dat.h5")
+        try:
+            return dat_pattern.format(config=config_name)
+        except (KeyError, ValueError):
+            return None
+
     pattern = STEP_FILE_PATTERNS.get(step_name)
     if not pattern:
         return None

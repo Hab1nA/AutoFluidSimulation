@@ -148,6 +148,7 @@ pub fn render_settings_dialog(
             let is_hovered = ss.hovered_field == Some((cat_idx, fi));
             let is_clicked = ss.clicked_field == Some((cat_idx, fi));
             let is_current_field = is_focused && ss.focus.editing;
+            let is_readonly = cat.is_readonly_field(fi);
 
             // Pre-compute row background
             let row_bg = if is_clicked {
@@ -158,7 +159,9 @@ pub fn render_settings_dialog(
                 theme.bg
             };
 
-            let label_style = if is_focused {
+            let label_style = if is_readonly && !is_focused {
+                Style::default().fg(theme.muted).bg(row_bg)
+            } else if is_focused {
                 Style::default().fg(theme.success).add_modifier(Modifier::BOLD).bg(row_bg)
             } else {
                 Style::default().fg(theme.gray_4).bg(row_bg)
@@ -238,7 +241,9 @@ pub fn render_settings_dialog(
 
             // Edit indicator
             if is_focused && !ss.focus.editing {
-                let hint = if cat.is_bool_field(fi) {
+                let hint = if is_readonly {
+                    "  [只读]"
+                } else if cat.is_bool_field(fi) {
                     "  [Enter 切换]"
                 } else {
                     "  [Enter 编辑]"

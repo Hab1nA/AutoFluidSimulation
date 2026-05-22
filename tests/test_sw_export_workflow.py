@@ -950,6 +950,29 @@ class TestStepFilenameGeneration(unittest.TestCase):
             get_step_filename("Solver", 7), "model_gen4_7.cas.h5"
         )
 
+    def test_get_step_filename_solver_dat(self):
+        from engine.config import get_step_filename
+        self.assertEqual(
+            get_step_filename("Solver_dat", 7), "model_gen4_7.dat.h5"
+        )
+
+    def test_get_step_filename_solver_dat_derived(self):
+        """验证 Solver_dat 从 Solver 模板正确推导（后缀替换）。"""
+        from engine.config import get_step_filename, STEP_FILE_PATTERNS
+        # 默认模板: model_gen4_{config}.cas.h5 → model_gen4_{config}.dat.h5
+        self.assertEqual(
+            get_step_filename("Solver_dat", 0), "model_gen4_0.dat.h5"
+        )
+        self.assertEqual(
+            get_step_filename("Solver_dat", 42), "model_gen4_42.dat.h5"
+        )
+        # 确认 cas 和 dat 的基础名一致
+        cas = get_step_filename("Solver", 5)
+        dat = get_step_filename("Solver_dat", 5)
+        self.assertIsNotNone(cas)
+        self.assertIsNotNone(dat)
+        self.assertEqual(cas.replace(".cas.h5", ""), dat.replace(".dat.h5", ""))
+
     def test_get_step_filename_invalid_step(self):
         from engine.config import get_step_filename
         self.assertIsNone(get_step_filename("InvalidStep", 5))

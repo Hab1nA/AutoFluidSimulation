@@ -160,17 +160,20 @@ def check_step_output_exists(
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/solver_done_{config_name}.txt"
         )
-        result_name = get_step_filename("Solver", config_name)
-        result_file = None
-        if result_name:
-            result_file = (
-                f"{remote_config['result_dir'].replace(chr(92), '/')}"
-                f"/{result_name}"
-            )
+        result_dir = remote_config['result_dir'].replace(chr(92), '/')
+        # 同时检查 cas.h5 和 dat.h5（Fluent write_case_data 同时生成两者）
+        cas_name = get_step_filename("Solver", config_name)
+        dat_name = get_step_filename("Solver_dat", config_name)
+        cas_file = f"{result_dir}/{cas_name}" if cas_name else None
+        dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            return bool(ssh.check_remote_file(flag_file)) or (
-                result_file is not None and bool(ssh.check_remote_file(result_file))
-            )
+            if bool(ssh.check_remote_file(flag_file)):
+                return True
+            if cas_file is not None and bool(ssh.check_remote_file(cas_file)):
+                return True
+            if dat_file is not None and bool(ssh.check_remote_file(dat_file)):
+                return True
+            return False
         except Exception:
             return False
 
