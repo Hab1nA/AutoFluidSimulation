@@ -4,18 +4,12 @@ sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidw
 excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx'
 step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
 sc_exe = 'C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe'
-sc_script = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\spaceclaim_transit.py'
-sc_bridge = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\bridge\SpaceClaimBridge.exe'
 scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
-log_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\logs'
-data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
-remote_scripts_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\remote_scripts'
 
 [remote_config]
 host = "172.17.135.240"
 port = 22
 username = "ps"
-password = "${AUTOFLUID_SSH_PASSWORD}"
 root_dir = 'D:\xkz_1020'
 scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'

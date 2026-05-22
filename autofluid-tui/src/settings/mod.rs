@@ -14,12 +14,7 @@ pub struct LocalPaths {
     pub excel: String,
     pub step_dir: String,
     pub sc_exe: String,
-    pub sc_script: String,
-    pub sc_bridge: String,
     pub scdoc_dir: String,
-    pub log_dir: String,
-    pub data_dir: String,
-    pub remote_scripts_dir: String,
 }
 
 impl Default for LocalPaths {
@@ -30,12 +25,7 @@ impl Default for LocalPaths {
             excel: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx".to_string(),
             step_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step".to_string(),
             sc_exe: r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe".to_string(),
-            sc_script: String::new(), // computed at runtime relative to project dir
-            sc_bridge: String::new(),  // computed at runtime relative to project dir
             scdoc_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc".to_string(),
-            log_dir: String::new(),   // computed at runtime
-            data_dir: String::new(),  // computed at runtime
-            remote_scripts_dir: String::new(),  // computed at runtime
         }
     }
 }
@@ -45,6 +35,7 @@ pub struct RemoteConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
+    #[serde(skip_serializing)]
     pub password: String,
     pub root_dir: String,
     pub scdoc_dir: String,
@@ -235,7 +226,7 @@ impl SettingCategory {
 
     pub fn field_count(self) -> usize {
         match self {
-            SettingCategory::LocalPaths => 11,
+            SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
             SettingCategory::StepPatterns => 5,
@@ -249,8 +240,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => match idx {
                 0 => "sw_exe", 1 => "sw_model", 2 => "excel", 3 => "step_dir",
-                4 => "sc_exe", 5 => "sc_script", 6 => "sc_bridge", 7 => "scdoc_dir", 8 => "log_dir", 9 => "data_dir",
-                10 => "remote_scripts_dir",
+                4 => "sc_exe", 5 => "scdoc_dir",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
@@ -290,7 +280,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => match idx {
                 0 => "SW可执行文件", 1 => "SW模型文件", 2 => "Excel参数表", 3 => "STEP输出目录",
-                4 => "SC可执行文件", 5 => "SC脚本文件", 6 => "SC桥接程序", 7 => "SCDOC输出目录", 8 => "日志目录", 9 => "数据目录",
+                4 => "SC可执行文件", 5 => "SCDOC输出目录",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
@@ -299,7 +289,7 @@ impl SettingCategory {
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "工程根目录", 1 => "SCDOC接收目录", 2 => "网格输出目录", 3 => "结果输出目录",
-                4 => "Conda环境名", 5 => "Conda路径", 6 => "网格脚本", 7 => "求解脚本", 8 => "标志文件目录",
+                4 => "Conda环境名", 5 => "Conda路径", 6 => "ANSYS安装目录", 7 => "网格脚本", 8 => "求解脚本", 9 => "标志文件目录",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
@@ -378,47 +368,10 @@ pub struct SettingsState {
 impl SettingsState {
     pub fn new() -> Self {
         let mut config = config_io::load_config().unwrap_or_default();
-        // 从 .env 文件加载密码（TOML 中密码可能为空）
-        if config.remote_config.password.is_empty() {
-            let env_pwd = config_io::read_env_password();
-            if !env_pwd.is_empty() {
-                config.remote_config.password = env_pwd;
-            }
-        }
-        // 路径在运行时计算相对于项目根目录的默认值
-        let project_dir = std::env::current_dir().unwrap_or_default();
-        if config.local_paths.sc_script.is_empty() {
-            config.local_paths.sc_script = project_dir
-                .join("executor")
-                .join("spaceclaim_transit.py")
-                .to_string_lossy()
-                .to_string();
-        }
-        if config.local_paths.sc_bridge.is_empty() {
-            config.local_paths.sc_bridge = project_dir
-                .join("bridge")
-                .join("SpaceClaimBridge.exe")
-                .to_string_lossy()
-                .to_string();
-        }
-        if config.local_paths.log_dir.is_empty() {
-            config.local_paths.log_dir = project_dir
-                .join("logs")
-                .to_string_lossy()
-                .to_string();
-        }
-        if config.local_paths.data_dir.is_empty() {
-            config.local_paths.data_dir = project_dir
-                .join("data")
-                .to_string_lossy()
-                .to_string();
-        }
-        if config.local_paths.remote_scripts_dir.is_empty() {
-            config.local_paths.remote_scripts_dir = project_dir
-                .join("executor")
-                .join("remote_scripts")
-                .to_string_lossy()
-                .to_string();
+        // 密码始终从 .env 文件读取（TOML 中不存储密码）
+        let env_pwd = config_io::read_env_password();
+        if !env_pwd.is_empty() {
+            config.remote_config.password = env_pwd;
         }
         Self {
             config,
@@ -456,12 +409,7 @@ impl SettingsState {
                 2 => self.config.local_paths.excel.clone(),
                 3 => self.config.local_paths.step_dir.clone(),
                 4 => self.config.local_paths.sc_exe.clone(),
-                5 => self.config.local_paths.sc_script.clone(),
-                6 => self.config.local_paths.sc_bridge.clone(),
-                7 => self.config.local_paths.scdoc_dir.clone(),
-                8 => self.config.local_paths.log_dir.clone(),
-                9 => self.config.local_paths.data_dir.clone(),
-                10 => self.config.local_paths.remote_scripts_dir.clone(),
+                5 => self.config.local_paths.scdoc_dir.clone(),
                 _ => String::new(),
             },
             SettingCategory::RemoteConnection => match idx {
@@ -533,12 +481,7 @@ impl SettingsState {
                 2 => self.config.local_paths.excel = value.to_string(),
                 3 => self.config.local_paths.step_dir = value.to_string(),
                 4 => self.config.local_paths.sc_exe = value.to_string(),
-                5 => self.config.local_paths.sc_script = value.to_string(),
-                6 => self.config.local_paths.sc_bridge = value.to_string(),
-                7 => self.config.local_paths.scdoc_dir = value.to_string(),
-                8 => self.config.local_paths.log_dir = value.to_string(),
-                9 => self.config.local_paths.data_dir = value.to_string(),
-                10 => self.config.local_paths.remote_scripts_dir = value.to_string(),
+                5 => self.config.local_paths.scdoc_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::RemoteConnection => match idx {
@@ -653,7 +596,19 @@ impl SettingsState {
     }
 
     pub fn begin_edit_current_field(&mut self) {
-        let value = self.get_field_value(self.current_category(), self.focus.field_index);
+        let cat = self.current_category();
+        let idx = self.focus.field_index;
+        // 密码字段：始终从 .env 文件读取真实密码，避免显示占位符
+        let value = if cat.is_password_field(idx) {
+            let env_pwd = config_io::read_env_password();
+            if !env_pwd.is_empty() {
+                env_pwd
+            } else {
+                self.get_field_value(cat, idx)
+            }
+        } else {
+            self.get_field_value(cat, idx)
+        };
         self.buffer = TextBuffer::with_text(value);
         self.focus.editing = true;
     }

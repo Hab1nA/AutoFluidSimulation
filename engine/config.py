@@ -138,36 +138,35 @@ LOCAL_PATHS: LocalPathsConfig = {
         r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
     ),
     # SpaceClaim 脚本文件（Python 格式，兼容 V23 API）
-    # 脚本位于项目 executor/ 目录下
-    "sc_script": _env_override(
-        "AUTOFLUID_SC_SCRIPT",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "executor", "spaceclaim_transit.py"),
+    # 脚本位于项目 executor/ 目录下（固定相对于项目根目录）
+    "sc_script": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "executor", "spaceclaim_transit.py",
     ),
     # C# 桥接程序（SpaceClaimBridge.exe）
     # 通过 Application.RunScript API 可靠调用 SpaceClaim 脚本
-    "sc_bridge": _env_override(
-        "AUTOFLUID_SC_BRIDGE",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge", "SpaceClaimBridge.exe"),
+    # 固定位于项目 bridge/ 目录下
+    "sc_bridge": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bridge", "SpaceClaimBridge.exe",
     ),
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc",
     ),
-    # 日志目录
-    "log_dir": _env_override(
-        "AUTOFLUID_LOG_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"),
+    # 日志目录（固定位于项目 logs/ 目录下）
+    "log_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs",
     ),
-    # 数据库/数据目录（独立于日志目录）
-    "data_dir": _env_override(
-        "AUTOFLUID_DATA_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
+    # 数据库/数据目录（固定位于项目 data/ 目录下）
+    "data_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data",
     ),
-    # 远程脚本本地目录（存放需要同步到工作站的脚本和配置文件）
-    "remote_scripts_dir": _env_override(
-        "AUTOFLUID_REMOTE_SCRIPTS_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "executor", "remote_scripts"),
+    # 远程脚本本地目录（固定位于项目 executor/remote_scripts/ 目录下）
+    "remote_scripts_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "executor", "remote_scripts",
     ),
 }
 

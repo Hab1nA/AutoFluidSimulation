@@ -206,7 +206,7 @@ pub fn render_settings_dialog(
                     if value.is_empty() {
                         "(未设置)".to_string()
                     } else {
-                        "*".repeat(value.len().min(12))
+                        "*".repeat(12)
                     }
                 } else if cat.is_bool_field(fi) {
                     if value == "true" { "是".to_string() } else { "否".to_string() }

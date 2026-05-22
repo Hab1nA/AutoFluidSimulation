@@ -11,16 +11,29 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ### 1. 架构理解（必须）
 
-在进行任何代码改动之前，必须先阅读 `docs\code-wiki.md`，全面理解：
+在进行任何代码改动之前，必须先阅读以下文档，全面理解项目：
+
+- `docs/code-style-guide.md` — 编码规范（命名、风格、错误处理）
+- `docs/roadmap.md` — 架构全景与远期规划
+
+需要理解的关键内容：
 
 - **项目整体架构**：Daemon ↔ IPC (TCP :9527) ↔ Rust TUI 的三层结构
-- **核心模块职责**：engine（调度引擎）、ipc（进程间通信）、utils（工具模块）、autofluid-tui（Rust TUI）
+- **核心模块职责**：
+  - `engine/` — 调度引擎：`PipelineDaemon`（守护进程/IPC 命令处理）、`PipelineScheduler`（流水线调度）、`TaskRunner`（阶段执行协调）、`StateManager`（SQLite WAL 持久化状态）、`config.py`（全局配置）及 `config_fingerprint.py`（配置指纹/数据库分片）
+  - `engine/scheduler/` — 调度器子包：`barrier`（全局屏障）、`worker_pool`（工作线程池）、`sw_phase`（SW 阶段处理）、`meshing_monitor`（Meshing 监控）、`retry`（重试管理）
+  - `executor/` — 任务执行器：`SWExecutor`（SolidWorks COM 自动化）、`RemoteExecutor`（SSH/SFTP 远程任务）、`FileCleaner`（文件清理）、`SCProcessPool`（SpaceClaim 进程池）
+  - `ipc/` — 进程间通信：JSON over TCP 协议，Python 侧 `IPCServer` ↔ Rust 侧 `IpcClient`
+  - `bridge/` — SpaceClaim 自动化桥接：C# .NET 程序（`SpaceClaimBridge`），通过进程检测模式辅助 SC 转换
+  - `autofluid-tui/` — Rust TUI 前端
+  - `utils/` — 工具模块：SSH 客户端、日志、进程管理等
+- **配置体系**：`autofluid_config.toml`（TOML 配置文件）→ `engine/config.py`（TypedDict 类型化配置 + `.env` 环境变量覆盖）→ `StateManager`（配置指纹自动分片数据库）
 - **关键交互逻辑**：
-  - `PipelineDaemon` 作为 IPC 命令处理器协调所有子系统
-  - `PipelineScheduler` 的 Producer-Consumer 异步队列与全局屏障同步机制
-  - `StateManager` 基于 SQLite WAL 模式的持久化状态
-  - `TaskRunner` 各阶段的执行逻辑（SW/SC/Transfer/Meshing/Solver）
-  - Rust TUI 通过 `tokio` + `ratatui` 异步轮询状态
+  - `PipelineDaemon` 通过 `IPCServer` 注册命令处理器，协调 Scheduler / TaskRunner / StateManager 所有子系统
+  - `PipelineScheduler` 基于 Producer-Consumer 异步队列 + `BarrierCoordinator` 全局屏障同步
+  - `StateManager` 基于 SQLite WAL 模式的持久化状态，支持 Daemon 写入 / TUI 并发读取
+  - `TaskRunner` 将各阶段委托给专用执行器：`SWExecutor`（SW）、`SCProcessPool`（SC）、`RemoteExecutor`（Transfer/Meshing/Solver）
+  - Rust TUI 通过 `tokio` + `ratatui` 异步轮询 IPC 状态
 
 > 如需补充项目结构、交互逻辑等信息，**随时向用户提出询问**，不要基于假设进行开发。
 
@@ -42,7 +55,7 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ### 阶段二：逐项实施与单元验证
 
-在此阶段，你必须先阅读 `docs\code-style-guide.md`，理解代码编写规范，然后遵循规范，按照计划**逐个**实施子任务：
+在此阶段，你必须先阅读 `docs/code-style-guide.md`，理解代码编写规范，然后遵循规范，按照计划**逐个**实施子任务：
 
 1. **一次只改一项**：完成一个子任务后再开始下一个
 2. **每项完成后立即验证**：
@@ -75,8 +88,7 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 ### 阶段五：交付确认
 
 - 确认所有验收标准已满足
-- 更新 `CODE_WIKI.md`（如有架构级变更）
-- 更新 `ROADMAP.md`（如涉及远期规划项）
+- 更新 `docs/roadmap.md`（如涉及架构级变更或远期规划项）
 
 ---
 
@@ -96,7 +108,7 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ## 禁止事项
 
-- ❌ **禁止**在未阅读 `CODE_WIKI.md` 的情况下直接开始编码
+- ❌ **禁止**在未阅读 `docs/code-style-guide.md` 和 `docs/roadmap.md` 的情况下直接开始编码
 - ❌ **禁止**一次性提交大量未经测试的改动
 - ❌ **禁止**跳过测试直接交付
 - ❌ **禁止**基于猜测修改项目架构或关键交互逻辑——必须先向用户确认
@@ -107,10 +119,13 @@ applyTo: ["**/*.py", "**/*.rs", "**/*.toml", "**/*.ini", "**/*.bat"]
 
 ## 项目技术栈速查
 
-| 层级     | 语言           | 关键依赖                               |
-| -------- | -------------- | -------------------------------------- |
-| 调度引擎 | Python 3.10    | SQLite WAL, threading, queue, paramiko |
-| IPC      | Python → Rust | JSON over TCP (port 9527)              |
-| TUI 前端 | Rust           | tokio, ratatui, serde                  |
-| 测试     | Python         | pytest                                 |
-| 代码质量 | Python + Rust  | ruff, mypy, cargo clippy               |
+| 层级       | 语言           | 关键依赖                                          |
+| ---------- | -------------- | ------------------------------------------------- |
+| 配置体系   | TOML + Python  | toml, python-dotenv, TypedDict                    |
+| 调度引擎   | Python 3.10    | SQLite WAL, threading, queue                      |
+| 任务执行   | Python 3.10    | pywin32 (COM), paramiko (SSH/SFTP)                |
+| IPC        | Python → Rust  | JSON over TCP (port 9527)                         |
+| TUI 前端   | Rust           | tokio, ratatui, crossterm, serde, toml            |
+| 代码桥接   | C# .NET 4.8    | SpaceClaim API                                    |
+| 测试       | Python         | pytest                                            |
+| 代码质量   | Python + Rust  | ruff, mypy, cargo clippy                          |

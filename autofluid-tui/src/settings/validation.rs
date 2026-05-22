@@ -33,8 +33,6 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         ("local_paths.sw_model", &config.local_paths.sw_model, true),
         ("local_paths.excel", &config.local_paths.excel, true),
         ("local_paths.sc_exe", &config.local_paths.sc_exe, false),
-        ("local_paths.sc_script", &config.local_paths.sc_script, false),
-        ("local_paths.sc_bridge", &config.local_paths.sc_bridge, false),
     ];
 
     for (name, path, is_required) in &required_executables {
@@ -59,9 +57,6 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
     let dirs = [
         ("local_paths.step_dir", &config.local_paths.step_dir),
         ("local_paths.scdoc_dir", &config.local_paths.scdoc_dir),
-        ("local_paths.log_dir", &config.local_paths.log_dir),
-        ("local_paths.data_dir", &config.local_paths.data_dir),
-        ("local_paths.remote_scripts_dir", &config.local_paths.remote_scripts_dir),
     ];
     for (name, path) in &dirs {
         if path.is_empty() {
