@@ -235,7 +235,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 11,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
-            SettingCategory::StepPatterns => 5,
+            SettingCategory::StepPatterns => 4,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
             SettingCategory::GlobalSettings => 9,
@@ -260,7 +260,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver", 4 => "Solver_dat",
+                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
@@ -300,7 +300,7 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板", 4 => "Solver(dat)模板",
+                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
@@ -329,11 +329,6 @@ impl SettingCategory {
 
     pub fn is_password_field(self, idx: usize) -> bool {
         matches!(self, SettingCategory::RemoteConnection) && idx == 3
-    }
-
-    /// 返回 `true` 表示该字段为只读（不可编辑），如派生字段。
-    pub fn is_readonly_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::StepPatterns) && idx == 4
     }
 }
 
@@ -491,9 +486,6 @@ impl SettingsState {
                 1 => self.config.step_file_patterns.sc.clone(),
                 2 => self.config.step_file_patterns.meshing.clone(),
                 3 => self.config.step_file_patterns.solver.clone(),
-                // Solver_dat: 从 Solver 模板推导（.cas.h5 → .dat.h5）
-                4 => self.config.step_file_patterns.solver
-                    .replace(".cas.h5", ".dat.h5"),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -574,7 +566,6 @@ impl SettingsState {
                 1 => self.config.step_file_patterns.sc = value.to_string(),
                 2 => self.config.step_file_patterns.meshing = value.to_string(),
                 3 => self.config.step_file_patterns.solver = value.to_string(),
-                4 => {} // Solver_dat 是只读派生字段，忽略写入
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {

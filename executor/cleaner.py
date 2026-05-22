@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
     STEP_NAMES, STEP_FILE_PATTERNS,
-    get_step_filename,
 )
 from utils.logger import setup_logger
 
@@ -117,7 +116,7 @@ class FileCleaner:
             "SC":       ("scdoc_dir",  STEP_FILE_PATTERNS["SC"],      None),
             "Transfer": None,
             "Meshing":  ("msh_dir",    STEP_FILE_PATTERNS["Meshing"], None),
-            "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  None),
+            "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  (".cas.h5", ".dat.h5")),
         }
 
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
@@ -152,7 +151,7 @@ class FileCleaner:
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)
         if remote_info is not None:
-            dir_key, file_template, _extra = remote_info
+            dir_key, file_template, extra_suffix_pair = remote_info
             target_dir = str(REMOTE_CONFIG.get(dir_key, ""))
             try:
                 ssh = self._get_ssh()
@@ -161,25 +160,15 @@ class FileCleaner:
                         filename = str(file_template).format(config=cn)
                         remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
                         ssh.delete_remote_file(remote_path)
+                        if extra_suffix_pair:
+                            old_suffix, new_suffix = extra_suffix_pair
+                            extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
+                            extra_remote_path = f"{target_dir.replace(chr(92), '/')}/{extra_filename}"
+                            ssh.delete_remote_file(extra_remote_path)
                     logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
                     logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")
             except (OSError, ConnectionError) as e:
                 logger.error(f"远程文件清理异常 ({step_name}): {e}")
-
-        # Solver 步骤额外清理 dat.h5 文件（从 cas.h5 模板推导）
-        if step_name == "Solver":
-            dat_dir = str(REMOTE_CONFIG.get("result_dir", ""))
-            try:
-                ssh = self._get_ssh()
-                if ssh.is_connected():
-                    for cn in configs:
-                        dat_name = get_step_filename("Solver_dat", cn)
-                        if dat_name:
-                            dat_path = f"{dat_dir.replace(chr(92), '/')}/{dat_name}"
-                            ssh.delete_remote_file(dat_path)
-                    logger.info(f"步骤 Solver(dat) 远程文件清理完成 ({dat_dir})")
-            except (OSError, ConnectionError) as e:
-                logger.error(f"远程 Solver(dat) 文件清理异常: {e}")
 
         logger.info(f"步骤 {step_name} 文件清理完成")

@@ -442,9 +442,7 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
             if let Some(ref mut ss) = state.settings_state {
                 let cat = ss.current_category();
                 let idx = ss.focus.field_index;
-                if cat.is_readonly_field(idx) {
-                    // 只读字段不可编辑，忽略 Enter
-                } else if cat.is_bool_field(idx) {
+                if cat.is_bool_field(idx) {
                     ss.toggle_boolean();
                 } else {
                     ss.begin_edit_current_field();
