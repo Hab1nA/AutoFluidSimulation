@@ -502,3 +502,100 @@ class RemoteWorkstation:
             ]
 
         return results
+
+    # ------------------------------------------------------------------
+    # 目录上传与文件哈希
+    # ------------------------------------------------------------------
+
+    def upload_directory(self, local_dir: str, remote_dir: str, max_retries: int = 3) -> bool:
+        """递归上传本地目录到远程工作站。
+
+        Args:
+            local_dir: 本地目录路径
+            remote_dir: 远程目录路径
+            max_retries: 每个文件的最大重试次数
+
+        Returns:
+            上传成功返回 True，失败返回 False
+        """
+        if not os.path.isdir(local_dir):
+            logger.error(f"本地目录不存在: {local_dir}")
+            return False
+
+        try:
+            # 确保远程目录存在
+            remote_dir_normalized = remote_dir.replace("\\", "/")
+            self._ensure_remote_dir(remote_dir_normalized)
+
+            # 遍历本地目录
+            for root, dirs, files in os.walk(local_dir):
+                # 计算相对路径
+                rel_path = os.path.relpath(root, local_dir)
+                if rel_path == ".":
+                    remote_subdir = remote_dir_normalized
+                else:
+                    remote_subdir = f"{remote_dir_normalized}/{rel_path.replace(os.sep, '/')}"
+
+                # 创建远程子目录
+                if files:  # 仅在有文件时创建目录
+                    self._ensure_remote_dir(remote_subdir)
+
+                # 上传文件
+                for filename in files:
+                    local_file = os.path.join(root, filename)
+                    remote_file = f"{remote_subdir}/{filename}"
+                    if not self.upload_file(local_file, remote_file, max_retries):
+                        logger.error(f"上传文件失败: {local_file}")
+                        return False
+
+            logger.info(f"目录上传完成: {local_dir} -> {remote_dir}")
+            return True
+
+        except (OSError, paramiko.SSHException, EOFError) as e:
+            logger.error(f"目录上传异常: {e}")
+            return False
+
+    def get_remote_file_hash(self, remote_path: str) -> Optional[str]:
+        """获取远程文件的 MD5 哈希值。
+
+        使用 PowerShell Get-FileHash 命令计算远程文件的哈希值。
+
+        Args:
+            remote_path: 远程文件路径
+
+        Returns:
+            文件的 MD5 哈希值（小写十六进制字符串），失败返回 None
+        """
+        if not self.ensure_connected():
+            return None
+
+        # 使用 PowerShell 计算文件哈希
+        normalized_path = remote_path.replace("\\", "/")
+        ps_command = f'Get-FileHash -Path "{normalized_path}" -Algorithm MD5 | Select-Object -ExpandProperty Hash'
+        out, err, code = self.exec_command(f'powershell -Command "{ps_command}"', timeout=30)
+
+        if code == 0 and out.strip():
+            # 返回小写的哈希值
+            return out.strip().lower()
+        else:
+            logger.debug(f"获取远程文件哈希失败 (可能文件不存在): {remote_path}")
+            return None
+
+    def get_remote_file_hashes(self, remote_dir: str, filenames: list) -> dict:
+        """批量获取远程文件的 MD5 哈希值。
+
+        Args:
+            remote_dir: 远程目录路径
+            filenames: 文件名列表
+
+        Returns:
+            字典，键为文件名，值为 MD5 哈希值（文件不存在则值为 None）
+        """
+        result = {}
+        remote_dir_normalized = remote_dir.replace("\\", "/")
+
+        for filename in filenames:
+            remote_path = f"{remote_dir_normalized}/{filename}"
+            result[filename] = self.get_remote_file_hash(remote_path)
+
+        return result

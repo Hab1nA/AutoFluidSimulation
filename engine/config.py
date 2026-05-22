@@ -44,6 +44,7 @@ class LocalPathsConfig(TypedDict):
     scdoc_dir: str
     log_dir: str
     data_dir: str
+    remote_scripts_dir: str
 
 
 class RemoteConfig(TypedDict):
@@ -161,6 +162,11 @@ LOCAL_PATHS: LocalPathsConfig = {
     "data_dir": _env_override(
         "AUTOFLUID_DATA_DIR",
         os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
+    ),
+    # 远程脚本本地目录（存放需要同步到工作站的脚本和配置文件）
+    "remote_scripts_dir": _env_override(
+        "AUTOFLUID_REMOTE_SCRIPTS_DIR",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "executor", "remote_scripts"),
     ),
 }
 

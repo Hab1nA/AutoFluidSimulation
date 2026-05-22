@@ -9,6 +9,7 @@ sc_bridge = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\bridge\S
 scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
 log_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\logs'
 data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
+remote_scripts_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\remote_scripts'
 
 [remote_config]
 host = "172.17.135.240"

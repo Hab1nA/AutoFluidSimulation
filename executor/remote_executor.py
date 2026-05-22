@@ -8,6 +8,7 @@
 ===============================================================================
 """
 
+import hashlib
 import os
 import time
 import threading
@@ -23,6 +24,17 @@ from engine.config import (
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# 远程脚本文件列表
+REMOTE_SCRIPT_FILES = [
+    "batch_meshing_gen4.py",
+    "batch_solver_gen4.py",
+    "meshing_gen4.wft",
+    "meshing_gen4.jou",
+    "solver_gen4.jou",
+    "solver_gen4.set",
+    "solver_post_gen4.jou",
+]
 
 
 class RemoteExecutor:
@@ -105,7 +117,17 @@ class RemoteExecutor:
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         meshing_script = REMOTE_CONFIG["meshing_script"]
-        command = f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
+        remote_root = REMOTE_CONFIG["root_dir"]
+
+        # 构建参数化命令
+        command = (
+            f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
+            f' --remote-root "{remote_root}"'
+            f' --workflow-path "{remote_root}/meshing_gen4.wft"'
+            f' --journal-path "{remote_root}/meshing_gen4.jou"'
+            f' --scdoc-dir "{remote_root}/scdoc"'
+            f' --output-dir "{remote_root}/msh"'
+        )
         return command, flag_file
 
     def execute_meshing(self, config_name: int) -> bool:
@@ -117,6 +139,11 @@ class RemoteExecutor:
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        # 同步远程脚本（仅在文件变更时上传）
+        if not self.sync_scripts():
+            logger.error("远程脚本同步失败，无法启动网格划分")
             return False
 
         command, flag_file = self._build_meshing_command(config_name)
@@ -145,6 +172,11 @@ class RemoteExecutor:
         """
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        # 同步远程脚本（仅在文件变更时上传）
+        if not self.sync_scripts():
+            logger.error("[MeshingMonitor] 远程脚本同步失败")
             return False
 
         command, flag_file = self._build_meshing_command(config_name)
@@ -231,12 +263,31 @@ class RemoteExecutor:
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
             return False
+
+        # 同步远程脚本（仅在文件变更时上传）
+        if not self.sync_scripts():
+            logger.error("远程脚本同步失败，无法启动仿真求解")
+            return False
+
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         solver_script = REMOTE_CONFIG["solver_script"]
-        command = f'"{conda_exe}" run -n {conda_env} python "{solver_script}" {config_name}'
+        remote_root = REMOTE_CONFIG["root_dir"]
+
+        # 构建参数化命令
+        command = (
+            f'"{conda_exe}" run -n {conda_env} python "{solver_script}" {config_name}'
+            f' --remote-root "{remote_root}"'
+            f' --journal-path "{remote_root}/solver_gen4.jou"'
+            f' --post-journal-path "{remote_root}/solver_post_gen4.jou"'
+            f' --msh-dir "{remote_root}/msh"'
+            f' --output-dir "{remote_root}/case"'
+            f' --anim-dir "{remote_root}/animation"'
+            f' --working-dir-t "{remote_root}/workingdir/animation-t"'
+            f' --working-dir-v "{remote_root}/workingdir/animation-v"'
+        )
 
         logger.info(f"启动远程仿真求解: 构型{config_name}")
 
@@ -290,3 +341,157 @@ class RemoteExecutor:
 
         logger.error(f"构型{config_name} 仿真求解超时 ({timeout}s)")
         return False
+
+    # ------------------------------------------------------------------
+    # 脚本同步
+    # ------------------------------------------------------------------
+
+    def sync_scripts(self) -> bool:
+        """同步远程脚本到工作站。
+
+        比较本地和远程脚本的 MD5 哈希值，仅在文件变更时上传。
+        对于 .jou 文件，上传时会动态替换其中的路径。
+
+        Returns:
+            同步成功返回 True，失败返回 False
+        """
+        local_scripts_dir = LOCAL_PATHS.get("remote_scripts_dir")
+        if not local_scripts_dir or not os.path.isdir(local_scripts_dir):
+            logger.error(f"本地脚本目录不存在: {local_scripts_dir}")
+            return False
+
+        remote_root = REMOTE_CONFIG["root_dir"]
+
+        # 获取本地文件哈希
+        local_hashes = self._calculate_local_hashes(local_scripts_dir)
+        if local_hashes is None:
+            return False
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+
+                # 获取远程文件哈希
+                remote_hashes = ssh.get_remote_file_hashes(remote_root, REMOTE_SCRIPT_FILES)
+
+                # 比较并上传变更的文件
+                files_to_upload = []
+                for filename in REMOTE_SCRIPT_FILES:
+                    local_hash = local_hashes.get(filename)
+                    remote_hash = remote_hashes.get(filename)
+
+                    if local_hash is None:
+                        logger.warning(f"本地文件不存在: {filename}")
+                        continue
+
+                    if local_hash != remote_hash:
+                        files_to_upload.append(filename)
+                        logger.info(f"文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
+
+                if not files_to_upload:
+                    logger.info("所有脚本文件已是最新，无需同步")
+                    return True
+
+                # 上传变更的文件
+                logger.info(f"需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
+                for filename in files_to_upload:
+                    local_file = os.path.join(local_scripts_dir, filename)
+                    remote_file = f"{remote_root}/{filename}"
+
+                    # 对于 .jou 文件，需要动态替换路径
+                    if filename.endswith('.jou'):
+                        if not self._upload_jou_file_with_path_replacement(ssh, local_file, remote_file, remote_root):
+                            return False
+                    else:
+                        if not ssh.upload_file(local_file, remote_file):
+                            logger.error(f"上传文件失败: {filename}")
+                            return False
+
+                logger.info("脚本同步完成")
+                return True
+
+            except (OSError, ConnectionError) as e:
+                logger.error(f"脚本同步异常: {e}")
+                return False
+
+    def _calculate_local_hashes(self, local_dir: str) -> Optional[dict]:
+        """计算本地目录中脚本文件的 MD5 哈希值。
+
+        Args:
+            local_dir: 本地目录路径
+
+        Returns:
+            字典，键为文件名，值为 MD5 哈希值；失败返回 None
+        """
+        result = {}
+        try:
+            for filename in REMOTE_SCRIPT_FILES:
+                filepath = os.path.join(local_dir, filename)
+                if not os.path.exists(filepath):
+                    logger.warning(f"本地文件不存在: {filepath}")
+                    result[filename] = None
+                    continue
+
+                # 计算文件 MD5
+                with open(filepath, 'rb') as f:
+                    file_hash = hashlib.md5(f.read()).hexdigest()
+                result[filename] = file_hash
+
+            return result
+
+        except OSError as e:
+            logger.error(f"计算本地文件哈希失败: {e}")
+            return None
+
+    def _upload_jou_file_with_path_replacement(
+        self,
+        ssh: "RemoteWorkstation",
+        local_file: str,
+        remote_file: str,
+        remote_root: str
+    ) -> bool:
+        """上传 .jou 文件，动态替换其中的路径。
+
+        Args:
+            ssh: SSH 连接实例
+            local_file: 本地文件路径
+            remote_file: 远程文件路径
+            remote_root: 远程根目录
+
+        Returns:
+            上传成功返回 True，失败返回 False
+        """
+        try:
+            # 读取本地 .jou 文件内容
+            with open(local_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # 替换路径：将 D:\xkz_1020 替换为实际的远程根目录
+            # 处理不同格式的路径引用（双反斜杠、单反斜杠、正斜杠）
+            # 注意：.jou 文件中使用双反斜杠格式，如 D:\\xkz_1020
+            remote_root_escaped = remote_root.replace('\\', '\\\\')
+            content = content.replace('D:\\\\xkz_1020', remote_root_escaped)
+            content = content.replace(r'D:\xkz_1020', remote_root)
+            content = content.replace(r'D:/xkz_1020', remote_root)
+
+            # 写入临时文件
+            temp_file = local_file + '.tmp'
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            # 上传临时文件
+            success = ssh.upload_file(temp_file, remote_file)
+
+            # 清理临时文件
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+
+            if success:
+                logger.info(f"上传 .jou 文件（已替换路径）: {os.path.basename(local_file)}")
+            return success
+
+        except (OSError, UnicodeDecodeError) as e:
+            logger.error(f"上传 .jou 文件失败: {e}")
+            return False
