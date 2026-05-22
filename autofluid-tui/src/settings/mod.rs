@@ -19,6 +19,7 @@ pub struct LocalPaths {
     pub scdoc_dir: String,
     pub log_dir: String,
     pub data_dir: String,
+    pub remote_scripts_dir: String,
 }
 
 impl Default for LocalPaths {
@@ -34,6 +35,7 @@ impl Default for LocalPaths {
             scdoc_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc".to_string(),
             log_dir: String::new(),   // computed at runtime
             data_dir: String::new(),  // computed at runtime
+            remote_scripts_dir: String::new(),  // computed at runtime
         }
     }
 }
@@ -50,6 +52,7 @@ pub struct RemoteConfig {
     pub result_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
+    pub ansys_root: String,
     pub meshing_script: String,
     pub solver_script: String,
     pub flag_dir: String,
@@ -68,6 +71,7 @@ impl Default for RemoteConfig {
             result_dir: r"D:\xkz_1020\case".to_string(),
             conda_env: "pyfluent".to_string(),
             conda_exe: r"C:\ProgramData\anaconda3\Scripts\conda.exe".to_string(),
+            ansys_root: r"C:\Program Files\ANSYS Inc\v241".to_string(),
             meshing_script: r"D:\xkz_1020\batch_meshing_gen4.py".to_string(),
             solver_script: r"D:\xkz_1020\batch_solver_gen4.py".to_string(),
             flag_dir: r"D:\xkz_1020\flags".to_string(),
@@ -228,9 +232,9 @@ impl SettingCategory {
 
     pub fn field_count(self) -> usize {
         match self {
-            SettingCategory::LocalPaths => 10,
+            SettingCategory::LocalPaths => 11,
             SettingCategory::RemoteConnection => 4,
-            SettingCategory::RemoteDirs => 9,
+            SettingCategory::RemoteDirs => 10,
             SettingCategory::StepPatterns => 4,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
@@ -243,6 +247,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => match idx {
                 0 => "sw_exe", 1 => "sw_model", 2 => "excel", 3 => "step_dir",
                 4 => "sc_exe", 5 => "sc_script", 6 => "sc_bridge", 7 => "scdoc_dir", 8 => "log_dir", 9 => "data_dir",
+                10 => "remote_scripts_dir",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
@@ -251,7 +256,7 @@ impl SettingCategory {
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "root_dir", 1 => "scdoc_dir", 2 => "msh_dir", 3 => "result_dir",
-                4 => "conda_env", 5 => "conda_exe", 6 => "meshing_script", 7 => "solver_script", 8 => "flag_dir",
+                4 => "conda_env", 5 => "conda_exe", 6 => "ansys_root", 7 => "meshing_script", 8 => "solver_script", 9 => "flag_dir",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
@@ -405,6 +410,13 @@ impl SettingsState {
                 .to_string_lossy()
                 .to_string();
         }
+        if config.local_paths.remote_scripts_dir.is_empty() {
+            config.local_paths.remote_scripts_dir = project_dir
+                .join("executor")
+                .join("remote_scripts")
+                .to_string_lossy()
+                .to_string();
+        }
         Self {
             config,
             focus: SettingsFocus::default(),
@@ -446,6 +458,7 @@ impl SettingsState {
                 7 => self.config.local_paths.scdoc_dir.clone(),
                 8 => self.config.local_paths.log_dir.clone(),
                 9 => self.config.local_paths.data_dir.clone(),
+                10 => self.config.local_paths.remote_scripts_dir.clone(),
                 _ => String::new(),
             },
             SettingCategory::RemoteConnection => match idx {
@@ -462,9 +475,10 @@ impl SettingsState {
                 3 => self.config.remote_config.result_dir.clone(),
                 4 => self.config.remote_config.conda_env.clone(),
                 5 => self.config.remote_config.conda_exe.clone(),
-                6 => self.config.remote_config.meshing_script.clone(),
-                7 => self.config.remote_config.solver_script.clone(),
-                8 => self.config.remote_config.flag_dir.clone(),
+                6 => self.config.remote_config.ansys_root.clone(),
+                7 => self.config.remote_config.meshing_script.clone(),
+                8 => self.config.remote_config.solver_script.clone(),
+                9 => self.config.remote_config.flag_dir.clone(),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -520,6 +534,7 @@ impl SettingsState {
                 7 => self.config.local_paths.scdoc_dir = value.to_string(),
                 8 => self.config.local_paths.log_dir = value.to_string(),
                 9 => self.config.local_paths.data_dir = value.to_string(),
+                10 => self.config.local_paths.remote_scripts_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::RemoteConnection => match idx {
@@ -540,9 +555,10 @@ impl SettingsState {
                 3 => self.config.remote_config.result_dir = value.to_string(),
                 4 => self.config.remote_config.conda_env = value.to_string(),
                 5 => self.config.remote_config.conda_exe = value.to_string(),
-                6 => self.config.remote_config.meshing_script = value.to_string(),
-                7 => self.config.remote_config.solver_script = value.to_string(),
-                8 => self.config.remote_config.flag_dir = value.to_string(),
+                6 => self.config.remote_config.ansys_root = value.to_string(),
+                7 => self.config.remote_config.meshing_script = value.to_string(),
+                8 => self.config.remote_config.solver_script = value.to_string(),
+                9 => self.config.remote_config.flag_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {

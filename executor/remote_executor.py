@@ -119,10 +119,10 @@ class RemoteExecutor:
         meshing_script = REMOTE_CONFIG["meshing_script"]
         remote_root = REMOTE_CONFIG["root_dir"]
 
-        # 构建参数化命令
+        # 构建参数化命令（所有路径均为必需参数，无默认值）
         command = (
             f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
-            f' --remote-root "{remote_root}"'
+            f' --ansys-root "{REMOTE_CONFIG["ansys_root"]}"'
             f' --workflow-path "{remote_root}/meshing_gen4.wft"'
             f' --journal-path "{remote_root}/meshing_gen4.jou"'
             f' --scdoc-dir "{remote_root}/scdoc"'
@@ -276,10 +276,10 @@ class RemoteExecutor:
         solver_script = REMOTE_CONFIG["solver_script"]
         remote_root = REMOTE_CONFIG["root_dir"]
 
-        # 构建参数化命令
+        # 构建参数化命令（所有路径均为必需参数，无默认值）
         command = (
             f'"{conda_exe}" run -n {conda_env} python "{solver_script}" {config_name}'
-            f' --remote-root "{remote_root}"'
+            f' --ansys-root "{REMOTE_CONFIG["ansys_root"]}"'
             f' --journal-path "{remote_root}/solver_gen4.jou"'
             f' --post-journal-path "{remote_root}/solver_post_gen4.jou"'
             f' --msh-dir "{remote_root}/msh"'
@@ -392,15 +392,16 @@ class RemoteExecutor:
                     logger.info("所有脚本文件已是最新，无需同步")
                     return True
 
-                # 上传变更的文件
+                # 上传变更的文件（对包含硬编码路径的文本文件做动态替换）
                 logger.info(f"需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
+                path_aware_exts = {'.jou', '.set'}
                 for filename in files_to_upload:
                     local_file = os.path.join(local_scripts_dir, filename)
                     remote_file = f"{remote_root}/{filename}"
 
-                    # 对于 .jou 文件，需要动态替换路径
-                    if filename.endswith('.jou'):
-                        if not self._upload_jou_file_with_path_replacement(ssh, local_file, remote_file, remote_root):
+                    # 对包含硬编码路径的文本文件，上传时动态替换路径
+                    if os.path.splitext(filename)[1] in path_aware_exts:
+                        if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file, remote_root):
                             return False
                     else:
                         if not ssh.upload_file(local_file, remote_file):
@@ -417,12 +418,19 @@ class RemoteExecutor:
     def _calculate_local_hashes(self, local_dir: str) -> Optional[dict]:
         """计算本地目录中脚本文件的 MD5 哈希值。
 
+        对于会进行路径替换的文件（.jou/.set），计算替换后的哈希值，
+        以便与远程文件哈希正确比较，避免每次都重新上传。
+
+        注意：.wft 文件不在此列，因为 batch_meshing_gen4.py 会在运行时动态覆盖其 FileName 字段。
+
         Args:
             local_dir: 本地目录路径
 
         Returns:
             字典，键为文件名，值为 MD5 哈希值；失败返回 None
         """
+        path_aware_exts = {'.jou', '.set'}
+        remote_root = REMOTE_CONFIG["root_dir"]
         result = {}
         try:
             for filename in REMOTE_SCRIPT_FILES:
@@ -432,9 +440,20 @@ class RemoteExecutor:
                     result[filename] = None
                     continue
 
-                # 计算文件 MD5
-                with open(filepath, 'rb') as f:
-                    file_hash = hashlib.md5(f.read()).hexdigest()
+                ext = os.path.splitext(filename)[1]
+                if ext in path_aware_exts:
+                    # 对会做路径替换的文件，计算替换后内容的哈希
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    remote_root_escaped = remote_root.replace('\\', '\\\\')
+                    content = content.replace('D:\\\\xkz_1020', remote_root_escaped)
+                    content = content.replace(r'D:\xkz_1020', remote_root)
+                    content = content.replace(r'D:/xkz_1020', remote_root)
+                    file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                else:
+                    # 普通文件直接计算原始内容哈希
+                    with open(filepath, 'rb') as f:
+                        file_hash = hashlib.md5(f.read()).hexdigest()
                 result[filename] = file_hash
 
             return result
@@ -443,14 +462,17 @@ class RemoteExecutor:
             logger.error(f"计算本地文件哈希失败: {e}")
             return None
 
-    def _upload_jou_file_with_path_replacement(
+    def _upload_text_file_with_path_replacement(
         self,
         ssh: "RemoteWorkstation",
         local_file: str,
         remote_file: str,
         remote_root: str
     ) -> bool:
-        """上传 .jou 文件，动态替换其中的路径。
+        """上传文本文件，动态替换其中的硬编码路径。
+
+        适用于 .jou、.set 等包含路径引用的配置文件。
+        将 D:\\xkz_1020（双反斜杠）、D:/xkz_1020（正斜杠）等格式统一替换为 remote_root。
 
         Args:
             ssh: SSH 连接实例
@@ -462,13 +484,12 @@ class RemoteExecutor:
             上传成功返回 True，失败返回 False
         """
         try:
-            # 读取本地 .jou 文件内容
+            # 读取本地文件内容
             with open(local_file, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             # 替换路径：将 D:\xkz_1020 替换为实际的远程根目录
             # 处理不同格式的路径引用（双反斜杠、单反斜杠、正斜杠）
-            # 注意：.jou 文件中使用双反斜杠格式，如 D:\\xkz_1020
             remote_root_escaped = remote_root.replace('\\', '\\\\')
             content = content.replace('D:\\\\xkz_1020', remote_root_escaped)
             content = content.replace(r'D:\xkz_1020', remote_root)
@@ -489,9 +510,9 @@ class RemoteExecutor:
                 pass
 
             if success:
-                logger.info(f"上传 .jou 文件（已替换路径）: {os.path.basename(local_file)}")
+                logger.info(f"上传配置文件（已替换路径）: {os.path.basename(local_file)}")
             return success
 
         except (OSError, UnicodeDecodeError) as e:
-            logger.error(f"上传 .jou 文件失败: {e}")
+            logger.error(f"上传配置文件失败: {e}")
             return False

@@ -58,6 +58,7 @@ class RemoteConfig(TypedDict):
     result_dir: str
     conda_env: str
     conda_exe: str
+    ansys_root: str
     meshing_script: str
     solver_script: str
     flag_dir: str
@@ -190,6 +191,8 @@ REMOTE_CONFIG: RemoteConfig = {
     "conda_env": "pyfluent",
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
     "conda_exe": r"C:\ProgramData\anaconda3\Scripts\conda.exe",
+    # 远程 ANSYS 安装根目录
+    "ansys_root": os.environ.get("AUTOFLUID_REMOTE_ANSYS_ROOT", r"C:\Program Files\ANSYS Inc\v241"),
     # 远程网格划分脚本
     "meshing_script": r"D:\xkz_1020\batch_meshing_gen4.py",
     # 远程求解脚本

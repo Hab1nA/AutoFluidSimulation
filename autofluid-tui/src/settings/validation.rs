@@ -61,6 +61,7 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         ("local_paths.scdoc_dir", &config.local_paths.scdoc_dir),
         ("local_paths.log_dir", &config.local_paths.log_dir),
         ("local_paths.data_dir", &config.local_paths.data_dir),
+        ("local_paths.remote_scripts_dir", &config.local_paths.remote_scripts_dir),
     ];
     for (name, path) in &dirs {
         if path.is_empty() {

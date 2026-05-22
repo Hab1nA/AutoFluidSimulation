@@ -22,6 +22,7 @@ msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+ansys_root = 'C:\Program Files\ANSYS Inc\v241'
 meshing_script = 'D:\xkz_1020\batch_meshing_gen4.py'
 solver_script = 'D:\xkz_1020\batch_solver_gen4.py'
 flag_dir = 'D:\xkz_1020\flags'
