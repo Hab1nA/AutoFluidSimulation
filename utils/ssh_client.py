@@ -430,8 +430,8 @@ class RemoteWorkstation:
 
             if self.check_remote_file(flag_file):
                 logger.info("远程任务完成（检测到标志文件）")
-                # 清理标志文件
-                self.exec_command(f'if exist "{flag_file}" del /f "{flag_file}"')
+                # 清理标志文件（使用 SFTP 协议，与 check_meshing_done 等方法保持一致）
+                self.delete_remote_file(flag_file)
                 return True
 
             time.sleep(poll_interval)
