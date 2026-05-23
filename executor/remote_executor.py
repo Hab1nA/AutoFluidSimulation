@@ -126,11 +126,47 @@ class RemoteExecutor:
         command = (
             f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_meshing_gen4.py" {config_name}'
             f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
+            f' --workflow-path "{scripts_dir}/meshing_gen4.wft"'
             f' --journal-path "{scripts_dir}/meshing_gen4.jou"'
             f' --scdoc-dir "{REMOTE_CONFIG["scdoc_dir"]}"'
             f' --output-dir "{REMOTE_CONFIG["msh_dir"]}"'
         )
         return command, flag_file
+
+    def _run_meshing_command(self, config_name: int, log_prefix: str = "") -> bool:
+        """启动远程网格划分后台任务（内部方法）。
+
+        统一处理参数校验、脚本同步、命令构建和 SSH 执行。
+        由 execute_meshing() 和 start_meshing() 委托调用。
+
+        Args:
+            config_name: 构型名称
+            log_prefix: 日志前缀（如 "[MeshingMonitor]"）
+
+        Returns:
+            True 表示后台任务启动成功
+        """
+        if not self.sync_scripts():
+            logger.error(f"{log_prefix} 远程脚本同步失败，无法启动网格划分")
+            return False
+
+        command, flag_file = self._build_meshing_command(config_name)
+
+        logger.info(f"{log_prefix} 启动远程网格划分: 构型{config_name}")
+        logger.debug(f"{log_prefix} 远程命令: {command}")
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+                success = ssh.exec_background(command, flag_file)
+                if success:
+                    logger.info(f"{log_prefix} 网格划分后台任务已启动: 构型{config_name}")
+                else:
+                    logger.error(f"{log_prefix} 网格划分远程任务启动失败: 构型{config_name}")
+                return success
+            except (OSError, ConnectionError) as e:
+                logger.error(f"{log_prefix} 网格划分启动异常: {e}")
+                return False
 
     def execute_meshing(self, config_name: int) -> bool:
         """在远程工作站启动网格划分后台任务。
@@ -138,34 +174,10 @@ class RemoteExecutor:
         注意：本方法仅返回成功/失败，不设置步骤状态。
         状态由调用方（RetryManager / MeshingMonitor）统一管理。
         """
-        # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
             return False
-
-        # 同步远程脚本（仅在文件变更时上传）
-        if not self.sync_scripts():
-            logger.error("远程脚本同步失败，无法启动网格划分")
-            return False
-
-        command, flag_file = self._build_meshing_command(config_name)
-
-        logger.info(f"启动远程网格划分: 构型{config_name}")
-        logger.debug(f"远程命令: {command}")
-
-        with self._ssh_lock:
-            try:
-                ssh = self._get_ssh()
-                success = ssh.exec_background(command, flag_file)
-                if success:
-                    logger.info(f"网格划分后台任务已启动: 构型{config_name}")
-                    return True
-                else:
-                    logger.error(f"网格划分远程任务启动失败: 构型{config_name}")
-                    return False
-            except (OSError, ConnectionError) as e:
-                logger.error(f"网格划分启动异常: {e}")
-                return False
+        return self._run_meshing_command(config_name)
 
     def start_meshing(self, config_name: int) -> bool:
         """启动远程网格划分后台任务（不设置状态错误，由调用方处理）。
@@ -175,24 +187,7 @@ class RemoteExecutor:
         if not isinstance(config_name, int):
             logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
             return False
-
-        # 同步远程脚本（仅在文件变更时上传）
-        if not self.sync_scripts():
-            logger.error("[MeshingMonitor] 远程脚本同步失败")
-            return False
-
-        command, flag_file = self._build_meshing_command(config_name)
-
-        logger.info(f"[MeshingMonitor] 启动远程网格划分: 构型{config_name}")
-        logger.debug(f"[MeshingMonitor] 远程命令: {command}")
-
-        with self._ssh_lock:
-            try:
-                ssh = self._get_ssh()
-                return ssh.exec_background(command, flag_file)
-            except (OSError, ConnectionError) as e:
-                logger.error(f"[MeshingMonitor] 网格划分启动异常: {e}")
-                return False
+        return self._run_meshing_command(config_name, log_prefix="[MeshingMonitor]")
 
     def check_meshing_done(self, config_name: int) -> bool:
         """检查网格划分是否已完成（标志文件是否存在）。
@@ -255,24 +250,16 @@ class RemoteExecutor:
     # 仿真求解
     # ------------------------------------------------------------------
 
-    def execute_solver(self, config_name: int) -> bool:
-        """在远程工作站启动仿真求解后台任务（全局屏障后调用）。
+    def _build_solver_command(self, config_name: int) -> tuple[str, str]:
+        """构建远程仿真求解命令和标志文件路径。
 
-        注意：本方法仅返回成功/失败，不设置步骤状态。
-        状态由调用方（RetryManager / BarrierCoordinator）统一管理。
+        Args:
+            config_name: 构型名称
+
+        Returns:
+            (command, flag_file) 元组
         """
-        # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
-        if not isinstance(config_name, int):
-            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
-            return False
-
-        # 同步远程脚本（仅在文件变更时上传）
-        if not self.sync_scripts():
-            logger.error("远程脚本同步失败，无法启动仿真求解")
-            return False
-
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
-
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
@@ -289,8 +276,28 @@ class RemoteExecutor:
             f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
             f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
         )
+        return command, flag_file
+
+    def execute_solver(self, config_name: int) -> bool:
+        """在远程工作站启动仿真求解后台任务（全局屏障后调用）。
+
+        注意：本方法仅返回成功/失败，不设置步骤状态。
+        状态由调用方（RetryManager / BarrierCoordinator）统一管理。
+        """
+        # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
+        if not isinstance(config_name, int):
+            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        # 同步远程脚本（仅在文件变更时上传）
+        if not self.sync_scripts():
+            logger.error("远程脚本同步失败，无法启动仿真求解")
+            return False
+
+        command, flag_file = self._build_solver_command(config_name)
 
         logger.info(f"启动远程仿真求解: 构型{config_name}")
+        logger.debug(f"远程命令: {command}")
 
         with self._ssh_lock:
             try:
