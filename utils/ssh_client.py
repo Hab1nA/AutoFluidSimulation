@@ -14,7 +14,6 @@ import base64
 import os
 import socket
 import time
-from typing import Optional
 
 try:
     import paramiko
@@ -51,8 +50,8 @@ class RemoteWorkstation:
         self.port = port
         self.username = username
         self.password = password
-        self._ssh: Optional[paramiko.SSHClient] = None
-        self._sftp: Optional[paramiko.SFTPClient] = None
+        self._ssh: paramiko.SSHClient | None = None
+        self._sftp: paramiko.SFTPClient | None = None
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -80,10 +79,10 @@ class RemoteWorkstation:
             if transport:
                 transport.set_keepalive(30)
             self._sftp = self._ssh.open_sftp()
-            logger.info(f"SSH 连接成功: {self.username}@{self.host}:{self.port}")
+            logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.error(f"SSH 连接失败: {e}")
+            logger.error(f"[SSH] SSH 连接失败: {e}")
             self._ssh = None
             self._sftp = None
             return False
@@ -94,17 +93,17 @@ class RemoteWorkstation:
             try:
                 self._sftp.close()
             except (OSError, EOFError) as e:
-                logger.warning(f"SFTP 关闭异常: {e}")
+                logger.warning(f"[SSH] SFTP 关闭异常: {e}")
             finally:
                 self._sftp = None
         if self._ssh:
             try:
                 self._ssh.close()
             except (OSError, EOFError) as e:
-                logger.warning(f"SSH 关闭异常: {e}")
+                logger.warning(f"[SSH] SSH 关闭异常: {e}")
             finally:
                 self._ssh = None
-        logger.info("SSH 连接已断开")
+        logger.info("[SSH] SSH 连接已断开")
 
     def is_connected(self) -> bool:
         """检查 SSH 是否已连接（含心跳验证）。"""
@@ -122,7 +121,7 @@ class RemoteWorkstation:
     def ensure_connected(self) -> bool:
         """确保连接有效，若断开则自动重连。"""
         if not self.is_connected():
-            logger.info("SSH 已断开，尝试重新连接...")
+            logger.info("[SSH] SSH 已断开，尝试重新连接...")
             return self.connect()
         return True
 
@@ -146,7 +145,7 @@ class RemoteWorkstation:
                 # 每次尝试前确保连接有效（解决竞态条件）
                 if not self.ensure_connected():
                     if attempt < max_retries - 1:
-                        logger.warning(f"连接失败，{attempt + 1}/{max_retries} 重试...")
+                        logger.warning(f"[SSH] 连接失败，{attempt + 1}/{max_retries} 重试...")
                         time.sleep(0.5 * (2 ** attempt))  # 指数退避
                         continue
                     return False
@@ -154,15 +153,15 @@ class RemoteWorkstation:
                 remote_dir = os.path.dirname(remote_path)
                 self._ensure_remote_dir(remote_dir)
 
-                logger.info(f"正在上传: {local_path} -> {remote_path}")
+                logger.info(f"[SSH] 正在上传: {local_path} -> {remote_path}")
                 # 再次确认 SFTP 连接有效
                 if self._sftp is None:
                     raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
                 self._sftp.put(local_path, remote_path)
-                logger.info(f"上传完成: {os.path.basename(local_path)}")
+                logger.info(f"[SSH] 上传完成: {os.path.basename(local_path)}")
                 return True
             except (paramiko.SSHException, OSError, EOFError) as e:
-                logger.error(f"文件上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                logger.error(f"[SSH] 文件上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                 self.disconnect()
                 if attempt < max_retries - 1:
                     time.sleep(0.5 * (2 ** attempt))  # 指数退避
@@ -198,15 +197,15 @@ class RemoteWorkstation:
                 self._ensure_remote_dir(parent, _depth + 1)
             try:
                 self._sftp.mkdir(remote_dir)
-                logger.debug(f"创建远程目录: {remote_dir}")
+                logger.debug(f"[SSH] 创建远程目录: {remote_dir}")
             except OSError as e:
                 # 检查是否因目录已存在而失败（并发创建场景）
                 try:
                     self._sftp.stat(remote_dir)
-                    logger.debug(f"远程目录已存在（并发创建）: {remote_dir}")
+                    logger.debug(f"[SSH] 远程目录已存在（并发创建）: {remote_dir}")
                 except FileNotFoundError:
                     # 目录确实不存在但创建失败 → 真实错误
-                    logger.error(f"无法创建远程目录 {remote_dir}: {e}")
+                    logger.error(f"[SSH] 无法创建远程目录 {remote_dir}: {e}")
                     raise
 
     def check_remote_file(self, remote_path: str) -> bool:
@@ -221,7 +220,7 @@ class RemoteWorkstation:
         except FileNotFoundError:
             return False
         except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.warning(f"检查远程文件异常: {remote_path}: {e}")
+            logger.warning(f"[SSH] 检查远程文件异常: {remote_path}: {e}")
             return False
 
     def delete_remote_file(self, remote_path: str) -> bool:
@@ -240,20 +239,20 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
         if self._sftp is None:
-            logger.error(f"SFTP 未就绪，无法删除远程文件: {remote_path}")
+            logger.error(f"[SSH] SFTP 未就绪，无法删除远程文件: {remote_path}")
             return False
         # SFTP 协议要求使用正斜杠
         normalized = remote_path.replace("\\", "/")
         try:
             self._sftp.remove(normalized)
-            logger.info(f"远程文件已删除: {remote_path}")
+            logger.info(f"[SSH] 远程文件已删除: {remote_path}")
             return True
         except FileNotFoundError:
             # 文件本就不存在，视为成功
-            logger.debug(f"远程文件不存在（跳过）: {remote_path}")
+            logger.debug(f"[SSH] 远程文件不存在（跳过）: {remote_path}")
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.error(f"远程文件删除失败: {remote_path}: {e}")
+            logger.error(f"[SSH] 远程文件删除失败: {remote_path}: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -265,7 +264,7 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return ("", "SSH 未连接", -1)
         try:
-            logger.debug(f"远程执行: {command}")
+            logger.debug(f"[SSH] 远程执行: {command}")
             stdin, stdout, stderr = self._ssh.exec_command(command, timeout=timeout)  # type: ignore[union-attr]
             exit_code = stdout.channel.recv_exit_status()
             out_raw = stdout.read()
@@ -274,22 +273,22 @@ class RemoteWorkstation:
             err = self._decode_remote_output(err_raw)
             return (out, err, exit_code)
         except (paramiko.SSHException, paramiko.AuthenticationException) as e:
-            logger.error(f"SSH 认证或协议异常: {e}")
+            logger.error(f"[SSH] SSH 认证或协议异常: {e}")
             self.disconnect()
             return ("", str(e), -1)
         except socket.timeout:
-            logger.error("远程命令执行超时")
+            logger.error("[SSH] 远程命令执行超时")
             return ("", "命令执行超时", -1)
         except OSError as e:
-            logger.error(f"远程命令执行失败: {e}")
+            logger.error(f"[SSH] 远程命令执行失败: {e}")
             self.disconnect()
             return ("", str(e), -1)
         except EOFError as e:
-            logger.error(f"SSH 连接已断开: {e}")
+            logger.error(f"[SSH] SSH 连接已断开: {e}")
             self.disconnect()
             return ("", str(e), -1)
         except Exception as e:
-            logger.error(f"远程命令执行未知异常: {e}")
+            logger.error(f"[SSH] 远程命令执行未知异常: {e}")
             return ("", str(e), -1)
 
     @staticmethod
@@ -349,8 +348,8 @@ class RemoteWorkstation:
         encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
         full_command = f'"{_PS_EXE}" -NoProfile -EncodedCommand {encoded}'
 
-        logger.info(f"启动远程后台任务: {command}")
-        logger.debug(f"标志文件: {flag_file}")
+        logger.info(f"[SSH] 启动远程后台任务: {command}")
+        logger.debug(f"[SSH] 标志文件: {flag_file}")
 
         try:
             # 先清理旧的标志文件（使用 SFTP 删除，避免 shell 兼容性问题）
@@ -360,13 +359,13 @@ class RemoteWorkstation:
             _, stderr, exit_code = self.exec_command(full_command, timeout=15)
 
             if exit_code == 0:
-                logger.info("远程后台任务已启动")
+                logger.info("[SSH] 远程后台任务已启动")
                 return True
             else:
-                logger.error(f"远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
+                logger.error(f"[SSH] 远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
                 return False
         except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.error(f"启动远程后台任务异常: {e}")
+            logger.error(f"[SSH] 启动远程后台任务异常: {e}")
             return False
 
     @staticmethod
@@ -411,7 +410,7 @@ class RemoteWorkstation:
         Returns:
             True 表示标志文件已出现（任务完成），False 表示超时或外部停止
         """
-        logger.info(f"等待远程任务完成，标志文件: {flag_file}")
+        logger.info(f"[SSH] 等待远程任务完成，标志文件: {flag_file}")
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -419,24 +418,24 @@ class RemoteWorkstation:
             if paused_event is not None:
                 while paused_event.is_set():
                     if stopped_event is not None and stopped_event.is_set():
-                        logger.info("等待远程任务期间收到停止指令，提前退出")
+                        logger.info("[SSH] 等待远程任务期间收到停止指令，提前退出")
                         return False
                     time.sleep(1)
 
             # ★ 响应停止指令
             if stopped_event is not None and stopped_event.is_set():
-                logger.info("等待远程任务期间收到停止指令，提前退出")
+                logger.info("[SSH] 等待远程任务期间收到停止指令，提前退出")
                 return False
 
             if self.check_remote_file(flag_file):
-                logger.info("远程任务完成（检测到标志文件）")
+                logger.info("[SSH] 远程任务完成（检测到标志文件）")
                 # 清理标志文件（使用 SFTP 协议，与 check_meshing_done 等方法保持一致）
                 self.delete_remote_file(flag_file)
                 return True
 
             time.sleep(poll_interval)
 
-        logger.error(f"等待远程任务超时 ({timeout}s): {flag_file}")
+        logger.error(f"[SSH] 等待远程任务超时 ({timeout}s): {flag_file}")
         return False
 
     # ------------------------------------------------------------------
@@ -519,7 +518,7 @@ class RemoteWorkstation:
             上传成功返回 True，失败返回 False
         """
         if not os.path.isdir(local_dir):
-            logger.error(f"本地目录不存在: {local_dir}")
+            logger.error(f"[SSH] 本地目录不存在: {local_dir}")
             return False
 
         try:
@@ -545,17 +544,17 @@ class RemoteWorkstation:
                     local_file = os.path.join(root, filename)
                     remote_file = f"{remote_subdir}/{filename}"
                     if not self.upload_file(local_file, remote_file, max_retries):
-                        logger.error(f"上传文件失败: {local_file}")
+                        logger.error(f"[SSH] 上传文件失败: {local_file}")
                         return False
 
-            logger.info(f"目录上传完成: {local_dir} -> {remote_dir}")
+            logger.info(f"[SSH] 目录上传完成: {local_dir} -> {remote_dir}")
             return True
 
         except (OSError, paramiko.SSHException, EOFError) as e:
-            logger.error(f"目录上传异常: {e}")
+            logger.error(f"[SSH] 目录上传异常: {e}")
             return False
 
-    def get_remote_file_hash(self, remote_path: str) -> Optional[str]:
+    def get_remote_file_hash(self, remote_path: str) -> str | None:
         """获取远程文件的 MD5 哈希值。
 
         使用 PowerShell Get-FileHash 命令计算远程文件的哈希值。
@@ -578,7 +577,7 @@ class RemoteWorkstation:
             # 返回小写的哈希值
             return out.strip().lower()
         else:
-            logger.debug(f"获取远程文件哈希失败 (可能文件不存在): {remote_path}")
+            logger.debug(f"[SSH] 获取远程文件哈希失败 (可能文件不存在): {remote_path}")
             return None
 
     def get_remote_file_hashes(self, remote_dir: str, filenames: list) -> dict:

@@ -586,27 +586,29 @@ class StateManager:
             "error_count": 0,
         }
 
+        # 预填充所有步骤×状态组合为 0（确保未出现的组合也有默认值）
+        for step_name in STEP_NAMES:
+            stats["steps"][step_name] = {status: 0 for status in ALL_STATUSES}
+
         with self._get_connection(readonly=True) as conn:
             # 总构型数
             row = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()
             stats["total_configs"] = row["cnt"] if row else 0
 
-            # 每个步骤的状态分布
-            for step_name in STEP_NAMES:
-                step_counts: dict = {}
-                for status in ALL_STATUSES:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status = ?",
-                        (step_name, status)
-                    ).fetchone()
-                    step_counts[status] = row["cnt"] if row else 0
-                stats["steps"][step_name] = step_counts
+            # 单条 GROUP BY 查询获取所有步骤×状态的计数（替代原先的 N×M 次查询）
+            rows = conn.execute(
+                "SELECT step_name, status, COUNT(*) as cnt "
+                "FROM steps GROUP BY step_name, status"
+            ).fetchall()
+            for row in rows:
+                step_name = row["step_name"]
+                status = row["status"]
+                if step_name in stats["steps"]:
+                    stats["steps"][step_name][status] = row["cnt"]
 
-            # 错误总数
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM steps WHERE status = ?",
-                (STATUS_ERROR,)
-            ).fetchone()
-            stats["error_count"] = row["cnt"] if row else 0
+            # 错误总数（从已查询的数据中聚合，避免额外查询）
+            stats["error_count"] = sum(
+                stats["steps"][sn].get(STATUS_ERROR, 0) for sn in STEP_NAMES
+            )
 
         return stats

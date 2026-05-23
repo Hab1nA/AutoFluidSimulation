@@ -59,8 +59,7 @@ Bridge 支持通过环境变量传入配置（由 Python 端在 `subprocess.Pope
 | `AUTOFLUID_SC_EXE` | SpaceClaim.exe 路径（命令行 `--sc-exe` 优先） | 自动检测 |
 | `AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT` | 等待 SC 进程出现的超时秒数 | 120 |
 | `AUTOFLUID_SC_GUI_READY_TIMEOUT` | 等待 GUI 就绪的超时秒数 | 30 |
-| `AUTOFLUID_SC_GUI_STABLE_DELAY` | GUI 就绪后的额外稳定延时秒数（**优先**） | 15 |
-| `AUTOFLUID_SC_GUI_WAIT` | 同上（**向后兼容旧名**，当 `STABLE_DELAY` 未设置时生效） | 15 |
+| `AUTOFLUID_SC_GUI_STABLE_DELAY` | GUI 就绪后的额外稳定延时秒数 | 15 |
 
 ### 3.2 常驻模式专用变量
 
@@ -84,17 +83,13 @@ Phase 1: 轮询 MainWindowHandle != IntPtr.Zero（超时由 AUTOFLUID_SC_GUI_REA
     ↓ 超时
 Phase 2: WaitForInputIdle(15s) 等待主线程空闲
     ↓ 超时
-Phase 3: 固定延时等待加载稳定（由 AUTOFLUID_SC_GUI_STABLE_DELAY / AUTOFLUID_SC_GUI_WAIT 控制）
+Phase 3: 固定延时等待加载稳定（由 AUTOFLUID_SC_GUI_STABLE_DELAY 控制）
 ```
 
 Phase 3 的环境变量读取逻辑：
 
 ```csharp
-int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 0);  // 新名，默认 0 = 未设置
-if (guiWaitSeconds <= 0)
-{
-    guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_WAIT", 15);          // 旧名，默认 15
-}
+int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 15);
 ```
 
 ---

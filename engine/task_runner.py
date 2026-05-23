@@ -14,7 +14,10 @@
 """
 import os
 import threading
-from typing import Any, Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from engine.state_manager import StateManager
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
@@ -37,7 +40,7 @@ class TaskRunner:
     保持 SSH 连接和 SCProcessPool，将具体执行逻辑委托给子模块。
     """
 
-    def __init__(self, state_manager: Any):
+    def __init__(self, state_manager: StateManager):
         """初始化任务执行器。
 
         Args:
@@ -81,6 +84,10 @@ class TaskRunner:
         self._sw_executor.set_control_events(paused_event, stopped_event)
         # 注：RemoteExecutor 不需要独立注入控制事件，它通过
         # wait_meshing_completion/wait_solver_completion 的参数接收事件
+
+    def get_remote_executor(self) -> RemoteExecutor:
+        """获取远程执行器实例（公共接口，供外部模块创建 MeshingMonitor 等）。"""
+        return self._remote_executor
 
     # ------------------------------------------------------------------
     # SSH 连接管理

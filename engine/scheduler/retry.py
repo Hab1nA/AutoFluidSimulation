@@ -140,9 +140,7 @@ class RetryManager:
                         #    恢复后下一轮迭代会检测 _paused 并正确等待
                         if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                             return False  # stopped
-            except (RuntimeError, ValueError, OSError) as e:
-                logger.error(f"[{step_name}] 构型{config_name} 异常: {e}")
-                if attempt < max_retries:
+            except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                     self.state.set_step_status(
                         config_name, step_name, STATUS_RETRYING,
                         f"异常重试 {attempt + 1}/{max_retries}: {e}"

@@ -592,7 +592,6 @@ namespace AutoFluidSimulation.Bridge
             }
 
             // Phase 3 等待时间可通过环境变量 AUTOFLUID_SC_GUI_STABLE_DELAY 配置（默认 15 秒）
-            // 向后兼容 AUTOFLUID_SC_GUI_WAIT
             int guiWaitSeconds = 15;
             string envWait = Environment.GetEnvironmentVariable("AUTOFLUID_SC_GUI_STABLE_DELAY");
             if (!string.IsNullOrEmpty(envWait))
@@ -601,18 +600,6 @@ namespace AutoFluidSimulation.Bridge
                 if (int.TryParse(envWait, out parsed) && parsed > 0)
                 {
                     guiWaitSeconds = parsed;
-                }
-            }
-            else
-            {
-                envWait = Environment.GetEnvironmentVariable("AUTOFLUID_SC_GUI_WAIT");
-                if (!string.IsNullOrEmpty(envWait))
-                {
-                    int parsed;
-                    if (int.TryParse(envWait, out parsed) && parsed > 0)
-                    {
-                        guiWaitSeconds = parsed;
-                    }
                 }
             }
             Console.WriteLine(string.Format("[BRIDGE] Phase 3: 等待加载稳定 (延时 {0}s)...", guiWaitSeconds));

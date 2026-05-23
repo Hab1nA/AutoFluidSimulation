@@ -287,42 +287,29 @@ class SWPhaseHandler:
         """确保文件监控器正在运行。
 
         优先使用由 PipelineScheduler 注入的共享实例（通过 set_file_monitor()），
-        仅在未注入时回退为自行创建。
+        仅在未注入时回退为自行创建（独立测试场景）。
         """
         if self._file_monitor is None:
             # 防御性回退：未注入时自行创建（独立测试场景）
+            # 注意：回退创建的监控器使用简化的回退回调，生产环境应始终由
+            # PipelineScheduler 注入带有完整 _on_step_file_ready 逻辑的实例
+            def _fallback_on_file_ready(config_name: int, filepath: str) -> None:
+                if self._paused.is_set():
+                    return
+                if self.state.get_step_status(config_name, "SW") != STATUS_COMPLETED:
+                    self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+                self._sc_queue.put((config_name, filepath))
+                logger.info(f"[SW] 构型{config_name} 已推入 SC 处理队列 (回退回调)")
+
             self._file_monitor = StepFileMonitor(
                 step_dir=None,
-                on_file_ready=self._on_step_file_ready,
+                on_file_ready=_fallback_on_file_ready,
                 shared_paused_event=self._paused,
             )
             logger.info("[SW] 文件监控器未注入，已自行创建（独立模式）")
         if not self._file_monitor.is_running:
             self._file_monitor.start()
             logger.info("[SW] 已启动 STEP 文件监控（提前于 SW 宏，实现边导出边处理）")
-
-    def _on_step_file_ready(self, config_name: int, filepath: str):
-        """文件就绪回调。"""
-        if self._paused.is_set():
-            logger.info(f"构型{config_name} STEP 文件就绪，但系统已暂停，跳过入队")
-            return
-
-        current_sw = self.state.get_step_status(config_name, "SW")
-        if current_sw != STATUS_COMPLETED:
-            self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
-
-        # 断点续传防护：若 SC/Transfer/Meshing 已全部完成，跳过推入队列
-        downstream_completed = all(
-            self.state.get_step_status(config_name, s) == STATUS_COMPLETED
-            for s in ["SC", "Transfer", "Meshing"]
-        )
-        if downstream_completed:
-            logger.info(f"构型{config_name} 下游步骤已完成，跳过入队")
-            return
-
-        # 推入 SC 处理队列
-        self._sc_queue.put((config_name, filepath))
-        logger.info(f"构型{config_name} 已推入 SC 处理队列 (队列长度: {self._sc_queue.qsize()})")
 
     # ------------------------------------------------------------------
     # 同步下游步骤状态与文件系统（断点续传）

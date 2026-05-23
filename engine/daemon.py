@@ -20,12 +20,14 @@
     修改设计表后自动使用新数据库，互不干扰。
 ===============================================================================
 """
+from __future__ import annotations
+
 import os
 import sys
 import signal
 import threading
 import time
-from typing import Any, Tuple
+from typing import Any
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -274,7 +276,7 @@ class PipelineDaemon:
     # IPC 命令处理器
     # ------------------------------------------------------------------
 
-    def handle_start(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_start(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 start 命令（启动或继续流水线）。
 
         状态机：
@@ -282,7 +284,8 @@ class PipelineDaemon:
         - paused  → 检查调度器状态后恢复或重启
         - stopped / 其他 → 全新启动
         """
-        assert self.state is not None and self.scheduler is not None
+        if self.state is None or self.scheduler is None:
+            raise RuntimeError("Daemon 组件未初始化，请先调用 start()")
         engine_status = self.state.get_engine_status()
 
         if engine_status == "running":
@@ -329,7 +332,7 @@ class PipelineDaemon:
 
         return True, None, "流水线已启动"
 
-    def handle_pause(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_pause(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 pause 命令。
 
         暂停行为取决于当前所处阶段：
@@ -337,7 +340,8 @@ class PipelineDaemon:
         - 下游步骤执行中：当前步骤完成后暂停
         - 空闲状态：直接标记为暂停
         """
-        assert self.state is not None and self.scheduler is not None
+        if self.state is None or self.scheduler is None:
+            raise RuntimeError("Daemon 组件未初始化，请先调用 start()")
         engine_status = self.state.get_engine_status()
         if engine_status == "paused":
             return True, None, "流水线已在暂停状态"
@@ -347,28 +351,31 @@ class PipelineDaemon:
         self.scheduler.pause()
         return True, None, "流水线已暂停（当前运行步骤完成后不再取新任务）"
 
-    def handle_stop(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_stop(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
         # 在另一个线程中执行关闭，以便给客户端返回响应
         threading.Thread(target=self.shutdown, daemon=True).start()
         return True, None, "后台引擎正在安全退出..."
 
-    def handle_check(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_check(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 check 命令（系统自检）。"""
-        assert self.runner is not None
+        if self.runner is None:
+            raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
 
-    def handle_get_all_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_get_all_status(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """获取所有构型的状态。"""
-        assert self.state is not None
+        if self.state is None:
+            raise RuntimeError("StateManager 未初始化，请先调用 start()")
         statuses = self.state.get_all_statuses()
         return True, statuses, ""
 
-    def handle_get_statistics(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_get_statistics(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """获取统计信息。"""
-        assert self.state is not None
+        if self.state is None:
+            raise RuntimeError("StateManager 未初始化，请先调用 start()")
         stats = self.state.get_statistics()
         engine_status = self.state.get_engine_status()
         stats["engine_status"] = engine_status
@@ -376,9 +383,10 @@ class PipelineDaemon:
         stats["barrier_passed"] = self.state.is_global_barrier_met()
         return True, stats, ""
 
-    def handle_get_engine_status(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_get_engine_status(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """获取引擎状态。"""
-        assert self.state is not None
+        if self.state is None:
+            raise RuntimeError("StateManager 未初始化，请先调用 start()")
         status = {
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
@@ -386,7 +394,7 @@ class PipelineDaemon:
         }
         return True, status, ""
 
-    def handle_reset_step(self, params: dict) -> Tuple[bool, Any, str]:
+    def handle_reset_step(self, params: dict) -> tuple[bool, Any, str]:
         """
         处理 reset 命令，config_name 和 step_name 均支持 "all"。
 
@@ -402,7 +410,8 @@ class PipelineDaemon:
         if step_name is not None and step_name != "all" and step_name not in STEP_NAMES:
             return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"
 
-        assert self.scheduler is not None
+        if self.scheduler is None:
+            raise RuntimeError("PipelineScheduler 未初始化，请先调用 start()")
         self.scheduler.reset_config(config_name, step_name)
 
         # 构建可读的消息
@@ -419,7 +428,7 @@ class PipelineDaemon:
         msg = f"已重置{cfg_desc}的{step_desc}"
         return True, None, msg
 
-    def handle_clean_step(self, params: dict) -> Tuple[bool, Any, str]:
+    def handle_clean_step(self, params: dict) -> tuple[bool, Any, str]:
         """
         处理 clean 命令，config_name 和 step_name 均支持 "all"。
 
@@ -438,7 +447,8 @@ class PipelineDaemon:
             and (step_name == "all" or step_name in {"Meshing", "Solver"})
         )
 
-        assert self.runner is not None
+        if self.runner is None:
+            raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
         if needs_background:
             def _do_clean_step():
                 try:
@@ -459,14 +469,14 @@ class PipelineDaemon:
                 msg += f" (构型{config_name})"
         return True, None, msg
 
-    def handle_reload_config(self, params: dict | None = None) -> Tuple[bool, Any, str]:
+    def handle_reload_config(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
         from engine.config import reload_config_from_toml
         if reload_config_from_toml():
             return True, None, "配置已从 autofluid_config.toml 重新加载"
         return True, None, "TOML 配置文件不存在，使用默认配置"
 
-    def handle_get_log_entries(self, params: dict) -> Tuple[bool, Any, str]:
+    def handle_get_log_entries(self, params: dict) -> tuple[bool, Any, str]:
         """处理 get_log_entries 命令（增量拉取日志条目）。
 
         params: {

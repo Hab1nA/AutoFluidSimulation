@@ -9,12 +9,14 @@
 从 engine/task_runner.py 中提取。
 ===============================================================================
 """
+from __future__ import annotations
 
 import os
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
+    from engine.state_manager import StateManager
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
@@ -28,7 +30,7 @@ logger = setup_logger(__name__)
 class FileCleaner:
     """文件清理与系统自检器。"""
 
-    def __init__(self, state_manager: Any, ssh_getter: Callable[[], "RemoteWorkstation"]):
+    def __init__(self, state_manager: StateManager, ssh_getter: Callable[[], "RemoteWorkstation"]):
         """初始化清理器。
 
         Args:
@@ -132,11 +134,11 @@ class FileCleaner:
                     filepath = os.path.join(target_dir, filename)
                     try:
                         os.remove(filepath)
-                        logger.info(f"已删除本地文件: {filepath}")
+                        logger.info(f"[Cleaner] 已删除本地文件: {filepath}")
                     except FileNotFoundError:
                         pass
                     except OSError as e:
-                        logger.warning(f"删除本地文件失败: {filepath}: {e}")
+                        logger.warning(f"[Cleaner] 删除本地文件失败: {filepath}: {e}")
 
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)
@@ -151,10 +153,10 @@ class FileCleaner:
                             filename = str(file_template).format(config=cn)
                             remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
                             ssh.delete_remote_file(remote_path)
-                    logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
+                    logger.info(f"[Cleaner] 步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
-                    logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")
+                    logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")
             except (OSError, ConnectionError) as e:
-                logger.error(f"远程文件清理异常 ({step_name}): {e}")
+                logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
 
-        logger.info(f"步骤 {step_name} 文件清理完成")
+        logger.info(f"[Cleaner] 步骤 {step_name} 文件清理完成")

@@ -11,6 +11,7 @@ SolidWorks COM 自动化执行器 (SW Executor)
 从 engine/task_runner.py 中提取，职责独立后可单独测试和维护。
 ===============================================================================
 """
+from __future__ import annotations
 
 import os
 import shutil
@@ -19,7 +20,6 @@ import tempfile
 import time
 import gc
 import threading
-from typing import List, Optional
 
 from engine.config import (
     LOCAL_PATHS, ENGINE_CONFIG,
@@ -57,8 +57,8 @@ class SWExecutor:
             state_manager: StateManager 实例
         """
         self.state = state_manager
-        self._paused_event: Optional[threading.Event] = None
-        self._stopped_event: Optional[threading.Event] = None
+        self._paused_event: threading.Event | None = None
+        self._stopped_event: threading.Event | None = None
 
     def set_control_events(
         self,
@@ -1097,8 +1097,11 @@ class SWExecutor:
                         doc.ShowConfiguration2(cfg)
                         doc.EditRebuild3()
                         rebuilt_count += 1
-                    except Exception:
-                        pass
+                    except Exception as e_cfg:
+                        logger.warning(
+                            f"[SW-Export] 构型{cfg} EditRebuild3 失败: "
+                            f"{type(e_cfg).__name__}: {e_cfg}"
+                        )
                 if rebuilt_count > 0:
                     rebuild_ok = True
                     logger.info(f"[SW-Export] 逐个配置重建完成 ({rebuilt_count}/{len(configs)} 个)")
@@ -1115,9 +1118,9 @@ class SWExecutor:
     def _verify_step_exports(self, step_dir: str) -> int:
         """安全网校验：扫描所有构型的 STEP 输出文件，补标记状态数据库。"""
         all_configs = self.state.get_all_configs()
-        missing_configs: List[int] = []
-        found_configs: List[int] = []
-        already_completed: List[int] = []
+        missing_configs: list[int] = []
+        found_configs: list[int] = []
+        already_completed: list[int] = []
 
         logger.info("[SW-Export] STEP 导出完毕，正在校验各构型 STEP 文件...")
         logger.info(f"[SW-Export] 输出目录: {step_dir}")

@@ -110,7 +110,7 @@ class PipelineScheduler:
         )
         self.meshing_monitor = MeshingMonitor(
             state_manager=self.state,
-            remote_executor=self.runner._remote_executor,
+            remote_executor=self.runner.get_remote_executor(),
             paused_event=self._paused,
             stopped_event=self._stopped,
         )
@@ -120,7 +120,6 @@ class PipelineScheduler:
 
         # ---- 工作线程 ----
         self._barrier_thread: Optional[threading.Thread] = None
-        self._solver_threads: list[threading.Thread] = []   # 求解线程（屏障通过后启动）
         # 预创建文件监控器并注入 SW 阶段处理器（避免双重实例）
         self._file_monitor: Optional[StepFileMonitor] = StepFileMonitor(
             step_dir=None,
@@ -507,15 +506,10 @@ class PipelineScheduler:
 
         try:
             # 等待关键线程退出
-            for t in self.worker_pool._worker_threads:
-                if t.is_alive():
-                    t.join(timeout=3)
+            self.worker_pool.join_worker_threads(timeout=3)
             if self._barrier_thread and self._barrier_thread.is_alive():
                 self._barrier_thread.join(timeout=3)
-            for t in self.barrier_coordinator._solver_threads:
-                if t.is_alive():
-                    t.join(timeout=3)
-            self.barrier_coordinator._solver_threads.clear()
+            self.barrier_coordinator.join_solver_threads(timeout=3)
 
             # 停止文件监控
             if self._file_monitor:

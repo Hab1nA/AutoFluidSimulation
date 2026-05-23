@@ -7,15 +7,17 @@
 从 engine/task_runner.py 中提取。
 ===============================================================================
 """
+from __future__ import annotations
 
 import hashlib
 import os
 import time
 import threading
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
+    from engine.state_manager import StateManager
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
@@ -48,7 +50,7 @@ class RemoteExecutor:
     共享同一个 SSH 连接。
     """
 
-    def __init__(self, state_manager: Any, ssh_getter: Callable[[], "RemoteWorkstation"], ssh_lock: threading.RLock):
+    def __init__(self, state_manager: StateManager, ssh_getter: Callable[[], "RemoteWorkstation"], ssh_lock: threading.RLock):
         """初始化远程执行器。
 
         Args:
@@ -72,7 +74,7 @@ class RemoteExecutor:
         """通过 SFTP 将 SCDOC 文件上传到远程工作站。"""
         _scdoc_name = get_step_filename("SC", config_name)
         if not _scdoc_name:
-            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
+            logger.error("[Transfer] 无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
             self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
         local_file = os.path.join(
@@ -85,7 +87,7 @@ class RemoteExecutor:
         ).replace("\\", "/")
 
         if not os.path.exists(local_file):
-            logger.error(f"本地 SCDOC 文件不存在: {local_file}")
+            logger.error(f"[Transfer] 本地 SCDOC 文件不存在: {local_file}")
             self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "本地文件不存在")
             return False
 
@@ -94,13 +96,13 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
                 success = ssh.upload_file(local_file, remote_file)
                 if success:
-                    logger.info(f"文件传输完成: 构型{config_name}")
+                    logger.info(f"[Transfer] 文件传输完成: 构型{config_name}")
                     return True
                 else:
                     self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SFTP 上传失败")
                     return False
             except (OSError, ConnectionError) as e:
-                logger.error(f"文件传输异常: {e}")
+                logger.error(f"[Transfer] 文件传输异常: {e}")
                 self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
                 return False
 
@@ -133,7 +135,7 @@ class RemoteExecutor:
         )
         return command, flag_file
 
-    def _run_meshing_command(self, config_name: int, log_prefix: str = "") -> bool:
+    def _run_meshing_command(self, config_name: int, log_prefix: str = "[Meshing]") -> bool:
         """启动远程网格划分后台任务（内部方法）。
 
         统一处理参数校验、脚本同步、命令构建和 SSH 执行。
@@ -175,7 +177,7 @@ class RemoteExecutor:
         状态由调用方（RetryManager / MeshingMonitor）统一管理。
         """
         if not isinstance(config_name, int):
-            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         return self._run_meshing_command(config_name)
 
@@ -185,9 +187,9 @@ class RemoteExecutor:
         用于 MeshingMonitor，启动失败时返回 False 由调用方决定重试策略。
         """
         if not isinstance(config_name, int):
-            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
-        return self._run_meshing_command(config_name, log_prefix="[MeshingMonitor]")
+        return self._run_meshing_command(config_name)
 
     def check_meshing_done(self, config_name: int) -> bool:
         """检查网格划分是否已完成（标志文件是否存在）。
@@ -199,12 +201,12 @@ class RemoteExecutor:
             with self._ssh_lock:
                 ssh = self._get_ssh()
                 if ssh.check_remote_file(flag_file):
-                    logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成（检测到标志文件）")
+                    logger.info(f"[Meshing] 构型{config_name} 网格划分完成（检测到标志文件）")
                     ssh.delete_remote_file(flag_file)
                     return True
             return False
         except (OSError, ConnectionError) as e:
-            logger.error(f"[MeshingMonitor] 检查网格划分状态异常: {e}")
+            logger.error(f"[Meshing] 检查网格划分状态异常: {e}")
             return False
 
     def wait_meshing_completion(
@@ -218,32 +220,32 @@ class RemoteExecutor:
         poll_interval = 10
         start_time = time.time()
 
-        logger.info(f"[MeshingMonitor] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
+        logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
         while time.time() - start_time < timeout:
             if paused_event is not None:
                 while paused_event.is_set():
                     if stopped_event is not None and stopped_event.is_set():
-                        logger.info(f"[MeshingMonitor] 等待构型{config_name} 期间收到停止指令")
+                        logger.info(f"[Meshing] 等待构型{config_name} 期间收到停止指令")
                         return False
                     time.sleep(1)
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[MeshingMonitor] 等待构型{config_name} 期间收到停止指令")
+                logger.info(f"[Meshing] 等待构型{config_name} 期间收到停止指令")
                 return False
 
             try:
                 with self._ssh_lock:
                     ssh = self._get_ssh()
                     if ssh.check_remote_file(flag_file):
-                        logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成")
+                        logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
                         return True
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[MeshingMonitor] 轮询构型{config_name} 异常: {e}")
+                logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
 
             time.sleep(poll_interval)
 
-        logger.error(f"[MeshingMonitor] 构型{config_name} 网格划分超时 ({timeout}s)")
+        logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
         return False
 
     # ------------------------------------------------------------------
@@ -286,31 +288,31 @@ class RemoteExecutor:
         """
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
         if not isinstance(config_name, int):
-            logger.error(f"无效的构型名称类型: {type(config_name).__name__}")
+            logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
             return False
 
         # 同步远程脚本（仅在文件变更时上传）
         if not self.sync_scripts():
-            logger.error("远程脚本同步失败，无法启动仿真求解")
+            logger.error("[Solver] 远程脚本同步失败，无法启动仿真求解")
             return False
 
         command, flag_file = self._build_solver_command(config_name)
 
-        logger.info(f"启动远程仿真求解: 构型{config_name}")
-        logger.debug(f"远程命令: {command}")
+        logger.info(f"[Solver] 启动远程仿真求解: 构型{config_name}")
+        logger.debug(f"[Solver] 远程命令: {command}")
 
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
                 success = ssh.exec_background(command, flag_file)
                 if success:
-                    logger.info(f"仿真求解后台任务已启动: 构型{config_name}")
+                    logger.info(f"[Solver] 仿真求解后台任务已启动: 构型{config_name}")
                     return True
                 else:
-                    logger.error(f"远程求解启动失败: 构型{config_name}")
+                    logger.error(f"[Solver] 远程求解启动失败: 构型{config_name}")
                     return False
             except (OSError, ConnectionError) as e:
-                logger.error(f"仿真求解启动异常: {e}")
+                logger.error(f"[Solver] 仿真求解启动异常: {e}")
                 return False
 
     def wait_solver_completion(
@@ -336,7 +338,7 @@ class RemoteExecutor:
         file_grace_period = 60
         first_file_seen_time: Optional[float] = None
 
-        logger.info(f"开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
+        logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
         while time.time() - start_time < timeout:
             # ---- 暂停/停止响应 ----
@@ -363,7 +365,7 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            logger.info(f"构型{config_name} 仿真求解完成（cas+dat 均已保存）")
+                            logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
                         # 部分文件缺失
@@ -375,7 +377,7 @@ class RemoteExecutor:
                             if not dat_exists:
                                 missing.append("dat.h5")
                             logger.warning(
-                                f"构型{config_name} Solver: 标志文件已存在但缺少 "
+                                f"[Solver] 构型{config_name}: 标志文件已存在但缺少 "
                                 f"{', '.join(missing)}，等待 {file_grace_period}s"
                             )
 
@@ -387,24 +389,24 @@ class RemoteExecutor:
                             if not dat_exists:
                                 missing.append("dat.h5")
                             logger.error(
-                                f"构型{config_name} Solver: {', '.join(missing)} "
+                                f"[Solver] 构型{config_name}: {', '.join(missing)} "
                                 f"{file_grace_period}s 内未生成，判定为导出错误"
                             )
                             # 清理部分文件 + 标志文件，确保 retry 从干净状态开始
                             if cas_exists and cas_file:
                                 ssh.delete_remote_file(cas_file)
-                                logger.info(f"构型{config_name} Solver: 已清理部分文件 {cas_file}")
+                                logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {cas_file}")
                             if dat_exists and dat_file:
                                 ssh.delete_remote_file(dat_file)
-                                logger.info(f"构型{config_name} Solver: 已清理部分文件 {dat_file}")
+                                logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
                             return False
             except (OSError, ConnectionError) as e:
-                logger.warning(f"轮询构型{config_name} 求解状态异常: {e}")
+                logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
 
             time.sleep(poll_interval)
 
-        logger.error(f"构型{config_name} 仿真求解超时 ({timeout}s)")
+        logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
         return False
 
     # ------------------------------------------------------------------
@@ -422,7 +424,7 @@ class RemoteExecutor:
         """
         local_scripts_dir = LOCAL_PATHS.get("remote_scripts_dir")
         if not local_scripts_dir or not os.path.isdir(local_scripts_dir):
-            logger.error(f"本地脚本目录不存在: {local_scripts_dir}")
+            logger.error(f"[Sync] 本地脚本目录不存在: {local_scripts_dir}")
             return False
 
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
@@ -446,19 +448,19 @@ class RemoteExecutor:
                     remote_hash = remote_hashes.get(filename)
 
                     if local_hash is None:
-                        logger.warning(f"本地文件不存在: {filename}")
+                        logger.warning(f"[Sync] 本地文件不存在: {filename}")
                         continue
 
                     if local_hash != remote_hash:
                         files_to_upload.append(filename)
-                        logger.info(f"文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
+                        logger.info(f"[Sync] 文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
 
                 if not files_to_upload:
-                    logger.info("所有脚本文件已是最新，无需同步")
+                    logger.info("[Sync] 所有脚本文件已是最新，无需同步")
                     return True
 
                 # 上传变更的文件（对包含硬编码路径的文本文件做动态替换）
-                logger.info(f"需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
+                logger.info(f"[Sync] 需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
                 path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
                 for filename in files_to_upload:
                     local_file = os.path.join(local_scripts_dir, filename)
@@ -470,14 +472,14 @@ class RemoteExecutor:
                             return False
                     else:
                         if not ssh.upload_file(local_file, remote_file):
-                            logger.error(f"上传文件失败: {filename}")
+                            logger.error(f"[Sync] 上传文件失败: {filename}")
                             return False
 
-                logger.info("脚本同步完成")
+                logger.info("[Sync] 脚本同步完成")
                 return True
 
             except (OSError, ConnectionError) as e:
-                logger.error(f"脚本同步异常: {e}")
+                logger.error(f"[Sync] 脚本同步异常: {e}")
                 return False
 
     def _calculate_local_hashes(self, local_dir: str) -> Optional[dict[str, Optional[str]]]:
@@ -498,7 +500,7 @@ class RemoteExecutor:
             for filename in REMOTE_SCRIPT_FILES:
                 filepath = os.path.join(local_dir, filename)
                 if not os.path.exists(filepath):
-                    logger.warning(f"本地文件不存在: {filepath}")
+                    logger.warning(f"[Sync] 本地文件不存在: {filepath}")
                     result[filename] = None
                     continue
 
@@ -518,7 +520,7 @@ class RemoteExecutor:
             return result
 
         except OSError as e:
-            logger.error(f"计算本地文件哈希失败: {e}")
+            logger.error(f"[Sync] 计算本地文件哈希失败: {e}")
             return None
 
     def _apply_placeholders(self, content: str) -> str:
@@ -575,9 +577,9 @@ class RemoteExecutor:
                 pass
 
             if success:
-                logger.info(f"上传配置文件（已替换路径）: {os.path.basename(local_file)}")
+                logger.info(f"[Transfer] 上传配置文件（已替换路径）: {os.path.basename(local_file)}")
             return success
 
         except (OSError, UnicodeDecodeError) as e:
-            logger.error(f"上传配置文件失败: {e}")
+            logger.error(f"[Transfer] 上传配置文件失败: {e}")
             return False
