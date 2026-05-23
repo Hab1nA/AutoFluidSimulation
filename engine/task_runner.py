@@ -12,6 +12,8 @@
 每个任务执行后会更新 StateManager 中的状态。
 ===============================================================================
 """
+from __future__ import annotations
+
 import os
 import threading
 from typing import Optional, TYPE_CHECKING
