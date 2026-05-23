@@ -4,7 +4,7 @@
         "ROOT": {
             "TaskObject:TaskObject1": {
                 "Arguments": {
-                    "FileName": "{{REMOTE_ROOT}}/scdoc/model_gen4_100.scdoc",
+                    "FileName": "{{REMOTE_SCDOC_DIR}}/{{SC_FILENAME}}",
                     "NumParts": "1"
                 },
                 "CommandName": "ImportGeometry",

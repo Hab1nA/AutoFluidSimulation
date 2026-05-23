@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
-    STATUS_ERROR, get_step_filename,
+    STATUS_ERROR, get_step_filename, STEP_FILE_PATTERNS,
 )
 from utils.logger import setup_logger
 
@@ -120,17 +120,15 @@ class RemoteExecutor:
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
-        meshing_script = REMOTE_CONFIG["meshing_script"]
-        remote_root = REMOTE_CONFIG["root_dir"]
+        scripts_dir = REMOTE_CONFIG["scripts_dir"]
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
         command = (
-            f'"{conda_exe}" run -n {conda_env} python "{meshing_script}" {config_name}'
-            f' --ansys-root "{REMOTE_CONFIG["ansys_root"]}"'
-            f' --workflow-path "{remote_root}/meshing_gen4.wft"'
-            f' --journal-path "{remote_root}/meshing_gen4.jou"'
-            f' --scdoc-dir "{remote_root}/scdoc"'
-            f' --output-dir "{remote_root}/msh"'
+            f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_meshing_gen4.py" {config_name}'
+            f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
+            f' --journal-path "{scripts_dir}/meshing_gen4.jou"'
+            f' --scdoc-dir "{REMOTE_CONFIG["scdoc_dir"]}"'
+            f' --output-dir "{REMOTE_CONFIG["msh_dir"]}"'
         )
         return command, flag_file
 
@@ -277,20 +275,19 @@ class RemoteExecutor:
 
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
-        solver_script = REMOTE_CONFIG["solver_script"]
-        remote_root = REMOTE_CONFIG["root_dir"]
+        scripts_dir = REMOTE_CONFIG["scripts_dir"]
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
         command = (
-            f'"{conda_exe}" run -n {conda_env} python "{solver_script}" {config_name}'
-            f' --ansys-root "{REMOTE_CONFIG["ansys_root"]}"'
-            f' --journal-path "{remote_root}/solver_gen4.jou"'
-            f' --post-journal-path "{remote_root}/solver_post_gen4.jou"'
-            f' --msh-dir "{remote_root}/msh"'
-            f' --output-dir "{remote_root}/case"'
-            f' --anim-dir "{remote_root}/animation"'
-            f' --working-dir-t "{remote_root}/workingdir/animation-t"'
-            f' --working-dir-v "{remote_root}/workingdir/animation-v"'
+            f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_solver_gen4.py" {config_name}'
+            f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
+            f' --journal-path "{scripts_dir}/solver_gen4.jou"'
+            f' --post-journal-path "{scripts_dir}/solver_post_gen4.jou"'
+            f' --msh-dir "{REMOTE_CONFIG["msh_dir"]}"'
+            f' --output-dir "{REMOTE_CONFIG["result_dir"]}"'
+            f' --anim-dir "{REMOTE_CONFIG["working_dir"]}/../animation"'
+            f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
+            f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
         )
 
         logger.info(f"启动远程仿真求解: 构型{config_name}")
@@ -411,7 +408,7 @@ class RemoteExecutor:
         """同步远程脚本到工作站。
 
         比较本地和远程脚本的 MD5 哈希值，仅在文件变更时上传。
-        对于 .jou 文件，上传时会动态替换其中的路径。
+        对于包含占位符的文件，上传时会动态替换路径。
 
         Returns:
             同步成功返回 True，失败返回 False
@@ -421,7 +418,7 @@ class RemoteExecutor:
             logger.error(f"本地脚本目录不存在: {local_scripts_dir}")
             return False
 
-        remote_root = REMOTE_CONFIG["root_dir"]
+        scripts_dir = REMOTE_CONFIG["scripts_dir"]
 
         # 获取本地文件哈希
         local_hashes = self._calculate_local_hashes(local_scripts_dir)
@@ -433,7 +430,7 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
 
                 # 获取远程文件哈希
-                remote_hashes = ssh.get_remote_file_hashes(remote_root, REMOTE_SCRIPT_FILES)
+                remote_hashes = ssh.get_remote_file_hashes(scripts_dir, REMOTE_SCRIPT_FILES)
 
                 # 比较并上传变更的文件
                 files_to_upload = []
@@ -455,14 +452,14 @@ class RemoteExecutor:
 
                 # 上传变更的文件（对包含硬编码路径的文本文件做动态替换）
                 logger.info(f"需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
-                path_aware_exts = {'.jou', '.set', '.wft'}
+                path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
                 for filename in files_to_upload:
                     local_file = os.path.join(local_scripts_dir, filename)
-                    remote_file = f"{remote_root}/{filename}"
+                    remote_file = f"{scripts_dir}/{filename}"
 
-                    # 对包含 {{REMOTE_ROOT}} 占位符的文件，上传时动态替换路径
+                    # 对包含占位符的文件，上传时动态替换路径
                     if os.path.splitext(filename)[1] in path_aware_exts:
-                        if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file, remote_root):
+                        if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file):
                             return False
                     else:
                         if not ssh.upload_file(local_file, remote_file):
@@ -479,7 +476,7 @@ class RemoteExecutor:
     def _calculate_local_hashes(self, local_dir: str) -> Optional[dict[str, Optional[str]]]:
         """计算本地目录中脚本文件的 MD5 哈希值。
 
-        对于包含 {{REMOTE_ROOT}} 占位符的文件（.jou/.set/.wft），
+        对于包含占位符的文件（.jou/.set/.wft/.pdf），
         计算替换后的哈希值，以便与远程文件哈希正确比较，避免每次都重新上传。
 
         Args:
@@ -488,8 +485,7 @@ class RemoteExecutor:
         Returns:
             字典，键为文件名，值为 MD5 哈希值；失败返回 None
         """
-        path_aware_exts = {'.jou', '.set', '.wft'}
-        remote_root = REMOTE_CONFIG["root_dir"]
+        path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
         result: dict[str, Optional[str]] = {}
         try:
             for filename in REMOTE_SCRIPT_FILES:
@@ -501,10 +497,10 @@ class RemoteExecutor:
 
                 ext = os.path.splitext(filename)[1]
                 if ext in path_aware_exts:
-                    # 对包含 {{REMOTE_ROOT}} 占位符的文件，计算替换后内容的哈希
+                    # 对包含占位符的文件，计算替换后内容的哈希
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read()
-                    content = content.replace('{{REMOTE_ROOT}}', remote_root)
+                    content = self._apply_placeholders(content)
                     file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 else:
                     # 普通文件直接计算原始内容哈希
@@ -518,22 +514,34 @@ class RemoteExecutor:
             logger.error(f"计算本地文件哈希失败: {e}")
             return None
 
+    def _apply_placeholders(self, content: str) -> str:
+        """将模板中的所有占位符替换为实际远程目录值。"""
+        scripts_dir = str(REMOTE_CONFIG["scripts_dir"])
+        content = content.replace('{{REMOTE_ROOT}}', scripts_dir)
+        content = content.replace('{{REMOTE_SCDOC_DIR}}', str(REMOTE_CONFIG["scdoc_dir"]))
+        content = content.replace('{{REMOTE_WORKING_DIR}}', str(REMOTE_CONFIG["working_dir"]))
+        content = content.replace('{{REMOTE_REF_FILES_DIR}}', str(REMOTE_CONFIG["ref_files_dir"]))
+        content = content.replace('{{REMOTE_MSH_DIR}}', str(REMOTE_CONFIG["msh_dir"]))
+        content = content.replace('{{REMOTE_RESULT_DIR}}', str(REMOTE_CONFIG["result_dir"]))
+        sc_pattern = STEP_FILE_PATTERNS.get("SC", "")
+        if sc_pattern:
+            content = content.replace('{{SC_FILENAME}}', sc_pattern)
+        return content
+
     def _upload_text_file_with_path_replacement(
         self,
         ssh: "RemoteWorkstation",
         local_file: str,
         remote_file: str,
-        remote_root: str
     ) -> bool:
-        """上传文本文件，将 {{REMOTE_ROOT}} 占位符替换为实际远程根目录。
+        """上传文本文件，将占位符替换为实际远程目录。
 
-        适用于 .jou、.set、.wft 等包含路径引用的配置文件。
+        适用于 .jou、.set、.wft、.pdf 等包含路径引用的配置文件。
 
         Args:
             ssh: SSH 连接实例
             local_file: 本地文件路径
             remote_file: 远程文件路径
-            remote_root: 远程根目录
 
         Returns:
             上传成功返回 True，失败返回 False
@@ -542,8 +550,8 @@ class RemoteExecutor:
             with open(local_file, 'r', encoding='utf-8') as f:
                 content = f.read()
 
-            # 替换占位符为实际远程根目录
-            content = content.replace('{{REMOTE_ROOT}}', remote_root)
+            # 替换所有占位符
+            content = self._apply_placeholders(content)
 
             # 写入临时文件
             temp_file = local_file + '.tmp'

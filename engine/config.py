@@ -52,16 +52,16 @@ class RemoteConfig(TypedDict):
     port: int
     username: str
     password: str
-    root_dir: str
+    working_dir: str
+    scripts_dir: str
+    ref_files_dir: str
     scdoc_dir: str
     msh_dir: str
     result_dir: str
+    flag_dir: str
     conda_env: str
     conda_exe: str
-    ansys_root: str
-    meshing_script: str
-    solver_script: str
-    flag_dir: str
+    mpi_bin_dir: str
 
 
 class IPCConfig(TypedDict):
@@ -178,26 +178,26 @@ REMOTE_CONFIG: RemoteConfig = {
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
     "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
     "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
-    # 远程工程根目录
-    "root_dir": r"D:\xkz_1020",
+    # 仿真工作目录
+    "working_dir": r"D:\xkz_1020\workingdir",
+    # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
+    "scripts_dir": r"D:\xkz_1020",
+    # 仿真引用文件目录（pdf/fla/chemkin 文件）
+    "ref_files_dir": r"D:\xkz_1020\fluent_chemkin_files",
     # 远程 SCDOC 接收目录
     "scdoc_dir": r"D:\xkz_1020\scdoc",
     # 远程网格划分输出目录 (.msh.h5)
     "msh_dir": r"D:\xkz_1020\msh",
     # 远程仿真求解输出目录 (.cas.h5, .dat.h5)
     "result_dir": r"D:\xkz_1020\case",
+    # 仿真标志目录（用于轮询判断任务完成）
+    "flag_dir": r"D:\xkz_1020\flags",
     # Conda 环境名称
     "conda_env": "pyfluent",
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
     "conda_exe": r"C:\ProgramData\anaconda3\Scripts\conda.exe",
     # 远程 ANSYS 安装根目录
-    "ansys_root": os.environ.get("AUTOFLUID_REMOTE_ANSYS_ROOT", r"C:\Program Files\ANSYS Inc\v241"),
-    # 远程网格划分脚本
-    "meshing_script": r"D:\xkz_1020\batch_meshing_gen4.py",
-    # 远程求解脚本
-    "solver_script": r"D:\xkz_1020\batch_solver_gen4.py",
-    # 远程标志文件目录（用于轮询判断任务完成）
-    "flag_dir": r"D:\xkz_1020\flags",
+    "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"),
 }
 
 # ============================================================================

@@ -142,7 +142,7 @@ pub fn render_settings_dialog(
 
             let label = cat.display_label(fi);
             let value = ss.get_field_value(*cat, fi);
-            let field_name = make_field_name(*cat, fi);
+            let field_name = cat.field_full_name(fi);
 
             let is_focused = ss.focus.category_index == cat_idx && ss.focus.field_index == fi;
             let is_hovered = ss.hovered_field == Some((cat_idx, fi));
@@ -216,14 +216,18 @@ pub fn render_settings_dialog(
                 spans.push(Span::styled(display_value, value_style));
             }
 
-            // Path status check
+            // Path status check（validation_error 已覆盖"不存在"时隐藏 ❌ 避免重复）
             if let Some(exists) = ss.path_status.get(&field_name) {
-                let (icon, color) = if *exists {
-                    (" ✅", theme.success)
+                if *exists {
+                    spans.push(Span::styled(" ✅", Style::default().fg(theme.success).bg(row_bg)));
                 } else {
-                    (" ❌", theme.error)
-                };
-                spans.push(Span::styled(icon, Style::default().fg(color).bg(row_bg)));
+                    let covered_by_validation = ss.validation_errors.iter().any(|e| {
+                        e.field_name == field_name && e.message.contains("不存在")
+                    });
+                    if !covered_by_validation {
+                        spans.push(Span::styled(" ❌", Style::default().fg(theme.error).bg(row_bg)));
+                    }
+                }
             }
 
             // Validation error
@@ -315,19 +319,6 @@ pub fn render_settings_dialog(
         scrollbar_area,
         button_bar_y: btn_y,
         field_positions,
-    }
-}
-
-fn make_field_name(cat: SettingCategory, fi: usize) -> String {
-    match cat {
-        SettingCategory::LocalPaths => format!("local_paths.{}", cat.field_name(fi)),
-        SettingCategory::RemoteConnection | SettingCategory::RemoteDirs => {
-            format!("remote_config.{}", cat.field_name(fi))
-        }
-        SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
-        SettingCategory::SolidWorks => format!("solidworks.{}", cat.field_name(fi)),
-        SettingCategory::SpaceClaim => format!("spaceclaim.{}", cat.field_name(fi)),
-        SettingCategory::GlobalSettings => format!("global_settings.{}", cat.field_name(fi)),
     }
 }
 

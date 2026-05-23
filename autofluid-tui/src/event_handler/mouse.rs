@@ -792,7 +792,17 @@ pub fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, sta
             let save_w = unicode_width::UnicodeWidthStr::width(save_label) as u16;
             let cancel_w = unicode_width::UnicodeWidthStr::width(cancel_label) as u16;
             let gap: u16 = 4;
-            let total_w = save_w + cancel_w + gap;
+            let mut total_w = save_w + cancel_w + gap;
+
+            // 附加消息宽度（与渲染逻辑保持一致）
+            if let Some(ref ss) = state.settings_state {
+                if let Some(ref err) = ss.save_error {
+                    total_w += 2 + unicode_width::UnicodeWidthStr::width(err.as_str()) as u16;
+                } else if ss.saved {
+                    total_w += 2 + unicode_width::UnicodeWidthStr::width("✅ 已保存") as u16;
+                }
+            }
+
             let start_x = inner.x + (inner.width.saturating_sub(total_w)) / 2;
 
             if col >= start_x && col < start_x + save_w {
@@ -890,6 +900,10 @@ pub fn handle_dialog_button_click(
                 0 => {
                     // Save
                     if let Some(ref mut ss) = state.settings_state {
+                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
+                        if ss.is_editing_field() {
+                            ss.commit_edit_current_field();
+                        }
                         ss.validation_errors.clear();
                         ss.save_error = None;
                         match ss.save() {

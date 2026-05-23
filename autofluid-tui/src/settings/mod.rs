@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::settings::validation::{validate_config, ValidationError};
 use crate::text_buffer::TextBuffer;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalPaths {
     pub sw_exe: String,
     pub sw_model: String,
@@ -17,36 +17,23 @@ pub struct LocalPaths {
     pub scdoc_dir: String,
 }
 
-impl Default for LocalPaths {
-    fn default() -> Self {
-        Self {
-            sw_exe: r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe".to_string(),
-            sw_model: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT".to_string(),
-            excel: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx".to_string(),
-            step_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step".to_string(),
-            sc_exe: r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe".to_string(),
-            scdoc_dir: r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc".to_string(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, default)]
     pub password: String,
-    pub root_dir: String,
+    pub working_dir: String,
+    pub scripts_dir: String,
+    pub ref_files_dir: String,
     pub scdoc_dir: String,
     pub msh_dir: String,
     pub result_dir: String,
+    pub flag_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
-    pub ansys_root: String,
-    pub meshing_script: String,
-    pub solver_script: String,
-    pub flag_dir: String,
+    pub mpi_bin_dir: String,
 }
 
 impl Default for RemoteConfig {
@@ -56,16 +43,16 @@ impl Default for RemoteConfig {
             port: 22,
             username: "ps".to_string(),
             password: String::new(),
-            root_dir: r"D:\xkz_1020".to_string(),
-            scdoc_dir: r"D:\xkz_1020\scdoc".to_string(),
-            msh_dir: r"D:\xkz_1020\msh".to_string(),
-            result_dir: r"D:\xkz_1020\case".to_string(),
-            conda_env: "pyfluent".to_string(),
-            conda_exe: r"C:\ProgramData\anaconda3\Scripts\conda.exe".to_string(),
-            ansys_root: r"C:\Program Files\ANSYS Inc\v241".to_string(),
-            meshing_script: r"D:\xkz_1020\batch_meshing_gen4.py".to_string(),
-            solver_script: r"D:\xkz_1020\batch_solver_gen4.py".to_string(),
-            flag_dir: r"D:\xkz_1020\flags".to_string(),
+            working_dir: String::new(),
+            scripts_dir: String::new(),
+            ref_files_dir: String::new(),
+            scdoc_dir: String::new(),
+            msh_dir: String::new(),
+            result_dir: String::new(),
+            flag_dir: String::new(),
+            conda_env: String::new(),
+            conda_exe: String::new(),
+            mpi_bin_dir: String::new(),
         }
     }
 }
@@ -248,8 +235,9 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => "root_dir", 1 => "scdoc_dir", 2 => "msh_dir", 3 => "result_dir",
-                4 => "conda_env", 5 => "conda_exe", 6 => "ansys_root", 7 => "meshing_script", 8 => "solver_script", 9 => "flag_dir",
+                0 => "working_dir", 1 => "scripts_dir", 2 => "ref_files_dir", 3 => "scdoc_dir",
+                4 => "msh_dir", 5 => "result_dir", 6 => "flag_dir",
+                7 => "conda_env", 8 => "conda_exe", 9 => "mpi_bin_dir",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
@@ -288,8 +276,9 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => "工程根目录", 1 => "SCDOC接收目录", 2 => "网格输出目录", 3 => "结果输出目录",
-                4 => "Conda环境名", 5 => "Conda路径", 6 => "ANSYS安装目录", 7 => "网格脚本", 8 => "求解脚本", 9 => "标志文件目录",
+                0 => "仿真工作目录", 1 => "脚本部署目录", 2 => "引用文件目录", 3 => "SCDOC接收目录",
+                4 => "网格输出目录", 5 => "仿真输出目录", 6 => "仿真标志目录",
+                7 => "Conda环境名", 8 => "Conda可执行文件", 9 => "MPI安装目录",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
@@ -322,6 +311,29 @@ impl SettingCategory {
 
     pub fn is_password_field(self, idx: usize) -> bool {
         matches!(self, SettingCategory::RemoteConnection) && idx == 3
+    }
+
+    /// 返回字段的完整配置路径名（如 "local_paths.sw_exe"）
+    pub fn field_full_name(self, idx: usize) -> String {
+        match self {
+            SettingCategory::LocalPaths => format!("local_paths.{}", self.field_name(idx)),
+            SettingCategory::RemoteConnection | SettingCategory::RemoteDirs => {
+                format!("remote_config.{}", self.field_name(idx))
+            }
+            SettingCategory::StepPatterns => format!("step_file_patterns.{}", self.field_name(idx)),
+            SettingCategory::SolidWorks => format!("solidworks.{}", self.field_name(idx)),
+            SettingCategory::SpaceClaim => format!("spaceclaim.{}", self.field_name(idx)),
+            SettingCategory::GlobalSettings => format!("global_settings.{}", self.field_name(idx)),
+        }
+    }
+
+    /// 判断字段是否为本地文件/目录路径（需要存在性检查）
+    pub fn is_path_field(self, _idx: usize) -> bool {
+        match self {
+            SettingCategory::LocalPaths => true,
+            // RemoteDirs 中的所有路径都指向远程工作站，不做本地存在性检查
+            _ => false,
+        }
     }
 }
 
@@ -420,16 +432,16 @@ impl SettingsState {
                 _ => String::new(),
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => self.config.remote_config.root_dir.clone(),
-                1 => self.config.remote_config.scdoc_dir.clone(),
-                2 => self.config.remote_config.msh_dir.clone(),
-                3 => self.config.remote_config.result_dir.clone(),
-                4 => self.config.remote_config.conda_env.clone(),
-                5 => self.config.remote_config.conda_exe.clone(),
-                6 => self.config.remote_config.ansys_root.clone(),
-                7 => self.config.remote_config.meshing_script.clone(),
-                8 => self.config.remote_config.solver_script.clone(),
-                9 => self.config.remote_config.flag_dir.clone(),
+                0 => self.config.remote_config.working_dir.clone(),
+                1 => self.config.remote_config.scripts_dir.clone(),
+                2 => self.config.remote_config.ref_files_dir.clone(),
+                3 => self.config.remote_config.scdoc_dir.clone(),
+                4 => self.config.remote_config.msh_dir.clone(),
+                5 => self.config.remote_config.result_dir.clone(),
+                6 => self.config.remote_config.flag_dir.clone(),
+                7 => self.config.remote_config.conda_env.clone(),
+                8 => self.config.remote_config.conda_exe.clone(),
+                9 => self.config.remote_config.mpi_bin_dir.clone(),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -496,16 +508,16 @@ impl SettingsState {
                 _ => {}
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => self.config.remote_config.root_dir = value.to_string(),
-                1 => self.config.remote_config.scdoc_dir = value.to_string(),
-                2 => self.config.remote_config.msh_dir = value.to_string(),
-                3 => self.config.remote_config.result_dir = value.to_string(),
-                4 => self.config.remote_config.conda_env = value.to_string(),
-                5 => self.config.remote_config.conda_exe = value.to_string(),
-                6 => self.config.remote_config.ansys_root = value.to_string(),
-                7 => self.config.remote_config.meshing_script = value.to_string(),
-                8 => self.config.remote_config.solver_script = value.to_string(),
-                9 => self.config.remote_config.flag_dir = value.to_string(),
+                0 => self.config.remote_config.working_dir = value.to_string(),
+                1 => self.config.remote_config.scripts_dir = value.to_string(),
+                2 => self.config.remote_config.ref_files_dir = value.to_string(),
+                3 => self.config.remote_config.scdoc_dir = value.to_string(),
+                4 => self.config.remote_config.msh_dir = value.to_string(),
+                5 => self.config.remote_config.result_dir = value.to_string(),
+                6 => self.config.remote_config.flag_dir = value.to_string(),
+                7 => self.config.remote_config.conda_env = value.to_string(),
+                8 => self.config.remote_config.conda_exe = value.to_string(),
+                9 => self.config.remote_config.mpi_bin_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {
@@ -596,19 +608,7 @@ impl SettingsState {
     }
 
     pub fn begin_edit_current_field(&mut self) {
-        let cat = self.current_category();
-        let idx = self.focus.field_index;
-        // 密码字段：始终从 .env 文件读取真实密码，避免显示占位符
-        let value = if cat.is_password_field(idx) {
-            let env_pwd = config_io::read_env_password();
-            if !env_pwd.is_empty() {
-                env_pwd
-            } else {
-                self.get_field_value(cat, idx)
-            }
-        } else {
-            self.get_field_value(cat, idx)
-        };
+        let value = self.get_field_value(self.current_category(), self.focus.field_index);
         self.buffer = TextBuffer::with_text(value);
         self.focus.editing = true;
     }
@@ -634,16 +634,21 @@ impl SettingsState {
                 self.undo_stack.remove(0);
             }
             self.set_field_value(cat, idx, &new_value);
+        }
 
-            // 路径字段提交后立即检查文件是否存在
-            if let SettingCategory::LocalPaths = cat {
-                let value = self.get_field_value(cat, idx);
-                let field_name = format!("local_paths.{}", cat.field_name(idx));
-                if !value.is_empty() {
-                    self.path_status.insert(field_name, std::path::Path::new(&value).exists());
-                }
+        // 路径字段提交后立即检查文件/目录是否存在
+        if cat.is_path_field(idx) {
+            let value = self.get_field_value(cat, idx);
+            let field_name = cat.field_full_name(idx);
+            if !value.is_empty() {
+                self.path_status.insert(field_name, std::path::Path::new(&value).exists());
+            } else {
+                self.path_status.remove(&field_name);
             }
         }
+
+        // 重新运行校验，刷新 validation_errors（修正路径后错误自动消失）
+        self.validation_errors = validate_config(&self.config);
 
         self.buffer = TextBuffer::new();
         self.focus.editing = false;

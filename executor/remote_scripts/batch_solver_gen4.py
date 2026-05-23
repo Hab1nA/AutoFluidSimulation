@@ -2,7 +2,7 @@
 Fluent Solver 批处理脚本 - 参数化版本
 
 用法:
-    python batch_solver_gen4.py <config_id> --ansys-root <path> --journal-path <path>
+    python batch_solver_gen4.py <config_id> --mpi-bin-dir <path> --journal-path <path>
         --post-journal-path <path> --msh-dir <path> --output-dir <path>
         --anim-dir <path> --working-dir-t <path> --working-dir-v <path>
 """
@@ -30,8 +30,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('config_id', type=int, help='模型编号 (必须是大于等于0的整数)')
 
     # ANSYS 路径参数（必需）
-    parser.add_argument('--ansys-root', type=str, required=True,
-                        help='ANSYS 安装根目录')
+    parser.add_argument('--mpi-bin-dir', type=str, required=True,
+                        help='Intel MPI bin 目录路径')
 
     # 文件路径参数（必需）
     parser.add_argument('--journal-path', type=str, required=True,
@@ -62,27 +62,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def setup_ansys_environment(ansys_root: str) -> None:
-    """设置 ANSYS 环境变量（含 MPI 绑定参数）。"""
-    fluent_root = os.path.join(ansys_root, "fluent")
-    # 查找 Fluent 版本目录（取最新版本）
-    mpi_root: str | None = None
-    if os.path.exists(fluent_root):
-        versions = [d for d in os.listdir(fluent_root) if d.startswith("fluent")]
-        if versions:
-            versions.sort(reverse=True)  # 降序排列，取最新版本
-            fluent_version_dir = os.path.join(fluent_root, versions[0])
-            candidate = os.path.join(fluent_version_dir, "multiport", "mpi", "win64", "intel2021")
-            if os.path.exists(candidate):
-                mpi_root = candidate
-
-    if mpi_root is None:
+def setup_mpi_environment(mpi_bin_dir: str) -> None:
+    """设置 MPI 环境变量（含 MPI 绑定参数）。"""
+    mpi_root = os.path.dirname(mpi_bin_dir)  # bin 的上级目录即 I_MPI_ROOT
+    if not os.path.isdir(mpi_bin_dir):
         raise FileNotFoundError(
-            f"无法在 {fluent_root} 下找到 Fluent MPI 目录，"
-            f"请确认 --ansys-root 参数正确且 ANSYS 已安装。"
+            f"MPI bin 目录不存在: {mpi_bin_dir}，"
+            f"请确认 --mpi-bin-dir 参数正确。"
         )
 
     os.environ["I_MPI_ROOT"] = mpi_root
+    os.environ["PATH"] = mpi_bin_dir + ";" + os.environ["PATH"]
     os.environ["PATH"] = mpi_root + "\\bin;" + os.environ["PATH"]
     print(f"[环境] I_MPI_ROOT = {mpi_root}")
 
@@ -165,11 +155,11 @@ def main() -> None:
         raise ValueError("参数 config_id 必须是大于等于0的整数。")
 
     # 设置环境变量
-    setup_ansys_environment(args.ansys_root)
+    setup_mpi_environment(args.mpi_bin_dir)
 
     # 打印配置信息
     print(f"[配置] 模型编号: {args.config_id}")
-    print(f"[配置] ANSYS 根目录: {args.ansys_root}")
+    print(f"[配置] MPI bin 目录: {args.mpi_bin_dir}")
     print(f"[配置] 求解 Journal: {args.journal_path}")
     print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 网格目录: {args.msh_dir}")

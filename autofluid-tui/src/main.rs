@@ -384,6 +384,10 @@ fn process_event(
                 }
                 key_handler::AppAction::SaveSettings => {
                     if let Some(ref mut ss) = state.settings_state {
+                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
+                        if ss.is_editing_field() {
+                            ss.commit_edit_current_field();
+                        }
                         ss.validation_errors.clear();
                         ss.save_error = None;
                         match ss.save() {

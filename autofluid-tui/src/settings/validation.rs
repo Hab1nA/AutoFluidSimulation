@@ -28,14 +28,14 @@ pub fn validate_config(config: &SettingsConfig) -> Vec<ValidationError> {
 }
 
 fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    let required_executables = [
+    let executables = [
         ("local_paths.sw_exe", &config.local_paths.sw_exe, false),
         ("local_paths.sw_model", &config.local_paths.sw_model, true),
         ("local_paths.excel", &config.local_paths.excel, true),
         ("local_paths.sc_exe", &config.local_paths.sc_exe, false),
     ];
 
-    for (name, path, is_required) in &required_executables {
+    for (name, path, is_required) in &executables {
         if path.is_empty() {
             if *is_required {
                 errors.push(ValidationError {
@@ -45,11 +45,10 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
                 });
             }
         } else if !Path::new(path).exists() {
-            let sev = if *is_required { Severity::Error } else { Severity::Warning };
             errors.push(ValidationError {
                 field_name: name.to_string(),
                 message: "文件不存在".to_string(),
-                severity: sev,
+                severity: Severity::Error,
             });
         }
     }
@@ -64,6 +63,12 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
                 field_name: name.to_string(),
                 message: "目录路径为空 (将在首次使用时创建)".to_string(),
                 severity: Severity::Warning,
+            });
+        } else if !Path::new(path).is_dir() {
+            errors.push(ValidationError {
+                field_name: name.to_string(),
+                message: "目录不存在".to_string(),
+                severity: Severity::Error,
             });
         }
     }
@@ -94,19 +99,14 @@ fn validate_remote_connection(config: &SettingsConfig, errors: &mut Vec<Validati
         });
     }
 
-    if config.remote_config.password.is_empty() {
-        errors.push(ValidationError {
-            field_name: "remote_config.password".to_string(),
-            message: "SSH密码未设置".to_string(),
-            severity: Severity::Warning,
-        });
-    }
 }
 
 fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     let remote_dirs = [
-        ("remote_config.root_dir", &config.remote_config.root_dir),
+        ("remote_config.scripts_dir", &config.remote_config.scripts_dir),
+        ("remote_config.working_dir", &config.remote_config.working_dir),
         ("remote_config.scdoc_dir", &config.remote_config.scdoc_dir),
+        ("remote_config.ref_files_dir", &config.remote_config.ref_files_dir),
         ("remote_config.msh_dir", &config.remote_config.msh_dir),
         ("remote_config.result_dir", &config.remote_config.result_dir),
     ];
@@ -128,6 +128,8 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         });
     }
 }
+
+
 
 fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     let patterns = [
@@ -288,14 +290,31 @@ mod tests {
     #[test]
     fn test_valid_config_passes() {
         let mut config = SettingsConfig::default();
-        // 默认配置中的文件路径是示例值，在 CI 环境中不存在；
-        // 用当前可执行文件路径代替，确保路径有效性检查通过。
+        // 填充所有必需的本地路径字段（用当前可执行文件代替不存在的路径）
         let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        config.local_paths.sw_exe = exe.clone();
         config.local_paths.sw_model = exe.clone();
-        config.local_paths.excel = exe;
+        config.local_paths.excel = exe.clone();
+        config.local_paths.sc_exe = exe.clone();
+        config.local_paths.step_dir = std::env::temp_dir().to_string_lossy().to_string();
+        config.local_paths.scdoc_dir = std::env::temp_dir().to_string_lossy().to_string();
+        // 填充远程连接字段
+        config.remote_config.host = "127.0.0.1".to_string();
+        config.remote_config.username = "test".to_string();
+        // 远程目录留空（不校验本地存在性）
+        config.remote_config.conda_exe = String::new();
+        config.remote_config.mpi_bin_dir = String::new();
         let errors = validate_config(&config);
         let critical: Vec<_> = errors.iter().filter(|e| matches!(e.severity, Severity::Error)).collect();
-        assert!(critical.is_empty(), "默认配置不应有严重错误: {:?}", critical);
+        assert!(critical.is_empty(), "完整配置不应有严重错误: {:?}", critical);
+    }
+
+    #[test]
+    fn test_empty_defaults_have_errors() {
+        let config = SettingsConfig::default();
+        let errors = validate_config(&config);
+        let critical: Vec<_> = errors.iter().filter(|e| matches!(e.severity, Severity::Error)).collect();
+        assert!(!critical.is_empty(), "空默认配置应有严重错误（路径未填写）");
     }
 
     #[test]
