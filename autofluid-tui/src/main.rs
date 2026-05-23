@@ -138,6 +138,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 事件处理上下文，聚合 process_event 所需的全部可变引用。
+struct EventContext<'a> {
+    state: &'a mut AppState,
+    log_buffer: &'a mut LogBuffer,
+    ipc: &'a mut IpcClient,
+    daemon: &'a mut daemon_mgr::DaemonManager,
+    rt: &'a tokio::runtime::Runtime,
+    project_dir: &'a str,
+    full_quit: &'a mut bool,
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
     let project_dir = std::env::current_dir()
@@ -178,47 +189,57 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut last_clock_refresh = std::time::Instant::now();
     let mut poll_counter: u64 = 0;
 
+    let mut ctx = EventContext {
+        state: &mut state,
+        log_buffer: &mut log_buffer,
+        ipc: &mut ipc,
+        daemon: &mut daemon,
+        rt: &rt,
+        project_dir: &project_dir,
+        full_quit: &mut full_quit,
+    };
+
     loop {
-        if state.should_quit {
+        if ctx.state.should_quit {
             break;
         }
 
-        state.tick();
+        ctx.state.tick();
 
-        if let Some(cmd) = state.pending_command.take() {
-            let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
+        if let Some(cmd) = ctx.state.pending_command.take() {
+            let result = ctx.rt.block_on(command::dispatch_command(&cmd, ctx.ipc, ctx.state, ctx.log_buffer));
             match result {
                 command::CommandResult::Quit => {
-                    state.should_quit = true;
+                    ctx.state.should_quit = true;
                 }
                 command::CommandResult::FullQuit => {
-                    full_quit = true;
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
+                    *ctx.full_quit = true;
+                    if ctx.ipc.is_connected() {
+                        let _ = ctx.rt.block_on(ctx.ipc.full_quit());
                     }
-                    rt.block_on(ipc.disconnect());
-                    state.should_quit = true;
+                    ctx.rt.block_on(ctx.ipc.disconnect());
+                    ctx.state.should_quit = true;
                 }
                 command::CommandResult::StartDaemon => {
-                    if ipc.is_connected() {
-                        log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+                    if ctx.ipc.is_connected() {
+                        ctx.log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                     } else {
-                        match daemon.launch(&project_dir) {
+                        match ctx.daemon.launch(ctx.project_dir) {
                             Ok(pid) => {
-                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                DaemonManager::reconnect_ipc_after_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
+                                ctx.log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
+                                DaemonManager::reconnect_ipc_after_launch(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
                             }
                             Err(e) => {
-                                log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+                                ctx.log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
                             }
                         }
                     }
                 }
                 command::CommandResult::RestartDaemon => {
-                    daemon.restart_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    ctx.daemon.restart_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
                 }
                 command::CommandResult::StopDaemon => {
-                    daemon.stop_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    ctx.daemon.stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
                 }
                 _ => {}
             }
@@ -227,25 +248,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         let first_poll_timeout = Duration::from_millis(50);
         if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
             let event = crossterm_event::read().map_err(|e| e.to_string())?;
-            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
+            process_event(event, &mut ctx);
 
             while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
                 let event = crossterm_event::read().map_err(|e| e.to_string())?;
-                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
+                process_event(event, &mut ctx);
             }
         }
 
-        if state.needs_redraw {
-            let _ = do_redraw(terminal, &mut state, &log_buffer);
-            state.needs_redraw = false;
+        if ctx.state.needs_redraw {
+            let _ = do_redraw(terminal, ctx.state, ctx.log_buffer);
+            ctx.state.needs_redraw = false;
         }
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
-        if ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
+        if ctx.ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
             // 拉取所有构型状态
-            if let Ok(resp) = rt.block_on(ipc.get_all_status()) {
+            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_all_status()) {
                 if resp.is_ok() {
-                    state.update_status_data(&resp.data);
+                    ctx.state.update_status_data(&resp.data);
                 }
             }
 
@@ -253,66 +274,65 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             poll_counter += 1;
             if poll_counter >= 5 {
                 poll_counter = 0;
-                if let Ok(resp) = rt.block_on(ipc.get_engine_status()) {
+                if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_engine_status()) {
                     if resp.is_ok() {
-                        state.update_engine_info(&resp.data);
+                        ctx.state.update_engine_info(&resp.data);
                     }
                 }
             }
 
             // 增量拉取日志
-            if let Ok(resp) = rt.block_on(ipc.get_log_entries(
-                state.last_log_id, 50,
-                state.log_filter_level.as_deref(),
-                state.log_filter_source.as_deref(),
+            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_log_entries(
+                ctx.state.last_log_id, 50,
+                ctx.state.log_filter_level.as_deref(),
+                ctx.state.log_filter_source.as_deref(),
             )) {
                 if resp.is_ok() {
                     if let Some(data_obj) = resp.data.as_object() {
                         if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
                             for entry_val in entries {
                                 if let Some(entry) = LogEntry::from_dict(entry_val) {
-                                    state.last_log_id = state.last_log_id.max(entry.id);
-                                    log_buffer.push_detail(entry);
+                                    ctx.state.last_log_id = ctx.state.last_log_id.max(entry.id);
+                                    ctx.log_buffer.push_detail(entry);
                                 }
                             }
                         }
                         if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64()) {
-                            state.last_log_id = state.last_log_id.max(latest);
+                            ctx.state.last_log_id = ctx.state.last_log_id.max(latest);
                         }
                     }
                 }
             }
 
             last_ipc_poll = std::time::Instant::now();
-            state.needs_redraw = true;
+            ctx.state.needs_redraw = true;
         }
 
         if last_clock_refresh.elapsed() >= clock_interval {
-            state.needs_redraw = true;
+            ctx.state.needs_redraw = true;
             last_clock_refresh = std::time::Instant::now();
         }
     }
 
-    rt.block_on(ipc.disconnect());
+    ctx.rt.block_on(ctx.ipc.disconnect());
 
-    if full_quit {
-        let _ = daemon.stop(&project_dir);
+    if *ctx.full_quit {
+        let _ = ctx.daemon.stop(ctx.project_dir);
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // 事件处理函数需要访问多个上下文对象
-fn process_event(
-    event: CrosstermEvent,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    ipc: &mut IpcClient,
-    daemon: &mut daemon_mgr::DaemonManager,
-    rt: &tokio::runtime::Runtime,
-    project_dir: &str,
-    full_quit: &mut bool,
-) {
+fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
+    let EventContext {
+        state,
+        log_buffer,
+        ipc,
+        daemon,
+        rt,
+        project_dir,
+        full_quit,
+    } = ctx;
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
             let action = key_handler::handle_key(key, state);
@@ -328,7 +348,7 @@ fn process_event(
                             state.should_quit = true;
                         }
                         command::CommandResult::FullQuit => {
-                            *full_quit = true;
+                            **full_quit = true;
                             if ipc.is_connected() {
                                 let _ = rt.block_on(ipc.full_quit());
                             }
@@ -364,7 +384,7 @@ fn process_event(
                         let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
-                                *full_quit = true;
+                                **full_quit = true;
                                 if ipc.is_connected() {
                                     let _ = rt.block_on(ipc.full_quit());
                                 }

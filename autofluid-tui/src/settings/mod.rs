@@ -656,12 +656,7 @@ impl SettingsState {
 
     pub fn undo(&mut self) {
         if let Some(entry) = self.undo_stack.pop() {
-            let current = self.get_field_value(entry.category, entry.field_index);
             self.set_field_value(entry.category, entry.field_index, &entry.old_value);
-            // Push current value back for redo... but simple undo is enough
-            let _ = current;
-            // Re-push the entry pointing to the current value (for redo)
-            // Actually just pop and don't re-push - simple linear undo
         }
     }
 
