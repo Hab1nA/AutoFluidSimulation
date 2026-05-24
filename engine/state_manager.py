@@ -331,6 +331,16 @@ class StateManager:
             result: int = row["retry_count"] if row else 0
             return result
 
+    def get_step_retry_count(self, config_name: int, step_name: str) -> int:
+        """查询指定构型指定步骤的当前重试次数。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
+                (config_name, step_name),
+            ).fetchone()
+            result: int = row["retry_count"] if row else 0
+            return result
+
     def set_meshing_running_if_idle(self, config_name: int) -> bool:
         """原子设置 Meshing 为 Running，同一时刻只允许一个构型执行网格划分。
 
