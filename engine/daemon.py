@@ -135,6 +135,7 @@ class PipelineDaemon:
 
         # 运行标志
         self._running = False
+        self._stop_event = threading.Event()  # 主循环阻塞用，set() 唤醒
 
         logger.info("PipelineDaemon 基础环境就绪")
 
@@ -232,8 +233,7 @@ class PipelineDaemon:
 
         # ---- 5. 主循环 ----
         try:
-            while self._running:
-                time.sleep(1)
+            self._stop_event.wait()  # 阻塞直到收到退出信号
         finally:
             self.shutdown()
 
@@ -241,6 +241,7 @@ class PipelineDaemon:
         """优雅关闭守护进程。"""
         logger.info("PipelineDaemon 正在关闭...")
         self._running = False
+        self._stop_event.set()
 
         # 停止调度器
         if self.scheduler:
@@ -264,6 +265,7 @@ class PipelineDaemon:
         def signal_handler(signum, frame):
             logger.info(f"收到信号 {signum}，正在关闭...")
             self._running = False
+            self._stop_event.set()
 
         # SIGTERM 用于外部 kill 命令优雅终止
         for sig in [signal.SIGTERM]:
@@ -292,6 +294,7 @@ class PipelineDaemon:
                             if ch == b'\x11':  # Ctrl+Q
                                 logger.info("检测到 Ctrl+Q，守护进程正在退出...")
                                 self._running = False
+                                self._stop_event.set()
                                 return
                     except (OSError, EOFError):
                         return  # stdin 不可用（如以子进程方式运行）
@@ -306,6 +309,7 @@ class PipelineDaemon:
                             if '\x11' in line:
                                 logger.info("检测到 Ctrl+Q，守护进程正在退出...")
                                 self._running = False
+                                self._stop_event.set()
                                 return
                     except (OSError, ValueError):
                         return  # stdin 不可用
