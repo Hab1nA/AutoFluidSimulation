@@ -339,9 +339,16 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
         render_items(raw_lines, items, label_width, theme);
     }
 
-    fn render_sub_header(raw_lines: &mut Vec<Line>, label: &str, theme: &AppTheme) {
+    fn render_sub_header(raw_lines: &mut Vec<Line>, label: &str, target_header_w: usize, theme: &AppTheme) {
+        let sub_header = format!("─── {} ──", label);
+        let header_dw = unicode_width::UnicodeWidthStr::width(sub_header.as_str());
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
         raw_lines.push(Line::from(Span::styled(
-            format!("    ── {} ──", label),
+            format!("  {}{}", sub_header, header_pad),
             Style::default().fg(theme.muted),
         )));
     }
@@ -374,19 +381,19 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
 
         // 远程目录
         if !dir_items.is_empty() {
-            render_sub_header(&mut raw_lines, "远程目录", theme);
+            render_sub_header(&mut raw_lines, "远程目录", target_header_w, theme);
             render_items(&mut raw_lines, &dir_items, label_width, theme);
         }
 
         // 远程程序
         if !prog_items.is_empty() {
-            render_sub_header(&mut raw_lines, "远程程序", theme);
+            render_sub_header(&mut raw_lines, "远程程序", target_header_w, theme);
             render_items(&mut raw_lines, &prog_items, label_width, theme);
         }
 
         // 脚本与引用文件部署
         if scripts_info.is_some() || ref_files_info.is_some() {
-            render_sub_header(&mut raw_lines, "文件部署", theme);
+            render_sub_header(&mut raw_lines, "文件部署", target_header_w, theme);
             if let Some((total, deployed, ref missing)) = scripts_info {
                 let (value, exists) = if missing.is_empty() {
                     (format!("全部就绪 ({}/{})", deployed, total), Some(true))
@@ -417,7 +424,7 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
 
         // 系统信息
         if !sys_items.is_empty() {
-            render_sub_header(&mut raw_lines, "系统信息", theme);
+            render_sub_header(&mut raw_lines, "系统信息", target_header_w, theme);
             render_items(&mut raw_lines, &sys_items, label_width, theme);
         }
     }

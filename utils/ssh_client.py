@@ -516,55 +516,47 @@ class RemoteWorkstation:
             if code == 0:
                 results["python_version"] = out.strip()
 
-        # ---- 远程目录 + MPI 批量检查（单次 SSH 调用） ----
+        # ---- 远程目录 + MPI 逐个检查（独立 SSH 调用） ----
+        # 注意：不能将多个 @if exist 用 & 拼接为单条命令——
+        # cmd.exe 的 else 分支会吞噬行内 & 后续的所有命令，
+        # 导致仅第一个检查执行，其余全部被跳过。
         all_dirs: dict[str, str] = dict(remote_dirs) if remote_dirs else {}
         if mpi_bin_dir:
             all_dirs["MPI安装目录"] = mpi_bin_dir
 
-        if all_dirs:
-            paths = list(all_dirs.values())
-            cmd_parts = [f'@if exist "{p}" (echo 1) else (echo 0)' for p in paths]
-            cmd = " & ".join(cmd_parts)
+        for label, path in all_dirs.items():
+            cmd = f'@if exist "{path}" (echo 1) else (echo 0)'
             out, err, code = self.exec_command(cmd)
-            results_list = out.strip().split() if code == 0 else ["0"] * len(paths)
-            for i, (label, path) in enumerate(all_dirs.items()):
-                exists = i < len(results_list) and results_list[i].strip() == "1"
-                entry = {"label": label, "path": path, "exists": exists}
-                if label == "MPI安装目录":
-                    results["remote_programs"].append(entry)
-                else:
-                    results["remote_dirs"].append(entry)
+            exists = code == 0 and out.strip() == "1"
+            logger.debug(f"[SSH] 目录检查: {label} ({path}) → exists={exists}")
+            entry = {"label": label, "path": path, "exists": exists}
+            if label == "MPI安装目录":
+                results["remote_programs"].append(entry)
+            else:
+                results["remote_dirs"].append(entry)
 
-        # ---- 脚本部署批量检查（单次 SSH 调用） ----
+        # ---- 脚本部署逐个检查（独立 SSH 调用） ----
         if scripts_dir and script_files:
             results["scripts_status"]["total"] = len(script_files)
-            cmd_parts = []
+            missing = []
             for filename in script_files:
                 remote_path = f"{scripts_dir}/{filename}".replace("\\", "/")
-                cmd_parts.append(f'@if exist "{remote_path}" (echo 1) else (echo 0)')
-            cmd = " & ".join(cmd_parts)
-            out, err, code = self.exec_command(cmd)
-            results_list = out.strip().split() if code == 0 else ["0"] * len(script_files)
-            missing = []
-            for i, filename in enumerate(script_files):
-                if i >= len(results_list) or results_list[i].strip() != "1":
+                cmd = f'@if exist "{remote_path}" (echo 1) else (echo 0)'
+                out, err, code = self.exec_command(cmd)
+                if code != 0 or out.strip() != "1":
                     missing.append(filename)
             results["scripts_status"]["missing"] = missing
             results["scripts_status"]["deployed"] = len(script_files) - len(missing)
 
-        # ---- 引用文件部署批量检查（单次 SSH 调用） ----
+        # ---- 引用文件部署逐个检查（独立 SSH 调用） ----
         if ref_files_dir and ref_files:
             results["ref_files_status"]["total"] = len(ref_files)
-            cmd_parts = []
+            missing = []
             for filename in ref_files:
                 remote_path = f"{ref_files_dir}/{filename}".replace("\\", "/")
-                cmd_parts.append(f'@if exist "{remote_path}" (echo 1) else (echo 0)')
-            cmd = " & ".join(cmd_parts)
-            out, err, code = self.exec_command(cmd)
-            results_list = out.strip().split() if code == 0 else ["0"] * len(ref_files)
-            missing = []
-            for i, filename in enumerate(ref_files):
-                if i >= len(results_list) or results_list[i].strip() != "1":
+                cmd = f'@if exist "{remote_path}" (echo 1) else (echo 0)'
+                out, err, code = self.exec_command(cmd)
+                if code != 0 or out.strip() != "1":
                     missing.append(filename)
             results["ref_files_status"]["missing"] = missing
             results["ref_files_status"]["deployed"] = len(ref_files) - len(missing)
