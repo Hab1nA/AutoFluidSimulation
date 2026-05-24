@@ -7,8 +7,8 @@
     python start_daemon.py
 
 守护进程启动后会在后台持续运行，等待 TUI 客户端连接。
-在本终端窗口按 Ctrl+Q 可完全退出后台引擎。
-TUI 客户端中也可通过 Ctrl+Q 退出（发送 IPC full_quit 命令关闭后台引擎）。
+在本终端窗口按 Ctrl+C 可完全退出后台引擎。
+TUI 客户端中也可通过 Ctrl+C 退出（发送 IPC full_quit 命令关闭后台引擎）。
 ===============================================================================
 """
 import sys
@@ -31,6 +31,6 @@ if __name__ == "__main__":
     print()
     print(f"日志目录: {session_log_dir}")
     print("启动后将监听 IPC 连接，等待 TUI 客户端...")
-    print("提示: 在此窗口按 Ctrl+Q 可完全退出后台引擎")
+    print("提示: 在此窗口按 Ctrl+C 可完全退出后台引擎")
     print()
     main()

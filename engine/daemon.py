@@ -26,9 +26,7 @@ import os
 import sys
 import signal
 import threading
-import time
 from typing import Any
-import platform
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -225,7 +223,6 @@ class PipelineDaemon:
 
         # ---- 4. 注册信号处理 ----
         self._setup_signal_handlers()
-        self._start_stdin_monitor()
 
         logger.info("PipelineDaemon 已就绪，等待客户端指令...")
         logger.info(f"IPC 地址: {IPC_CONFIG['host']}:{IPC_CONFIG['port']}")
@@ -234,6 +231,8 @@ class PipelineDaemon:
         # ---- 5. 主循环 ----
         try:
             self._stop_event.wait()  # 阻塞直到收到退出信号
+        except KeyboardInterrupt:
+            logger.info("收到 Ctrl+C，守护进程正在退出...")
         finally:
             self.shutdown()
 
@@ -273,50 +272,6 @@ class PipelineDaemon:
                 signal.signal(sig, signal_handler)
             except (AttributeError, ValueError):
                 pass  # Windows 不支持某些信号
-
-    def _start_stdin_monitor(self):
-        """
-        启动后台线程监听 Ctrl+Q 按键，检测到后优雅退出守护进程。
-
-        Ctrl+Q 在终端中产生 0x11 (DC1) 字符。根据平台选择不同检测方式：
-        - Windows: 使用 msvcrt.kbhit/getch 非阻塞轮询
-        - Unix:    使用 select 检测 stdin 可读事件
-        """
-        is_windows = platform.system() == "Windows"
-
-        def _stdin_monitor():
-            if is_windows:
-                import msvcrt
-                while self._running:
-                    try:
-                        if msvcrt.kbhit():
-                            ch = msvcrt.getch()
-                            if ch == b'\x11':  # Ctrl+Q
-                                logger.info("检测到 Ctrl+Q，守护进程正在退出...")
-                                self._running = False
-                                self._stop_event.set()
-                                return
-                    except (OSError, EOFError):
-                        return  # stdin 不可用（如以子进程方式运行）
-                    time.sleep(0.1)
-            else:
-                import select
-                while self._running:
-                    try:
-                        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
-                        if ready:
-                            line = sys.stdin.readline()
-                            if '\x11' in line:
-                                logger.info("检测到 Ctrl+Q，守护进程正在退出...")
-                                self._running = False
-                                self._stop_event.set()
-                                return
-                    except (OSError, ValueError):
-                        return  # stdin 不可用
-                    time.sleep(0.1)
-
-        t = threading.Thread(target=_stdin_monitor, daemon=True, name="StdinMonitor")
-        t.start()
 
     # ------------------------------------------------------------------
     # IPC 命令处理器
