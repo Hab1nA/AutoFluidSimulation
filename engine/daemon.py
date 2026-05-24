@@ -230,7 +230,10 @@ class PipelineDaemon:
 
         # ---- 5. 主循环 ----
         try:
-            self._stop_event.wait()  # 阻塞直到收到退出信号
+            # 必须带 timeout：无超时的 wait() 底层是 C 级 Lock.acquire()，
+            # 不执行 Python 字节码，导致 KeyboardInterrupt 无法在 Windows 上被抛出。
+            while not self._stop_event.wait(timeout=1.0):
+                pass
         except KeyboardInterrupt:
             logger.info("收到 Ctrl+C，守护进程正在退出...")
         finally:
