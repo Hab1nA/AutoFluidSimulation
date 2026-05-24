@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 import threading
@@ -27,7 +28,7 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# 远程脚本文件列表
+# 远程脚本文件列表（部署到 scripts_dir）
 REMOTE_SCRIPT_FILES = [
     "batch_meshing_gen4.py",
     "batch_solver_gen4.py",
@@ -36,10 +37,14 @@ REMOTE_SCRIPT_FILES = [
     "solver_gen4.jou",
     "solver_gen4.set",
     "solver_post_gen4.jou",
-    "fluent_chemkin_files/chemkin-import_chem.inp",
-    "fluent_chemkin_files/chemkin-import_therm.dat",
-    "fluent_chemkin_files/model_gen4.fla",
-    "fluent_chemkin_files/model_gen4.pdf",
+]
+
+# 远程仿真引用文件列表（部署到 ref_files_dir）
+REMOTE_REF_FILES = [
+    "chemkin-import_chem.inp",
+    "chemkin-import_therm.dat",
+    "model_gen4.fla",
+    "model_gen4.pdf",
 ]
 
 
@@ -65,6 +70,69 @@ class RemoteExecutor:
     def get_ssh_connection(self) -> "RemoteWorkstation":
         """获取 SSH 连接实例（公共接口，供外部模块查询远程文件状态）。"""
         return self._get_ssh()
+
+    # ------------------------------------------------------------------
+    # 同步状态持久化
+    # ------------------------------------------------------------------
+
+    @property
+    def _sync_state_path(self) -> str:
+        """同步状态文件路径（记录上次同步的远程目录）。"""
+        return os.path.join(str(LOCAL_PATHS["data_dir"]), "last_sync_paths.json")
+
+    def _load_last_sync_paths(self) -> dict[str, str]:
+        """加载上次同步时的远程目录路径。
+
+        Returns:
+            字典，包含 scripts_dir 和 ref_files_dir 的上次值；
+            文件不存在或解析失败返回空字典
+        """
+        state_file = self._sync_state_path
+        if not os.path.exists(state_file):
+            return {}
+        try:
+            with open(state_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"[Sync] 加载同步状态失败: {e}")
+            return {}
+
+    def _save_last_sync_paths(self) -> None:
+        """将当前远程目录配置保存为下次同步的比对基准。"""
+        state = {
+            "scripts_dir": str(REMOTE_CONFIG["scripts_dir"]),
+            "ref_files_dir": str(REMOTE_CONFIG["ref_files_dir"]),
+        }
+        try:
+            with open(self._sync_state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            logger.debug(f"[Sync] 已保存同步状态: {state}")
+        except OSError as e:
+            logger.warning(f"[Sync] 保存同步状态失败: {e}")
+
+    def _cleanup_remote_files(self, remote_dir: str, filenames: list[str], label: str) -> None:
+        """清理旧远程目录中我们上传过的已知文件。
+
+        逐个删除文件，忽略不存在或删除失败的情况。
+        不删除目录本身，避免误伤共享目录中的其他文件。
+
+        Args:
+            remote_dir: 旧的远程目录路径
+            filenames: 需要清理的文件名列表
+            label: 日志标签（如 "脚本"、"引用文件"）
+        """
+        logger.info(f"[Sync] 检测到{label}远程目录变更，清理旧路径: {remote_dir}")
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+                for filename in filenames:
+                    remote_path = f"{remote_dir}/{filename}".replace("\\", "/")
+                    try:
+                        ssh.delete_remote_file(remote_path)
+                    except Exception as e:
+                        logger.debug(f"[Sync] 清理旧文件跳过 {remote_path}: {e}")
+            except (OSError, ConnectionError) as e:
+                logger.warning(f"[Sync] 清理旧路径文件异常（不影响后续上传）: {e}")
 
     # ------------------------------------------------------------------
     # 文件传输
@@ -414,10 +482,13 @@ class RemoteExecutor:
     # ------------------------------------------------------------------
 
     def sync_scripts(self) -> bool:
-        """同步远程脚本到工作站。
+        """同步远程脚本和引用文件到工作站。
 
-        比较本地和远程脚本的 MD5 哈希值，仅在文件变更时上传。
+        比较本地和远程文件的 MD5 哈希值，仅在文件变更时上传。
         对于包含占位符的文件，上传时会动态替换路径。
+
+        若检测到远程目录路径发生变更，先清理旧路径中的已知文件，
+        再上传到新路径。
 
         Returns:
             同步成功返回 True，失败返回 False
@@ -427,69 +498,110 @@ class RemoteExecutor:
             logger.error(f"[Sync] 本地脚本目录不存在: {local_scripts_dir}")
             return False
 
-        scripts_dir = REMOTE_CONFIG["scripts_dir"]
+        # ---- 路径变更检测：清理旧远程文件 ----
+        last_paths = self._load_last_sync_paths()
+        current_scripts_dir = str(REMOTE_CONFIG["scripts_dir"])
+        current_ref_dir = str(REMOTE_CONFIG["ref_files_dir"])
 
-        # 获取本地文件哈希
-        local_hashes = self._calculate_local_hashes(local_scripts_dir)
+        last_scripts_dir = last_paths.get("scripts_dir")
+        last_ref_dir = last_paths.get("ref_files_dir")
+
+        if last_scripts_dir and last_scripts_dir != current_scripts_dir:
+            self._cleanup_remote_files(last_scripts_dir, REMOTE_SCRIPT_FILES, "脚本")
+        if last_ref_dir and last_ref_dir != current_ref_dir:
+            self._cleanup_remote_files(last_ref_dir, REMOTE_REF_FILES, "引用文件")
+
+        # ---- 正常同步流程 ----
+
+        # 同步脚本文件 → scripts_dir
+        if not self._sync_file_group(
+            local_dir=local_scripts_dir,
+            remote_dir=current_scripts_dir,
+            filenames=REMOTE_SCRIPT_FILES,
+            label="脚本",
+        ):
+            return False
+
+        # 同步引用文件 → ref_files_dir
+        ref_local_dir = os.path.join(local_scripts_dir, "fluent_chemkin_files")
+        if os.path.isdir(ref_local_dir):
+            if not self._sync_file_group(
+                local_dir=ref_local_dir,
+                remote_dir=current_ref_dir,
+                filenames=REMOTE_REF_FILES,
+                label="引用文件",
+            ):
+                return False
+
+        # 同步成功 → 记录当前路径供下次比对
+        self._save_last_sync_paths()
+        return True
+
+    def _sync_file_group(self, local_dir: str, remote_dir: str,
+                         filenames: list, label: str) -> bool:
+        """同步一组文件到远程目录。
+
+        Args:
+            local_dir: 本地文件目录
+            remote_dir: 远程目标目录
+            filenames: 文件名列表
+            label: 日志标签（如 "脚本"、"引用文件"）
+
+        Returns:
+            同步成功返回 True，失败返回 False
+        """
+        local_hashes = self._calculate_local_hashes(local_dir, filenames)
         if local_hashes is None:
             return False
 
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
+                remote_hashes = ssh.get_remote_file_hashes(remote_dir, filenames)
 
-                # 获取远程文件哈希
-                remote_hashes = ssh.get_remote_file_hashes(scripts_dir, REMOTE_SCRIPT_FILES)
-
-                # 比较并上传变更的文件
                 files_to_upload = []
-                for filename in REMOTE_SCRIPT_FILES:
+                for filename in filenames:
                     local_hash = local_hashes.get(filename)
                     remote_hash = remote_hashes.get(filename)
-
                     if local_hash is None:
-                        logger.warning(f"[Sync] 本地文件不存在: {filename}")
+                        logger.warning(f"[Sync] 本地{label}文件不存在: {filename}")
                         continue
-
                     if local_hash != remote_hash:
                         files_to_upload.append(filename)
-                        logger.info(f"[Sync] 文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
+                        logger.info(f"[Sync] {label}文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
 
                 if not files_to_upload:
-                    logger.info("[Sync] 所有脚本文件已是最新，无需同步")
+                    logger.info(f"[Sync] 所有{label}文件已是最新，无需同步")
                     return True
 
-                # 上传变更的文件（对包含硬编码路径的文本文件做动态替换）
-                logger.info(f"[Sync] 需要上传 {len(files_to_upload)} 个文件: {', '.join(files_to_upload)}")
+                logger.info(f"[Sync] 需要上传 {len(files_to_upload)} 个{label}文件: {', '.join(files_to_upload)}")
                 path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
                 for filename in files_to_upload:
-                    local_file = os.path.join(local_scripts_dir, filename)
-                    remote_file = f"{scripts_dir}/{filename}"
-
-                    # 对包含占位符的文件，上传时动态替换路径
+                    local_file = os.path.join(local_dir, filename)
+                    remote_file = f"{remote_dir}/{filename}".replace("\\", "/")
                     if os.path.splitext(filename)[1] in path_aware_exts:
                         if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file):
                             return False
                     else:
                         if not ssh.upload_file(local_file, remote_file):
-                            logger.error(f"[Sync] 上传文件失败: {filename}")
+                            logger.error(f"[Sync] 上传{label}文件失败: {filename}")
                             return False
 
-                logger.info("[Sync] 脚本同步完成")
+                logger.info(f"[Sync] {label}同步完成")
                 return True
-
             except (OSError, ConnectionError) as e:
-                logger.error(f"[Sync] 脚本同步异常: {e}")
+                logger.error(f"[Sync] {label}同步异常: {e}")
                 return False
 
-    def _calculate_local_hashes(self, local_dir: str) -> Optional[dict[str, Optional[str]]]:
-        """计算本地目录中脚本文件的 MD5 哈希值。
+    def _calculate_local_hashes(self, local_dir: str, filenames: list) -> Optional[dict[str, Optional[str]]]:
+        """计算本地目录中指定文件的 MD5 哈希值。
 
         对于包含占位符的文件（.jou/.set/.wft/.pdf），
         计算替换后的哈希值，以便与远程文件哈希正确比较，避免每次都重新上传。
 
         Args:
             local_dir: 本地目录路径
+            filenames: 要计算哈希的文件名列表
 
         Returns:
             字典，键为文件名，值为 MD5 哈希值；失败返回 None
@@ -497,7 +609,7 @@ class RemoteExecutor:
         path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
         result: dict[str, Optional[str]] = {}
         try:
-            for filename in REMOTE_SCRIPT_FILES:
+            for filename in filenames:
                 filepath = os.path.join(local_dir, filename)
                 if not os.path.exists(filepath):
                     logger.warning(f"[Sync] 本地文件不存在: {filepath}")

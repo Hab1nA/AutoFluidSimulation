@@ -170,7 +170,7 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
     let label_width: u16 = 20;
 
     struct CheckItem {
-        label: &'static str,
+        label: String,
         value: String,
         exists: Option<bool>,
     }
@@ -189,7 +189,7 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
     let local_items: Vec<CheckItem> = if let Some(local) = data.get("local_checks").and_then(|v| v.as_object()) {
         let keys_in_order = [
             "SW可执行文件", "SW模型文件", "Excel参数表", "STEP输出目录",
-            "SC可执行文件", "SC脚本文件", "SCDOC输出目录", "日志目录", "数据目录",
+            "SC可执行文件", "SCDOC输出目录",
         ];
         keys_in_order.iter().filter_map(|name| {
             local.get(*name).map(|info| {
@@ -197,7 +197,7 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
                 let path = info.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let value = if path.is_empty() { "(未设置)".to_string() } else { path.clone() };
                 CheckItem {
-                    label: name,
+                    label: name.to_string(),
                     value,
                     exists,
                 }
@@ -208,34 +208,80 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
     };
 
     // ---- 远程工作站检查 ----
-    let mut remote_items: Vec<CheckItem> = Vec::new();
+    let mut conn_items: Vec<CheckItem> = Vec::new();
+    let mut dir_items: Vec<CheckItem> = Vec::new();
+    let mut prog_items: Vec<CheckItem> = Vec::new();
+    let mut sys_items: Vec<CheckItem> = Vec::new();
+    let mut scripts_info: Option<(usize, usize, Vec<String>)> = None;
+    let mut ref_files_info: Option<(usize, usize, Vec<String>)> = None;
+
     if let Some(remote) = data.get("remote_checks").and_then(|v| v.as_object()) {
+        // 连接状态
         if let Some(ssh_status) = remote.get("ssh").and_then(|v| v.as_str()) {
             let ok = ssh_status.contains("成功");
-            remote_items.push(CheckItem {
-                label: "SSH连接",
+            conn_items.push(CheckItem {
+                label: "SSH连接".to_string(),
                 value: ssh_status.to_string(),
                 exists: Some(ok),
             });
         }
-        if let Some(conda) = remote.get("conda_available").and_then(|v| v.as_bool()) {
-            remote_items.push(CheckItem {
-                label: "Conda环境",
-                value: if conda { "可用".to_string() } else { "不可用".to_string() },
-                exists: Some(conda),
-            });
+
+        // 远程目录（从 Python 端传入的结构化数据）
+        if let Some(dirs) = remote.get("remote_dirs").and_then(|v| v.as_array()) {
+            for d in dirs {
+                let label = d.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let path = d.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let exists = d.get("exists").and_then(|v| v.as_bool());
+                let value = if path.is_empty() { "(未设置)".to_string() } else { path };
+                dir_items.push(CheckItem { label, value, exists });
+            }
         }
+
+        // 远程程序（Conda、MPI 等）
+        if let Some(progs) = remote.get("remote_programs").and_then(|v| v.as_array()) {
+            for p in progs {
+                let label = p.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let exists = p.get("exists").and_then(|v| v.as_bool());
+                let value = if path.is_empty() { "(未设置)".to_string() } else { path };
+                prog_items.push(CheckItem { label, value, exists });
+            }
+        }
+
+        // 脚本部署状态
+        if let Some(scripts) = remote.get("scripts_status") {
+            let total = scripts.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let deployed = scripts.get("deployed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let missing: Vec<String> = scripts.get("missing")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            scripts_info = Some((total, deployed, missing));
+        }
+
+        // 引用文件部署状态
+        if let Some(refs) = remote.get("ref_files_status") {
+            let total = refs.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let deployed = refs.get("deployed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let missing: Vec<String> = refs.get("missing")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            ref_files_info = Some((total, deployed, missing));
+        }
+
+        // 系统信息
         if let Some(py_ver) = remote.get("python_version").and_then(|v| v.as_str()) {
             let ok = !py_ver.is_empty();
-            remote_items.push(CheckItem {
-                label: "Python版本",
+            sys_items.push(CheckItem {
+                label: "Python版本".to_string(),
                 value: if ok { py_ver.to_string() } else { "未安装或无法检测".to_string() },
                 exists: Some(ok),
             });
         }
         if let Some(disk) = remote.get("disk_space").and_then(|v| v.as_str()) {
-            remote_items.push(CheckItem {
-                label: "磁盘空间",
+            sys_items.push(CheckItem {
+                label: "磁盘空间".to_string(),
                 value: disk.to_string(),
                 exists: None,
             });
@@ -243,11 +289,37 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
         if let Some(procs) = remote.get("background_processes").and_then(|v| v.as_array()) {
             let proc_list: Vec<&str> = procs.iter().map(|v| v.as_str().unwrap_or("?")).collect();
             let display = if proc_list.is_empty() { "无".to_string() } else { proc_list.join(", ") };
-            remote_items.push(CheckItem {
-                label: "后台进程",
+            sys_items.push(CheckItem {
+                label: "后台进程".to_string(),
                 value: display,
                 exists: None,
             });
+        }
+    }
+
+    // ---- 渲染辅助函数 ----
+    fn render_items(raw_lines: &mut Vec<Line>, items: &[CheckItem], label_width: u16, theme: &AppTheme) {
+        for item in items {
+            let icon = match item.exists {
+                Some(true) => (" ✅", theme.success),
+                Some(false) => (" ❌", theme.error),
+                None => ("", theme.bg),
+            };
+            let mut spans = vec![
+                Span::styled("  ", Style::default().bg(theme.bg)),
+                Span::styled(
+                    pad_label_by_display_width(&item.label, label_width),
+                    Style::default().fg(theme.gray_4).bg(theme.bg),
+                ),
+                Span::styled(
+                    truncate_for_display(&item.value, 50),
+                    Style::default().fg(theme.gray_3).bg(theme.bg),
+                ),
+            ];
+            if !icon.0.is_empty() {
+                spans.push(Span::styled(icon.0, Style::default().fg(icon.1).bg(theme.bg)));
+            }
+            raw_lines.push(Line::from(spans));
         }
     }
 
@@ -258,46 +330,96 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
         } else {
             String::new()
         };
-
         raw_lines.push(Line::from(""));
         raw_lines.push(Line::from(Span::styled(
             format!("  {}{}", header, header_pad),
             Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
         )));
         raw_lines.push(Line::from(""));
-
-        for item in items {
-            let icon = match item.exists {
-                Some(true) => (" ✅", theme.success),
-                Some(false) => (" ❌", theme.error),
-                None => ("", theme.bg),
-            };
-
-            let mut spans = vec![
-                Span::styled("  ", Style::default().bg(theme.bg)),
-                Span::styled(
-                    pad_label_by_display_width(item.label, label_width),
-                    Style::default().fg(theme.gray_4).bg(theme.bg),
-                ),
-                Span::styled(
-                    truncate_for_display(&item.value, 50),
-                    Style::default().fg(theme.gray_3).bg(theme.bg),
-                ),
-            ];
-
-            if !icon.0.is_empty() {
-                spans.push(Span::styled(icon.0, Style::default().fg(icon.1).bg(theme.bg)));
-            }
-
-            raw_lines.push(Line::from(spans));
-        }
+        render_items(raw_lines, items, label_width, theme);
     }
 
+    fn render_sub_header(raw_lines: &mut Vec<Line>, label: &str, theme: &AppTheme) {
+        raw_lines.push(Line::from(Span::styled(
+            format!("    ── {} ──", label),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    // ---- 渲染本地检查 ----
     if !local_items.is_empty() {
         render_section(&mut raw_lines, local_header, target_header_w, &local_items, label_width, theme);
     }
-    if !remote_items.is_empty() {
-        render_section(&mut raw_lines, remote_header, target_header_w, &remote_items, label_width, theme);
+
+    // ---- 渲染远程检查（分组显示） ----
+    let has_remote = !conn_items.is_empty() || !dir_items.is_empty() || !prog_items.is_empty()
+        || scripts_info.is_some() || ref_files_info.is_some() || !sys_items.is_empty();
+    if has_remote {
+        // 主标题
+        let header_dw = unicode_width::UnicodeWidthStr::width(remote_header);
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
+        raw_lines.push(Line::from(""));
+        raw_lines.push(Line::from(Span::styled(
+            format!("  {}{}", remote_header, header_pad),
+            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+        )));
+        raw_lines.push(Line::from(""));
+
+        // 连接状态
+        render_items(&mut raw_lines, &conn_items, label_width, theme);
+
+        // 远程目录
+        if !dir_items.is_empty() {
+            render_sub_header(&mut raw_lines, "远程目录", theme);
+            render_items(&mut raw_lines, &dir_items, label_width, theme);
+        }
+
+        // 远程程序
+        if !prog_items.is_empty() {
+            render_sub_header(&mut raw_lines, "远程程序", theme);
+            render_items(&mut raw_lines, &prog_items, label_width, theme);
+        }
+
+        // 脚本与引用文件部署
+        if scripts_info.is_some() || ref_files_info.is_some() {
+            render_sub_header(&mut raw_lines, "文件部署", theme);
+            if let Some((total, deployed, ref missing)) = scripts_info {
+                let (value, exists) = if missing.is_empty() {
+                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
+                } else {
+                    (format!("缺失 {} 个: {}", missing.len(), missing.join(", ")), Some(false))
+                };
+                let items = vec![CheckItem {
+                    label: "远程脚本文件".to_string(),
+                    value,
+                    exists,
+                }];
+                render_items(&mut raw_lines, &items, label_width, theme);
+            }
+            if let Some((total, deployed, ref missing)) = ref_files_info {
+                let (value, exists) = if missing.is_empty() {
+                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
+                } else {
+                    (format!("缺失 {} 个: {}", missing.len(), missing.join(", ")), Some(false))
+                };
+                let items = vec![CheckItem {
+                    label: "仿真引用文件".to_string(),
+                    value,
+                    exists,
+                }];
+                render_items(&mut raw_lines, &items, label_width, theme);
+            }
+        }
+
+        // 系统信息
+        if !sys_items.is_empty() {
+            render_sub_header(&mut raw_lines, "系统信息", theme);
+            render_items(&mut raw_lines, &sys_items, label_width, theme);
+        }
     }
 
     raw_lines

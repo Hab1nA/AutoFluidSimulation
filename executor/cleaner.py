@@ -22,6 +22,7 @@ from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
     STEP_NAMES, STEP_FILE_PATTERNS,
 )
+from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -51,16 +52,14 @@ class FileCleaner:
             "remote_checks": {},
         }
 
+        # 仅检查 settings 页面「本地文件路径」分类中展示的 6 个用户可配置路径
         checks = {
             "SW可执行文件": LOCAL_PATHS["sw_exe"],
             "SW模型文件": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
             "STEP输出目录": LOCAL_PATHS["step_dir"],
             "SC可执行文件": LOCAL_PATHS["sc_exe"],
-            "SC脚本文件": LOCAL_PATHS["sc_script"],
             "SCDOC输出目录": LOCAL_PATHS["scdoc_dir"],
-            "日志目录": LOCAL_PATHS["log_dir"],
-            "数据目录": LOCAL_PATHS["data_dir"],
         }
         for name, path in checks.items():
             exists = os.path.exists(path)
@@ -74,6 +73,20 @@ class FileCleaner:
                 remote_info = ssh.check_system(
                     conda_exe=REMOTE_CONFIG["conda_exe"],
                     conda_env=REMOTE_CONFIG["conda_env"],
+                    remote_dirs={
+                        "仿真工作目录": REMOTE_CONFIG["working_dir"],
+                        "脚本部署目录": REMOTE_CONFIG["scripts_dir"],
+                        "引用文件目录": REMOTE_CONFIG["ref_files_dir"],
+                        "SCDOC接收目录": REMOTE_CONFIG["scdoc_dir"],
+                        "网格输出目录": REMOTE_CONFIG["msh_dir"],
+                        "仿真输出目录": REMOTE_CONFIG["result_dir"],
+                        "仿真标志目录": REMOTE_CONFIG["flag_dir"],
+                    },
+                    mpi_bin_dir=REMOTE_CONFIG["mpi_bin_dir"],
+                    scripts_dir=REMOTE_CONFIG["scripts_dir"],
+                    script_files=REMOTE_SCRIPT_FILES,
+                    ref_files_dir=REMOTE_CONFIG["ref_files_dir"],
+                    ref_files=REMOTE_REF_FILES,
                 )
                 results["remote_checks"].update(remote_info)
             else:

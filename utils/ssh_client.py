@@ -442,13 +442,25 @@ class RemoteWorkstation:
     # 系统自检
     # ------------------------------------------------------------------
 
-    def check_system(self, conda_exe: str = "", conda_env: str = "") -> dict:
+    def check_system(self, conda_exe: str = "", conda_env: str = "",
+                     remote_dirs: dict | None = None,
+                     mpi_bin_dir: str = "",
+                     scripts_dir: str = "",
+                     script_files: list | None = None,
+                     ref_files_dir: str = "",
+                     ref_files: list | None = None) -> dict:
         """
         执行远程工作站系统自检。
 
         Args:
             conda_exe: conda 可执行文件的完整远程路径（用于 SSH 非交互会话中定位 conda）
             conda_env: conda 环境名称（用于检测 Python 版本）
+            remote_dirs: 需要检查存在性的远程目录 {显示名: 路径}
+            mpi_bin_dir: ANSYS Fluent MPI 安装目录
+            scripts_dir: 远程脚本部署目录
+            script_files: 需要检查部署的脚本文件列表
+            ref_files_dir: 远程引用文件目录
+            ref_files: 需要检查的引用文件列表
 
         Returns:
             包含自检结果的字典
@@ -459,39 +471,110 @@ class RemoteWorkstation:
             "python_version": "",
             "disk_space": "",
             "background_processes": [],
+            "remote_dirs": [],
+            "remote_programs": [],
+            "scripts_status": {"total": 0, "deployed": 0, "missing": []},
+            "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
         }
 
         if not self.ensure_connected():
             return results
 
-        # 检查 Conda 是否可用（使用完整路径，SSH 非交互会话 PATH 不含用户级 conda）
+        # ---- Conda 检查 ----
         if conda_exe:
             out, err, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
-            results["conda_available"] = (code == 0)
+            results["conda_available"] = (code == 0 and "found" in out)
         else:
-            # 回退：尝试 where 命令
             out, err, code = self.exec_command("where conda")
             results["conda_available"] = (code == 0)
 
-        # 检查 Python 版本（优先通过 conda 环境，回退系统 PATH）
+        results["remote_programs"].append({
+            "label": "Conda可执行文件",
+            "path": conda_exe or "(PATH)",
+            "exists": results["conda_available"],
+        })
+
+        # Conda 环境
+        conda_env_ok = False
         if conda_exe and conda_env and results["conda_available"]:
             out, err, code = self.exec_command(
                 f'"{conda_exe}" run -n {conda_env} python --version'
             )
             if code == 0 and out.strip():
                 results["python_version"] = out.strip()
+                conda_env_ok = True
 
+        results["remote_programs"].append({
+            "label": "Conda环境",
+            "path": conda_env or "(未设置)",
+            "exists": conda_env_ok,
+        })
+
+        # Python 版本（回退系统 PATH）
         if not results["python_version"]:
             out, err, code = self.exec_command("python --version")
             if code == 0:
                 results["python_version"] = out.strip()
 
-        # 检查磁盘空间（转换为 GB 显示）
+        # ---- 远程目录 + MPI 批量检查（单次 SSH 调用） ----
+        all_dirs: dict[str, str] = dict(remote_dirs) if remote_dirs else {}
+        if mpi_bin_dir:
+            all_dirs["MPI安装目录"] = mpi_bin_dir
+
+        if all_dirs:
+            paths = list(all_dirs.values())
+            cmd_parts = [f'@if exist "{p}" (echo 1) else (echo 0)' for p in paths]
+            cmd = " & ".join(cmd_parts)
+            out, err, code = self.exec_command(cmd)
+            results_list = out.strip().split() if code == 0 else ["0"] * len(paths)
+            for i, (label, path) in enumerate(all_dirs.items()):
+                exists = i < len(results_list) and results_list[i].strip() == "1"
+                entry = {"label": label, "path": path, "exists": exists}
+                if label == "MPI安装目录":
+                    results["remote_programs"].append(entry)
+                else:
+                    results["remote_dirs"].append(entry)
+
+        # ---- 脚本部署批量检查（单次 SSH 调用） ----
+        if scripts_dir and script_files:
+            results["scripts_status"]["total"] = len(script_files)
+            cmd_parts = []
+            for filename in script_files:
+                remote_path = f"{scripts_dir}/{filename}".replace("\\", "/")
+                cmd_parts.append(f'@if exist "{remote_path}" (echo 1) else (echo 0)')
+            cmd = " & ".join(cmd_parts)
+            out, err, code = self.exec_command(cmd)
+            results_list = out.strip().split() if code == 0 else ["0"] * len(script_files)
+            missing = []
+            for i, filename in enumerate(script_files):
+                if i >= len(results_list) or results_list[i].strip() != "1":
+                    missing.append(filename)
+            results["scripts_status"]["missing"] = missing
+            results["scripts_status"]["deployed"] = len(script_files) - len(missing)
+
+        # ---- 引用文件部署批量检查（单次 SSH 调用） ----
+        if ref_files_dir and ref_files:
+            results["ref_files_status"]["total"] = len(ref_files)
+            cmd_parts = []
+            for filename in ref_files:
+                remote_path = f"{ref_files_dir}/{filename}".replace("\\", "/")
+                cmd_parts.append(f'@if exist "{remote_path}" (echo 1) else (echo 0)')
+            cmd = " & ".join(cmd_parts)
+            out, err, code = self.exec_command(cmd)
+            results_list = out.strip().split() if code == 0 else ["0"] * len(ref_files)
+            missing = []
+            for i, filename in enumerate(ref_files):
+                if i >= len(results_list) or results_list[i].strip() != "1":
+                    missing.append(filename)
+            results["ref_files_status"]["missing"] = missing
+            results["ref_files_status"]["deployed"] = len(ref_files) - len(missing)
+
+        # ---- 磁盘空间 ----
         out, err, code = self.exec_command("wmic logicaldisk where DeviceID='D:' get FreeSpace,Size")
         if code == 0:
             results["disk_space"] = self._parse_disk_space(out)
 
-        # 查询后台 Python 进程
+        # ---- 后台进程 ----
         out, err, code = self.exec_command(
             'tasklist /FI "IMAGENAME eq python.exe" /FO CSV /NH'
         )
