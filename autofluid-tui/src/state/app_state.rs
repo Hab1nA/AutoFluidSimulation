@@ -107,6 +107,7 @@ pub struct EngineInfo {
     pub engine_status: String,
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
+    pub pipeline_started: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -285,6 +286,10 @@ impl AppState {
                 .unwrap_or(false);
             self.engine_info.barrier_passed = obj
                 .get("barrier_passed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            self.engine_info.pipeline_started = obj
+                .get("pipeline_started")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
         }

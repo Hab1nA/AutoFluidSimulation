@@ -42,7 +42,11 @@ pub async fn dispatch_command(
         "quit" => cmd_quit(&parts, state, log_buffer),
         "daemon" => cmd_daemon(&parts, state, log_buffer),
         "settings" => {
-            state.open_settings();
+            if state.engine_info.pipeline_started {
+                log_buffer.push_info("⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置".to_string());
+            } else {
+                state.open_settings();
+            }
             CommandResult::None
         }
         "filter" => cmd_filter(&parts, state, log_buffer),

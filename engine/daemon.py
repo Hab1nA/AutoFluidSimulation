@@ -134,6 +134,7 @@ class PipelineDaemon:
         # 运行标志
         self._running = False
         self._stop_event = threading.Event()  # 主循环阻塞用，set() 唤醒
+        self._pipeline_ever_started = False  # 一旦流水线启动过即置 True，锁定配置
 
         logger.info("PipelineDaemon 基础环境就绪")
 
@@ -310,6 +311,7 @@ class PipelineDaemon:
                 # 重新启动流水线（start_pipeline 会检查断点续传）
                 logger.info("检测到调度器线程已退出且未暂停，重新启动流水线...")
                 self.state.set_engine_status("running")
+                self._pipeline_ever_started = True
                 scheduler_thread = threading.Thread(
                     target=self.scheduler.start_pipeline,
                     daemon=True,
@@ -324,6 +326,7 @@ class PipelineDaemon:
 
         # 全新启动（engine_status 为 stopped 或其他）
         self.state.set_engine_status("running")
+        self._pipeline_ever_started = True
 
         # 在独立线程中启动调度器（避免阻塞 IPC 响应）
         scheduler_thread = threading.Thread(
@@ -395,6 +398,7 @@ class PipelineDaemon:
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
             "barrier_passed": self.state.is_global_barrier_met(),
+            "pipeline_started": self._pipeline_ever_started,
         }
         return True, status, ""
 
@@ -475,6 +479,9 @@ class PipelineDaemon:
 
     def handle_reload_config(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
+        if self._pipeline_ever_started:
+            logger.warning("[Config] 流水线已启动过，拒绝重新加载配置（需重启 Daemon）")
+            return False, None, "流水线已启动过，配置已锁定。请重启 Daemon 后再修改配置"
         from engine.config import reload_config_from_toml
         if reload_config_from_toml():
             return True, None, "配置已从 autofluid_config.toml 重新加载"
