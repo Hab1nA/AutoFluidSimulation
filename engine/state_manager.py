@@ -10,9 +10,10 @@ Daemon 写入状态，TUI 客户端读取状态。通过 IPC 命令触发状态�
 - engine_state: 引擎全局状态（running/paused/stopped）
 ===============================================================================
 """
+from __future__ import annotations
+
 import sqlite3
 import threading
-from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 
 from engine.config import (
@@ -154,7 +155,7 @@ class StateManager:
     # 构型管理
     # ------------------------------------------------------------------
 
-    def load_configs(self, configs: Dict[int, List[float]]):
+    def load_configs(self, configs: dict[int, list[float]]):
         """
         从 Excel 读取的构型数据同步到数据库（断点续传：保留已有状态）。
 
@@ -225,13 +226,13 @@ class StateManager:
             f"删除 {len(removed_configs) if removed_configs else 0}"
         )
 
-    def get_all_configs(self) -> List[int]:
+    def get_all_configs(self) -> list[int]:
         """获取所有构型名称列表。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute("SELECT config_name FROM configs ORDER BY config_name").fetchall()
             return [row["config_name"] for row in rows]
 
-    def get_config_params(self, config_name: int) -> Optional[List[float]]:
+    def get_config_params(self, config_name: int) -> list[float] | None:
         """获取指定构型的参数。"""
         with self._get_connection(readonly=True) as conn:
             row = conn.execute(
@@ -279,7 +280,7 @@ class StateManager:
                 """, (status, error_message, config_name, step_name))
                 logger.info(f"状态更新: 构型{config_name} [{step_name}] -> {status}")
 
-    def get_all_steps_for_config(self, config_name: int) -> Dict[str, dict]:
+    def get_all_steps_for_config(self, config_name: int) -> dict[str, dict]:
         """获取指定构型的所有步骤状态详情。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
@@ -295,7 +296,7 @@ class StateManager:
                 for row in rows
             }
 
-    def get_all_statuses(self) -> Dict[int, Dict[str, str]]:
+    def get_all_statuses(self) -> dict[int, dict[str, str]]:
         """
         获取所有构型所有步骤的状态（用于 TUI 渲染）。
 
@@ -307,7 +308,7 @@ class StateManager:
                 "SELECT config_name, step_name, status FROM steps ORDER BY config_name, step_name"
             ).fetchall()
 
-        result: Dict[int, Dict[str, str]] = {}
+        result: dict[int, dict[str, str]] = {}
         for row in rows:
             cn = row["config_name"]
             if cn not in result:
@@ -467,32 +468,6 @@ class StateManager:
                 )
         logger.info("已将所有运行中/重试中步骤切换为 Paused")
 
-    def set_all_paused_to_running(self, exclude_steps: list[str] | None = None):
-        """将所有 Paused 状态的步骤恢复为 Running。
-
-        Args:
-            exclude_steps: 可选的步骤名列表，这些步骤的 Paused 状态不会被修改
-        """
-        with self._lock:
-            with self._get_connection() as conn:
-                if exclude_steps:
-                    placeholders = ','.join(['?'] * len(exclude_steps))
-                    conn.execute(
-                        f"UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                        f"WHERE status = ? AND step_name NOT IN ({placeholders})",
-                        (STATUS_RUNNING, STATUS_PAUSED, *exclude_steps)
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                        "WHERE status = ?",
-                        (STATUS_RUNNING, STATUS_PAUSED)
-                    )
-        if exclude_steps:
-            logger.info(f"已将所有 Paused 步骤恢复为 Running（排除步骤: {exclude_steps}）")
-        else:
-            logger.info("已将所有 Paused 步骤恢复为 Running")
-
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""
         with self._get_connection(readonly=True) as conn:
@@ -531,7 +506,7 @@ class StateManager:
     # 辅助查询方法
     # ------------------------------------------------------------------
 
-    def get_configs_at_step(self, step_name: str, status: str | None = None) -> List[int]:
+    def get_configs_at_step(self, step_name: str, status: str | None = None) -> list[int]:
         """获取处于指定步骤指定状态的构型列表。"""
         with self._get_connection(readonly=True) as conn:
             if status:
@@ -560,7 +535,7 @@ class StateManager:
             ).fetchone()
             return (row["cnt"] or 0) == 0
 
-    def get_error_configs(self) -> List[Tuple[int, str, str]]:
+    def get_error_configs(self) -> list[tuple[int, str, str]]:
         """获取所有处于 Error 状态的构型和步骤。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute(

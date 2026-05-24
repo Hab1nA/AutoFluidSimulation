@@ -52,22 +52,36 @@ impl AppTheme {
         Style::default().fg(self.fg).bg(self.secondary)
     }
     pub fn btn_hover(&self) -> Style {
-        Style::default().fg(Color::Rgb(255, 255, 255)).bg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Rgb(255, 255, 255))
+            .bg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
     pub fn btn_click(&self) -> Style {
-        Style::default().fg(self.click_fg).bg(self.click_bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.click_fg)
+            .bg(self.click_bg)
+            .add_modifier(Modifier::BOLD)
     }
     pub fn border_style_for(&self, focused: bool) -> Style {
-        if focused { Style::default().fg(self.accent) } else { Style::default().fg(self.border_inactive) }
+        if focused {
+            Style::default().fg(self.accent)
+        } else {
+            Style::default().fg(self.border_inactive)
+        }
     }
     pub fn title_style(&self) -> Style {
-        Style::default().fg(self.accent).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.accent)
+            .add_modifier(Modifier::BOLD)
     }
     pub fn detail_title_style(&self) -> Style {
         Style::default().fg(self.info).add_modifier(Modifier::BOLD)
     }
     pub fn hover_style(&self) -> Style {
-        Style::default().bg(self.secondary).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(self.secondary)
+            .add_modifier(Modifier::BOLD)
     }
     /// 对话框/设置页面通用按钮样式（hover/click/normal 三态）。
     pub fn dialog_btn_style(&self, idx: u8, hovered: Option<u8>, clicked: Option<u8>) -> Style {

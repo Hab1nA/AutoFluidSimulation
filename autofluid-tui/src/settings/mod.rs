@@ -226,39 +226,70 @@ impl SettingCategory {
     pub fn field_name(self, idx: usize) -> &'static str {
         match self {
             SettingCategory::LocalPaths => match idx {
-                0 => "sw_exe", 1 => "sw_model", 2 => "excel", 3 => "step_dir",
-                4 => "sc_exe", 5 => "scdoc_dir",
+                0 => "sw_exe",
+                1 => "sw_model",
+                2 => "excel",
+                3 => "step_dir",
+                4 => "sc_exe",
+                5 => "scdoc_dir",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
-                0 => "host", 1 => "port", 2 => "username", 3 => "password",
+                0 => "host",
+                1 => "port",
+                2 => "username",
+                3 => "password",
                 _ => "",
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => "working_dir", 1 => "scripts_dir", 2 => "ref_files_dir", 3 => "scdoc_dir",
-                4 => "msh_dir", 5 => "result_dir", 6 => "flag_dir",
-                7 => "conda_env", 8 => "conda_exe", 9 => "mpi_bin_dir",
+                0 => "working_dir",
+                1 => "scripts_dir",
+                2 => "ref_files_dir",
+                3 => "scdoc_dir",
+                4 => "msh_dir",
+                5 => "result_dir",
+                6 => "flag_dir",
+                7 => "conda_env",
+                8 => "conda_exe",
+                9 => "mpi_bin_dir",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW", 1 => "SC", 2 => "Meshing", 3 => "Solver", 4 => "SolverData",
+                0 => "SW",
+                1 => "SC",
+                2 => "Meshing",
+                3 => "Solver",
+                4 => "SolverData",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
-                0 => "sw_macro_timeout", 1 => "sw_close_doc_on_finish", 2 => "sw_exit_on_finish",
-                3 => "sw_visible", 4 => "sw_startup", 5 => "sw_dispatch_startup_delay",
+                0 => "sw_macro_timeout",
+                1 => "sw_close_doc_on_finish",
+                2 => "sw_exit_on_finish",
+                3 => "sw_visible",
+                4 => "sw_startup",
+                5 => "sw_dispatch_startup_delay",
                 6 => "sw_exit_wait_seconds",
                 _ => "",
             },
             SettingCategory::SpaceClaim => match idx {
-                0 => "sc_timeout", 1 => "sc_poll_interval", 2 => "sc_process_appear_timeout",
-                3 => "sc_gui_ready_timeout", 4 => "sc_gui_stable_delay",
+                0 => "sc_timeout",
+                1 => "sc_poll_interval",
+                2 => "sc_process_appear_timeout",
+                3 => "sc_gui_ready_timeout",
+                4 => "sc_gui_stable_delay",
                 _ => "",
             },
             SettingCategory::GlobalSettings => match idx {
-                0 => "watchdog_interval", 1 => "transfer_timeout", 2 => "meshing_timeout",
-                3 => "solver_timeout", 4 => "max_retries", 5 => "state_refresh_interval",
-                6 => "ssh_connection", 7 => "dir_recursion_limit", 8 => "ssh_upload_max_retries",
+                0 => "watchdog_interval",
+                1 => "transfer_timeout",
+                2 => "meshing_timeout",
+                3 => "solver_timeout",
+                4 => "max_retries",
+                5 => "state_refresh_interval",
+                6 => "ssh_connection",
+                7 => "dir_recursion_limit",
+                8 => "ssh_upload_max_retries",
                 _ => "",
             },
         }
@@ -267,39 +298,70 @@ impl SettingCategory {
     pub fn display_label(self, idx: usize) -> &'static str {
         match self {
             SettingCategory::LocalPaths => match idx {
-                0 => "SW可执行文件", 1 => "SW模型文件", 2 => "Excel参数表", 3 => "STEP输出目录",
-                4 => "SC可执行文件", 5 => "SCDOC输出目录",
+                0 => "SW可执行文件",
+                1 => "SW模型文件",
+                2 => "Excel参数表",
+                3 => "STEP输出目录",
+                4 => "SC可执行文件",
+                5 => "SCDOC输出目录",
                 _ => "",
             },
             SettingCategory::RemoteConnection => match idx {
-                0 => "主机地址", 1 => "SSH端口", 2 => "用户名", 3 => "密码",
+                0 => "主机地址",
+                1 => "SSH端口",
+                2 => "用户名",
+                3 => "密码",
                 _ => "",
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => "仿真工作目录", 1 => "脚本部署目录", 2 => "引用文件目录", 3 => "SCDOC接收目录",
-                4 => "网格输出目录", 5 => "仿真输出目录", 6 => "仿真标志目录",
-                7 => "Conda环境名", 8 => "Conda可执行文件", 9 => "MPI安装目录",
+                0 => "仿真工作目录",
+                1 => "脚本部署目录",
+                2 => "引用文件目录",
+                3 => "SCDOC接收目录",
+                4 => "网格输出目录",
+                5 => "仿真输出目录",
+                6 => "仿真标志目录",
+                7 => "Conda环境名",
+                8 => "Conda可执行文件",
+                9 => "MPI安装目录",
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW步骤模板", 1 => "SC步骤模板", 2 => "Meshing模板", 3 => "Solver模板", 4 => "Solver数据模板",
+                0 => "SW步骤模板",
+                1 => "SC步骤模板",
+                2 => "Meshing模板",
+                3 => "Solver模板",
+                4 => "Solver数据模板",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {
-                0 => "宏超时(秒)", 1 => "完成后关闭文档", 2 => "完成后退出SW",
-                3 => "显示窗口", 4 => "启动超时(秒)", 5 => "调度启动延迟(秒)",
+                0 => "宏超时(秒)",
+                1 => "完成后关闭文档",
+                2 => "完成后退出SW",
+                3 => "显示窗口",
+                4 => "启动超时(秒)",
+                5 => "调度启动延迟(秒)",
                 6 => "退出等待(秒)",
                 _ => "",
             },
             SettingCategory::SpaceClaim => match idx {
-                0 => "脚本超时(秒)", 1 => "轮询间隔(秒)", 2 => "进程出现等待(秒)",
-                3 => "窗口就绪超时(秒)", 4 => "窗口稳定等待(秒)",
+                0 => "脚本超时(秒)",
+                1 => "轮询间隔(秒)",
+                2 => "进程出现等待(秒)",
+                3 => "窗口就绪超时(秒)",
+                4 => "窗口稳定等待(秒)",
                 _ => "",
             },
             SettingCategory::GlobalSettings => match idx {
-                0 => "看门狗间隔(秒)", 1 => "传输超时(秒)", 2 => "网格超时(秒)",
-                3 => "求解超时(秒)", 4 => "最大重试", 5 => "状态刷新间隔(秒)",
-                6 => "SSH连接超时(秒)", 7 => "目录递归深度限制", 8 => "SSH上传最大重试",
+                0 => "看门狗间隔(秒)",
+                1 => "传输超时(秒)",
+                2 => "网格超时(秒)",
+                3 => "求解超时(秒)",
+                4 => "最大重试",
+                5 => "状态刷新间隔(秒)",
+                6 => "SSH连接超时(秒)",
+                7 => "目录递归深度限制",
+                8 => "SSH上传最大重试",
                 _ => "",
             },
         }
@@ -406,7 +468,10 @@ impl SettingsState {
     }
 
     pub fn current_category(&self) -> SettingCategory {
-        SettingCategory::ALL.get(self.focus.category_index).copied().unwrap_or(SettingCategory::LocalPaths)
+        SettingCategory::ALL
+            .get(self.focus.category_index)
+            .copied()
+            .unwrap_or(SettingCategory::LocalPaths)
     }
 
     pub fn is_editing_field(&self) -> bool {
@@ -476,10 +541,18 @@ impl SettingsState {
                 2 => self.config.global_settings.meshing_timeout.to_string(),
                 3 => self.config.global_settings.solver_timeout.to_string(),
                 4 => self.config.global_settings.max_retries.to_string(),
-                5 => self.config.global_settings.state_refresh_interval.to_string(),
+                5 => self
+                    .config
+                    .global_settings
+                    .state_refresh_interval
+                    .to_string(),
                 6 => self.config.global_settings.ssh_connection.to_string(),
                 7 => self.config.global_settings.dir_recursion_limit.to_string(),
-                8 => self.config.global_settings.ssh_upload_max_retries.to_string(),
+                8 => self
+                    .config
+                    .global_settings
+                    .ssh_upload_max_retries
+                    .to_string(),
                 _ => String::new(),
             },
         }
@@ -529,33 +602,107 @@ impl SettingsState {
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {
-                0 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_macro_timeout = v; }
-                1 => self.config.solidworks.sw_close_doc_on_finish = value == "true" || value == "是",
+                0 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.solidworks.sw_macro_timeout = v;
+                    }
+                }
+                1 => {
+                    self.config.solidworks.sw_close_doc_on_finish = value == "true" || value == "是"
+                }
                 2 => self.config.solidworks.sw_exit_on_finish = value == "true" || value == "是",
                 3 => self.config.solidworks.sw_visible = value == "true" || value == "是",
-                4 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_startup = v; }
-                5 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_dispatch_startup_delay = v; }
-                6 => if let Ok(v) = value.parse::<u64>() { self.config.solidworks.sw_exit_wait_seconds = v; }
+                4 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.solidworks.sw_startup = v;
+                    }
+                }
+                5 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.solidworks.sw_dispatch_startup_delay = v;
+                    }
+                }
+                6 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.solidworks.sw_exit_wait_seconds = v;
+                    }
+                }
                 _ => {}
             },
             SettingCategory::SpaceClaim => match idx {
-                0 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_timeout = v; }
-                1 => if let Ok(v) = value.parse::<f64>() { self.config.spaceclaim.sc_poll_interval = v; }
-                2 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_process_appear_timeout = v; }
-                3 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_gui_ready_timeout = v; }
-                4 => if let Ok(v) = value.parse::<u64>() { self.config.spaceclaim.sc_gui_stable_delay = v; }
+                0 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_timeout = v;
+                    }
+                }
+                1 => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.config.spaceclaim.sc_poll_interval = v;
+                    }
+                }
+                2 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_process_appear_timeout = v;
+                    }
+                }
+                3 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_gui_ready_timeout = v;
+                    }
+                }
+                4 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_gui_stable_delay = v;
+                    }
+                }
                 _ => {}
             },
             SettingCategory::GlobalSettings => match idx {
-                0 => if let Ok(v) = value.parse::<f64>() { self.config.global_settings.watchdog_interval = v; }
-                1 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.transfer_timeout = v; }
-                2 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.meshing_timeout = v; }
-                3 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.solver_timeout = v; }
-                4 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.max_retries = v; }
-                5 => if let Ok(v) = value.parse::<f64>() { self.config.global_settings.state_refresh_interval = v; }
-                6 => if let Ok(v) = value.parse::<u64>() { self.config.global_settings.ssh_connection = v; }
-                7 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.dir_recursion_limit = v; }
-                8 => if let Ok(v) = value.parse::<u32>() { self.config.global_settings.ssh_upload_max_retries = v; }
+                0 => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.config.global_settings.watchdog_interval = v;
+                    }
+                }
+                1 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.transfer_timeout = v;
+                    }
+                }
+                2 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.meshing_timeout = v;
+                    }
+                }
+                3 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.solver_timeout = v;
+                    }
+                }
+                4 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.max_retries = v;
+                    }
+                }
+                5 => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.config.global_settings.state_refresh_interval = v;
+                    }
+                }
+                6 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.ssh_connection = v;
+                    }
+                }
+                7 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.dir_recursion_limit = v;
+                    }
+                }
+                8 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.ssh_upload_max_retries = v;
+                    }
+                }
                 _ => {}
             },
         }
@@ -603,7 +750,9 @@ impl SettingsState {
         } else {
             let last_idx = SettingCategory::ALL.len() - 1;
             self.focus.category_index = last_idx;
-            self.focus.field_index = SettingCategory::ALL[last_idx].field_count().saturating_sub(1);
+            self.focus.field_index = SettingCategory::ALL[last_idx]
+                .field_count()
+                .saturating_sub(1);
         }
     }
 
@@ -641,7 +790,8 @@ impl SettingsState {
             let value = self.get_field_value(cat, idx);
             let field_name = cat.field_full_name(idx);
             if !value.is_empty() {
-                self.path_status.insert(field_name, std::path::Path::new(&value).exists());
+                self.path_status
+                    .insert(field_name, std::path::Path::new(&value).exists());
             } else {
                 self.path_status.remove(&field_name);
             }
@@ -692,14 +842,25 @@ impl SettingsState {
         let cat = self.current_category();
         let idx = self.focus.field_index;
         let old = self.get_field_value(cat, idx);
-        let new = if old == "true" || old == "是" { "false" } else { "true" };
-        self.undo_stack.push(UndoEntry { category: cat, field_index: idx, old_value: old });
+        let new = if old == "true" || old == "是" {
+            "false"
+        } else {
+            "true"
+        };
+        self.undo_stack.push(UndoEntry {
+            category: cat,
+            field_index: idx,
+            old_value: old,
+        });
         self.set_field_value(cat, idx, new);
     }
 
     pub fn save(&self) -> Result<(), Vec<ValidationError>> {
         let errors = validate_config(&self.config);
-        if errors.iter().any(|e| matches!(e.severity, crate::settings::validation::Severity::Error)) {
+        if errors
+            .iter()
+            .any(|e| matches!(e.severity, crate::settings::validation::Severity::Error))
+        {
             return Err(errors);
         }
         config_io::save_config(&self.config).map_err(|e| {

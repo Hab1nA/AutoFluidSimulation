@@ -17,7 +17,12 @@ pub struct ScrollbarThumbInfo {
     pub track_space: usize,
 }
 
-fn thumb_info_impl(total: usize, visible: usize, scroll: usize, track_length: usize) -> Option<ScrollbarThumbInfo> {
+fn thumb_info_impl(
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    track_length: usize,
+) -> Option<ScrollbarThumbInfo> {
     if total <= visible || track_length == 0 {
         return None;
     }
@@ -30,10 +35,20 @@ fn thumb_info_impl(total: usize, visible: usize, scroll: usize, track_length: us
     } else {
         ((clamped as f64 / max_scroll as f64) * track_space as f64).round() as usize
     };
-    Some(ScrollbarThumbInfo { thumb_start, thumb_size, track_space })
+    Some(ScrollbarThumbInfo {
+        thumb_start,
+        thumb_size,
+        track_space,
+    })
 }
 
-fn scroll_from_thumb_impl(total: usize, visible: usize, scroll: usize, thumb_pos: usize, track_length: usize) -> usize {
+fn scroll_from_thumb_impl(
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    thumb_pos: usize,
+    track_length: usize,
+) -> usize {
     let ti = match thumb_info_impl(total, visible, scroll, track_length) {
         Some(ti) => ti,
         None => return scroll,
@@ -43,7 +58,8 @@ fn scroll_from_thumb_impl(total: usize, visible: usize, scroll: usize, thumb_pos
     }
     let max_scroll = total - visible;
     let clamped_pos = thumb_pos.min(ti.track_space);
-    let new_scroll = ((clamped_pos as f64 / ti.track_space as f64) * max_scroll as f64).round() as usize;
+    let new_scroll =
+        ((clamped_pos as f64 / ti.track_space as f64) * max_scroll as f64).round() as usize;
     new_scroll.min(max_scroll)
 }
 
@@ -61,7 +77,13 @@ impl VerticalScrollbar {
     }
 
     pub fn scroll_from_thumb_position(&self, thumb_pos: usize, track_length: usize) -> usize {
-        scroll_from_thumb_impl(self.total, self.visible, self.scroll, thumb_pos, track_length)
+        scroll_from_thumb_impl(
+            self.total,
+            self.visible,
+            self.scroll,
+            thumb_pos,
+            track_length,
+        )
     }
 }
 
@@ -100,7 +122,13 @@ impl HorizontalScrollbar {
     }
 
     pub fn scroll_from_thumb_position(&self, thumb_pos: usize, track_length: usize) -> usize {
-        scroll_from_thumb_impl(self.total, self.visible, self.scroll, thumb_pos, track_length)
+        scroll_from_thumb_impl(
+            self.total,
+            self.visible,
+            self.scroll,
+            thumb_pos,
+            track_length,
+        )
     }
 }
 

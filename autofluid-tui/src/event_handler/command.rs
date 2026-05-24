@@ -1,9 +1,9 @@
 use std::fs;
 
 use crate::ipc::client::IpcClient;
-use crate::state::app_state::{AppState, UiMode, ConfirmAction, STEP_NAMES};
-use crate::state::log_buffer::LogBuffer;
+use crate::state::app_state::{AppState, ConfirmAction, UiMode, STEP_NAMES};
 use crate::state::filter;
+use crate::state::log_buffer::LogBuffer;
 use crate::utils::format_local_time;
 
 pub enum CommandResult {
@@ -43,7 +43,9 @@ pub async fn dispatch_command(
         "daemon" => cmd_daemon(&parts, state, log_buffer),
         "settings" => {
             if state.engine_info.pipeline_started {
-                log_buffer.push_info("⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置".to_string());
+                log_buffer.push_info(
+                    "⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置".to_string(),
+                );
             } else {
                 state.open_settings();
             }
@@ -100,7 +102,11 @@ async fn cmd_pause(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandRe
     CommandResult::None
 }
 
-async fn cmd_check(ipc: &mut IpcClient, state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
+async fn cmd_check(
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> CommandResult {
     if !ipc.is_connected() {
         log_buffer.push_info("❌ 未连接到后台引擎".to_string());
         return CommandResult::None;
@@ -130,8 +136,14 @@ async fn cmd_status(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandR
     match ipc.get_statistics().await {
         Ok(resp) if resp.is_ok() => {
             if let Some(obj) = resp.data.as_object() {
-                let engine_status = obj.get("engine_status").and_then(|v| v.as_str()).unwrap_or("?");
-                let total = obj.get("total_configs").and_then(|v| v.as_u64()).unwrap_or(0);
+                let engine_status = obj
+                    .get("engine_status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let total = obj
+                    .get("total_configs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 log_buffer.push_info(format!("引擎状态: {}", engine_status));
                 log_buffer.push_info(format!("总构型数: {}", total));
                 if let Some(steps) = obj.get("steps").and_then(|v| v.as_object()) {
@@ -173,13 +185,20 @@ fn cmd_reset(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -
         return CommandResult::None;
     };
 
-    let cfg_desc = if config_arg.eq_ignore_ascii_case("all") { "所有构型" } else { config_arg };
+    let cfg_desc = if config_arg.eq_ignore_ascii_case("all") {
+        "所有构型"
+    } else {
+        config_arg
+    };
     let step_desc = match &step_name {
         None => "所有步骤".to_string(),
         Some(s) => format!("{} 及后续步骤", s),
     };
 
-    state.confirm_message = Some(format!("确定要重置{}的{}吗？此操作不可逆！", cfg_desc, step_desc));
+    state.confirm_message = Some(format!(
+        "确定要重置{}的{}吗？此操作不可逆！",
+        cfg_desc, step_desc
+    ));
     state.confirm_callback = Some(ConfirmAction::ResetStep {
         config_name: config_arg.to_string(),
         step_name,
@@ -218,10 +237,21 @@ fn cmd_clean(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -
         }
     };
 
-    let cfg_desc = if config_arg.eq_ignore_ascii_case("all") { "所有构型" } else { config_arg };
-    let step_desc = if step_arg.eq_ignore_ascii_case("all") { "所有步骤" } else { step_arg };
+    let cfg_desc = if config_arg.eq_ignore_ascii_case("all") {
+        "所有构型"
+    } else {
+        config_arg
+    };
+    let step_desc = if step_arg.eq_ignore_ascii_case("all") {
+        "所有步骤"
+    } else {
+        step_arg
+    };
 
-    state.confirm_message = Some(format!("确定要清理{}的{}产生的文件吗？此操作不可逆！", cfg_desc, step_desc));
+    state.confirm_message = Some(format!(
+        "确定要清理{}的{}产生的文件吗？此操作不可逆！",
+        cfg_desc, step_desc
+    ));
     state.confirm_callback = Some(ConfirmAction::CleanStep {
         step_name,
         config_name: config_value,
@@ -233,7 +263,8 @@ fn cmd_clean(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -
 
 fn cmd_quit(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
     if parts.len() > 1 && parts[1].eq_ignore_ascii_case("full") {
-        state.confirm_message = Some("确定要【完全退出】后台引擎和界面吗？\n所有正在运行的任务将被中止！".to_string());
+        state.confirm_message =
+            Some("确定要【完全退出】后台引擎和界面吗？\n所有正在运行的任务将被中止！".to_string());
         state.confirm_callback = Some(ConfirmAction::FullQuit);
         state.dialog_scroll = 0;
         state.ui_mode = UiMode::ConfirmDialog;
@@ -284,23 +315,21 @@ fn cmd_filter(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
             let source_str = state.log_filter_source.as_deref().unwrap_or("全部");
             log_buffer.push_info(format!("当前过滤: 级别={}, 来源={}", level_str, source_str));
         }
-        _ => {
-            match filter::parse_filter_arg(&sub) {
-                Some(filter::FilterType::Level(level)) => {
-                    log_buffer.push_info(format!("日志过滤: 仅显示 {} 级别", level));
-                    state.log_filter_level = Some(level);
-                    state.log_filter_source = None;
-                }
-                Some(filter::FilterType::Source(source)) => {
-                    log_buffer.push_info(format!("日志过滤: 仅显示 {} 来源", source));
-                    state.log_filter_source = Some(source);
-                    state.log_filter_level = None;
-                }
-                None => {
-                    log_buffer.push_info(format!("❌ 未知过滤条件: {}", sub));
-                }
+        _ => match filter::parse_filter_arg(&sub) {
+            Some(filter::FilterType::Level(level)) => {
+                log_buffer.push_info(format!("日志过滤: 仅显示 {} 级别", level));
+                state.log_filter_level = Some(level);
+                state.log_filter_source = None;
             }
-        }
+            Some(filter::FilterType::Source(source)) => {
+                log_buffer.push_info(format!("日志过滤: 仅显示 {} 来源", source));
+                state.log_filter_source = Some(source);
+                state.log_filter_level = None;
+            }
+            None => {
+                log_buffer.push_info(format!("❌ 未知过滤条件: {}", sub));
+            }
+        },
     }
     CommandResult::None
 }
@@ -317,9 +346,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         format!("export_{}.log", time_str)
     };
 
-    let log_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .join("logs");
+    let log_dir = std::env::current_dir().unwrap_or_default().join("logs");
     let _ = fs::create_dir_all(&log_dir);
     let filepath = log_dir.join(&filename);
 
@@ -329,7 +356,11 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     } else {
         match fs::write(&filepath, lines.join("\n")) {
             Ok(_) => {
-                log_buffer.push_info(format!("✅ 日志已导出: {} ({} 条)", filepath.display(), lines.len()));
+                log_buffer.push_info(format!(
+                    "✅ 日志已导出: {} ({} 条)",
+                    filepath.display(),
+                    lines.len()
+                ));
             }
             Err(e) => {
                 log_buffer.push_info(format!("❌ 日志导出失败: {}", e));
@@ -345,11 +376,17 @@ pub async fn execute_confirm_action(
     log_buffer: &mut LogBuffer,
 ) -> CommandResult {
     match action {
-        ConfirmAction::ResetStep { config_name, step_name } => {
+        ConfirmAction::ResetStep {
+            config_name,
+            step_name,
+        } => {
             let config_value = if config_name.eq_ignore_ascii_case("all") {
                 serde_json::Value::String("all".to_string())
             } else {
-                config_name.parse::<u64>().map(|n| serde_json::Value::Number(n.into())).unwrap_or(serde_json::Value::String(config_name.clone()))
+                config_name
+                    .parse::<u64>()
+                    .map(|n| serde_json::Value::Number(n.into()))
+                    .unwrap_or(serde_json::Value::String(config_name.clone()))
             };
             match ipc.reset_step(config_value, step_name.as_deref()).await {
                 Ok(resp) if resp.is_ok() => {
@@ -364,7 +401,10 @@ pub async fn execute_confirm_action(
             }
             CommandResult::None
         }
-        ConfirmAction::CleanStep { step_name, config_name } => {
+        ConfirmAction::CleanStep {
+            step_name,
+            config_name,
+        } => {
             match ipc.clean_step(step_name, config_name.clone()).await {
                 Ok(resp) if resp.is_ok() => {
                     log_buffer.push_info(format!("✅ {}", resp.message));
@@ -437,7 +477,8 @@ mod tests {
         let mut state = AppState::new();
         let mut log_buffer = LogBuffer::new();
 
-        let result = dispatch_command("daemon restart", &mut ipc, &mut state, &mut log_buffer).await;
+        let result =
+            dispatch_command("daemon restart", &mut ipc, &mut state, &mut log_buffer).await;
         assert!(matches!(result, CommandResult::RestartDaemon));
     }
 
@@ -450,6 +491,9 @@ mod tests {
         let result = dispatch_command("help", &mut ipc, &mut state, &mut log_buffer).await;
         assert!(matches!(result, CommandResult::None));
 
-        assert!(log_buffer.info_messages.iter().any(|line| line.contains("daemon restart")));
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line.contains("daemon restart")));
     }
 }

@@ -62,30 +62,28 @@ impl IpcClient {
         let mut buffer = Vec::new();
 
         // 带长度限制的行读取：防止异常长响应导致内存溢出
-        let read_result = tokio::time::timeout(
-            DEFAULT_TIMEOUT,
-            async {
-                loop {
-                    let mut byte = [0u8; 1];
-                    match reader.read(&mut byte).await {
-                        Ok(0) => return Ok(false), // EOF
-                        Ok(_) => {
-                            buffer.push(byte[0]);
-                            if byte[0] == b'\n' {
-                                return Ok(true); // 行结束
-                            }
-                            if buffer.len() > MAX_RESPONSE_BYTES {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
-                                ));
-                            }
+        let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+            loop {
+                let mut byte = [0u8; 1];
+                match reader.read(&mut byte).await {
+                    Ok(0) => return Ok(false), // EOF
+                    Ok(_) => {
+                        buffer.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            return Ok(true); // 行结束
                         }
-                        Err(e) => return Err(e),
+                        if buffer.len() > MAX_RESPONSE_BYTES {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
+                            ));
+                        }
                     }
+                    Err(e) => return Err(e),
                 }
-            },
-        ).await;
+            }
+        })
+        .await;
 
         match read_result {
             Ok(Ok(true)) => {
@@ -117,59 +115,83 @@ impl IpcClient {
     }
 
     pub async fn start_pipeline(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_START)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_START))
+            .await
     }
 
     pub async fn pause_pipeline(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_PAUSE)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_PAUSE))
+            .await
     }
 
     pub async fn full_quit(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_STOP)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_STOP))
+            .await
     }
 
     pub async fn check_system(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_CHECK)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_CHECK))
+            .await
     }
 
     pub async fn get_all_status(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ALL_STATUS)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ALL_STATUS))
+            .await
     }
 
     pub async fn get_statistics(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_STATISTICS)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_STATISTICS))
+            .await
     }
 
     pub async fn get_engine_status(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ENGINE_STATUS)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ENGINE_STATUS))
+            .await
     }
 
-    pub async fn reset_step(&mut self, config_name: serde_json::Value, step_name: Option<&str>) -> Result<IpcResponse, String> {
+    pub async fn reset_step(
+        &mut self,
+        config_name: serde_json::Value,
+        step_name: Option<&str>,
+    ) -> Result<IpcResponse, String> {
         let mut params = serde_json::Map::new();
         params.insert("config_name".to_string(), config_name);
         if let Some(sn) = step_name {
-            params.insert("step_name".to_string(), serde_json::Value::String(sn.to_string()));
+            params.insert(
+                "step_name".to_string(),
+                serde_json::Value::String(sn.to_string()),
+            );
         }
         self.send_request(&IpcRequest::with_params(
             super::protocol::CMD_RESET_STEP,
             serde_json::Value::Object(params),
-        )).await
+        ))
+        .await
     }
 
-    pub async fn clean_step(&mut self, step_name: &str, config_name: Option<serde_json::Value>) -> Result<IpcResponse, String> {
+    pub async fn clean_step(
+        &mut self,
+        step_name: &str,
+        config_name: Option<serde_json::Value>,
+    ) -> Result<IpcResponse, String> {
         let mut params = serde_json::Map::new();
-        params.insert("step_name".to_string(), serde_json::Value::String(step_name.to_string()));
+        params.insert(
+            "step_name".to_string(),
+            serde_json::Value::String(step_name.to_string()),
+        );
         if let Some(cn) = config_name {
             params.insert("config_name".to_string(), cn);
         }
         self.send_request(&IpcRequest::with_params(
             super::protocol::CMD_CLEAN_STEP,
             serde_json::Value::Object(params),
-        )).await
+        ))
+        .await
     }
 
     pub async fn reload_config(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_RELOAD_CONFIG)).await
+        self.send_request(&IpcRequest::new(super::protocol::CMD_RELOAD_CONFIG))
+            .await
     }
 
     pub async fn get_log_entries(
@@ -180,17 +202,27 @@ impl IpcClient {
         source_filter: Option<&str>,
     ) -> Result<IpcResponse, String> {
         let mut params = serde_json::Map::new();
-        params.insert("since_id".to_string(), serde_json::Value::Number(since_id.into()));
+        params.insert(
+            "since_id".to_string(),
+            serde_json::Value::Number(since_id.into()),
+        );
         params.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
         if let Some(lf) = level_filter {
-            params.insert("level_filter".to_string(), serde_json::Value::String(lf.to_string()));
+            params.insert(
+                "level_filter".to_string(),
+                serde_json::Value::String(lf.to_string()),
+            );
         }
         if let Some(sf) = source_filter {
-            params.insert("source_filter".to_string(), serde_json::Value::String(sf.to_string()));
+            params.insert(
+                "source_filter".to_string(),
+                serde_json::Value::String(sf.to_string()),
+            );
         }
         self.send_request(&IpcRequest::with_params(
             super::protocol::CMD_GET_LOG_ENTRIES,
             serde_json::Value::Object(params),
-        )).await
+        ))
+        .await
     }
 }

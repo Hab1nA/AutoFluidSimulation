@@ -17,10 +17,26 @@ impl LogEntry {
         let obj = data.as_object()?;
         Some(Self {
             id: obj.get("id")?.as_u64()?,
-            level: obj.get("level").and_then(|v| v.as_str()).unwrap_or("INFO").to_string(),
-            source: obj.get("source").and_then(|v| v.as_str()).unwrap_or("system").to_string(),
-            message: obj.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            raw_message: obj.get("raw_message").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            level: obj
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("INFO")
+                .to_string(),
+            source: obj
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("system")
+                .to_string(),
+            message: obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            raw_message: obj
+                .get("raw_message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
     }
 

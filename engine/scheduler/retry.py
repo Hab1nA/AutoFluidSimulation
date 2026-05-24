@@ -141,12 +141,12 @@ class RetryManager:
                         if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                             return False  # stopped
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
-                    self.state.set_step_status(
-                        config_name, step_name, STATUS_RETRYING,
-                        f"异常重试 {attempt + 1}/{max_retries}: {e}"
-                    )
-                    if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
-                        return False  # stopped
+                self.state.set_step_status(
+                    config_name, step_name, STATUS_RETRYING,
+                    f"异常重试 {attempt + 1}/{max_retries}: {e}"
+                )
+                if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
+                    return False  # stopped
 
         # 所有重试均失败
         self.state.set_step_status(config_name, step_name, STATUS_ERROR,

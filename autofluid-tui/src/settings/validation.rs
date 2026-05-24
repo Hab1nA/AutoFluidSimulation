@@ -98,15 +98,23 @@ fn validate_remote_connection(config: &SettingsConfig, errors: &mut Vec<Validati
             severity: Severity::Error,
         });
     }
-
 }
 
 fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     let remote_dirs = [
-        ("remote_config.scripts_dir", &config.remote_config.scripts_dir),
-        ("remote_config.working_dir", &config.remote_config.working_dir),
+        (
+            "remote_config.scripts_dir",
+            &config.remote_config.scripts_dir,
+        ),
+        (
+            "remote_config.working_dir",
+            &config.remote_config.working_dir,
+        ),
         ("remote_config.scdoc_dir", &config.remote_config.scdoc_dir),
-        ("remote_config.ref_files_dir", &config.remote_config.ref_files_dir),
+        (
+            "remote_config.ref_files_dir",
+            &config.remote_config.ref_files_dir,
+        ),
         ("remote_config.msh_dir", &config.remote_config.msh_dir),
         ("remote_config.result_dir", &config.remote_config.result_dir),
     ];
@@ -129,16 +137,30 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
     }
 }
 
-
-
 fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    let patterns = [
+    let patterns: [(&str, &str, bool); 6] = [
         ("step_file_patterns.SW", &config.step_file_patterns.sw, true),
         ("step_file_patterns.SC", &config.step_file_patterns.sc, true),
-        ("step_file_patterns.Transfer", &config.step_file_patterns.transfer.clone().unwrap_or_default(), false),
-        ("step_file_patterns.Meshing", &config.step_file_patterns.meshing, true),
-        ("step_file_patterns.Solver", &config.step_file_patterns.solver, true),
-        ("step_file_patterns.SolverData", &config.step_file_patterns.solver_dat, true),
+        (
+            "step_file_patterns.Transfer",
+            config.step_file_patterns.transfer.as_deref().unwrap_or(""),
+            false,
+        ),
+        (
+            "step_file_patterns.Meshing",
+            &config.step_file_patterns.meshing,
+            true,
+        ),
+        (
+            "step_file_patterns.Solver",
+            &config.step_file_patterns.solver,
+            true,
+        ),
+        (
+            "step_file_patterns.SolverData",
+            &config.step_file_patterns.solver_dat,
+            true,
+        ),
     ];
     for (name, pattern, requires_placeholder) in &patterns {
         if *requires_placeholder && !pattern.contains("{config}") {
@@ -206,9 +228,7 @@ fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError
             severity: Severity::Warning,
         });
     }
-    if config.spaceclaim.sc_gui_ready_timeout < 10
-        || config.spaceclaim.sc_gui_ready_timeout > 120
-    {
+    if config.spaceclaim.sc_gui_ready_timeout < 10 || config.spaceclaim.sc_gui_ready_timeout > 120 {
         errors.push(ValidationError {
             field_name: "spaceclaim.sc_gui_ready_timeout".to_string(),
             message: "应在 10-120 秒之间".to_string(),
@@ -233,9 +253,18 @@ fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<Validation
         });
     }
     let timeouts = [
-        ("global_settings.transfer_timeout", config.global_settings.transfer_timeout),
-        ("global_settings.meshing_timeout", config.global_settings.meshing_timeout),
-        ("global_settings.solver_timeout", config.global_settings.solver_timeout),
+        (
+            "global_settings.transfer_timeout",
+            config.global_settings.transfer_timeout,
+        ),
+        (
+            "global_settings.meshing_timeout",
+            config.global_settings.meshing_timeout,
+        ),
+        (
+            "global_settings.solver_timeout",
+            config.global_settings.solver_timeout,
+        ),
     ];
     for (name, val) in &timeouts {
         if *val == 0 {
@@ -291,7 +320,10 @@ mod tests {
     fn test_valid_config_passes() {
         let mut config = SettingsConfig::default();
         // 填充所有必需的本地路径字段（用当前可执行文件代替不存在的路径）
-        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        let exe = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         config.local_paths.sw_exe = exe.clone();
         config.local_paths.sw_model = exe.clone();
         config.local_paths.excel = exe.clone();
@@ -305,15 +337,25 @@ mod tests {
         config.remote_config.conda_exe = String::new();
         config.remote_config.mpi_bin_dir = String::new();
         let errors = validate_config(&config);
-        let critical: Vec<_> = errors.iter().filter(|e| matches!(e.severity, Severity::Error)).collect();
-        assert!(critical.is_empty(), "完整配置不应有严重错误: {:?}", critical);
+        let critical: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e.severity, Severity::Error))
+            .collect();
+        assert!(
+            critical.is_empty(),
+            "完整配置不应有严重错误: {:?}",
+            critical
+        );
     }
 
     #[test]
     fn test_empty_defaults_have_errors() {
         let config = SettingsConfig::default();
         let errors = validate_config(&config);
-        let critical: Vec<_> = errors.iter().filter(|e| matches!(e.severity, Severity::Error)).collect();
+        let critical: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e.severity, Severity::Error))
+            .collect();
         assert!(!critical.is_empty(), "空默认配置应有严重错误（路径未填写）");
     }
 
@@ -322,7 +364,12 @@ mod tests {
         let mut config = SettingsConfig::default();
         config.remote_config.port = 0;
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "remote_config.port" && matches!(e.severity, Severity::Error)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field_name == "remote_config.port"
+                    && matches!(e.severity, Severity::Error))
+        );
     }
 
     #[test]
@@ -330,7 +377,10 @@ mod tests {
         let mut config = SettingsConfig::default();
         config.step_file_patterns.sw = "bad_pattern.step".to_string();
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "step_file_patterns.SW" && matches!(e.severity, Severity::Error)));
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "step_file_patterns.SW"
+                && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
@@ -338,7 +388,10 @@ mod tests {
         let mut config = SettingsConfig::default();
         config.global_settings.solver_timeout = 0;
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "global_settings.solver_timeout" && matches!(e.severity, Severity::Error)));
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "global_settings.solver_timeout"
+                && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
@@ -346,7 +399,12 @@ mod tests {
         let mut config = SettingsConfig::default();
         config.remote_config.host = String::new();
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "remote_config.host" && matches!(e.severity, Severity::Error)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field_name == "remote_config.host"
+                    && matches!(e.severity, Severity::Error))
+        );
     }
 
     #[test]
@@ -354,6 +412,9 @@ mod tests {
         let mut config = SettingsConfig::default();
         config.remote_config.username = String::new();
         let errors = validate_config(&config);
-        assert!(errors.iter().any(|e| e.field_name == "remote_config.username" && matches!(e.severity, Severity::Error)));
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "remote_config.username"
+                && matches!(e.severity, Severity::Error)));
     }
 }

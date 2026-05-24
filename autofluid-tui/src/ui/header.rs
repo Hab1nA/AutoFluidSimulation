@@ -1,7 +1,7 @@
-use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use crate::state::app_state::AppState;
 use crate::utils::format_local_time;
@@ -18,7 +18,11 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
     frame.render_widget(block, area);
 
     let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序")
-        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center);
     frame.render_widget(title, inner);
 
@@ -30,7 +34,12 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
     };
 
     let time = Paragraph::new(time_str)
-        .style(Style::default().fg(theme.gray_5).bg(theme.bg).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(theme.gray_5)
+                .bg(theme.bg)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Right);
     frame.render_widget(time, time_area);
 }

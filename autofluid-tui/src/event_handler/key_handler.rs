@@ -34,8 +34,9 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)
-            && state.focus_zone != FocusZone::CommandInput =>
+        KeyCode::Char('c')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && state.focus_zone != FocusZone::CommandInput =>
         {
             // Ctrl+C 退出（命令输入区的 Ctrl+C 由 handle_command_input 处理为复制）
             state.should_quit = true;
@@ -201,24 +202,44 @@ fn handle_command_passthrough(key: KeyCode, state: &mut AppState) -> AppAction {
 
 struct TableScroll<'a>(&'a mut AppState);
 impl ScrollArea for TableScroll<'_> {
-    fn offset(&self) -> u16 { self.0.table_scroll_offset }
-    fn set_offset(&mut self, val: u16) { self.0.table_scroll_offset = val; }
+    fn offset(&self) -> u16 {
+        self.0.table_scroll_offset
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.table_scroll_offset = val;
+    }
 }
 
 struct InfoLogScroll<'a>(&'a mut AppState);
 impl ScrollArea for InfoLogScroll<'_> {
-    fn offset(&self) -> u16 { self.0.info_log_scroll }
-    fn set_offset(&mut self, val: u16) { self.0.info_log_scroll = val; }
-    fn disable_auto_scroll(&mut self) { self.0.info_log_auto_scroll = false; }
-    fn handle_end(&mut self) { self.0.info_log_auto_scroll = true; }
+    fn offset(&self) -> u16 {
+        self.0.info_log_scroll
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.info_log_scroll = val;
+    }
+    fn disable_auto_scroll(&mut self) {
+        self.0.info_log_auto_scroll = false;
+    }
+    fn handle_end(&mut self) {
+        self.0.info_log_auto_scroll = true;
+    }
 }
 
 struct DetailLogScroll<'a>(&'a mut AppState);
 impl ScrollArea for DetailLogScroll<'_> {
-    fn offset(&self) -> u16 { self.0.detail_log_scroll }
-    fn set_offset(&mut self, val: u16) { self.0.detail_log_scroll = val; }
-    fn disable_auto_scroll(&mut self) { self.0.detail_log_auto_scroll = false; }
-    fn handle_end(&mut self) { self.0.detail_log_auto_scroll = true; }
+    fn offset(&self) -> u16 {
+        self.0.detail_log_scroll
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.detail_log_scroll = val;
+    }
+    fn disable_auto_scroll(&mut self) {
+        self.0.detail_log_auto_scroll = false;
+    }
+    fn handle_end(&mut self) {
+        self.0.detail_log_auto_scroll = true;
+    }
 }
 
 // ── 简化后的各区域处理函数 ─────────────────────────────────────

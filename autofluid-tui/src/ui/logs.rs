@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
 use crate::state::app_state::FocusZone;
 use crate::state::log_buffer::LogBuffer;
@@ -38,7 +38,10 @@ fn info_message_color(msg: &str, theme: &crate::theme::AppTheme) -> Color {
     }
 }
 
-pub fn compute_info_lines_no_wrap(log_buffer: &LogBuffer, theme: &crate::theme::AppTheme) -> (Vec<Line<'static>>, usize) {
+pub fn compute_info_lines_no_wrap(
+    log_buffer: &LogBuffer,
+    theme: &crate::theme::AppTheme,
+) -> (Vec<Line<'static>>, usize) {
     let mut lines: Vec<Line> = Vec::new();
     let mut max_width: usize = 0;
     for msg in &log_buffer.info_messages {
@@ -80,7 +83,11 @@ pub fn compute_detail_lines_no_wrap(
     (lines, max_width)
 }
 
-fn compute_layout(inner: Rect, total: usize, max_content_width: usize) -> (usize, usize, bool, bool) {
+fn compute_layout(
+    inner: Rect,
+    total: usize,
+    max_content_width: usize,
+) -> (usize, usize, bool, bool) {
     let visible_height = inner.height as usize;
     let has_vscroll = total > visible_height;
     let has_hscroll = max_content_width > inner.width as usize;
@@ -129,7 +136,8 @@ pub fn render_info_panel(
 
     let (lines, max_content_width) = compute_info_lines_no_wrap(log_buffer, theme);
     let total = lines.len();
-    let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
+    let (content_height, content_width, has_vscroll, has_hscroll) =
+        compute_layout(inner, total, max_content_width);
 
     let scroll = scroll_offset as usize;
     let start = scroll.min(total);
@@ -193,7 +201,9 @@ pub fn get_raw_message_at_visual_line(
     _max_width: usize,
     visual_line: usize,
 ) -> Option<String> {
-    let entries: Vec<_> = log_buffer.filtered_entries(level_filter, source_filter).collect();
+    let entries: Vec<_> = log_buffer
+        .filtered_entries(level_filter, source_filter)
+        .collect();
     if visual_line < entries.len() {
         Some(entries[visual_line].raw_message.clone())
     } else {
@@ -242,9 +252,11 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let (lines, max_content_width) = compute_detail_lines_no_wrap(log_buffer, level_filter, source_filter);
+    let (lines, max_content_width) =
+        compute_detail_lines_no_wrap(log_buffer, level_filter, source_filter);
     let total = lines.len();
-    let (content_height, content_width, has_vscroll, has_hscroll) = compute_layout(inner, total, max_content_width);
+    let (content_height, content_width, has_vscroll, has_hscroll) =
+        compute_layout(inner, total, max_content_width);
 
     let scroll = *scroll_offset as usize;
     let start = scroll.min(total);
@@ -258,7 +270,10 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
             let is_clicked = *clicked_detail_row == Some(idx as u16);
             let is_hovered = !is_clicked && *hovered_detail_row == Some(idx as u16);
             let highlight_style = if is_clicked {
-                Style::default().fg(theme.click_fg).bg(theme.click_bg).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.click_fg)
+                    .bg(theme.click_bg)
+                    .add_modifier(Modifier::BOLD)
             } else if is_hovered {
                 theme.hover_style()
             } else {

@@ -16,7 +16,7 @@ import os
 import time
 import threading
 import re
-from typing import Callable, Optional, Set
+from typing import Callable
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, STEP_FILE_PATTERNS
 from utils.logger import setup_logger
@@ -129,7 +129,7 @@ class StepFileMonitor:
     _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
 
     @staticmethod
-    def _compile_config_regex(pattern: str) -> Optional[re.Pattern]:
+    def _compile_config_regex(pattern: str) -> re.Pattern | None:
         """
         将 STEP_FILE_PATTERNS["SW"] 形式的模板编译成正则表达式。
 
@@ -141,10 +141,10 @@ class StepFileMonitor:
         escaped = escaped.replace(re.escape("{config}"), r"(?P<config>\d+)")
         return re.compile(rf"^{escaped}$", flags=re.IGNORECASE)
 
-    _FILENAME_REGEX: Optional[re.Pattern] = None
+    _FILENAME_REGEX: re.Pattern | None = None
 
     @classmethod
-    def _get_filename_regex(cls) -> Optional[re.Pattern]:
+    def _get_filename_regex(cls) -> re.Pattern | None:
         """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
         if cls._FILENAME_REGEX is None:
             sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
@@ -157,13 +157,13 @@ class StepFileMonitor:
         self.step_dir = step_dir or LOCAL_PATHS["step_dir"]
         self.on_file_ready = on_file_ready
         self._running = False
-        self._monitor_thread: Optional[threading.Thread] = None
+        self._monitor_thread: threading.Thread | None = None
         self._detector = FileStableDetector(
             stable_time=2.0,
             check_interval=ENGINE_CONFIG["watchdog_interval"]
         )
-        self._processed_files: Set[str] = set()
-        self._known_files: Set[str] = set()
+        self._processed_files: set[str] = set()
+        self._known_files: set[str] = set()
         # 暂停控制：优先使用调度器传入的共享 Event，实现暂停标志同步
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
@@ -184,7 +184,7 @@ class StepFileMonitor:
     # ------------------------------------------------------------------
 
     @classmethod
-    def parse_config_name(cls, filename: str) -> Optional[int]:
+    def parse_config_name(cls, filename: str) -> int | None:
         """
         从文件名中解析构型名称。
 

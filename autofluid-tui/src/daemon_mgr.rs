@@ -6,7 +6,6 @@ use std::time::Duration;
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
 
-
 pub struct DaemonManager {
     process: Option<Child>,
 }
@@ -100,7 +99,9 @@ impl DaemonManager {
                 #[cfg(not(target_os = "windows"))]
                 {
                     // 使用标准 SIGTERM 信号（15），而非不规范的自由格式
-                    let _ = Command::new("kill").args(["-s", "TERM", &pid.to_string()]).status();
+                    let _ = Command::new("kill")
+                        .args(["-s", "TERM", &pid.to_string()])
+                        .status();
                 }
             }
         }
@@ -172,7 +173,10 @@ impl DaemonManager {
         self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
         match self.launch(project_dir) {
             Ok(pid) => {
-                log_buffer.push_info(format!("⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...", pid));
+                log_buffer.push_info(format!(
+                    "⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...",
+                    pid
+                ));
                 Self::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
             }
             Err(e) => {

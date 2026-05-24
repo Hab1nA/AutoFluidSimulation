@@ -5,12 +5,13 @@
 相同构型组合复用同一数据库，修改设计表后自动使用新数据库。
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
-from typing import Dict, List
 
 
-def compute_config_fingerprint(configs: Dict[int, List[float]]) -> str:
+def compute_config_fingerprint(configs: dict[int, list[float]]) -> str:
     """
     计算构型组合的指纹（MD5 前 8 位）。
 
