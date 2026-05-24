@@ -47,7 +47,7 @@ pub fn render_settings_dialog(
     let hint_text = if ss.focus.editing {
         "Enter 提交 | Esc 取消 | ←→ 移动光标 | Home/End 跳转 | Ctrl+A/X/C/V"
     } else {
-        "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Esc 关闭 | Ctrl+S 保存"
+        "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Ctrl+C/Esc 关闭 | Ctrl+S 保存"
     };
 
     let title_text = "程序设置 (Settings)";

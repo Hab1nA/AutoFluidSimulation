@@ -24,10 +24,6 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_quit = true;
-            AppAction::Quit
-        }
         KeyCode::Tab => {
             state.focus_zone = state.focus_zone.cycle_next();
             state.needs_redraw = true;
@@ -37,6 +33,13 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.focus_zone = state.focus_zone.cycle_prev();
             state.needs_redraw = true;
             AppAction::None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL)
+            && state.focus_zone != FocusZone::CommandInput =>
+        {
+            // Ctrl+C 退出（命令输入区的 Ctrl+C 由 handle_command_input 处理为复制）
+            state.should_quit = true;
+            AppAction::Quit
         }
         _ => match state.focus_zone {
             FocusZone::CommandInput => handle_command_input(key, state),
@@ -363,6 +366,16 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 
     match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+C 在设置页非编辑态：退出设置
+            if let Some(ref mut ss) = state.settings_state {
+                if ss.dirty {
+                    ss.cancel_edit_current_field();
+                }
+            }
+            state.close_settings();
+            AppAction::DiscardSettings
+        }
         KeyCode::Esc => {
             if let Some(ref mut ss) = state.settings_state {
                 if ss.dirty {
