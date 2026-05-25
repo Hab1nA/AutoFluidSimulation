@@ -10,9 +10,10 @@ Daemon 写入状态，TUI 客户端读取状态。通过 IPC 命令触发状态�
 - engine_state: 引擎全局状态（running/paused/stopped）
 ===============================================================================
 """
+from __future__ import annotations
+
 import sqlite3
 import threading
-from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 
 from engine.config import (
@@ -154,7 +155,7 @@ class StateManager:
     # 构型管理
     # ------------------------------------------------------------------
 
-    def load_configs(self, configs: Dict[int, List[float]]):
+    def load_configs(self, configs: dict[int, list[float]]):
         """
         从 Excel 读取的构型数据同步到数据库（断点续传：保留已有状态）。
 
@@ -225,13 +226,13 @@ class StateManager:
             f"删除 {len(removed_configs) if removed_configs else 0}"
         )
 
-    def get_all_configs(self) -> List[int]:
+    def get_all_configs(self) -> list[int]:
         """获取所有构型名称列表。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute("SELECT config_name FROM configs ORDER BY config_name").fetchall()
             return [row["config_name"] for row in rows]
 
-    def get_config_params(self, config_name: int) -> Optional[List[float]]:
+    def get_config_params(self, config_name: int) -> list[float] | None:
         """获取指定构型的参数。"""
         with self._get_connection(readonly=True) as conn:
             row = conn.execute(
@@ -253,7 +254,8 @@ class StateManager:
                 "SELECT status FROM steps WHERE config_name = ? AND step_name = ?",
                 (config_name, step_name)
             ).fetchone()
-            return row["status"] if row else STATUS_WAITING
+            result: str = row["status"] if row else STATUS_WAITING
+            return result
 
     def set_step_status(self, config_name: int, step_name: str, status: str,
                         error_message: str = ""):
@@ -278,7 +280,7 @@ class StateManager:
                 """, (status, error_message, config_name, step_name))
                 logger.info(f"状态更新: 构型{config_name} [{step_name}] -> {status}")
 
-    def get_all_steps_for_config(self, config_name: int) -> Dict[str, dict]:
+    def get_all_steps_for_config(self, config_name: int) -> dict[str, dict]:
         """获取指定构型的所有步骤状态详情。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
@@ -294,7 +296,7 @@ class StateManager:
                 for row in rows
             }
 
-    def get_all_statuses(self) -> Dict[int, Dict[str, str]]:
+    def get_all_statuses(self) -> dict[int, dict[str, str]]:
         """
         获取所有构型所有步骤的状态（用于 TUI 渲染）。
 
@@ -306,7 +308,7 @@ class StateManager:
                 "SELECT config_name, step_name, status FROM steps ORDER BY config_name, step_name"
             ).fetchall()
 
-        result: Dict[int, Dict[str, str]] = {}
+        result: dict[int, dict[str, str]] = {}
         for row in rows:
             cn = row["config_name"]
             if cn not in result:
@@ -326,16 +328,52 @@ class StateManager:
                     "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
                     (config_name, step_name)
                 ).fetchone()
-                return row["retry_count"] if row else 0
+            result: int = row["retry_count"] if row else 0
+            return result
 
     def get_step_retry_count(self, config_name: int, step_name: str) -> int:
         """查询指定构型指定步骤的当前重试次数。"""
         with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
-                (config_name, step_name)
+                (config_name, step_name),
             ).fetchone()
-            return row["retry_count"] if row else 0
+            result: int = row["retry_count"] if row else 0
+            return result
+
+    def set_meshing_running_if_idle(self, config_name: int) -> bool:
+        """原子设置 Meshing 为 Running，同一时刻只允许一个构型执行网格划分。
+
+        在同一个 self._lock 临界区内完成 SELECT + UPDATE，
+        确保不会有多个构型同时处于 Meshing Running 状态。
+
+        Args:
+            config_name: 要启动网格划分的构型名称
+
+        Returns:
+            True 表示成功设置为 Running；False 表示已有其他构型在执行
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM steps "
+                    "WHERE step_name = 'Meshing' AND status = ?",
+                    (STATUS_RUNNING,),
+                ).fetchone()
+                if (row["cnt"] or 0) > 0:
+                    logger.debug(
+                        f"set_meshing_running_if_idle({config_name}): "
+                        f"已有其他构型在执行网格划分，拒绝"
+                    )
+                    return False
+                conn.execute(
+                    "UPDATE steps SET status = ?, error_message = '', "
+                    "updated_at = strftime('%s','now') "
+                    "WHERE config_name = ? AND step_name = ?",
+                    (STATUS_RUNNING, config_name, "Meshing"),
+                )
+                logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
+                return True
 
     # ------------------------------------------------------------------
     # 批量状态操作（用于 reset 命令）
@@ -413,7 +451,8 @@ class StateManager:
             row = conn.execute(
                 "SELECT value FROM engine_state WHERE key = 'engine_status'"
             ).fetchone()
-            return row["value"] if row else "stopped"
+            result: str = row["value"] if row else "stopped"
+            return result
 
     def set_engine_status(self, status: str):
         """设置引擎状态。"""
@@ -438,32 +477,6 @@ class StateManager:
                     (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING)
                 )
         logger.info("已将所有运行中/重试中步骤切换为 Paused")
-
-    def set_all_paused_to_running(self, exclude_steps: list[str] | None = None):
-        """将所有 Paused 状态的步骤恢复为 Running。
-
-        Args:
-            exclude_steps: 可选的步骤名列表，这些步骤的 Paused 状态不会被修改
-        """
-        with self._lock:
-            with self._get_connection() as conn:
-                if exclude_steps:
-                    placeholders = ','.join(['?'] * len(exclude_steps))
-                    conn.execute(
-                        f"UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                        f"WHERE status = ? AND step_name NOT IN ({placeholders})",
-                        (STATUS_RUNNING, STATUS_PAUSED, *exclude_steps)
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                        "WHERE status = ?",
-                        (STATUS_RUNNING, STATUS_PAUSED)
-                    )
-        if exclude_steps:
-            logger.info(f"已将所有 Paused 步骤恢复为 Running（排除步骤: {exclude_steps}）")
-        else:
-            logger.info("已将所有 Paused 步骤恢复为 Running")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""
@@ -503,7 +516,7 @@ class StateManager:
     # 辅助查询方法
     # ------------------------------------------------------------------
 
-    def get_configs_at_step(self, step_name: str, status: str | None = None) -> List[int]:
+    def get_configs_at_step(self, step_name: str, status: str | None = None) -> list[int]:
         """获取处于指定步骤指定状态的构型列表。"""
         with self._get_connection(readonly=True) as conn:
             if status:
@@ -532,7 +545,7 @@ class StateManager:
             ).fetchone()
             return (row["cnt"] or 0) == 0
 
-    def get_error_configs(self) -> List[Tuple[int, str, str]]:
+    def get_error_configs(self) -> list[tuple[int, str, str]]:
         """获取所有处于 Error 状态的构型和步骤。"""
         with self._get_connection(readonly=True) as conn:
             rows = conn.execute(
@@ -558,27 +571,29 @@ class StateManager:
             "error_count": 0,
         }
 
+        # 预填充所有步骤×状态组合为 0（确保未出现的组合也有默认值）
+        for step_name in STEP_NAMES:
+            stats["steps"][step_name] = {status: 0 for status in ALL_STATUSES}
+
         with self._get_connection(readonly=True) as conn:
             # 总构型数
             row = conn.execute("SELECT COUNT(*) as cnt FROM configs").fetchone()
             stats["total_configs"] = row["cnt"] if row else 0
 
-            # 每个步骤的状态分布
-            for step_name in STEP_NAMES:
-                step_counts: dict = {}
-                for status in ALL_STATUSES:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status = ?",
-                        (step_name, status)
-                    ).fetchone()
-                    step_counts[status] = row["cnt"] if row else 0
-                stats["steps"][step_name] = step_counts
+            # 单条 GROUP BY 查询获取所有步骤×状态的计数（替代原先的 N×M 次查询）
+            rows = conn.execute(
+                "SELECT step_name, status, COUNT(*) as cnt "
+                "FROM steps GROUP BY step_name, status"
+            ).fetchall()
+            for row in rows:
+                step_name = row["step_name"]
+                status = row["status"]
+                if step_name in stats["steps"]:
+                    stats["steps"][step_name][status] = row["cnt"]
 
-            # 错误总数
-            row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM steps WHERE status = ?",
-                (STATUS_ERROR,)
-            ).fetchone()
-            stats["error_count"] = row["cnt"] if row else 0
+            # 错误总数（从已查询的数据中聚合，避免额外查询）
+            stats["error_count"] = sum(
+                stats["steps"][sn].get(STATUS_ERROR, 0) for sn in STEP_NAMES
+            )
 
         return stats

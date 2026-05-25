@@ -29,10 +29,7 @@ impl AppLayout {
 
         let main_split = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Ratio(3, 5),
-                Constraint::Ratio(2, 5),
-            ])
+            .constraints([Constraint::Ratio(3, 5), Constraint::Ratio(2, 5)])
             .split(main_content);
 
         let status_table = main_split[0];
@@ -40,10 +37,7 @@ impl AppLayout {
 
         let log_split = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Ratio(1, 2),
-                Constraint::Ratio(1, 2),
-            ])
+            .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
             .split(log_panels);
 
         let info_panel = log_split[0];
@@ -51,10 +45,7 @@ impl AppLayout {
 
         let cmd_split = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-            ])
+            .constraints([Constraint::Length(3), Constraint::Length(3)])
             .split(command_area);
 
         let cmd_input = cmd_split[0];

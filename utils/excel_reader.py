@@ -7,8 +7,9 @@ Excel 读取工具 (Excel Reader)
 - 第2-5列：4个参数
 ===============================================================================
 """
+from __future__ import annotations
+
 import os
-from typing import Dict, List
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -35,7 +36,7 @@ def _import_openpyxl():
     return _openpyxl
 
 
-def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
+def read_model_configs(excel_path: str) -> dict[int, list[float]]:
     """
     从 Excel 文件中读取所有构型的参数配置。
 
@@ -51,12 +52,12 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
         ImportError: openpyxl 库未安装
     """
     openpyxl = _import_openpyxl()
-    logger.info(f"正在读取 Excel 参数表: {excel_path}")
+    logger.info(f"[Excel] 正在读取 Excel 参数表: {excel_path}")
 
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
 
-    configs: Dict[int, List[float]] = {}
+    configs: dict[int, list[float]] = {}
     wb = None
     try:
         wb = openpyxl.load_workbook(excel_path, data_only=True)
@@ -72,12 +73,12 @@ def read_model_configs(excel_path: str) -> Dict[int, List[float]]:
                 config_name = int(row[0])  # 第1列：构型名称（整数）
                 params = [float(row[i]) for i in PARAM_COLUMN_RANGE]  # 第2-5列：参数
                 configs[config_name] = params
-                logger.debug(f"读取构型 {config_name}: 参数 = {params}")
+                logger.debug(f"[Excel] 读取构型 {config_name}: 参数 = {params}")
             except (ValueError, TypeError, IndexError) as e:
-                logger.warning(f"跳过无效行: {row}, 错误: {e}")
+                logger.warning(f"[Excel] 跳过无效行: {row}, 错误: {e}")
                 continue
     finally:
         if wb is not None:
             wb.close()
-    logger.info(f"成功读取 {len(configs)} 个构型配置")
+    logger.info(f"[Excel] 成功读取 {len(configs)} 个构型配置")
     return configs

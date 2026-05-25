@@ -1,30 +1,32 @@
+mod daemon_mgr;
+mod event_handler;
 mod ipc;
 mod settings;
 mod state;
 mod text_buffer;
 mod theme;
 mod ui;
-mod event_handler;
-mod daemon_mgr;
 mod utils;
 
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{self as crossterm_event, Event as CrosstermEvent, EnableMouseCapture, DisableMouseCapture};
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::event::{
+    self as crossterm_event, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent,
+};
 use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use daemon_mgr::DaemonManager;
+use event_handler::command;
+use event_handler::key_handler;
 use ipc::client::IpcClient;
-use state::{AppState, LogBuffer};
 use state::app_state::UiMode;
 use state::log_buffer::LogEntry;
-use daemon_mgr::DaemonManager;
+use state::{AppState, LogBuffer};
 use ui::layout::AppLayout;
-use event_handler::key_handler;
-use event_handler::command;
 
 pub use utils::format_local_time;
 
@@ -46,18 +48,18 @@ fn init_file_logger() {
     match log_dir {
         Some(dir) => {
             let log_path = dir.join("autofluid-tui.log");
-            match OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-            {
+            match OpenOptions::new().create(true).append(true).open(&log_path) {
                 Ok(file) => {
                     env_logger::Builder::new()
                         .filter_level(LevelFilter::Info)
                         .target(env_logger::Target::Pipe(Box::new(file)))
                         .format_timestamp_millis()
                         .init();
-                    log::info!("AutoFluid TUI v{} 启动，日志文件: {:?}", env!("CARGO_PKG_VERSION"), log_path);
+                    log::info!(
+                        "AutoFluid TUI v{} 启动，日志文件: {:?}",
+                        env!("CARGO_PKG_VERSION"),
+                        log_path
+                    );
                 }
                 Err(e) => {
                     eprintln!("警告: 无法创建日志文件 {:?}: {}", log_path, e);
@@ -75,15 +77,15 @@ fn init_stderr_logger() {
         .target(env_logger::Target::Stderr)
         .format_timestamp_millis()
         .init();
-    log::info!("AutoFluid TUI v{} 启动 (stderr-only 日志)", env!("CARGO_PKG_VERSION"));
+    log::info!(
+        "AutoFluid TUI v{} 启动 (stderr-only 日志)",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 /// 查找 logs/client/ 下最新的时间戳子目录
 fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
-    let client_dir = std::env::current_dir()
-        .ok()?
-        .join("logs")
-        .join("client");
+    let client_dir = std::env::current_dir().ok()?.join("logs").join("client");
     if !client_dir.is_dir() {
         return None;
     }
@@ -138,8 +140,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// 事件处理上下文，聚合 process_event 所需的全部可变引用。
+struct EventContext<'a> {
+    state: &'a mut AppState,
+    log_buffer: &'a mut LogBuffer,
+    ipc: &'a mut IpcClient,
+    daemon: &'a mut daemon_mgr::DaemonManager,
+    rt: &'a tokio::runtime::Runtime,
+    project_dir: &'a str,
+    full_quit: &'a mut bool,
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
     let project_dir = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
@@ -152,7 +168,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
-    log_buffer.push_info("Tab 切换焦点 | ↑↓ 滚动 | PageUp/PageDown 翻页 | Home/End 跳转".to_string());
+    log_buffer
+        .push_info("Tab 切换焦点 | ↑↓ 滚动 | PageUp/PageDown 翻页 | Home/End 跳转".to_string());
 
     if let Ok(size) = terminal.size() {
         state.update_terminal_size(size.width, size.height);
@@ -167,7 +184,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         Err(_) => {
             state.connected = false;
             log_buffer.push_info("❌ 无法连接到后台引擎，请先启动 start_daemon.py".to_string());
-            log_buffer.push_info("提示: 界面将在无后台连接的情况下运行，部分功能不可用".to_string());
+            log_buffer
+                .push_info("提示: 界面将在无后台连接的情况下运行，部分功能不可用".to_string());
         }
     }
 
@@ -178,47 +196,84 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut last_clock_refresh = std::time::Instant::now();
     let mut poll_counter: u64 = 0;
 
+    let mut ctx = EventContext {
+        state: &mut state,
+        log_buffer: &mut log_buffer,
+        ipc: &mut ipc,
+        daemon: &mut daemon,
+        rt: &rt,
+        project_dir: &project_dir,
+        full_quit: &mut full_quit,
+    };
+
     loop {
-        if state.should_quit {
+        if ctx.state.should_quit {
             break;
         }
 
-        state.tick();
+        ctx.state.tick();
 
-        if let Some(cmd) = state.pending_command.take() {
-            let result = rt.block_on(command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer));
+        if let Some(cmd) = ctx.state.pending_command.take() {
+            let result = ctx.rt.block_on(command::dispatch_command(
+                &cmd,
+                ctx.ipc,
+                ctx.state,
+                ctx.log_buffer,
+            ));
             match result {
                 command::CommandResult::Quit => {
-                    state.should_quit = true;
+                    ctx.state.should_quit = true;
                 }
                 command::CommandResult::FullQuit => {
-                    full_quit = true;
-                    if ipc.is_connected() {
-                        let _ = rt.block_on(ipc.full_quit());
+                    *ctx.full_quit = true;
+                    if ctx.ipc.is_connected() {
+                        let _ = ctx.rt.block_on(ctx.ipc.full_quit());
                     }
-                    rt.block_on(ipc.disconnect());
-                    state.should_quit = true;
+                    ctx.rt.block_on(ctx.ipc.disconnect());
+                    ctx.state.should_quit = true;
                 }
                 command::CommandResult::StartDaemon => {
-                    if ipc.is_connected() {
-                        log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+                    if ctx.ipc.is_connected() {
+                        ctx.log_buffer
+                            .push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                     } else {
-                        match daemon.launch(&project_dir) {
+                        match ctx.daemon.launch(ctx.project_dir) {
                             Ok(pid) => {
-                                log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                DaemonManager::reconnect_ipc_after_launch(&rt, &mut ipc, &mut state, &mut log_buffer);
+                                ctx.log_buffer.push_info(format!(
+                                    "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
+                                    pid
+                                ));
+                                DaemonManager::reconnect_ipc_after_launch(
+                                    ctx.rt,
+                                    ctx.ipc,
+                                    ctx.state,
+                                    ctx.log_buffer,
+                                );
                             }
                             Err(e) => {
-                                log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+                                ctx.log_buffer
+                                    .push_info(format!("❌ 启动后台引擎失败: {}", e));
                             }
                         }
                     }
                 }
                 command::CommandResult::RestartDaemon => {
-                    daemon.restart_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    ctx.daemon.restart_with_ipc(
+                        ctx.ipc,
+                        ctx.rt,
+                        ctx.state,
+                        ctx.log_buffer,
+                        ctx.project_dir,
+                    );
                 }
                 command::CommandResult::StopDaemon => {
-                    daemon.stop_with_ipc(&mut ipc, &rt, &mut state, &mut log_buffer, &project_dir);
+                    ctx.daemon.stop_with_ipc(
+                        ctx.ipc,
+                        ctx.rt,
+                        ctx.state,
+                        ctx.log_buffer,
+                        ctx.project_dir,
+                    );
                 }
                 _ => {}
             }
@@ -227,25 +282,25 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         let first_poll_timeout = Duration::from_millis(50);
         if crossterm_event::poll(first_poll_timeout).map_err(|e| e.to_string())? {
             let event = crossterm_event::read().map_err(|e| e.to_string())?;
-            process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
+            process_event(event, &mut ctx);
 
             while crossterm_event::poll(Duration::from_millis(0)).map_err(|e| e.to_string())? {
                 let event = crossterm_event::read().map_err(|e| e.to_string())?;
-                process_event(event, &mut state, &mut log_buffer, &mut ipc, &mut daemon, &rt, &project_dir, &mut full_quit);
+                process_event(event, &mut ctx);
             }
         }
 
-        if state.needs_redraw {
-            let _ = do_redraw(terminal, &mut state, &log_buffer);
-            state.needs_redraw = false;
+        if ctx.state.needs_redraw {
+            let _ = do_redraw(terminal, ctx.state, ctx.log_buffer);
+            ctx.state.needs_redraw = false;
         }
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
-        if ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
+        if ctx.ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
             // 拉取所有构型状态
-            if let Ok(resp) = rt.block_on(ipc.get_all_status()) {
+            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_all_status()) {
                 if resp.is_ok() {
-                    state.update_status_data(&resp.data);
+                    ctx.state.update_status_data(&resp.data);
                 }
             }
 
@@ -253,66 +308,66 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             poll_counter += 1;
             if poll_counter >= 5 {
                 poll_counter = 0;
-                if let Ok(resp) = rt.block_on(ipc.get_engine_status()) {
+                if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_engine_status()) {
                     if resp.is_ok() {
-                        state.update_engine_info(&resp.data);
+                        ctx.state.update_engine_info(&resp.data);
                     }
                 }
             }
 
             // 增量拉取日志
-            if let Ok(resp) = rt.block_on(ipc.get_log_entries(
-                state.last_log_id, 50,
-                state.log_filter_level.as_deref(),
-                state.log_filter_source.as_deref(),
+            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_log_entries(
+                ctx.state.last_log_id,
+                50,
+                ctx.state.log_filter_level.as_deref(),
+                ctx.state.log_filter_source.as_deref(),
             )) {
                 if resp.is_ok() {
                     if let Some(data_obj) = resp.data.as_object() {
                         if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
                             for entry_val in entries {
                                 if let Some(entry) = LogEntry::from_dict(entry_val) {
-                                    state.last_log_id = state.last_log_id.max(entry.id);
-                                    log_buffer.push_detail(entry);
+                                    ctx.state.last_log_id = ctx.state.last_log_id.max(entry.id);
+                                    ctx.log_buffer.push_detail(entry);
                                 }
                             }
                         }
                         if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64()) {
-                            state.last_log_id = state.last_log_id.max(latest);
+                            ctx.state.last_log_id = ctx.state.last_log_id.max(latest);
                         }
                     }
                 }
             }
 
             last_ipc_poll = std::time::Instant::now();
-            state.needs_redraw = true;
+            ctx.state.needs_redraw = true;
         }
 
         if last_clock_refresh.elapsed() >= clock_interval {
-            state.needs_redraw = true;
+            ctx.state.needs_redraw = true;
             last_clock_refresh = std::time::Instant::now();
         }
     }
 
-    rt.block_on(ipc.disconnect());
+    ctx.rt.block_on(ctx.ipc.disconnect());
 
-    if full_quit {
-        let _ = daemon.stop(&project_dir);
+    if *ctx.full_quit {
+        let _ = ctx.daemon.stop(ctx.project_dir);
     }
 
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // 事件处理函数需要访问多个上下文对象
-fn process_event(
-    event: CrosstermEvent,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    ipc: &mut IpcClient,
-    daemon: &mut daemon_mgr::DaemonManager,
-    rt: &tokio::runtime::Runtime,
-    project_dir: &str,
-    full_quit: &mut bool,
-) {
+fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
+    let EventContext {
+        state,
+        log_buffer,
+        ipc,
+        daemon,
+        rt,
+        project_dir,
+        full_quit,
+    } = ctx;
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
             let action = key_handler::handle_key(key, state);
@@ -322,13 +377,14 @@ fn process_event(
                 }
                 key_handler::AppAction::SubmitCommand(cmd) => {
                     log_buffer.push_info(format!("> {}", cmd));
-                    let result = rt.block_on(command::dispatch_command(&cmd, ipc, state, log_buffer));
+                    let result =
+                        rt.block_on(command::dispatch_command(&cmd, ipc, state, log_buffer));
                     match result {
                         command::CommandResult::Quit => {
                             state.should_quit = true;
                         }
                         command::CommandResult::FullQuit => {
-                            *full_quit = true;
+                            **full_quit = true;
                             if ipc.is_connected() {
                                 let _ = rt.block_on(ipc.full_quit());
                             }
@@ -337,12 +393,18 @@ fn process_event(
                         }
                         command::CommandResult::StartDaemon => {
                             if ipc.is_connected() {
-                                log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+                                log_buffer
+                                    .push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
                             } else {
                                 match daemon.launch(project_dir) {
                                     Ok(pid) => {
-                                        log_buffer.push_info(format!("⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...", pid));
-                                        DaemonManager::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
+                                        log_buffer.push_info(format!(
+                                            "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
+                                            pid
+                                        ));
+                                        DaemonManager::reconnect_ipc_after_launch(
+                                            rt, ipc, state, log_buffer,
+                                        );
                                     }
                                     Err(e) => {
                                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -361,10 +423,11 @@ fn process_event(
                 }
                 key_handler::AppAction::Confirm => {
                     if let Some(callback) = state.confirm_callback.take() {
-                        let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
+                        let result = rt
+                            .block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
                         match result {
                             command::CommandResult::FullQuit => {
-                                *full_quit = true;
+                                **full_quit = true;
                                 if ipc.is_connected() {
                                     let _ = rt.block_on(ipc.full_quit());
                                 }
@@ -384,6 +447,10 @@ fn process_event(
                 }
                 key_handler::AppAction::SaveSettings => {
                     if let Some(ref mut ss) = state.settings_state {
+                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
+                        if ss.is_editing_field() {
+                            ss.commit_edit_current_field();
+                        }
                         ss.validation_errors.clear();
                         ss.save_error = None;
                         match ss.save() {
@@ -393,7 +460,8 @@ fn process_event(
                                 if ipc.is_connected() {
                                     let _ = rt.block_on(ipc.reload_config());
                                 }
-                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer
+                                    .push_info(" 设置已保存到 autofluid_config.toml".to_string());
                                 log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
                             }
                             Err(errors) => {
@@ -423,223 +491,341 @@ fn do_redraw(
     state: &mut AppState,
     log_buffer: &LogBuffer,
 ) -> Result<(), String> {
-    terminal.draw(|frame| {
-        let area = frame.area();
-        let layout = AppLayout::new(area);
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let layout = AppLayout::new(area);
 
-        state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
+            state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-        let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
-        let info_visual_count = info_lines.0.len();
-        let info_max_width = info_lines.1;
-        let detail_lines = ui::logs::compute_detail_lines_no_wrap(log_buffer, &state.log_filter_level, &state.log_filter_source);
-        let detail_visual_count = detail_lines.0.len();
-        let detail_max_width = detail_lines.1;
+            let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
+            let info_visual_count = info_lines.0.len();
+            let info_max_width = info_lines.1;
+            let detail_lines = ui::logs::compute_detail_lines_no_wrap(
+                log_buffer,
+                &state.log_filter_level,
+                &state.log_filter_source,
+            );
+            let detail_visual_count = detail_lines.0.len();
+            let detail_max_width = detail_lines.1;
 
-        let info_inner_height = layout.info_panel.height.saturating_sub(2) as usize;
-        let detail_inner_height = layout.detail_panel.height.saturating_sub(2) as usize;
-        let info_has_hscroll = info_max_width > layout.info_panel.width.saturating_sub(2) as usize;
-        let detail_has_hscroll = detail_max_width > layout.detail_panel.width.saturating_sub(2) as usize;
-        let info_content_height = if info_has_hscroll { info_inner_height.saturating_sub(1) } else { info_inner_height };
-        let detail_content_height = if detail_has_hscroll { detail_inner_height.saturating_sub(1) } else { detail_inner_height };
-
-        fn apply_auto_scroll(auto_scroll: &mut bool, scroll: &mut u16, visual_count: usize, content_height: usize) {
-            if *auto_scroll && visual_count > content_height {
-                *scroll = (visual_count - content_height) as u16;
-            }
-            if visual_count > content_height {
-                let max_scroll = (visual_count - content_height) as u16;
-                if *scroll >= max_scroll {
-                    *auto_scroll = true;
-                }
-            }
-        }
-
-        if log_buffer.log_generation != state.last_log_generation {
-            state.info_log_auto_scroll = true;
-            state.last_log_generation = log_buffer.log_generation;
-        }
-
-        apply_auto_scroll(&mut state.info_log_auto_scroll, &mut state.info_log_scroll, info_visual_count, info_content_height);
-        apply_auto_scroll(&mut state.detail_log_auto_scroll, &mut state.detail_log_scroll, detail_visual_count, detail_content_height);
-        state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
-        state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
-
-        let info_inner_width = layout.info_panel.width.saturating_sub(2) as usize;
-        let info_has_vscroll = info_visual_count > info_content_height;
-        let info_content_width = if info_has_vscroll { info_inner_width.saturating_sub(1) } else { info_inner_width };
-        state.clamp_info_hscroll(info_max_width, info_content_width);
-
-        let detail_inner_width = layout.detail_panel.width.saturating_sub(2) as usize;
-        let detail_has_vscroll = detail_visual_count > detail_content_height;
-        let detail_content_width = if detail_has_vscroll { detail_inner_width.saturating_sub(1) } else { detail_inner_width };
-        state.clamp_detail_hscroll(detail_max_width, detail_content_width);
-
-        state.scrollbar_info.table_v = {
-            let visible_data_rows = layout.status_table.height.saturating_sub(3) as usize;
-            if state.configs.len() > visible_data_rows {
-                let table_inner = ratatui::layout::Rect {
-                    x: layout.status_table.x + 1,
-                    y: layout.status_table.y + 1,
-                    width: layout.status_table.width.saturating_sub(2),
-                    height: layout.status_table.height.saturating_sub(2),
-                };
-                let sb_area = ratatui::layout::Rect {
-                    x: table_inner.x + table_inner.width.saturating_sub(1),
-                    y: table_inner.y + 1,
-                    width: 1,
-                    height: table_inner.height.saturating_sub(1),
-                };
-                Some((sb_area, state.configs.len(), visible_data_rows, state.table_scroll_offset as usize))
+            let info_inner_height = layout.info_panel.height.saturating_sub(2) as usize;
+            let detail_inner_height = layout.detail_panel.height.saturating_sub(2) as usize;
+            let info_has_hscroll =
+                info_max_width > layout.info_panel.width.saturating_sub(2) as usize;
+            let detail_has_hscroll =
+                detail_max_width > layout.detail_panel.width.saturating_sub(2) as usize;
+            let info_content_height = if info_has_hscroll {
+                info_inner_height.saturating_sub(1)
             } else {
-                None
-            }
-        };
-        state.scrollbar_info.info_v = if info_has_vscroll {
-            let info_inner = ratatui::layout::Rect {
-                x: layout.info_panel.x + 1,
-                y: layout.info_panel.y + 1,
-                width: layout.info_panel.width.saturating_sub(2),
-                height: layout.info_panel.height.saturating_sub(2),
+                info_inner_height
             };
-            let sb_area = ratatui::layout::Rect {
-                x: info_inner.x + info_inner.width.saturating_sub(1),
-                y: info_inner.y,
-                width: 1,
-                height: info_content_height as u16,
+            let detail_content_height = if detail_has_hscroll {
+                detail_inner_height.saturating_sub(1)
+            } else {
+                detail_inner_height
             };
-            Some((sb_area, info_visual_count, info_content_height, state.info_log_scroll as usize))
-        } else {
-            None
-        };
-        state.scrollbar_info.info_h = if info_has_hscroll {
-            let info_inner = ratatui::layout::Rect {
-                x: layout.info_panel.x + 1,
-                y: layout.info_panel.y + 1,
-                width: layout.info_panel.width.saturating_sub(2),
-                height: layout.info_panel.height.saturating_sub(2),
-            };
-            let sb_area = ratatui::layout::Rect {
-                x: info_inner.x,
-                y: info_inner.y + info_content_height as u16,
-                width: info_content_width as u16,
-                height: 1,
-            };
-            Some((sb_area, info_max_width, info_content_width, state.info_log_hscroll as usize))
-        } else {
-            None
-        };
-        state.scrollbar_info.detail_v = if detail_has_vscroll {
-            let detail_inner = ratatui::layout::Rect {
-                x: layout.detail_panel.x + 1,
-                y: layout.detail_panel.y + 1,
-                width: layout.detail_panel.width.saturating_sub(2),
-                height: layout.detail_panel.height.saturating_sub(2),
-            };
-            let sb_area = ratatui::layout::Rect {
-                x: detail_inner.x + detail_inner.width.saturating_sub(1),
-                y: detail_inner.y,
-                width: 1,
-                height: detail_content_height as u16,
-            };
-            Some((sb_area, detail_visual_count, detail_content_height, state.detail_log_scroll as usize))
-        } else {
-            None
-        };
-        state.scrollbar_info.detail_h = if detail_has_hscroll {
-            let detail_inner = ratatui::layout::Rect {
-                x: layout.detail_panel.x + 1,
-                y: layout.detail_panel.y + 1,
-                width: layout.detail_panel.width.saturating_sub(2),
-                height: layout.detail_panel.height.saturating_sub(2),
-            };
-            let sb_area = ratatui::layout::Rect {
-                x: detail_inner.x,
-                y: detail_inner.y + detail_content_height as u16,
-                width: detail_content_width as u16,
-                height: 1,
-            };
-            Some((sb_area, detail_max_width, detail_content_width, state.detail_log_hscroll as usize))
-        } else {
-            None
-        };
 
-        ui::header::render_header(frame, layout.header, state);
-        ui::header::render_info_bar(frame, layout.info_bar, state);
-        ui::table::render_table(frame, layout.status_table, state);
-        ui::logs::render_info_panel(frame, layout.info_panel, log_buffer, state.info_log_scroll, state.focus_zone, state.info_log_hscroll, state.info_log_auto_scroll, &state.theme);
-        ui::logs::render_detail_panel(
-        frame,
-        layout.detail_panel,
-        &ui::logs::DetailPanelParams {
-            log_buffer,
-            level_filter: &state.log_filter_level,
-            source_filter: &state.log_filter_source,
-            scroll_offset: state.detail_log_scroll,
-            auto_scroll: state.detail_log_auto_scroll,
-            focus_zone: state.focus_zone,
-            hovered_detail_row: state.hovered_detail_row,
-            clicked_detail_row: state.clicked_detail_row,
-            hscroll: state.detail_log_hscroll,
-            theme: &state.theme,
-        },
-    );
-        ui::command_bar::render_command_bar(frame, layout.cmd_input, layout.quick_buttons, state);
-
-        match state.ui_mode {
-            UiMode::ConfirmDialog => {
-                if let Some(ref msg) = state.confirm_message {
-                    let info = ui::dialogs::render_confirm_dialog(frame, area, msg, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
-                    state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
-                        Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
-                    } else {
-                        None
-                    };
-                    state.dialog_button_bar_y = Some(info.button_bar_y);
+            fn apply_auto_scroll(
+                auto_scroll: &mut bool,
+                scroll: &mut u16,
+                visual_count: usize,
+                content_height: usize,
+            ) {
+                if *auto_scroll && visual_count > content_height {
+                    *scroll = (visual_count - content_height) as u16;
                 }
-            }
-            UiMode::CheckResult => {
-                if let Some(ref data) = state.check_data {
-                    let info = ui::dialogs::render_check_result(frame, area, data, state.dialog_scroll, state.hovered_dialog_button, state.clicked_dialog_button, &state.theme);
-                    state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
-                        Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, state.dialog_scroll as usize))
-                    } else {
-                        None
-                    };
-                    state.dialog_button_bar_y = Some(info.button_bar_y);
-                    state.clamp_dialog_scroll(info.content_total_lines, info.content_visible_lines);
-                }
-            }
-            UiMode::Settings => {
-                if let Some(ref mut ss) = state.settings_state {
-                    let info = settings::settings_ui::render_settings_dialog(
-                        frame,
-                        area,
-                        ss,
-                        state.hovered_dialog_button,
-                        state.clicked_dialog_button,
-                        &state.theme,
-                    );
-                    ss.field_positions = info.field_positions;
-                    state.scrollbar_info.dialog_v = if info.content_total_lines > info.content_visible_lines {
-                        Some((info.scrollbar_area, info.content_total_lines, info.content_visible_lines, ss.scroll as usize))
-                    } else {
-                        None
-                    };
-                    state.dialog_button_bar_y = Some(info.button_bar_y);
-                    // Clamp settings scroll
-                    let max_scroll = info.content_total_lines.saturating_sub(info.content_visible_lines) as u16;
-                    if ss.scroll > max_scroll {
-                        ss.scroll = max_scroll;
+                if visual_count > content_height {
+                    let max_scroll = (visual_count - content_height) as u16;
+                    if *scroll >= max_scroll {
+                        *auto_scroll = true;
                     }
                 }
             }
-            UiMode::Normal => {
-                state.scrollbar_info.dialog_v = None;
-                state.dialog_button_bar_y = None;
+
+            if log_buffer.log_generation != state.last_log_generation {
+                state.info_log_auto_scroll = true;
+                state.last_log_generation = log_buffer.log_generation;
             }
-        }
-    }).map_err(|e| e.to_string())?;
+
+            apply_auto_scroll(
+                &mut state.info_log_auto_scroll,
+                &mut state.info_log_scroll,
+                info_visual_count,
+                info_content_height,
+            );
+            apply_auto_scroll(
+                &mut state.detail_log_auto_scroll,
+                &mut state.detail_log_scroll,
+                detail_visual_count,
+                detail_content_height,
+            );
+            state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
+            state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
+
+            let info_inner_width = layout.info_panel.width.saturating_sub(2) as usize;
+            let info_has_vscroll = info_visual_count > info_content_height;
+            let info_content_width = if info_has_vscroll {
+                info_inner_width.saturating_sub(1)
+            } else {
+                info_inner_width
+            };
+            state.clamp_info_hscroll(info_max_width, info_content_width);
+
+            let detail_inner_width = layout.detail_panel.width.saturating_sub(2) as usize;
+            let detail_has_vscroll = detail_visual_count > detail_content_height;
+            let detail_content_width = if detail_has_vscroll {
+                detail_inner_width.saturating_sub(1)
+            } else {
+                detail_inner_width
+            };
+            state.clamp_detail_hscroll(detail_max_width, detail_content_width);
+
+            state.scrollbar_info.table_v = {
+                let visible_data_rows = layout.status_table.height.saturating_sub(3) as usize;
+                if state.configs.len() > visible_data_rows {
+                    let table_inner = ratatui::layout::Rect {
+                        x: layout.status_table.x + 1,
+                        y: layout.status_table.y + 1,
+                        width: layout.status_table.width.saturating_sub(2),
+                        height: layout.status_table.height.saturating_sub(2),
+                    };
+                    let sb_area = ratatui::layout::Rect {
+                        x: table_inner.x + table_inner.width.saturating_sub(1),
+                        y: table_inner.y + 1,
+                        width: 1,
+                        height: table_inner.height.saturating_sub(1),
+                    };
+                    Some((
+                        sb_area,
+                        state.configs.len(),
+                        visible_data_rows,
+                        state.table_scroll_offset as usize,
+                    ))
+                } else {
+                    None
+                }
+            };
+            state.scrollbar_info.info_v = if info_has_vscroll {
+                let info_inner = ratatui::layout::Rect {
+                    x: layout.info_panel.x + 1,
+                    y: layout.info_panel.y + 1,
+                    width: layout.info_panel.width.saturating_sub(2),
+                    height: layout.info_panel.height.saturating_sub(2),
+                };
+                let sb_area = ratatui::layout::Rect {
+                    x: info_inner.x + info_inner.width.saturating_sub(1),
+                    y: info_inner.y,
+                    width: 1,
+                    height: info_content_height as u16,
+                };
+                Some((
+                    sb_area,
+                    info_visual_count,
+                    info_content_height,
+                    state.info_log_scroll as usize,
+                ))
+            } else {
+                None
+            };
+            state.scrollbar_info.info_h = if info_has_hscroll {
+                let info_inner = ratatui::layout::Rect {
+                    x: layout.info_panel.x + 1,
+                    y: layout.info_panel.y + 1,
+                    width: layout.info_panel.width.saturating_sub(2),
+                    height: layout.info_panel.height.saturating_sub(2),
+                };
+                let sb_area = ratatui::layout::Rect {
+                    x: info_inner.x,
+                    y: info_inner.y + info_content_height as u16,
+                    width: info_content_width as u16,
+                    height: 1,
+                };
+                Some((
+                    sb_area,
+                    info_max_width,
+                    info_content_width,
+                    state.info_log_hscroll as usize,
+                ))
+            } else {
+                None
+            };
+            state.scrollbar_info.detail_v = if detail_has_vscroll {
+                let detail_inner = ratatui::layout::Rect {
+                    x: layout.detail_panel.x + 1,
+                    y: layout.detail_panel.y + 1,
+                    width: layout.detail_panel.width.saturating_sub(2),
+                    height: layout.detail_panel.height.saturating_sub(2),
+                };
+                let sb_area = ratatui::layout::Rect {
+                    x: detail_inner.x + detail_inner.width.saturating_sub(1),
+                    y: detail_inner.y,
+                    width: 1,
+                    height: detail_content_height as u16,
+                };
+                Some((
+                    sb_area,
+                    detail_visual_count,
+                    detail_content_height,
+                    state.detail_log_scroll as usize,
+                ))
+            } else {
+                None
+            };
+            state.scrollbar_info.detail_h = if detail_has_hscroll {
+                let detail_inner = ratatui::layout::Rect {
+                    x: layout.detail_panel.x + 1,
+                    y: layout.detail_panel.y + 1,
+                    width: layout.detail_panel.width.saturating_sub(2),
+                    height: layout.detail_panel.height.saturating_sub(2),
+                };
+                let sb_area = ratatui::layout::Rect {
+                    x: detail_inner.x,
+                    y: detail_inner.y + detail_content_height as u16,
+                    width: detail_content_width as u16,
+                    height: 1,
+                };
+                Some((
+                    sb_area,
+                    detail_max_width,
+                    detail_content_width,
+                    state.detail_log_hscroll as usize,
+                ))
+            } else {
+                None
+            };
+
+            ui::header::render_header(frame, layout.header, state);
+            ui::header::render_info_bar(frame, layout.info_bar, state);
+            ui::table::render_table(frame, layout.status_table, state);
+            ui::logs::render_info_panel(
+                frame,
+                layout.info_panel,
+                log_buffer,
+                state.info_log_scroll,
+                state.focus_zone,
+                state.info_log_hscroll,
+                state.info_log_auto_scroll,
+                &state.theme,
+            );
+            ui::logs::render_detail_panel(
+                frame,
+                layout.detail_panel,
+                &ui::logs::DetailPanelParams {
+                    log_buffer,
+                    level_filter: &state.log_filter_level,
+                    source_filter: &state.log_filter_source,
+                    scroll_offset: state.detail_log_scroll,
+                    auto_scroll: state.detail_log_auto_scroll,
+                    focus_zone: state.focus_zone,
+                    hovered_detail_row: state.hovered_detail_row,
+                    clicked_detail_row: state.clicked_detail_row,
+                    hscroll: state.detail_log_hscroll,
+                    theme: &state.theme,
+                },
+            );
+            ui::command_bar::render_command_bar(
+                frame,
+                layout.cmd_input,
+                layout.quick_buttons,
+                state,
+            );
+
+            match state.ui_mode {
+                UiMode::ConfirmDialog => {
+                    if let Some(ref msg) = state.confirm_message {
+                        let info = ui::dialogs::render_confirm_dialog(
+                            frame,
+                            area,
+                            msg,
+                            state.dialog_scroll,
+                            state.hovered_dialog_button,
+                            state.clicked_dialog_button,
+                            &state.theme,
+                        );
+                        state.scrollbar_info.dialog_v =
+                            if info.content_total_lines > info.content_visible_lines {
+                                Some((
+                                    info.scrollbar_area,
+                                    info.content_total_lines,
+                                    info.content_visible_lines,
+                                    state.dialog_scroll as usize,
+                                ))
+                            } else {
+                                None
+                            };
+                        state.dialog_button_bar_y = Some(info.button_bar_y);
+                    }
+                }
+                UiMode::CheckResult => {
+                    if let Some(ref data) = state.check_data {
+                        let info = ui::dialogs::render_check_result(
+                            frame,
+                            area,
+                            data,
+                            state.dialog_scroll,
+                            state.hovered_dialog_button,
+                            state.clicked_dialog_button,
+                            &state.theme,
+                        );
+                        state.scrollbar_info.dialog_v =
+                            if info.content_total_lines > info.content_visible_lines {
+                                Some((
+                                    info.scrollbar_area,
+                                    info.content_total_lines,
+                                    info.content_visible_lines,
+                                    state.dialog_scroll as usize,
+                                ))
+                            } else {
+                                None
+                            };
+                        state.dialog_button_bar_y = Some(info.button_bar_y);
+                        state.clamp_dialog_scroll(
+                            info.content_total_lines,
+                            info.content_visible_lines,
+                        );
+                    }
+                }
+                UiMode::Settings => {
+                    if let Some(ref mut ss) = state.settings_state {
+                        let info = settings::settings_ui::render_settings_dialog(
+                            frame,
+                            area,
+                            ss,
+                            state.hovered_dialog_button,
+                            state.clicked_dialog_button,
+                            &state.theme,
+                        );
+                        ss.field_positions = info.field_positions;
+                        state.scrollbar_info.dialog_v =
+                            if info.content_total_lines > info.content_visible_lines {
+                                Some((
+                                    info.scrollbar_area,
+                                    info.content_total_lines,
+                                    info.content_visible_lines,
+                                    ss.scroll as usize,
+                                ))
+                            } else {
+                                None
+                            };
+                        state.dialog_button_bar_y = Some(info.button_bar_y);
+                        // Clamp settings scroll
+                        let max_scroll = info
+                            .content_total_lines
+                            .saturating_sub(info.content_visible_lines)
+                            as u16;
+                        if ss.scroll > max_scroll {
+                            ss.scroll = max_scroll;
+                        }
+                    }
+                }
+                UiMode::Normal => {
+                    state.scrollbar_info.dialog_v = None;
+                    state.dialog_button_bar_y = None;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -669,7 +855,11 @@ mod tests {
     #[test]
     fn test_format_local_time_datetime_format() {
         let result = format_local_time("%Y%m%d_%H%M%S");
-        assert_eq!(result.len(), 15, "日期时间格式应为 YYYYMMDD_HHMMSS (15字符)");
+        assert_eq!(
+            result.len(),
+            15,
+            "日期时间格式应为 YYYYMMDD_HHMMSS (15字符)"
+        );
         let parts: Vec<&str> = result.split('_').collect();
         assert_eq!(parts.len(), 2, "应包含日期和时间两部分");
         assert_eq!(parts[0].len(), 8, "日期部分应为8字符");
@@ -688,8 +878,14 @@ mod tests {
         let id2 = generate_request_id();
         assert_eq!(id1.len(), 8, "请求ID应为8字符");
         assert_eq!(id2.len(), 8, "请求ID应为8字符");
-        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()), "请求ID应为十六进制");
-        assert!(id2.chars().all(|c| c.is_ascii_hexdigit()), "请求ID应为十六进制");
+        assert!(
+            id1.chars().all(|c| c.is_ascii_hexdigit()),
+            "请求ID应为十六进制"
+        );
+        assert!(
+            id2.chars().all(|c| c.is_ascii_hexdigit()),
+            "请求ID应为十六进制"
+        );
     }
 
     #[test]

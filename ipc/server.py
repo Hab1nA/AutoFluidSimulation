@@ -5,9 +5,11 @@ IPC 服务器模块 (IPC Server)
 每个连接使用独立线程处理，支持多客户端同时连接（但命令执行串行化）。
 ===============================================================================
 """
+from __future__ import annotations
+
 import socket
 import threading
-from typing import Optional, Callable
+from collections.abc import Callable
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
@@ -41,9 +43,9 @@ class IPCServer:
         self.host = host or IPC_CONFIG["host"]
         self.port = port or IPC_CONFIG["port"]
         self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
-        self._socket: Optional[socket.socket] = None
+        self._socket: socket.socket | None = None
         self._running = False
-        self._server_thread: Optional[threading.Thread] = None
+        self._server_thread: threading.Thread | None = None
         self._active_connections: int = 0
         self._conn_lock = threading.Lock()
 
@@ -63,7 +65,7 @@ class IPCServer:
             handler: 处理函数，签名为 handler(params: dict) -> (ok: bool, data: any, message: str)
         """
         self._handlers[command] = handler
-        logger.debug(f"注册命令处理器: {command}")
+        logger.debug(f"[IPC] 注册命令处理器: {command}")
 
     def register_default_handlers(self, daemon):
         """
@@ -100,7 +102,7 @@ class IPCServer:
     def start(self):
         """启动 IPC 服务器（在独立线程中运行）。"""
         if self._running:
-            logger.warning("IPC 服务器已在运行")
+            logger.warning("[IPC] IPC 服务器已在运行")
             return
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -113,9 +115,9 @@ class IPCServer:
             self._running = True
             self._server_thread = threading.Thread(target=self._accept_loop, daemon=True, name="IPC-Server")
             self._server_thread.start()
-            logger.info(f"IPC 服务器已启动: {self.host}:{self.port}")
+            logger.info(f"[IPC] IPC 服务器已启动: {self.host}:{self.port}")
         except OSError as e:
-            logger.error(f"IPC 服务器启动失败（端口可能被占用）: {e}")
+            logger.error(f"[IPC] IPC 服务器启动失败（端口可能被占用）: {e}")
             self._running = False
             self._socket.close()
             self._socket = None
@@ -132,7 +134,7 @@ class IPCServer:
             self._socket = None
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=3)
-        logger.info("IPC 服务器已停止")
+        logger.info("[IPC] IPC 服务器已停止")
 
     # ------------------------------------------------------------------
     # 连接处理
@@ -148,7 +150,7 @@ class IPCServer:
                 with self._conn_lock:
                     if self._active_connections >= self._max_connections:
                         logger.warning(
-                            f"IPC 连接数已达上限 ({self._max_connections})，"
+                            f"[IPC] IPC 连接数已达上限 ({self._max_connections})，"
                             f"拒绝新连接: {addr}"
                         )
                         try:
@@ -167,7 +169,7 @@ class IPCServer:
                         continue
                     self._active_connections += 1
 
-                logger.info(f"IPC 客户端连接: {addr}")
+                logger.info(f"[IPC] IPC 客户端连接: {addr}")
                 # 每个客户端在独立线程中处理
                 client_thread = threading.Thread(
                     target=self._handle_client,
@@ -180,7 +182,7 @@ class IPCServer:
                 continue  # 超时后检查 _running 标志
             except OSError:
                 if self._running:
-                    logger.error("IPC 服务器 accept 异常")
+                    logger.error("[IPC] IPC 服务器 accept 异常")
                 break
 
     def _handle_client(self, client_sock: socket.socket, addr: tuple):
@@ -213,7 +215,7 @@ class IPCServer:
                 except socket.timeout:
                     continue
                 except (ConnectionError, OSError) as e:
-                    logger.error(f"处理客户端消息异常: {e}")
+                    logger.error(f"[IPC] 处理客户端消息异常: {e}")
                     break
         finally:
             try:
@@ -223,11 +225,11 @@ class IPCServer:
             with self._conn_lock:
                 self._active_connections = max(0, self._active_connections - 1)
             if has_sent_valid_message:
-                logger.info(f"IPC 客户端断开: {addr}")
+                logger.info(f"[IPC] IPC 客户端断开: {addr}")
             else:
-                logger.debug(f"IPC 客户端断开 (探测连接): {addr}")
+                logger.debug(f"[IPC] IPC 客户端断开 (探测连接): {addr}")
 
-    def _process_message(self, data: bytes) -> Optional[dict]:
+    def _process_message(self, data: bytes) -> dict | None:
         """
         处理单条消息。
 
@@ -245,7 +247,7 @@ class IPCServer:
         params = msg.get("params", {})
         request_id = msg.get("request_id", "")
 
-        logger.debug(f"收到命令: {command}, params={params}")
+        logger.debug(f"[IPC] 收到命令: {command}, params={params}")
 
         handler = self._handlers.get(command)
         if handler is None:
@@ -260,5 +262,5 @@ class IPCServer:
                 message=message
             )
         except Exception as e:
-            logger.error(f"命令处理异常 [{command}]: {e}", exc_info=True)
+            logger.error(f"[IPC] 命令处理异常 [{command}]: {e}", exc_info=True)
             return create_response("error", request_id, message=str(e))

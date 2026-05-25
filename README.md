@@ -415,8 +415,14 @@ pip install ansys-fluent-core
 
 - `host` / `port` / `username`: SSH 连接参数
 - `conda_env` / `conda_exe`: Conda 环境名和可执行文件路径
-- 远程目录映射（`scdoc_dir` / `msh_dir` / `result_dir` / `flags_dir`）
-- `meshing_script` / `solver_script`: 远程 Python 脚本路径
+- 远程目录映射：
+  - `scripts_dir`: 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
+  - `working_dir`: 仿真工作目录（动画输出前缀）
+  - `scdoc_dir`: SCDOC 接收目录
+  - `ref_files_dir`: 仿真引用文件目录（pdf/fla/chemkin 文件）
+  - `msh_dir`: 网格输出目录
+  - `result_dir`: 结果输出目录
+  - `flag_dir`: 仿真标志目录
 
 敏感信息通过项目根目录 `.env` 文件注入：
 
@@ -523,7 +529,7 @@ python main.py --all           # 同时启动
 | ----------------------- | ------------------------------------------------------------- |
 | `Tab`                 | 焦点区正向轮换：命令输入 → 状态表格 → 信息日志 → 详细日志  |
 | `Shift+Tab`           | 焦点区反向轮换                                                |
-| `Ctrl+C` / `Ctrl+Q` | 退出 TUI（后台引擎继续运行）                                  |
+| `Ctrl+C`                | 退出 TUI（后台引擎继续运行）                                  |
 | `↑` `↓`           | 当前焦点区滚动（表格/日志行移动）                             |
 | `PageUp` `PageDown` | 整页滚动（表格/日志 ±10 行）                                 |
 | `Home`                | 跳转到顶部                                                    |

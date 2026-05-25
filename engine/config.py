@@ -44,6 +44,7 @@ class LocalPathsConfig(TypedDict):
     scdoc_dir: str
     log_dir: str
     data_dir: str
+    remote_scripts_dir: str
 
 
 class RemoteConfig(TypedDict):
@@ -51,15 +52,16 @@ class RemoteConfig(TypedDict):
     port: int
     username: str
     password: str
-    root_dir: str
+    working_dir: str
+    scripts_dir: str
+    ref_files_dir: str
     scdoc_dir: str
     msh_dir: str
     result_dir: str
+    flag_dir: str
     conda_env: str
     conda_exe: str
-    meshing_script: str
-    solver_script: str
-    flag_dir: str
+    mpi_bin_dir: str
 
 
 class IPCConfig(TypedDict):
@@ -136,31 +138,35 @@ LOCAL_PATHS: LocalPathsConfig = {
         r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
     ),
     # SpaceClaim 脚本文件（Python 格式，兼容 V23 API）
-    # 脚本位于项目 executor/ 目录下
-    "sc_script": _env_override(
-        "AUTOFLUID_SC_SCRIPT",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "executor", "spaceclaim_transit.py"),
+    # 脚本位于项目 executor/ 目录下（固定相对于项目根目录）
+    "sc_script": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "executor", "spaceclaim_transit.py",
     ),
     # C# 桥接程序（SpaceClaimBridge.exe）
     # 通过 Application.RunScript API 可靠调用 SpaceClaim 脚本
-    "sc_bridge": _env_override(
-        "AUTOFLUID_SC_BRIDGE",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge", "SpaceClaimBridge.exe"),
+    # 固定位于项目 bridge/ 目录下
+    "sc_bridge": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "bridge", "SpaceClaimBridge.exe",
     ),
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
         r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc",
     ),
-    # 日志目录
-    "log_dir": _env_override(
-        "AUTOFLUID_LOG_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"),
+    # 日志目录（固定位于项目 logs/ 目录下）
+    "log_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs",
     ),
-    # 数据库/数据目录（独立于日志目录）
-    "data_dir": _env_override(
-        "AUTOFLUID_DATA_DIR",
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
+    # 数据库/数据目录（固定位于项目 data/ 目录下）
+    "data_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data",
+    ),
+    # 远程脚本本地目录（固定位于项目 executor/remote_scripts/ 目录下）
+    "remote_scripts_dir": os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "executor", "remote_scripts",
     ),
 }
 
@@ -172,24 +178,26 @@ REMOTE_CONFIG: RemoteConfig = {
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
     "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
     "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
-    # 远程工程根目录
-    "root_dir": r"D:\xkz_1020",
+    # 仿真工作目录
+    "working_dir": r"D:\xkz_1020\workingdir",
+    # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
+    "scripts_dir": r"D:\xkz_1020",
+    # 仿真引用文件目录（pdf/fla/chemkin 文件）
+    "ref_files_dir": r"D:\xkz_1020\fluent_chemkin_files",
     # 远程 SCDOC 接收目录
     "scdoc_dir": r"D:\xkz_1020\scdoc",
     # 远程网格划分输出目录 (.msh.h5)
     "msh_dir": r"D:\xkz_1020\msh",
     # 远程仿真求解输出目录 (.cas.h5, .dat.h5)
     "result_dir": r"D:\xkz_1020\case",
+    # 仿真标志目录（用于轮询判断任务完成）
+    "flag_dir": r"D:\xkz_1020\flags",
     # Conda 环境名称
     "conda_env": "pyfluent",
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
     "conda_exe": r"C:\ProgramData\anaconda3\Scripts\conda.exe",
-    # 远程网格划分脚本
-    "meshing_script": r"D:\xkz_1020\batch_meshing_gen4.py",
-    # 远程求解脚本
-    "solver_script": r"D:\xkz_1020\batch_solver_gen4.py",
-    # 远程标志文件目录（用于轮询判断任务完成）
-    "flag_dir": r"D:\xkz_1020\flags",
+    # 远程 ANSYS 安装根目录
+    "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"),
 }
 
 # ============================================================================
@@ -229,7 +237,8 @@ STEP_FILE_PATTERNS = {
     "SC": "model_gen4_{config}.scdoc",
     "Transfer": None,  # 传输不产生本地文件
     "Meshing": "model_gen4_{config}.msh.h5",
-    "Solver": "model_gen4_{config}.cas.h5",  # cas 和 dat 都会清理
+    "Solver": "model_gen4_{config}.cas.h5",
+    "SolverData": "model_gen4_{config}.dat.h5",
 }
 
 # ============================================================================

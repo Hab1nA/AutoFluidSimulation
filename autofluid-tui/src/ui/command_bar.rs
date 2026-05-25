@@ -1,9 +1,10 @@
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
+use crate::point_in_rect;
 use crate::state::app_state::{AppState, FocusZone};
 
 pub const BUTTON_DEFS: [(&str, &str); 8] = [
@@ -31,15 +32,11 @@ pub fn button_total_width(label: &str) -> u16 {
     button_display_width(label) + 2
 }
 
-fn point_in_rect(col: u16, row: u16, rect: Rect) -> bool {
-    col >= rect.x
-        && col < rect.x + rect.width
-        && row >= rect.y
-        && row < rect.y + rect.height
-}
-
 pub fn button_bounds(buttons_area: Rect, index: usize) -> Option<Rect> {
-    let total_btn_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| button_total_width(l) + 1).sum();
+    let total_btn_width: u16 = BUTTON_DEFS
+        .iter()
+        .map(|(l, _)| button_total_width(l) + 1)
+        .sum();
     let padding = buttons_area.width.saturating_sub(total_btn_width) / 2;
 
     let mut offset = padding;
@@ -81,8 +78,10 @@ pub fn daemon_menu_bounds(buttons_area: Rect) -> Option<Rect> {
         .saturating_sub(menu_width.saturating_div(2));
     // 按钮文本从 button.x+1 开始（format " {} " 的前导空格），菜单文本从 menu.x+2 开始（边框+空格）
     // 为使二者对齐，菜单整体左移 1 格
-    let menu_x = x.saturating_sub(1).min(buttons_area.x + buttons_area.width.saturating_sub(menu_width));
-    let menu_y = buttons_area.y.saturating_sub(menu_height).saturating_add(1);  // 下移一行紧贴按钮
+    let menu_x = x
+        .saturating_sub(1)
+        .min(buttons_area.x + buttons_area.width.saturating_sub(menu_width));
+    let menu_y = buttons_area.y.saturating_sub(menu_height).saturating_add(1); // 下移一行紧贴按钮
     Some(Rect {
         x: menu_x,
         y: menu_y,
@@ -120,7 +119,12 @@ pub fn daemon_menu_command(index: u8) -> Option<&'static str> {
     DAEMON_MENU_ITEMS.get(index as usize).map(|(_, cmd)| *cmd)
 }
 
-pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, buttons_area: ratatui::layout::Rect, state: &AppState) {
+pub fn render_command_bar(
+    frame: &mut Frame,
+    input_area: ratatui::layout::Rect,
+    buttons_area: ratatui::layout::Rect,
+    state: &AppState,
+) {
     let theme = &state.theme;
     let input_style = if state.focus_zone == FocusZone::CommandInput {
         Style::default().fg(theme.success).bg(theme.input_bg)
@@ -128,9 +132,23 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         Style::default().fg(theme.gray_3).bg(theme.input_bg)
     };
 
-    let before_cursor: String = state.command_buffer.text.chars().take(state.command_buffer.cursor).collect();
-    let cursor_char = state.command_buffer.text.chars().nth(state.command_buffer.cursor);
-    let after_cursor: String = state.command_buffer.text.chars().skip(state.command_buffer.cursor + 1).collect();
+    let before_cursor: String = state
+        .command_buffer
+        .text
+        .chars()
+        .take(state.command_buffer.cursor)
+        .collect();
+    let cursor_char = state
+        .command_buffer
+        .text
+        .chars()
+        .nth(state.command_buffer.cursor);
+    let after_cursor: String = state
+        .command_buffer
+        .text
+        .chars()
+        .skip(state.command_buffer.cursor + 1)
+        .collect();
 
     let prefix = "> ";
     let before_text = format!("{}{}", prefix, before_cursor);
@@ -145,7 +163,8 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
 
     let scroll_x = if total_width > input_display_width {
         if before_width + cursor_display_w > input_display_width {
-            (before_width + cursor_display_w - input_display_width + 3).min(total_width - input_display_width) as u16
+            (before_width + cursor_display_w - input_display_width + 3)
+                .min(total_width - input_display_width) as u16
         } else {
             0u16
         }
@@ -158,28 +177,31 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         .bg(theme.success)
         .add_modifier(Modifier::BOLD);
 
-    let sel_style = Style::default()
-        .fg(theme.bg)
-        .bg(theme.success);
+    let sel_style = Style::default().fg(theme.bg).bg(theme.success);
 
     let input_line = if state.focus_zone == FocusZone::CommandInput {
         let sel = state.command_buffer.selection_range();
         let chars: Vec<char> = state.command_buffer.text.chars().collect();
-        let mut spans: Vec<Span<'_>> = vec![
-            Span::styled(prefix, input_style),
-        ];
+        let mut spans: Vec<Span<'_>> = vec![Span::styled(prefix, input_style)];
         for (i, ch) in chars.iter().enumerate() {
             let style = if i == state.command_buffer.cursor {
                 cursor_highlight
             } else if let Some((s, e)) = sel {
-                if i >= s && i < e { sel_style } else { input_style }
+                if i >= s && i < e {
+                    sel_style
+                } else {
+                    input_style
+                }
             } else {
                 input_style
             };
             spans.push(Span::styled(ch.to_string(), style));
         }
         if state.command_buffer.cursor >= chars.len() {
-            spans.push(Span::styled("▎".to_string(), Style::default().fg(theme.success)));
+            spans.push(Span::styled(
+                "▎".to_string(),
+                Style::default().fg(theme.success),
+            ));
         }
         Line::from(spans)
     } else {
@@ -218,12 +240,15 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
         spans.push(Span::styled(" ", Style::default().bg(theme.secondary)));
     }
 
-    let total_btn_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| button_total_width(l) + 1).sum();
+    let total_btn_width: u16 = BUTTON_DEFS
+        .iter()
+        .map(|(l, _)| button_total_width(l) + 1)
+        .sum();
     let padding = buttons_area.width.saturating_sub(total_btn_width) / 2;
 
     let mut padded_spans = vec![Span::styled(
         " ".repeat(padding as usize),
-        Style::default().bg(theme.secondary)
+        Style::default().bg(theme.secondary),
     )];
     padded_spans.extend(spans);
 
@@ -265,7 +290,6 @@ pub fn render_command_bar(frame: &mut Frame, input_area: ratatui::layout::Rect, 
             );
         }
     }
-
 }
 
 #[cfg(test)]

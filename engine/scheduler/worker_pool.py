@@ -33,7 +33,7 @@ class WorkerPoolManager:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue,
+        sc_queue: queue.Queue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         barrier_passed_event: threading.Event,
@@ -73,6 +73,18 @@ class WorkerPoolManager:
     def set_meshing_monitor(self, meshing_monitor) -> None:
         """注入 MeshingMonitor 实例。由 PipelineScheduler 在创建后调用。"""
         self._meshing_monitor = meshing_monitor
+
+    def join_worker_threads(self, timeout: float = 3.0) -> None:
+        """等待所有工作线程退出。
+
+        供外部模块（如 PipelineScheduler.stop()）调用，避免直接访问私有成员。
+
+        Args:
+            timeout: 每个线程的最大等待秒数
+        """
+        for t in self._worker_threads:
+            if t.is_alive():
+                t.join(timeout=timeout)
 
     # ------------------------------------------------------------------
     # 工作线程池管理

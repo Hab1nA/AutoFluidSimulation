@@ -30,9 +30,7 @@ pub fn save_config(config: &SettingsConfig) -> Result<(), String> {
 }
 
 pub fn env_file_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join(".env")
+    std::env::current_dir().unwrap_or_default().join(".env")
 }
 
 pub fn read_env_password() -> String {
@@ -66,7 +64,10 @@ pub fn write_env_password(password: &str) -> Result<(), String> {
     let new_line = format!("{}{}", key, password);
 
     if let Some(line_start) = contents.find(key) {
-        let line_end = contents[line_start..].find('\n').map(|i| line_start + i).unwrap_or(contents.len());
+        let line_end = contents[line_start..]
+            .find('\n')
+            .map(|i| line_start + i)
+            .unwrap_or(contents.len());
         contents.replace_range(line_start..line_end, &new_line);
     } else {
         if !contents.is_empty() && !contents.ends_with('\n') {

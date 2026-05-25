@@ -107,6 +107,7 @@ pub struct EngineInfo {
     pub engine_status: String,
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
+    pub pipeline_started: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -181,8 +182,14 @@ pub enum UiMode {
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    ResetStep { config_name: String, step_name: Option<String> },
-    CleanStep { step_name: String, config_name: Option<serde_json::Value> },
+    ResetStep {
+        config_name: String,
+        step_name: Option<String>,
+    },
+    CleanStep {
+        step_name: String,
+        config_name: Option<serde_json::Value>,
+    },
     FullQuit,
     StopDaemon,
 }
@@ -287,6 +294,10 @@ impl AppState {
                 .get("barrier_passed")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            self.engine_info.pipeline_started = obj
+                .get("pipeline_started")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
         }
         self.needs_redraw = true;
     }
@@ -304,7 +315,11 @@ impl AppState {
             return "  引擎: 未连接  │  请先启动 Daemon".to_string();
         }
         let engine_status = engine_status_display(&self.engine_info.engine_status);
-        let barrier = if self.engine_info.barrier_passed { "已通过" } else { "未通过" };
+        let barrier = if self.engine_info.barrier_passed {
+            "已通过"
+        } else {
+            "未通过"
+        };
         format!(
             "  引擎: {}  │  构型数: {}  │  屏障: {}",
             engine_status,

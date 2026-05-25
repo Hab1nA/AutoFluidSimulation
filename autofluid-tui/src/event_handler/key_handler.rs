@@ -24,10 +24,6 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
 
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            state.should_quit = true;
-            AppAction::Quit
-        }
         KeyCode::Tab => {
             state.focus_zone = state.focus_zone.cycle_next();
             state.needs_redraw = true;
@@ -37,6 +33,14 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.focus_zone = state.focus_zone.cycle_prev();
             state.needs_redraw = true;
             AppAction::None
+        }
+        KeyCode::Char('c')
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && state.focus_zone != FocusZone::CommandInput =>
+        {
+            // Ctrl+C 退出（命令输入区的 Ctrl+C 由 handle_command_input 处理为复制）
+            state.should_quit = true;
+            AppAction::Quit
         }
         _ => match state.focus_zone {
             FocusZone::CommandInput => handle_command_input(key, state),
@@ -198,24 +202,44 @@ fn handle_command_passthrough(key: KeyCode, state: &mut AppState) -> AppAction {
 
 struct TableScroll<'a>(&'a mut AppState);
 impl ScrollArea for TableScroll<'_> {
-    fn offset(&self) -> u16 { self.0.table_scroll_offset }
-    fn set_offset(&mut self, val: u16) { self.0.table_scroll_offset = val; }
+    fn offset(&self) -> u16 {
+        self.0.table_scroll_offset
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.table_scroll_offset = val;
+    }
 }
 
 struct InfoLogScroll<'a>(&'a mut AppState);
 impl ScrollArea for InfoLogScroll<'_> {
-    fn offset(&self) -> u16 { self.0.info_log_scroll }
-    fn set_offset(&mut self, val: u16) { self.0.info_log_scroll = val; }
-    fn disable_auto_scroll(&mut self) { self.0.info_log_auto_scroll = false; }
-    fn handle_end(&mut self) { self.0.info_log_auto_scroll = true; }
+    fn offset(&self) -> u16 {
+        self.0.info_log_scroll
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.info_log_scroll = val;
+    }
+    fn disable_auto_scroll(&mut self) {
+        self.0.info_log_auto_scroll = false;
+    }
+    fn handle_end(&mut self) {
+        self.0.info_log_auto_scroll = true;
+    }
 }
 
 struct DetailLogScroll<'a>(&'a mut AppState);
 impl ScrollArea for DetailLogScroll<'_> {
-    fn offset(&self) -> u16 { self.0.detail_log_scroll }
-    fn set_offset(&mut self, val: u16) { self.0.detail_log_scroll = val; }
-    fn disable_auto_scroll(&mut self) { self.0.detail_log_auto_scroll = false; }
-    fn handle_end(&mut self) { self.0.detail_log_auto_scroll = true; }
+    fn offset(&self) -> u16 {
+        self.0.detail_log_scroll
+    }
+    fn set_offset(&mut self, val: u16) {
+        self.0.detail_log_scroll = val;
+    }
+    fn disable_auto_scroll(&mut self) {
+        self.0.detail_log_auto_scroll = false;
+    }
+    fn handle_end(&mut self) {
+        self.0.detail_log_auto_scroll = true;
+    }
 }
 
 // ── 简化后的各区域处理函数 ─────────────────────────────────────
@@ -253,19 +277,18 @@ fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
     handle_command_passthrough(key.code, state)
 }
 
-fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
-    match key.code {
+/// 处理对话框通用滚动键（Up/Down/PageUp/PageDown/Home/End），返回是否已处理。
+fn handle_dialog_scroll_keys(key: KeyCode, state: &mut AppState) -> bool {
+    match key {
         KeyCode::Up => {
             if state.dialog_scroll > 0 {
                 state.dialog_scroll -= 1;
                 state.needs_redraw = true;
             }
-            AppAction::None
         }
         KeyCode::Down => {
             state.dialog_scroll = state.dialog_scroll.saturating_add(1);
             state.needs_redraw = true;
-            AppAction::None
         }
         KeyCode::PageUp => {
             if state.dialog_scroll >= 10 {
@@ -274,30 +297,36 @@ fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
                 state.dialog_scroll = 0;
             }
             state.needs_redraw = true;
-            AppAction::None
         }
         KeyCode::PageDown => {
             state.dialog_scroll = state.dialog_scroll.saturating_add(10);
             state.needs_redraw = true;
-            AppAction::None
         }
         KeyCode::Home => {
             state.dialog_scroll = 0;
             state.needs_redraw = true;
-            AppAction::None
         }
         KeyCode::End => {
             state.dialog_scroll = u16::MAX;
             state.needs_redraw = true;
-            AppAction::None
         }
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
+        _ => return false,
+    }
+    true
+}
+
+fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
+    if handle_dialog_scroll_keys(key.code, state) {
+        return AppAction::None;
+    }
+    match key.code {
+        KeyCode::Char('y' | 'Y') => {
             state.ui_mode = UiMode::Normal;
             state.confirm_message = None;
             state.dialog_scroll = 0;
             AppAction::Confirm
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+        KeyCode::Char('n' | 'N') | KeyCode::Esc => {
             state.ui_mode = UiMode::Normal;
             state.confirm_message = None;
             state.confirm_callback = None;
@@ -309,43 +338,10 @@ fn handle_key_confirm(key: KeyEvent, state: &mut AppState) -> AppAction {
 }
 
 fn handle_key_check_result(key: KeyEvent, state: &mut AppState) -> AppAction {
+    if handle_dialog_scroll_keys(key.code, state) {
+        return AppAction::None;
+    }
     match key.code {
-        KeyCode::Up => {
-            if state.dialog_scroll > 0 {
-                state.dialog_scroll -= 1;
-                state.needs_redraw = true;
-            }
-            AppAction::None
-        }
-        KeyCode::Down => {
-            state.dialog_scroll = state.dialog_scroll.saturating_add(1);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageUp => {
-            if state.dialog_scroll >= 10 {
-                state.dialog_scroll -= 10;
-            } else {
-                state.dialog_scroll = 0;
-            }
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::PageDown => {
-            state.dialog_scroll = state.dialog_scroll.saturating_add(10);
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::Home => {
-            state.dialog_scroll = 0;
-            state.needs_redraw = true;
-            AppAction::None
-        }
-        KeyCode::End => {
-            state.dialog_scroll = u16::MAX;
-            state.needs_redraw = true;
-            AppAction::None
-        }
         KeyCode::Esc => {
             state.ui_mode = UiMode::Normal;
             state.check_data = None;
@@ -391,6 +387,16 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 
     match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+C 在设置页非编辑态：退出设置
+            if let Some(ref mut ss) = state.settings_state {
+                if ss.dirty {
+                    ss.cancel_edit_current_field();
+                }
+            }
+            state.close_settings();
+            AppAction::DiscardSettings
+        }
         KeyCode::Esc => {
             if let Some(ref mut ss) = state.settings_state {
                 if ss.dirty {

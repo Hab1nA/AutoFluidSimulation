@@ -150,6 +150,9 @@ class MockTaskRunner:
     def get_ssh(self):
         return None
 
+    def get_remote_executor(self):
+        return self._remote_executor
+
     def set_control_events(self, paused_event, stopped_event):
         self._paused_event = paused_event
         self._stopped_event = stopped_event

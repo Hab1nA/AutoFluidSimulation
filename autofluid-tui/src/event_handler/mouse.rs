@@ -5,18 +5,18 @@
 use crossterm::event::{MouseEvent, MouseEventKind};
 
 use crate::ipc::client::IpcClient;
+use crate::settings::SettingsState;
+use crate::state::app_state::{FocusZone, ScrollbarDragZone, UiMode};
 use crate::state::AppState;
 use crate::state::LogBuffer;
-use crate::state::app_state::{FocusZone, UiMode, ScrollbarDragZone};
-use crate::settings::SettingsState;
-use crate::ui::layout::AppLayout;
+use crate::ui;
 use crate::ui::command_bar;
 use crate::ui::command_bar::BUTTON_DEFS;
-use crate::ui::scrollbar::{VerticalScrollbar, HorizontalScrollbar};
-use crate::ui;
+use crate::ui::layout::AppLayout;
+use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
 
-use crate::point_in_rect;
 use crate::event_handler::command;
+use crate::point_in_rect;
 
 // ====================================================================
 // 公共入口
@@ -59,10 +59,27 @@ pub fn handle_mouse(
             handle_drag(state, col, row);
         }
         MouseEventKind::Down(_button) => {
-            handle_mouse_down(state, log_buffer, ipc, rt, full_quit, col, row, &layout, area, in_buttons, in_table, in_info, in_detail, in_cmd_input);
+            handle_mouse_down(
+                state,
+                log_buffer,
+                ipc,
+                rt,
+                full_quit,
+                col,
+                row,
+                &layout,
+                area,
+                in_buttons,
+                in_table,
+                in_info,
+                in_detail,
+                in_cmd_input,
+            );
         }
         MouseEventKind::Up(_button) => {
-            handle_mouse_up(state, log_buffer, ipc, rt, full_quit, col, row, &layout, in_buttons);
+            handle_mouse_up(
+                state, log_buffer, ipc, rt, full_quit, col, row, &layout, in_buttons,
+            );
         }
         _ => {}
     }
@@ -125,10 +142,17 @@ fn handle_mouse_moved(
 
         // 按钮 / Daemon 菜单 hover
         if state.daemon_menu_open {
-            state.hovered_daemon_menu_item = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons);
+            state.hovered_daemon_menu_item =
+                command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons);
             if let Some(btn_idx) = command_bar::daemon_button_index() {
                 state.hovered_button = command_bar::button_bounds(layout.quick_buttons, btn_idx)
-                    .and_then(|rect| if point_in_rect(col, row, rect) { Some(btn_idx as u8) } else { None });
+                    .and_then(|rect| {
+                        if point_in_rect(col, row, rect) {
+                            Some(btn_idx as u8)
+                        } else {
+                            None
+                        }
+                    });
             } else {
                 state.hovered_button = None;
             }
@@ -143,20 +167,29 @@ fn handle_mouse_moved(
     } // end Normal-mode-only hover detection
 
     // 对话框按钮 hover
-    if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+    if state.ui_mode == UiMode::ConfirmDialog
+        || state.ui_mode == UiMode::CheckResult
+        || state.ui_mode == UiMode::Settings
+    {
         state.hovered_dialog_button = detect_dialog_button(col, row, area, state);
     } else {
         state.hovered_dialog_button = None;
     }
 
     // Settings 模式下检测字段 hover
-    let prev_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+    let prev_hovered_field = state
+        .settings_state
+        .as_ref()
+        .and_then(|ss| ss.hovered_field);
     if state.ui_mode == UiMode::Settings {
         if let Some(ref mut ss) = state.settings_state {
             ss.hovered_field = detect_settings_field(col, row, area, ss);
         }
     }
-    let new_hovered_field = state.settings_state.as_ref().and_then(|ss| ss.hovered_field);
+    let new_hovered_field = state
+        .settings_state
+        .as_ref()
+        .and_then(|ss| ss.hovered_field);
 
     if state.hovered_table_row != prev_hover_row
         || state.hovered_button != prev_hover_btn
@@ -180,7 +213,10 @@ fn handle_scroll_up(
     in_detail: bool,
     modifiers: crossterm::event::KeyModifiers,
 ) {
-    if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+    if state.ui_mode == UiMode::ConfirmDialog
+        || state.ui_mode == UiMode::CheckResult
+        || state.ui_mode == UiMode::Settings
+    {
         if state.ui_mode == UiMode::Settings {
             if let Some(ref mut ss) = state.settings_state {
                 if ss.scroll > 0 {
@@ -228,7 +264,10 @@ fn handle_scroll_down(
     in_detail: bool,
     modifiers: crossterm::event::KeyModifiers,
 ) {
-    if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+    if state.ui_mode == UiMode::ConfirmDialog
+        || state.ui_mode == UiMode::CheckResult
+        || state.ui_mode == UiMode::Settings
+    {
         if state.ui_mode == UiMode::Settings {
             if let Some(ref mut ss) = state.settings_state {
                 ss.scroll = ss.scroll.saturating_add(1);
@@ -270,42 +309,132 @@ fn handle_drag(state: &mut AppState, col: u16, row: u16) {
         use ScrollbarDragZone::*;
         let result: Option<(u16, FocusZone)> = match zone {
             TableVertical => {
-                state.scrollbar_info.table_v.as_ref().map(|(area, total, visible, _)| {
-                    (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::Table)
-                })
+                state
+                    .scrollbar_info
+                    .table_v
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_vertical_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                row.saturating_sub(area.y),
+                            ),
+                            FocusZone::Table,
+                        )
+                    })
             }
             InfoVertical => {
-                state.scrollbar_info.info_v.as_ref().map(|(area, total, visible, _)| {
-                    (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::InfoLog)
-                })
+                state
+                    .scrollbar_info
+                    .info_v
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_vertical_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                row.saturating_sub(area.y),
+                            ),
+                            FocusZone::InfoLog,
+                        )
+                    })
             }
             InfoHorizontal => {
-                state.scrollbar_info.info_h.as_ref().map(|(area, total, visible, _)| {
-                    (sb_horizontal_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, col.saturating_sub(area.x)), FocusZone::InfoLog)
-                })
+                state
+                    .scrollbar_info
+                    .info_h
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_horizontal_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                col.saturating_sub(area.x),
+                            ),
+                            FocusZone::InfoLog,
+                        )
+                    })
             }
             DetailVertical => {
-                state.scrollbar_info.detail_v.as_ref().map(|(area, total, visible, _)| {
-                    (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), FocusZone::DetailLog)
-                })
+                state
+                    .scrollbar_info
+                    .detail_v
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_vertical_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                row.saturating_sub(area.y),
+                            ),
+                            FocusZone::DetailLog,
+                        )
+                    })
             }
             DetailHorizontal => {
-                state.scrollbar_info.detail_h.as_ref().map(|(area, total, visible, _)| {
-                    (sb_horizontal_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, col.saturating_sub(area.x)), FocusZone::DetailLog)
-                })
+                state
+                    .scrollbar_info
+                    .detail_h
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_horizontal_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                col.saturating_sub(area.x),
+                            ),
+                            FocusZone::DetailLog,
+                        )
+                    })
             }
             DialogVertical => {
-                state.scrollbar_info.dialog_v.as_ref().map(|(area, total, visible, _)| {
-                    (sb_vertical_scroll_from_drag(area, *total, *visible, start_scroll, start_pos, row.saturating_sub(area.y)), state.focus_zone)
-                })
+                state
+                    .scrollbar_info
+                    .dialog_v
+                    .as_ref()
+                    .map(|(area, total, visible, _)| {
+                        (
+                            sb_vertical_scroll_from_drag(
+                                area,
+                                *total,
+                                *visible,
+                                start_scroll,
+                                start_pos,
+                                row.saturating_sub(area.y),
+                            ),
+                            state.focus_zone,
+                        )
+                    })
             }
         };
         if let Some((new_scroll, focus)) = result {
             match zone {
                 TableVertical => state.table_scroll_offset = new_scroll,
-                InfoVertical => { state.info_log_scroll = new_scroll; state.info_log_auto_scroll = false; }
+                InfoVertical => {
+                    state.info_log_scroll = new_scroll;
+                    state.info_log_auto_scroll = false;
+                }
                 InfoHorizontal => state.info_log_hscroll = new_scroll,
-                DetailVertical => { state.detail_log_scroll = new_scroll; state.detail_log_auto_scroll = false; }
+                DetailVertical => {
+                    state.detail_log_scroll = new_scroll;
+                    state.detail_log_auto_scroll = false;
+                }
                 DetailHorizontal => state.detail_log_hscroll = new_scroll,
                 DialogVertical => {
                     state.dialog_scroll = new_scroll;
@@ -344,7 +473,10 @@ fn handle_mouse_down(
     in_cmd_input: bool,
 ) {
     // 对话框/设置模式下检测按钮点击
-    if state.ui_mode == UiMode::ConfirmDialog || state.ui_mode == UiMode::CheckResult || state.ui_mode == UiMode::Settings {
+    if state.ui_mode == UiMode::ConfirmDialog
+        || state.ui_mode == UiMode::CheckResult
+        || state.ui_mode == UiMode::Settings
+    {
         if let Some(btn_idx) = detect_dialog_button(col, row, area, state) {
             state.clicked_dialog_button = Some(btn_idx);
             state.dialog_click_time = Some(std::time::Instant::now());
@@ -362,11 +494,22 @@ fn handle_mouse_down(
         if state.ui_mode == UiMode::Settings {
             if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
                 if sb_vertical_track_hit(area, col, row) {
-                    let current_scroll = state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16);
-                    if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                        state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                    let current_scroll = state
+                        .settings_state
+                        .as_ref()
+                        .map(|ss| ss.scroll)
+                        .unwrap_or(*scroll as u16);
+                    if let Some(rel_pos) =
+                        sb_vertical_hit(area, *total, *visible, *scroll, col, row)
+                    {
+                        state.scrollbar_drag = Some((
+                            ScrollbarDragZone::DialogVertical,
+                            rel_pos as u16,
+                            current_scroll,
+                        ));
                     } else {
-                        let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                        let new_scroll =
+                            sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
                         if let Some(ref mut ss) = state.settings_state {
                             ss.scroll = new_scroll;
                         }
@@ -393,7 +536,9 @@ fn handle_mouse_down(
                     let now = std::time::Instant::now();
                     // Double-click: same field clicked within 400ms
                     let is_double = ss.last_clicked_field == Some((cat_idx, fi))
-                        && ss.last_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+                        && ss
+                            .last_click_time
+                            .is_some_and(|t| now.duration_since(t).as_millis() < 400);
                     if is_double {
                         ss.focus.category_index = cat_idx;
                         ss.focus.field_index = fi;
@@ -426,7 +571,8 @@ fn handle_mouse_down(
 
     // Daemon 菜单打开时的点击处理
     if state.ui_mode == UiMode::Normal && state.daemon_menu_open {
-        if let Some(menu_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+        if let Some(menu_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons)
+        {
             state.clicked_daemon_menu_item = Some(menu_idx);
             state.daemon_menu_click_time = Some(std::time::Instant::now());
             state.needs_redraw = true;
@@ -486,9 +632,14 @@ fn detect_panel_scrollbars(
     if let Some((area, total, visible, scroll)) = &sb_info.table_v {
         if sb_vertical_track_hit(area, col, row) {
             if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                state.scrollbar_drag = Some((ScrollbarDragZone::TableVertical, rel_pos as u16, state.table_scroll_offset));
+                state.scrollbar_drag = Some((
+                    ScrollbarDragZone::TableVertical,
+                    rel_pos as u16,
+                    state.table_scroll_offset,
+                ));
             } else {
-                state.table_scroll_offset = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                state.table_scroll_offset =
+                    sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
             }
             state.focus_zone = FocusZone::Table;
             state.needs_redraw = true;
@@ -499,9 +650,14 @@ fn detect_panel_scrollbars(
         if let Some((area, total, visible, scroll)) = &sb_info.info_v {
             if sb_vertical_track_hit(area, col, row) {
                 if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                    state.scrollbar_drag = Some((ScrollbarDragZone::InfoVertical, rel_pos as u16, state.info_log_scroll));
+                    state.scrollbar_drag = Some((
+                        ScrollbarDragZone::InfoVertical,
+                        rel_pos as u16,
+                        state.info_log_scroll,
+                    ));
                 } else {
-                    state.info_log_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    state.info_log_scroll =
+                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
                 }
                 state.info_log_auto_scroll = false;
                 state.focus_zone = FocusZone::InfoLog;
@@ -513,10 +669,16 @@ fn detect_panel_scrollbars(
     if !sb_detected {
         if let Some((area, total, visible, scroll)) = &sb_info.info_h {
             if sb_horizontal_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row) {
-                    state.scrollbar_drag = Some((ScrollbarDragZone::InfoHorizontal, rel_pos as u16, state.info_log_hscroll));
+                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row)
+                {
+                    state.scrollbar_drag = Some((
+                        ScrollbarDragZone::InfoHorizontal,
+                        rel_pos as u16,
+                        state.info_log_hscroll,
+                    ));
                 } else {
-                    state.info_log_hscroll = sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                    state.info_log_hscroll =
+                        sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
                 }
                 state.focus_zone = FocusZone::InfoLog;
                 state.needs_redraw = true;
@@ -528,9 +690,14 @@ fn detect_panel_scrollbars(
         if let Some((area, total, visible, scroll)) = &sb_info.detail_v {
             if sb_vertical_track_hit(area, col, row) {
                 if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                    state.scrollbar_drag = Some((ScrollbarDragZone::DetailVertical, rel_pos as u16, state.detail_log_scroll));
+                    state.scrollbar_drag = Some((
+                        ScrollbarDragZone::DetailVertical,
+                        rel_pos as u16,
+                        state.detail_log_scroll,
+                    ));
                 } else {
-                    state.detail_log_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    state.detail_log_scroll =
+                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
                     state.detail_log_auto_scroll = false;
                 }
                 state.focus_zone = FocusZone::DetailLog;
@@ -542,10 +709,16 @@ fn detect_panel_scrollbars(
     if !sb_detected {
         if let Some((area, total, visible, scroll)) = &sb_info.detail_h {
             if sb_horizontal_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row) {
-                    state.scrollbar_drag = Some((ScrollbarDragZone::DetailHorizontal, rel_pos as u16, state.detail_log_hscroll));
+                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row)
+                {
+                    state.scrollbar_drag = Some((
+                        ScrollbarDragZone::DetailHorizontal,
+                        rel_pos as u16,
+                        state.detail_log_hscroll,
+                    ));
                 } else {
-                    state.detail_log_hscroll = sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                    state.detail_log_hscroll =
+                        sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
                 }
                 state.focus_zone = FocusZone::DetailLog;
                 state.needs_redraw = true;
@@ -557,14 +730,23 @@ fn detect_panel_scrollbars(
         if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
             if sb_vertical_track_hit(area, col, row) {
                 let current_scroll = if state.ui_mode == UiMode::Settings {
-                    state.settings_state.as_ref().map(|ss| ss.scroll).unwrap_or(*scroll as u16)
+                    state
+                        .settings_state
+                        .as_ref()
+                        .map(|ss| ss.scroll)
+                        .unwrap_or(*scroll as u16)
                 } else {
                     state.dialog_scroll
                 };
                 if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
-                    state.scrollbar_drag = Some((ScrollbarDragZone::DialogVertical, rel_pos as u16, current_scroll));
+                    state.scrollbar_drag = Some((
+                        ScrollbarDragZone::DialogVertical,
+                        rel_pos as u16,
+                        current_scroll,
+                    ));
                 } else {
-                    let new_scroll = sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    let new_scroll =
+                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
                     if state.ui_mode == UiMode::Settings {
                         if let Some(ref mut ss) = state.settings_state {
                             ss.scroll = new_scroll;
@@ -598,7 +780,9 @@ fn handle_detail_click(
     state.clicked_detail_row = Some(visual_line);
     state.detail_click_time = Some(now);
     let is_double_click = state.last_detail_click_row == Some(row)
-        && state.last_detail_click_time.is_some_and(|t| now.duration_since(t).as_millis() < 400);
+        && state
+            .last_detail_click_time
+            .is_some_and(|t| now.duration_since(t).as_millis() < 400);
     if is_double_click {
         let max_width = layout.detail_panel.width.saturating_sub(2) as usize;
         if let Some(msg) = ui::logs::get_raw_message_at_visual_line(
@@ -609,7 +793,15 @@ fn handle_detail_click(
             visual_line as usize,
         ) {
             if clipboard_win::set_clipboard_string(&msg).is_ok() {
-                log_buffer.push_info(format!("已复制到剪贴板: {}", if msg.chars().count() > 60 { let s: String = msg.chars().take(60).collect(); format!("{}...", s) } else { msg.clone() }));
+                log_buffer.push_info(format!(
+                    "已复制到剪贴板: {}",
+                    if msg.chars().count() > 60 {
+                        let s: String = msg.chars().take(60).collect();
+                        format!("{}...", s)
+                    } else {
+                        msg.clone()
+                    }
+                ));
             }
         }
         state.last_detail_click_time = None;
@@ -655,7 +847,9 @@ fn handle_mouse_up(
     // Daemon 菜单项释放
     if let Some(menu_idx) = state.clicked_daemon_menu_item {
         if state.daemon_menu_open {
-            if let Some(hover_idx) = command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons) {
+            if let Some(hover_idx) =
+                command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons)
+            {
                 if hover_idx == menu_idx {
                     if let Some(cmd) = command_bar::daemon_menu_command(menu_idx) {
                         state.pending_command = Some(cmd.to_string());
@@ -712,7 +906,10 @@ pub fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
     }
 
     let rel_col = col.saturating_sub(buttons_area.x);
-    let total_width: u16 = BUTTON_DEFS.iter().map(|(l, _)| ui::command_bar::button_total_width(l) + 1).sum();
+    let total_width: u16 = BUTTON_DEFS
+        .iter()
+        .map(|(l, _)| ui::command_bar::button_total_width(l) + 1)
+        .sum();
     let padding = buttons_area.width.saturating_sub(total_width) / 2;
 
     let mut offset = padding;
@@ -726,7 +923,12 @@ pub fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
     None
 }
 
-pub fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, state: &AppState) -> Option<u8> {
+pub fn detect_dialog_button(
+    col: u16,
+    row: u16,
+    area: ratatui::layout::Rect,
+    state: &AppState,
+) -> Option<u8> {
     let dialog_area = match state.ui_mode {
         UiMode::ConfirmDialog => ui::dialogs::centered_rect(80, 40, area),
         UiMode::CheckResult => ui::dialogs::centered_rect(90, 90, area),
@@ -792,7 +994,17 @@ pub fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, sta
             let save_w = unicode_width::UnicodeWidthStr::width(save_label) as u16;
             let cancel_w = unicode_width::UnicodeWidthStr::width(cancel_label) as u16;
             let gap: u16 = 4;
-            let total_w = save_w + cancel_w + gap;
+            let mut total_w = save_w + cancel_w + gap;
+
+            // 附加消息宽度（与渲染逻辑保持一致）
+            if let Some(ref ss) = state.settings_state {
+                if let Some(ref err) = ss.save_error {
+                    total_w += 2 + unicode_width::UnicodeWidthStr::width(err.as_str()) as u16;
+                } else if ss.saved {
+                    total_w += 2 + unicode_width::UnicodeWidthStr::width("✅ 已保存") as u16;
+                }
+            }
+
             let start_x = inner.x + (inner.width.saturating_sub(total_w)) / 2;
 
             if col >= start_x && col < start_x + save_w {
@@ -809,7 +1021,12 @@ pub fn detect_dialog_button(col: u16, row: u16, area: ratatui::layout::Rect, sta
 
 /// 检测鼠标是否悬停在 Settings 对话框的某一行字段上。
 /// 返回 (category_index, field_index)
-pub fn detect_settings_field(col: u16, row: u16, area: ratatui::layout::Rect, ss: &SettingsState) -> Option<(usize, usize)> {
+pub fn detect_settings_field(
+    col: u16,
+    row: u16,
+    area: ratatui::layout::Rect,
+    ss: &SettingsState,
+) -> Option<(usize, usize)> {
     let dialog_area = ui::dialogs::centered_rect(90, 90, area);
     if !point_in_rect(col, row, dialog_area) {
         return None;
@@ -818,7 +1035,11 @@ pub fn detect_settings_field(col: u16, row: u16, area: ratatui::layout::Rect, ss
     let top_height: u16 = 2; // title + separator
     let content_y = inner_y + top_height;
     let bottom_height: u16 = 2;
-    let content_height = dialog_area.height.saturating_sub(2).saturating_sub(top_height).saturating_sub(bottom_height);
+    let content_height = dialog_area
+        .height
+        .saturating_sub(2)
+        .saturating_sub(top_height)
+        .saturating_sub(bottom_height);
     let content_bottom = content_y + content_height;
 
     if row < content_y || row >= content_bottom {
@@ -844,40 +1065,39 @@ pub fn handle_dialog_button_click(
     full_quit: &mut bool,
 ) {
     match state.ui_mode {
-        UiMode::ConfirmDialog => {
-            match btn_idx {
-                0 => {
-                    if let Some(callback) = state.confirm_callback.take() {
-                        let result = rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
-                        match result {
-                            command::CommandResult::FullQuit => {
-                                *full_quit = true;
-                                state.should_quit = true;
-                            }
-                            command::CommandResult::StopDaemon => {
-                                if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.full_quit());
-                                    rt.block_on(ipc.disconnect());
-                                }
-                                state.connected = false;
-                                log_buffer.push_info("✅ 后台引擎已停止".to_string());
-                            }
-                            _ => {}
+        UiMode::ConfirmDialog => match btn_idx {
+            0 => {
+                if let Some(callback) = state.confirm_callback.take() {
+                    let result =
+                        rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
+                    match result {
+                        command::CommandResult::FullQuit => {
+                            *full_quit = true;
+                            state.should_quit = true;
                         }
+                        command::CommandResult::StopDaemon => {
+                            if ipc.is_connected() {
+                                let _ = rt.block_on(ipc.full_quit());
+                                rt.block_on(ipc.disconnect());
+                            }
+                            state.connected = false;
+                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                        }
+                        _ => {}
                     }
-                    state.ui_mode = UiMode::Normal;
-                    state.confirm_message = None;
-                    state.dialog_scroll = 0;
                 }
-                1 => {
-                    state.ui_mode = UiMode::Normal;
-                    state.confirm_message = None;
-                    state.confirm_callback = None;
-                    state.dialog_scroll = 0;
-                }
-                _ => {}
+                state.ui_mode = UiMode::Normal;
+                state.confirm_message = None;
+                state.dialog_scroll = 0;
             }
-        }
+            1 => {
+                state.ui_mode = UiMode::Normal;
+                state.confirm_message = None;
+                state.confirm_callback = None;
+                state.dialog_scroll = 0;
+            }
+            _ => {}
+        },
         UiMode::CheckResult => {
             if btn_idx == 0 {
                 state.ui_mode = UiMode::Normal;
@@ -890,6 +1110,10 @@ pub fn handle_dialog_button_click(
                 0 => {
                     // Save
                     if let Some(ref mut ss) = state.settings_state {
+                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
+                        if ss.is_editing_field() {
+                            ss.commit_edit_current_field();
+                        }
                         ss.validation_errors.clear();
                         ss.save_error = None;
                         match ss.save() {
@@ -898,7 +1122,8 @@ pub fn handle_dialog_button_click(
                                 if ipc.is_connected() {
                                     let _ = rt.block_on(ipc.reload_config());
                                 }
-                                log_buffer.push_info(" 设置已保存到 autofluid_config.toml".to_string());
+                                log_buffer
+                                    .push_info(" 设置已保存到 autofluid_config.toml".to_string());
                                 log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
                             }
                             Err(errors) => {
@@ -931,11 +1156,24 @@ fn close_daemon_menu(state: &mut AppState) {
 // 滚动条命中检测与拖拽辅助函数
 // ====================================================================
 
-pub fn sb_vertical_hit(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16, row: u16) -> Option<usize> {
+pub fn sb_vertical_hit(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
     if col != area.x || row < area.y || row >= area.y + area.height {
         return None;
     }
-    let sb = VerticalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
+    let sb = VerticalScrollbar {
+        total,
+        visible,
+        scroll,
+        track_color: None,
+        thumb_color: None,
+    };
     let ti = sb.thumb_info(area.height as usize)?;
     let rel = (row - area.y) as usize;
     if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
@@ -945,11 +1183,24 @@ pub fn sb_vertical_hit(area: &ratatui::layout::Rect, total: usize, visible: usiz
     }
 }
 
-pub fn sb_horizontal_hit(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16, row: u16) -> Option<usize> {
+pub fn sb_horizontal_hit(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    col: u16,
+    row: u16,
+) -> Option<usize> {
     if row != area.y || col < area.x || col >= area.x + area.width {
         return None;
     }
-    let sb = HorizontalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
+    let sb = HorizontalScrollbar {
+        total,
+        visible,
+        scroll,
+        track_color: None,
+        thumb_color: None,
+    };
     let ti = sb.thumb_info(area.width as usize)?;
     let rel = (col - area.x) as usize;
     if rel >= ti.thumb_start && rel < ti.thumb_start + ti.thumb_size {
@@ -967,8 +1218,20 @@ pub fn sb_horizontal_track_hit(area: &ratatui::layout::Rect, col: u16, row: u16)
     row == area.y && col >= area.x && col < area.x + area.width
 }
 
-pub fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, row: u16) -> u16 {
-    let sb = VerticalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
+pub fn sb_vertical_scroll_from_click(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    row: u16,
+) -> u16 {
+    let sb = VerticalScrollbar {
+        total,
+        visible,
+        scroll,
+        track_color: None,
+        thumb_color: None,
+    };
     let rel = (row.saturating_sub(area.y)) as usize;
     let track_length = area.height as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
@@ -980,8 +1243,20 @@ pub fn sb_vertical_scroll_from_click(area: &ratatui::layout::Rect, total: usize,
     }
 }
 
-pub fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usize, visible: usize, scroll: usize, col: u16) -> u16 {
-    let sb = HorizontalScrollbar { total, visible, scroll, track_color: None, thumb_color: None };
+pub fn sb_horizontal_scroll_from_click(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    scroll: usize,
+    col: u16,
+) -> u16 {
+    let sb = HorizontalScrollbar {
+        total,
+        visible,
+        scroll,
+        track_color: None,
+        thumb_color: None,
+    };
     let rel = (col.saturating_sub(area.x)) as usize;
     let track_length = area.width as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
@@ -993,24 +1268,54 @@ pub fn sb_horizontal_scroll_from_click(area: &ratatui::layout::Rect, total: usiz
     }
 }
 
-pub fn sb_vertical_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
-    let sb = VerticalScrollbar { total, visible, scroll: start_scroll as usize, track_color: None, thumb_color: None };
+pub fn sb_vertical_scroll_from_drag(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    start_scroll: u16,
+    start_pos: u16,
+    current_pos: u16,
+) -> u16 {
+    let sb = VerticalScrollbar {
+        total,
+        visible,
+        scroll: start_scroll as usize,
+        track_color: None,
+        thumb_color: None,
+    };
     let track_length = area.height as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let delta = current_pos as i32 - start_pos as i32;
-        let new_thumb_start = (ti.thumb_start as i32 + delta).max(0).min(ti.track_space as i32) as usize;
+        let new_thumb_start = (ti.thumb_start as i32 + delta)
+            .max(0)
+            .min(ti.track_space as i32) as usize;
         sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
     } else {
         start_scroll
     }
 }
 
-pub fn sb_horizontal_scroll_from_drag(area: &ratatui::layout::Rect, total: usize, visible: usize, start_scroll: u16, start_pos: u16, current_pos: u16) -> u16 {
-    let sb = HorizontalScrollbar { total, visible, scroll: start_scroll as usize, track_color: None, thumb_color: None };
+pub fn sb_horizontal_scroll_from_drag(
+    area: &ratatui::layout::Rect,
+    total: usize,
+    visible: usize,
+    start_scroll: u16,
+    start_pos: u16,
+    current_pos: u16,
+) -> u16 {
+    let sb = HorizontalScrollbar {
+        total,
+        visible,
+        scroll: start_scroll as usize,
+        track_color: None,
+        thumb_color: None,
+    };
     let track_length = area.width as usize;
     if let Some(ti) = sb.thumb_info(track_length) {
         let delta = current_pos as i32 - start_pos as i32;
-        let new_thumb_start = (ti.thumb_start as i32 + delta).max(0).min(ti.track_space as i32) as usize;
+        let new_thumb_start = (ti.thumb_start as i32 + delta)
+            .max(0)
+            .min(ti.track_space as i32) as usize;
         sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
     } else {
         start_scroll

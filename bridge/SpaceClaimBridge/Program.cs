@@ -151,7 +151,7 @@ namespace AutoFluidSimulation.Bridge
   --stepdir  <STEP文件目录>       (必需)
   --scdocdir <SCDOC输出目录>      (必需)
   [--timeout <秒数>]              (可选, 默认300)
-  [--sc-exe  <SpaceClaim.exe路径>] (可选, 自动检测)
+  [--sc-exe  <SpaceClaim.exe路径>] (可选, 覆盖自动检测)
 
 常驻模式:
   --persistent                    (启用常驻模式)
@@ -185,7 +185,7 @@ namespace AutoFluidSimulation.Bridge
 
             Directory.CreateDirectory(opts.ScdocDir);
 
-            string scExe = FindSpaceClaimExe();
+            string scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -315,7 +315,7 @@ namespace AutoFluidSimulation.Bridge
 
             Directory.CreateDirectory(opts.CmdDir);
 
-            string scExe = FindSpaceClaimExe();
+            string scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -459,15 +459,22 @@ namespace AutoFluidSimulation.Bridge
             return exitCode;
         }
 
-        private static string FindSpaceClaimExe()
+        private static string FindSpaceClaimExe(string userPath = null)
         {
-            // 优先检查环境变量 AUTOFLUID_SC_EXE
+            // 1. 优先使用命令行指定的路径
+            if (!string.IsNullOrEmpty(userPath) && File.Exists(userPath))
+            {
+                Console.WriteLine($"[BRIDGE] 找到 SpaceClaim.exe (命令行): {userPath}");
+                return userPath;
+            }
+            // 2. 检查环境变量 AUTOFLUID_SC_EXE
             string envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
             if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
             {
                 Console.WriteLine($"[BRIDGE] 找到 SpaceClaim.exe (环境变量): {envPath}");
                 return envPath;
             }
+            // 3. 自动检测已知安装路径
             foreach (string p in SpaceClaimExePaths)
             {
                 if (File.Exists(p))
@@ -500,6 +507,11 @@ namespace AutoFluidSimulation.Bridge
                         // 优先匹配启动后的新进程（不在旧 PID 集合中）
                         if (!existingPids.Contains(p.Id) && p.StartTime.ToUniversalTime() >= after)
                         {
+                            // 释放其余进程，避免资源泄漏
+                            foreach (var other in procs)
+                            {
+                                if (other.Id != p.Id) other.Dispose();
+                            }
                             return p;
                         }
                     }
@@ -513,7 +525,15 @@ namespace AutoFluidSimulation.Bridge
                 {
                     if (!existingPids.Contains(p.Id))
                     {
-                        try { return p; }
+                        try
+                        {
+                            // 释放其余进程，避免资源泄漏
+                            foreach (var other in procs)
+                            {
+                                if (other.Id != p.Id) other.Dispose();
+                            }
+                            return p;
+                        }
                         catch (Exception ex)
                         {
                             Console.Error.WriteLine($"[BRIDGE] Warning: 返回进程失败: {ex.Message}");
@@ -604,12 +624,7 @@ namespace AutoFluidSimulation.Bridge
             }
 
             // Phase 3 等待时间可通过环境变量配置（默认 15 秒）
-            // AUTOFLUID_SC_GUI_STABLE_DELAY 优先，向后兼容 AUTOFLUID_SC_GUI_WAIT
-            int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 0);
-            if (guiWaitSeconds <= 0)
-            {
-                guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_WAIT", 15);
-            }
+            int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 15);
             Console.WriteLine($"[BRIDGE] Phase 3: 等待加载稳定 (延时 {guiWaitSeconds}s)...");
             Thread.Sleep(guiWaitSeconds * 1000);
             Console.WriteLine("[BRIDGE] SpaceClaim GUI 加载完成");

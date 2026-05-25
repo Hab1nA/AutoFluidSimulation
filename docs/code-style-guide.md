@@ -94,7 +94,7 @@ reset_config()                # 重置指定构型步骤
 # 内部方法
 _prepare_sw_retry()           # SW 重试准备（taskkill + 监控器重置）
 _resume_paused_steps()        # 恢复暂停的步骤（SW + SC）
-_prescan_downstream_outputs() # 预扫描输出文件（断点续传）
+_scan_completed_downstream()  # 同步下游步骤状态与文件系统
 _execute_with_retry()         # 通用重试包装器
 _execute_single_config()      # 处理单个构型（SC→Transfer→Meshing）
 _barrier_monitor_loop()       # 全局屏障监控线程

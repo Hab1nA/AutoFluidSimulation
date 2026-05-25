@@ -1,12 +1,12 @@
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::Frame;
 
-use crate::ui::scrollbar::VerticalScrollbar;
-use crate::utils::{truncate_for_display, pad_label_by_display_width};
 use crate::theme::AppTheme;
+use crate::ui::scrollbar::VerticalScrollbar;
+use crate::utils::{pad_label_by_display_width, truncate_for_display};
 
 fn symbol_is_wide(symbol: &str) -> bool {
     unicode_width::UnicodeWidthStr::width(symbol) > 1
@@ -94,7 +94,9 @@ pub fn render_confirm_dialog(
         .map(|line| {
             Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
             ))
         })
         .collect();
@@ -137,7 +139,12 @@ pub fn render_confirm_dialog(
     let separator: String = "─".repeat(inner.width as usize);
     frame.render_widget(
         Paragraph::new(Span::styled(separator, Style::default().fg(theme.gray_1))),
-        Rect { x: inner.x, y: separator_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: separator_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     let btn_y = inner.y + content_height + 1;
@@ -155,7 +162,12 @@ pub fn render_confirm_dialog(
 
     frame.render_widget(
         Paragraph::new(btn_line).alignment(Alignment::Center),
-        Rect { x: inner.x, y: btn_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: btn_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     DialogRenderInfo {
@@ -166,11 +178,15 @@ pub fn render_confirm_dialog(
     }
 }
 
-fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, theme: &AppTheme) -> Vec<Line<'static>> {
+fn build_check_content_lines(
+    data: &serde_json::Value,
+    _content_width: usize,
+    theme: &AppTheme,
+) -> Vec<Line<'static>> {
     let label_width: u16 = 20;
 
     struct CheckItem {
-        label: &'static str,
+        label: String,
         value: String,
         exists: Option<bool>,
     }
@@ -186,97 +202,206 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
         w1.max(w2) + 2
     };
 
-    let local_items: Vec<CheckItem> = if let Some(local) = data.get("local_checks").and_then(|v| v.as_object()) {
-        let keys_in_order = [
-            "SW可执行文件", "SW模型文件", "Excel参数表", "STEP输出目录",
-            "SC可执行文件", "SC脚本文件", "SCDOC输出目录", "日志目录", "数据目录",
-        ];
-        keys_in_order.iter().filter_map(|name| {
-            local.get(*name).map(|info| {
-                let exists = info.get("exists").and_then(|v| v.as_bool());
-                let path = info.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let value = if path.is_empty() { "(未设置)".to_string() } else { path.clone() };
-                CheckItem {
-                    label: name,
-                    value,
-                    exists,
-                }
-            })
-        }).collect()
-    } else {
-        Vec::new()
-    };
+    let local_items: Vec<CheckItem> =
+        if let Some(local) = data.get("local_checks").and_then(|v| v.as_object()) {
+            let keys_in_order = [
+                "SW可执行文件",
+                "SW模型文件",
+                "Excel参数表",
+                "STEP输出目录",
+                "SC可执行文件",
+                "SCDOC输出目录",
+            ];
+            keys_in_order
+                .iter()
+                .filter_map(|name| {
+                    local.get(*name).map(|info| {
+                        let exists = info.get("exists").and_then(|v| v.as_bool());
+                        let path = info
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let value = if path.is_empty() {
+                            "(未设置)".to_string()
+                        } else {
+                            path.clone()
+                        };
+                        CheckItem {
+                            label: name.to_string(),
+                            value,
+                            exists,
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
     // ---- 远程工作站检查 ----
-    let mut remote_items: Vec<CheckItem> = Vec::new();
+    let mut conn_items: Vec<CheckItem> = Vec::new();
+    let mut dir_items: Vec<CheckItem> = Vec::new();
+    let mut prog_items: Vec<CheckItem> = Vec::new();
+    let mut sys_items: Vec<CheckItem> = Vec::new();
+    let mut scripts_info: Option<(usize, usize, Vec<String>)> = None;
+    let mut ref_files_info: Option<(usize, usize, Vec<String>)> = None;
+
     if let Some(remote) = data.get("remote_checks").and_then(|v| v.as_object()) {
+        // 连接状态
         if let Some(ssh_status) = remote.get("ssh").and_then(|v| v.as_str()) {
             let ok = ssh_status.contains("成功");
-            remote_items.push(CheckItem {
-                label: "SSH连接",
+            conn_items.push(CheckItem {
+                label: "SSH连接".to_string(),
                 value: ssh_status.to_string(),
                 exists: Some(ok),
             });
         }
-        if let Some(conda) = remote.get("conda_available").and_then(|v| v.as_bool()) {
-            remote_items.push(CheckItem {
-                label: "Conda环境",
-                value: if conda { "可用".to_string() } else { "不可用".to_string() },
-                exists: Some(conda),
-            });
+
+        // 远程目录（从 Python 端传入的结构化数据）
+        if let Some(dirs) = remote.get("remote_dirs").and_then(|v| v.as_array()) {
+            for d in dirs {
+                let label = d
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let path = d
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let exists = d.get("exists").and_then(|v| v.as_bool());
+                let value = if path.is_empty() {
+                    "(未设置)".to_string()
+                } else {
+                    path
+                };
+                dir_items.push(CheckItem {
+                    label,
+                    value,
+                    exists,
+                });
+            }
         }
+
+        // 远程程序（Conda、MPI 等）
+        if let Some(progs) = remote.get("remote_programs").and_then(|v| v.as_array()) {
+            for p in progs {
+                let label = p
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let path = p
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let exists = p.get("exists").and_then(|v| v.as_bool());
+                let value = if path.is_empty() {
+                    "(未设置)".to_string()
+                } else {
+                    path
+                };
+                prog_items.push(CheckItem {
+                    label,
+                    value,
+                    exists,
+                });
+            }
+        }
+
+        // 脚本部署状态
+        if let Some(scripts) = remote.get("scripts_status") {
+            let total = scripts.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let deployed = scripts
+                .get("deployed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let missing: Vec<String> = scripts
+                .get("missing")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            scripts_info = Some((total, deployed, missing));
+        }
+
+        // 引用文件部署状态
+        if let Some(refs) = remote.get("ref_files_status") {
+            let total = refs.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let deployed = refs.get("deployed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let missing: Vec<String> = refs
+                .get("missing")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ref_files_info = Some((total, deployed, missing));
+        }
+
+        // 系统信息
         if let Some(py_ver) = remote.get("python_version").and_then(|v| v.as_str()) {
             let ok = !py_ver.is_empty();
-            remote_items.push(CheckItem {
-                label: "Python版本",
-                value: if ok { py_ver.to_string() } else { "未安装或无法检测".to_string() },
+            sys_items.push(CheckItem {
+                label: "Python版本".to_string(),
+                value: if ok {
+                    py_ver.to_string()
+                } else {
+                    "未安装或无法检测".to_string()
+                },
                 exists: Some(ok),
             });
         }
         if let Some(disk) = remote.get("disk_space").and_then(|v| v.as_str()) {
-            remote_items.push(CheckItem {
-                label: "磁盘空间",
+            sys_items.push(CheckItem {
+                label: "磁盘空间".to_string(),
                 value: disk.to_string(),
                 exists: None,
             });
         }
-        if let Some(procs) = remote.get("background_processes").and_then(|v| v.as_array()) {
+        if let Some(procs) = remote
+            .get("background_processes")
+            .and_then(|v| v.as_array())
+        {
             let proc_list: Vec<&str> = procs.iter().map(|v| v.as_str().unwrap_or("?")).collect();
-            let display = if proc_list.is_empty() { "无".to_string() } else { proc_list.join(", ") };
-            remote_items.push(CheckItem {
-                label: "后台进程",
+            let display = if proc_list.is_empty() {
+                "无".to_string()
+            } else {
+                proc_list.join(", ")
+            };
+            sys_items.push(CheckItem {
+                label: "后台进程".to_string(),
                 value: display,
                 exists: None,
             });
         }
     }
 
-    fn render_section(raw_lines: &mut Vec<Line>, header: &str, target_header_w: usize, items: &[CheckItem], label_width: u16, theme: &AppTheme) {
-        let header_dw = unicode_width::UnicodeWidthStr::width(header);
-        let header_pad = if header_dw < target_header_w {
-            "─".repeat(target_header_w - header_dw)
-        } else {
-            String::new()
-        };
-
-        raw_lines.push(Line::from(""));
-        raw_lines.push(Line::from(Span::styled(
-            format!("  {}{}", header, header_pad),
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
-        )));
-        raw_lines.push(Line::from(""));
-
+    // ---- 渲染辅助函数 ----
+    fn render_items(
+        raw_lines: &mut Vec<Line>,
+        items: &[CheckItem],
+        label_width: u16,
+        theme: &AppTheme,
+    ) {
         for item in items {
             let icon = match item.exists {
                 Some(true) => (" ✅", theme.success),
                 Some(false) => (" ❌", theme.error),
                 None => ("", theme.bg),
             };
-
             let mut spans = vec![
                 Span::styled("  ", Style::default().bg(theme.bg)),
                 Span::styled(
-                    pad_label_by_display_width(item.label, label_width),
+                    pad_label_by_display_width(&item.label, label_width),
                     Style::default().fg(theme.gray_4).bg(theme.bg),
                 ),
                 Span::styled(
@@ -284,20 +409,153 @@ fn build_check_content_lines(data: &serde_json::Value, _content_width: usize, th
                     Style::default().fg(theme.gray_3).bg(theme.bg),
                 ),
             ];
-
             if !icon.0.is_empty() {
-                spans.push(Span::styled(icon.0, Style::default().fg(icon.1).bg(theme.bg)));
+                spans.push(Span::styled(
+                    icon.0,
+                    Style::default().fg(icon.1).bg(theme.bg),
+                ));
             }
-
             raw_lines.push(Line::from(spans));
         }
     }
 
-    if !local_items.is_empty() {
-        render_section(&mut raw_lines, local_header, target_header_w, &local_items, label_width, theme);
+    fn render_section(
+        raw_lines: &mut Vec<Line>,
+        header: &str,
+        target_header_w: usize,
+        items: &[CheckItem],
+        label_width: u16,
+        theme: &AppTheme,
+    ) {
+        let header_dw = unicode_width::UnicodeWidthStr::width(header);
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
+        raw_lines.push(Line::from(""));
+        raw_lines.push(Line::from(Span::styled(
+            format!("  {}{}", header, header_pad),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        raw_lines.push(Line::from(""));
+        render_items(raw_lines, items, label_width, theme);
     }
-    if !remote_items.is_empty() {
-        render_section(&mut raw_lines, remote_header, target_header_w, &remote_items, label_width, theme);
+
+    fn render_sub_header(
+        raw_lines: &mut Vec<Line>,
+        label: &str,
+        target_header_w: usize,
+        theme: &AppTheme,
+    ) {
+        let sub_header = format!("─── {} ──", label);
+        let header_dw = unicode_width::UnicodeWidthStr::width(sub_header.as_str());
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
+        raw_lines.push(Line::from(Span::styled(
+            format!("  {}{}", sub_header, header_pad),
+            Style::default().fg(theme.muted),
+        )));
+    }
+
+    // ---- 渲染本地检查 ----
+    if !local_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            local_header,
+            target_header_w,
+            &local_items,
+            label_width,
+            theme,
+        );
+    }
+
+    // ---- 渲染远程检查（分组显示） ----
+    let has_remote = !conn_items.is_empty()
+        || !dir_items.is_empty()
+        || !prog_items.is_empty()
+        || scripts_info.is_some()
+        || ref_files_info.is_some()
+        || !sys_items.is_empty();
+    if has_remote {
+        // 主标题
+        let header_dw = unicode_width::UnicodeWidthStr::width(remote_header);
+        let header_pad = if header_dw < target_header_w {
+            "─".repeat(target_header_w - header_dw)
+        } else {
+            String::new()
+        };
+        raw_lines.push(Line::from(""));
+        raw_lines.push(Line::from(Span::styled(
+            format!("  {}{}", remote_header, header_pad),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        raw_lines.push(Line::from(""));
+
+        // 连接状态
+        render_items(&mut raw_lines, &conn_items, label_width, theme);
+
+        // 远程目录
+        if !dir_items.is_empty() {
+            render_sub_header(&mut raw_lines, "远程目录", target_header_w, theme);
+            render_items(&mut raw_lines, &dir_items, label_width, theme);
+        }
+
+        // 远程程序
+        if !prog_items.is_empty() {
+            render_sub_header(&mut raw_lines, "远程程序", target_header_w, theme);
+            render_items(&mut raw_lines, &prog_items, label_width, theme);
+        }
+
+        // 脚本与引用文件部署
+        if scripts_info.is_some() || ref_files_info.is_some() {
+            render_sub_header(&mut raw_lines, "文件部署", target_header_w, theme);
+            if let Some((total, deployed, ref missing)) = scripts_info {
+                let (value, exists) = if missing.is_empty() {
+                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
+                } else {
+                    (
+                        format!("缺失 {} 个: {}", missing.len(), missing.join(", ")),
+                        Some(false),
+                    )
+                };
+                let items = vec![CheckItem {
+                    label: "远程脚本文件".to_string(),
+                    value,
+                    exists,
+                }];
+                render_items(&mut raw_lines, &items, label_width, theme);
+            }
+            if let Some((total, deployed, ref missing)) = ref_files_info {
+                let (value, exists) = if missing.is_empty() {
+                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
+                } else {
+                    (
+                        format!("缺失 {} 个: {}", missing.len(), missing.join(", ")),
+                        Some(false),
+                    )
+                };
+                let items = vec![CheckItem {
+                    label: "仿真引用文件".to_string(),
+                    value,
+                    exists,
+                }];
+                render_items(&mut raw_lines, &items, label_width, theme);
+            }
+        }
+
+        // 系统信息
+        if !sys_items.is_empty() {
+            render_sub_header(&mut raw_lines, "系统信息", target_header_w, theme);
+            render_items(&mut raw_lines, &sys_items, label_width, theme);
+        }
     }
 
     raw_lines
@@ -332,7 +590,12 @@ pub fn render_check_result(
     let title_text = "系统自检结果 (System Check)";
     let title_w = unicode_width::UnicodeWidthStr::width(title_text) as u16 + 2;
 
-    let title_row = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    let title_row = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
     let title_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -364,14 +627,22 @@ pub fn render_check_result(
     let sep_y = inner.y + 1;
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, sep_style)),
-        Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: sep_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     // Layout: top(2 rows) + content + bottom(2 rows = separator + button)
     let top_height: u16 = 2;
     let bottom_height: u16 = 2;
     let content_top = inner.y + top_height;
-    let content_height = inner.height.saturating_sub(top_height).saturating_sub(bottom_height);
+    let content_height = inner
+        .height
+        .saturating_sub(top_height)
+        .saturating_sub(bottom_height);
 
     let content_area = Rect {
         x: inner.x,
@@ -413,7 +684,12 @@ pub fn render_check_result(
     let sep2_y = content_top + content_height;
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, sep_style)),
-        Rect { x: inner.x, y: sep2_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: sep2_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     // Button bar — btn_y = inner.y + inner.height - 1
@@ -425,7 +701,12 @@ pub fn render_check_result(
 
     frame.render_widget(
         Paragraph::new(btn_line).alignment(Alignment::Center),
-        Rect { x: inner.x, y: btn_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: btn_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     DialogRenderInfo {

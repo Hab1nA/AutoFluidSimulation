@@ -9,17 +9,20 @@
 从 engine/task_runner.py 中提取。
 ===============================================================================
 """
+from __future__ import annotations
 
 import os
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
+    from engine.state_manager import StateManager
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG,
     STEP_NAMES, STEP_FILE_PATTERNS,
 )
+from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -28,7 +31,7 @@ logger = setup_logger(__name__)
 class FileCleaner:
     """文件清理与系统自检器。"""
 
-    def __init__(self, state_manager: Any, ssh_getter: Callable[[], "RemoteWorkstation"]):
+    def __init__(self, state_manager: StateManager, ssh_getter: Callable[[], "RemoteWorkstation"]):
         """初始化清理器。
 
         Args:
@@ -49,16 +52,14 @@ class FileCleaner:
             "remote_checks": {},
         }
 
+        # 仅检查 settings 页面「本地文件路径」分类中展示的 6 个用户可配置路径
         checks = {
             "SW可执行文件": LOCAL_PATHS["sw_exe"],
             "SW模型文件": LOCAL_PATHS["sw_model"],
             "Excel参数表": LOCAL_PATHS["excel"],
             "STEP输出目录": LOCAL_PATHS["step_dir"],
             "SC可执行文件": LOCAL_PATHS["sc_exe"],
-            "SC脚本文件": LOCAL_PATHS["sc_script"],
             "SCDOC输出目录": LOCAL_PATHS["scdoc_dir"],
-            "日志目录": LOCAL_PATHS["log_dir"],
-            "数据目录": LOCAL_PATHS["data_dir"],
         }
         for name, path in checks.items():
             exists = os.path.exists(path)
@@ -72,6 +73,20 @@ class FileCleaner:
                 remote_info = ssh.check_system(
                     conda_exe=REMOTE_CONFIG["conda_exe"],
                     conda_env=REMOTE_CONFIG["conda_env"],
+                    remote_dirs={
+                        "仿真工作目录": REMOTE_CONFIG["working_dir"],
+                        "脚本部署目录": REMOTE_CONFIG["scripts_dir"],
+                        "引用文件目录": REMOTE_CONFIG["ref_files_dir"],
+                        "SCDOC接收目录": REMOTE_CONFIG["scdoc_dir"],
+                        "网格输出目录": REMOTE_CONFIG["msh_dir"],
+                        "仿真输出目录": REMOTE_CONFIG["result_dir"],
+                        "仿真标志目录": REMOTE_CONFIG["flag_dir"],
+                    },
+                    mpi_bin_dir=REMOTE_CONFIG["mpi_bin_dir"],
+                    scripts_dir=REMOTE_CONFIG["scripts_dir"],
+                    script_files=REMOTE_SCRIPT_FILES,
+                    ref_files_dir=REMOTE_CONFIG["ref_files_dir"],
+                    ref_files=REMOTE_REF_FILES,
                 )
                 results["remote_checks"].update(remote_info)
             else:
@@ -104,8 +119,8 @@ class FileCleaner:
     def _clean_single_step(self, step_name: str, config_name: Optional[int] = None):
         """清理单个步骤的文件（内部方法）。"""
         local_patterns = {
-            "SW":       ("step_dir",  STEP_FILE_PATTERNS["SW"],       None),
-            "SC":       ("scdoc_dir", STEP_FILE_PATTERNS["SC"],       None),
+            "SW":       ("step_dir",  [STEP_FILE_PATTERNS["SW"]]),
+            "SC":       ("scdoc_dir", [STEP_FILE_PATTERNS["SC"]]),
             "Transfer": None,
             "Meshing":  None,
             "Solver":   None,
@@ -113,10 +128,10 @@ class FileCleaner:
 
         remote_patterns = {
             "SW":       None,
-            "SC":       ("scdoc_dir",  STEP_FILE_PATTERNS["SC"],      None),
+            "SC":       ("scdoc_dir",  [STEP_FILE_PATTERNS["SC"]]),
             "Transfer": None,
-            "Meshing":  ("msh_dir",    STEP_FILE_PATTERNS["Meshing"], None),
-            "Solver":   ("result_dir", STEP_FILE_PATTERNS["Solver"],  (".cas.h5", ".dat.h5")),
+            "Meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["Meshing"]]),
+            "Solver":   ("result_dir", [STEP_FILE_PATTERNS["Solver"], STEP_FILE_PATTERNS["SolverData"]]),
         }
 
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
@@ -124,51 +139,37 @@ class FileCleaner:
         # ---- 清理本地文件 ----
         local_info = local_patterns.get(step_name)
         if local_info is not None:
-            dir_key, file_template, extra_suffix_pair = local_info
+            dir_key, file_templates = local_info
             target_dir = str(LOCAL_PATHS.get(dir_key, ""))
             for cn in configs:
-                filename = str(file_template).format(config=cn)
-                filepath = os.path.join(target_dir, filename)
-                try:
-                    os.remove(filepath)
-                    logger.info(f"已删除本地文件: {filepath}")
-                except FileNotFoundError:
-                    pass
-                except OSError as e:
-                    logger.warning(f"删除本地文件失败: {filepath}: {e}")
-                if extra_suffix_pair:
-                    old_suffix, new_suffix = extra_suffix_pair
-                    extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
-                    extra_path = os.path.join(target_dir, extra_filename)
+                for file_template in file_templates:
+                    filename = str(file_template).format(config=cn)
+                    filepath = os.path.join(target_dir, filename)
                     try:
-                        os.remove(extra_path)
-                        logger.info(f"已删除本地文件: {extra_path}")
+                        os.remove(filepath)
+                        logger.info(f"[Cleaner] 已删除本地文件: {filepath}")
                     except FileNotFoundError:
                         pass
                     except OSError as e:
-                        logger.warning(f"删除本地文件失败: {extra_path}: {e}")
+                        logger.warning(f"[Cleaner] 删除本地文件失败: {filepath}: {e}")
 
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)
         if remote_info is not None:
-            dir_key, file_template, extra_suffix_pair = remote_info
+            dir_key, file_templates = remote_info
             target_dir = str(REMOTE_CONFIG.get(dir_key, ""))
             try:
                 ssh = self._get_ssh()
                 if ssh.is_connected():
                     for cn in configs:
-                        filename = str(file_template).format(config=cn)
-                        remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
-                        ssh.delete_remote_file(remote_path)
-                        if extra_suffix_pair:
-                            old_suffix, new_suffix = extra_suffix_pair
-                            extra_filename = filename.rsplit(old_suffix, 1)[0] + new_suffix
-                            extra_remote_path = f"{target_dir.replace(chr(92), '/')}/{extra_filename}"
-                            ssh.delete_remote_file(extra_remote_path)
-                    logger.info(f"步骤 {step_name} 远程文件清理完成 ({target_dir})")
+                        for file_template in file_templates:
+                            filename = str(file_template).format(config=cn)
+                            remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
+                            ssh.delete_remote_file(remote_path)
+                    logger.info(f"[Cleaner] 步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
-                    logger.warning(f"SSH 未连接，跳过远程文件清理: {step_name}")
+                    logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")
             except (OSError, ConnectionError) as e:
-                logger.error(f"远程文件清理异常 ({step_name}): {e}")
+                logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
 
-        logger.info(f"步骤 {step_name} 文件清理完成")
+        logger.info(f"[Cleaner] 步骤 {step_name} 文件清理完成")

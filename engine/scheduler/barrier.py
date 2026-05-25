@@ -59,6 +59,19 @@ class BarrierCoordinator:
 
         logger.info("全局屏障协调器初始化完成")
 
+    def join_solver_threads(self, timeout: float = 3.0) -> None:
+        """等待所有 Solver 线程退出并清空列表。
+
+        供外部模块（如 PipelineScheduler.stop()）调用，避免直接访问私有成员。
+
+        Args:
+            timeout: 每个线程的最大等待秒数
+        """
+        for t in self._solver_threads:
+            if t.is_alive():
+                t.join(timeout=timeout)
+        self._solver_threads.clear()
+
     # ------------------------------------------------------------------
     # 全局屏障监控
     # ------------------------------------------------------------------

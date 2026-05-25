@@ -4,32 +4,29 @@ sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidw
 excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx'
 step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
 sc_exe = 'C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe'
-sc_script = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\executor\spaceclaim_transit.py'
-sc_bridge = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\bridge\SpaceClaimBridge.exe'
 scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
-log_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\logs'
-data_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data'
 
 [remote_config]
 host = "172.17.135.240"
 port = 22
 username = "ps"
-password = "${AUTOFLUID_SSH_PASSWORD}"
-root_dir = 'D:\xkz_1020'
+working_dir = 'D:\xkz_1020\workingdir'
+scripts_dir = 'D:\xkz_1020\scripts'
+ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
 scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
+flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
-meshing_script = 'D:\xkz_1020\batch_meshing_gen4.py'
-solver_script = 'D:\xkz_1020\batch_solver_gen4.py'
-flag_dir = 'D:\xkz_1020\flags'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
 
 [step_file_patterns]
 SW = "model_gen4.SLDPRT_{config}.step"
 SC = "model_gen4_{config}.scdoc"
 Meshing = "model_gen4_{config}.msh.h5"
 Solver = "model_gen4_{config}.cas.h5"
+SolverData = "model_gen4_{config}.dat.h5"
 
 [solidworks]
 sw_macro_timeout = 3600
@@ -46,8 +43,6 @@ sc_poll_interval = 2.0
 sc_process_appear_timeout = 120
 sc_gui_ready_timeout = 30
 sc_gui_stable_delay = 5
-sc_persistent_ready_timeout = 180
-sc_scdoc_stable_seconds = 3.0
 
 [global_settings]
 watchdog_interval = 1.0

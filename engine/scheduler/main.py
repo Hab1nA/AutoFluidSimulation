@@ -75,7 +75,7 @@ class PipelineScheduler:
 
         # ---- 工作队列 ----
         # SC 处理队列：(config_name, step_file_path)
-        self._sc_queue: queue.Queue = queue.Queue()
+        self._sc_queue: queue.Queue[tuple[int, str]] = queue.Queue()
 
         # ---- 子模块 ----
         self.retry_manager = RetryManager(
@@ -110,7 +110,7 @@ class PipelineScheduler:
         )
         self.meshing_monitor = MeshingMonitor(
             state_manager=self.state,
-            remote_executor=self.runner._remote_executor,
+            remote_executor=self.runner.get_remote_executor(),
             paused_event=self._paused,
             stopped_event=self._stopped,
         )
@@ -120,7 +120,6 @@ class PipelineScheduler:
 
         # ---- 工作线程 ----
         self._barrier_thread: Optional[threading.Thread] = None
-        self._solver_threads: list[threading.Thread] = []   # 求解线程（屏障通过后启动）
         # 预创建文件监控器并注入 SW 阶段处理器（避免双重实例）
         self._file_monitor: Optional[StepFileMonitor] = StepFileMonitor(
             step_dir=None,
@@ -192,17 +191,17 @@ class PipelineScheduler:
             self.state.set_engine_status("paused")
             return
 
-        # ---- 步骤 1.5: 预扫描下游输出文件（断点续传） ----
-        self.sw_phase_handler.prescan_downstream_outputs()
+        # ---- 步骤 1.5: 同步下游步骤状态与文件系统 ----
+        self.sw_phase_handler.scan_completed_downstream()
 
         # ---- 步骤 2: 启动文件监控 ----
         self._ensure_file_monitor_running()
 
-        # ---- 步骤 3: 启动工作线程池（仅在未启动时创建） ----
-        self.worker_pool.start_if_needed()
-
-        # ---- 步骤 3.5: 启动 MeshingMonitor ----
+        # ---- 步骤 3: 启动 MeshingMonitor（先于 Worker Pool，确保队列消费者就绪） ----
         self.meshing_monitor.start_if_needed()
+
+        # ---- 步骤 3.5: 启动工作线程池（仅在未启动时创建） ----
+        self.worker_pool.start_if_needed()
 
         # ---- 步骤 4: 启动全局屏障监控 ----
         self._ensure_barrier_monitor_running()
@@ -468,8 +467,8 @@ class PipelineScheduler:
 
         # 确保各组件线程存活（start_if_needed 内部已是幂等的，不会重复创建）
         self._ensure_file_monitor_running()
-        self.worker_pool.start_if_needed()
-        self.meshing_monitor.start_if_needed()
+        self.meshing_monitor.start_if_needed()   # 先启动 MeshingMonitor
+        self.worker_pool.start_if_needed()        # 再启动 Worker Pool
         self._ensure_barrier_monitor_running()
 
         # ★ 仅清除文件监控器的暂停标志，不重置已处理文件集合。
@@ -507,15 +506,10 @@ class PipelineScheduler:
 
         try:
             # 等待关键线程退出
-            for t in self.worker_pool._worker_threads:
-                if t.is_alive():
-                    t.join(timeout=3)
+            self.worker_pool.join_worker_threads(timeout=3)
             if self._barrier_thread and self._barrier_thread.is_alive():
                 self._barrier_thread.join(timeout=3)
-            for t in self.barrier_coordinator._solver_threads:
-                if t.is_alive():
-                    t.join(timeout=3)
-            self.barrier_coordinator._solver_threads.clear()
+            self.barrier_coordinator.join_solver_threads(timeout=3)
 
             # 停止文件监控
             if self._file_monitor:

@@ -1,14 +1,14 @@
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use super::{SettingCategory, SettingsState};
+use crate::theme::AppTheme;
 use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
-use crate::utils::{truncate_for_display, pad_label_by_display_width};
-use crate::theme::AppTheme;
+use crate::utils::{pad_label_by_display_width, truncate_for_display};
 
 pub struct SettingsRenderInfo {
     pub content_total_lines: usize,
@@ -47,13 +47,18 @@ pub fn render_settings_dialog(
     let hint_text = if ss.focus.editing {
         "Enter 提交 | Esc 取消 | ←→ 移动光标 | Home/End 跳转 | Ctrl+A/X/C/V"
     } else {
-        "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Esc 关闭 | Ctrl+S 保存"
+        "↑↓ 滚动 | Tab 切换分类 | Enter 编辑 | Ctrl+Z 撤销 | Ctrl+C/Esc 关闭 | Ctrl+S 保存"
     };
 
     let title_text = "程序设置 (Settings)";
     let title_w = unicode_width::UnicodeWidthStr::width(title_text) as u16 + 2;
 
-    let title_row = Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 };
+    let title_row = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
     let title_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -85,14 +90,22 @@ pub fn render_settings_dialog(
     let sep_y = inner.y + 1;
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, sep_style)),
-        Rect { x: inner.x, y: sep_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: sep_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     // Layout: top(2 rows) + content + bottom(2 rows = separator + button)
     let top_height: u16 = 2;
     let bottom_height: u16 = 2;
     let content_top = inner.y + top_height;
-    let content_height = inner.height.saturating_sub(top_height).saturating_sub(bottom_height);
+    let content_height = inner
+        .height
+        .saturating_sub(top_height)
+        .saturating_sub(bottom_height);
     let content_y = content_top;
 
     let content_area = Rect {
@@ -110,16 +123,24 @@ pub fn render_settings_dialog(
     };
 
     let label_width: u16 = 20;
-    let field_content_width = content_area.width.saturating_sub(label_width).saturating_sub(2) as usize;
+    let field_content_width = content_area
+        .width
+        .saturating_sub(label_width)
+        .saturating_sub(2) as usize;
 
     let mut raw_lines: Vec<Line> = Vec::new();
     let mut field_positions: Vec<(usize, usize, u16)> = Vec::new();
 
     // 预计算子标题最大显示宽度，确保所有标题长度一致
-    let target_header_w: usize = SettingCategory::ALL.iter().map(|c| {
-        let hdr = format!("─── {} ──", c.display_name());
-        unicode_width::UnicodeWidthStr::width(hdr.as_str())
-    }).max().unwrap_or(20) + 2;
+    let target_header_w: usize = SettingCategory::ALL
+        .iter()
+        .map(|c| {
+            let hdr = format!("─── {} ──", c.display_name());
+            unicode_width::UnicodeWidthStr::width(hdr.as_str())
+        })
+        .max()
+        .unwrap_or(20)
+        + 2;
 
     for (cat_idx, cat) in SettingCategory::ALL.iter().enumerate() {
         raw_lines.push(Line::from(""));
@@ -132,7 +153,9 @@ pub fn render_settings_dialog(
         };
         raw_lines.push(Line::from(Span::styled(
             format!("  {}{}", header_str, header_pad),
-            Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
         )));
         raw_lines.push(Line::from(""));
 
@@ -142,7 +165,7 @@ pub fn render_settings_dialog(
 
             let label = cat.display_label(fi);
             let value = ss.get_field_value(*cat, fi);
-            let field_name = make_field_name(*cat, fi);
+            let field_name = cat.field_full_name(fi);
 
             let is_focused = ss.focus.category_index == cat_idx && ss.focus.field_index == fi;
             let is_hovered = ss.hovered_field == Some((cat_idx, fi));
@@ -159,7 +182,10 @@ pub fn render_settings_dialog(
             };
 
             let label_style = if is_focused {
-                Style::default().fg(theme.success).add_modifier(Modifier::BOLD).bg(row_bg)
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(row_bg)
             } else {
                 Style::default().fg(theme.gray_4).bg(row_bg)
             };
@@ -175,16 +201,11 @@ pub fn render_settings_dialog(
             };
 
             // Selection highlight style (inverted: bright bg, dark fg)
-            let sel_style = Style::default()
-                .fg(theme.bg)
-                .bg(theme.success);
+            let sel_style = Style::default().fg(theme.bg).bg(theme.success);
 
             let mut spans: Vec<Span<'_>> = vec![
                 Span::styled("  ", Style::default().bg(row_bg)),
-                Span::styled(
-                    pad_label_by_display_width(label, label_width),
-                    label_style,
-                ),
+                Span::styled(pad_label_by_display_width(label, label_width), label_style),
             ];
 
             if is_current_field {
@@ -196,7 +217,10 @@ pub fn render_settings_dialog(
                     field_content_width,
                     value_style,
                     sel_style,
-                    Style::default().fg(theme.cursor_fg).bg(theme.success).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.cursor_fg)
+                        .bg(theme.success)
+                        .add_modifier(Modifier::BOLD),
                     Style::default().fg(theme.success),
                 );
                 spans.extend(edit_spans);
@@ -206,34 +230,56 @@ pub fn render_settings_dialog(
                     if value.is_empty() {
                         "(未设置)".to_string()
                     } else {
-                        "*".repeat(value.len().min(12))
+                        "*".repeat(12)
                     }
                 } else if cat.is_bool_field(fi) {
-                    if value == "true" { "是".to_string() } else { "否".to_string() }
+                    if value == "true" {
+                        "是".to_string()
+                    } else {
+                        "否".to_string()
+                    }
                 } else {
                     truncate_for_display(&value, field_content_width.saturating_sub(3))
                 };
                 spans.push(Span::styled(display_value, value_style));
             }
 
-            // Path status check
+            // Path status check（validation_error 已覆盖"不存在"时隐藏 ❌ 避免重复）
             if let Some(exists) = ss.path_status.get(&field_name) {
-                let (icon, color) = if *exists {
-                    (" ✅", theme.success)
+                if *exists {
+                    spans.push(Span::styled(
+                        " ✅",
+                        Style::default().fg(theme.success).bg(row_bg),
+                    ));
                 } else {
-                    (" ❌", theme.error)
-                };
-                spans.push(Span::styled(icon, Style::default().fg(color).bg(row_bg)));
+                    let covered_by_validation = ss
+                        .validation_errors
+                        .iter()
+                        .any(|e| e.field_name == field_name && e.message.contains("不存在"));
+                    if !covered_by_validation {
+                        spans.push(Span::styled(
+                            " ❌",
+                            Style::default().fg(theme.error).bg(row_bg),
+                        ));
+                    }
+                }
             }
 
             // Validation error
-            if let Some(err) = ss.validation_errors.iter().find(|e| e.field_name == field_name) {
+            if let Some(err) = ss
+                .validation_errors
+                .iter()
+                .find(|e| e.field_name == field_name)
+            {
                 let color = if matches!(err.severity, super::validation::Severity::Error) {
                     theme.error
                 } else {
                     theme.warning
                 };
-                spans.push(Span::styled(format!("  ⚠ {}", err.message), Style::default().fg(color).bg(row_bg)));
+                spans.push(Span::styled(
+                    format!("  ⚠ {}", err.message),
+                    Style::default().fg(color).bg(row_bg),
+                ));
             }
 
             // Edit indicator
@@ -278,7 +324,12 @@ pub fn render_settings_dialog(
     let sep2_y = content_y + content_height;
     frame.render_widget(
         Paragraph::new(Span::styled(&sep, sep_style)),
-        Rect { x: inner.x, y: sep2_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: sep2_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     // Button bar — btn_y = inner.y + inner.height - 1 (matches detect_dialog_button formula)
@@ -301,12 +352,20 @@ pub fn render_settings_dialog(
         btn_spans.push(Span::styled(err, Style::default().fg(theme.error)));
     } else if ss.saved {
         btn_spans.push(Span::raw("  "));
-        btn_spans.push(Span::styled("✅ 已保存", Style::default().fg(theme.success)));
+        btn_spans.push(Span::styled(
+            "✅ 已保存",
+            Style::default().fg(theme.success),
+        ));
     }
 
     frame.render_widget(
         Paragraph::new(Line::from(btn_spans)).alignment(Alignment::Center),
-        Rect { x: inner.x, y: btn_y, width: inner.width, height: 1 },
+        Rect {
+            x: inner.x,
+            y: btn_y,
+            width: inner.width,
+            height: 1,
+        },
     );
 
     SettingsRenderInfo {
@@ -315,19 +374,6 @@ pub fn render_settings_dialog(
         scrollbar_area,
         button_bar_y: btn_y,
         field_positions,
-    }
-}
-
-fn make_field_name(cat: SettingCategory, fi: usize) -> String {
-    match cat {
-        SettingCategory::LocalPaths => format!("local_paths.{}", cat.field_name(fi)),
-        SettingCategory::RemoteConnection | SettingCategory::RemoteDirs => {
-            format!("remote_config.{}", cat.field_name(fi))
-        }
-        SettingCategory::StepPatterns => format!("step_file_patterns.{}", cat.field_name(fi)),
-        SettingCategory::SolidWorks => format!("solidworks.{}", cat.field_name(fi)),
-        SettingCategory::SpaceClaim => format!("spaceclaim.{}", cat.field_name(fi)),
-        SettingCategory::GlobalSettings => format!("global_settings.{}", cat.field_name(fi)),
     }
 }
 
@@ -374,7 +420,11 @@ fn build_edit_spans(
         let style = if i == cursor {
             cursor_style
         } else if let Some((s, e)) = sel {
-            if i >= s && i < e { sel_style } else { base_style }
+            if i >= s && i < e {
+                sel_style
+            } else {
+                base_style
+            }
         } else {
             base_style
         };
