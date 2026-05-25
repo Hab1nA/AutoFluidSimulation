@@ -239,17 +239,27 @@ def _get_script_args():
 def _close_document(doc):
     """关闭 SpaceClaim 文档，释放内部资源。
 
-    SpaceClaim API V23 的 Document 对象没有 Close() 方法。
-    通过多种方式尝试关闭，确保资源被释放：
-
-    1. Command.Execute("CloseWindow") — 通过 SpaceClaim 命令系统关闭当前窗口
-    2. doc.Window.Close() — 通过文档关联的 Window 对象关闭
-    3. Window.ActiveWindow.Close() — 关闭当前活动窗口
+    常驻模式与一次性模式采用不同策略：
+    - 一次性模式：关闭窗口，SpaceClaim 随后退出。
+    - 常驻模式：不关闭窗口（避免 SpaceClaim 因无文档而自动退出），
+      仅释放 Python 引用，由 gc 回收 COM 资源。
+      后续 Document.Open 会自动替换当前文档。
 
     Args:
         doc: SpaceClaim Document 对象（Document.Open 返回值）
     """
-    # 方式1: 通过命令系统关闭（最可靠，与 Command.Execute("Exit") 同一体系）
+    is_persistent = os.environ.get("AUTOFLUID_SC_PERSISTENT", "") == "1"
+
+    if is_persistent:
+        # ★ 常驻模式：不关闭窗口，仅释放引用。
+        #   Command.Execute("CloseWindow") 会关闭唯一文档窗口，
+        #   导致 SpaceClaim 判定无文档可显示后自动退出进程。
+        #   Document.Open 下次调用会自动替换当前文档内容。
+        logger.debug("常驻模式: 跳过窗口关闭，仅释放引用")
+        return
+
+    # 一次性模式：正常关闭窗口
+    # 方式1: 通过命令系统关闭（最可靠）
     try:
         Command.Execute("CloseWindow")
         return
@@ -504,9 +514,26 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     try:
         if doc is not None:
             _close_document(doc)
-            logger.info("文档已关闭")
+            if os.environ.get("AUTOFLUID_SC_PERSISTENT", "") == "1":
+                logger.info("文档引用已释放（常驻模式保留窗口）")
+            else:
+                logger.info("文档已关闭")
     except Exception as e:
         logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
+
+    # ------------------------------------------------------------------
+    # 9. 释放 Python 引用 + 触发 GC
+    # ------------------------------------------------------------------
+    # 常驻模式下不关闭窗口，需显式释放引用帮助 .NET GC 回收
+    # COM 对象和几何数据，防止内存持续增长。
+    try:
+        body_selection = None
+        part = None
+        doc = None
+        import gc
+        gc.collect()
+    except Exception:
+        pass
 
     logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
     return True
@@ -641,6 +668,13 @@ def _persistent_loop():
             except Exception:
                 pass
 
+            # ★ 定期 GC：每处理 N 个构型后强制回收，防止内存缓慢增长
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
+
         except BaseException as e:
             # ★ 使用 BaseException 而非 Exception：
             #   在 IronPython/SpaceClaim 环境中，traceback.print_exc() 可能抛出
@@ -687,10 +721,12 @@ def _write_result(result_file, config_name, success, message="",
         with io.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
             json.dump(result, f)
             f.write("\n")
-            # ★ 立即 flush + fsync：确保数据落盘，
-            #   即使后续代码抛出异常，Python 端也能读到完整结果
+            # ★ flush 确保数据写入 OS 缓冲区。
+            #   注意：不在 IronPython 中调用 os.fsync()——
+            #   IronPython 2.7 的 io.open 底层使用 .NET StreamWriter，
+            #   fileno() 返回的伪文件描述符在 os.fsync() 时会触发
+            #   UnicodeEncodeError('unknown', '\x00', 0, 1, '')。
             f.flush()
-            os.fsync(f.fileno())
         # Windows 下 rename 目标存在时会报错，先删除
         try:
             if os.path.exists(result_file):
