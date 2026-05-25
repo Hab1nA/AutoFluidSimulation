@@ -41,6 +41,7 @@ class PersistentSlot:
     status: str = "idle"  # idle | starting | ready | busy
     current_config: Optional[int] = None
     started_at: Optional[float] = None
+    configs_processed: int = 0  # 已处理的构型计数（仅用于诊断/监控）
 
 
 class SCProcessPool:
@@ -105,7 +106,10 @@ class SCProcessPool:
             slot.current_config = config_name
 
         try:
-            return self._send_persistent_command(slot, config_name, paused_event, stopped_event)
+            result = self._send_persistent_command(slot, config_name, paused_event, stopped_event)
+            if result:
+                slot.configs_processed += 1
+            return result
         finally:
             with self._lock:
                 if slot.slot_id in self._persistent_slots:
@@ -172,8 +176,13 @@ class SCProcessPool:
     # ==================================================================
 
     def _get_or_create_persistent_slot(self) -> Optional[PersistentSlot]:
-        """获取空闲的常驻槽位，若无则创建新槽位。调用方须持有 _lock。"""
-        for slot in self._persistent_slots.values():
+        """获取空闲的常驻槽位，若无则创建新槽位。调用方须持有 _lock。
+
+        常驻进程会一直运行直到被 quit 命令关闭或进程异常退出。
+        不会基于已处理构型数主动回收——只要文档关闭逻辑正常工作，
+        SpaceClaim 应能无限期稳定运行。
+        """
+        for slot in list(self._persistent_slots.values()):
             if slot.status == "ready":
                 if slot.process is not None and slot.process.poll() is None:
                     return slot
@@ -182,9 +191,17 @@ class SCProcessPool:
                     self._cleanup_persistent_slot(slot)
             elif slot.status == "busy":
                 if slot.process is not None and slot.process.poll() is not None:
-                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理复用")
+                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理并重新启动")
                     self._cleanup_persistent_slot(slot)
-                    return slot
+                    # ★ 重新启动进程：不能直接返回已清理的空槽位，
+                    #    否则后续 _send_persistent_command 会在无进程的情况下
+                    #    空等 300s 超时。重新启动后 slot 进入 "starting" 状态，
+                    #    run_config() 会通过 _wait_for_slot_ready 等待就绪。
+                    if self._launch_persistent_process(slot):
+                        return slot
+                    else:
+                        # 启动失败，移除槽位，让后续逻辑创建新槽位
+                        self._persistent_slots.pop(slot.slot_id, None)
 
         active_slots = sum(
             1 for s in self._persistent_slots.values()
@@ -522,6 +539,7 @@ class SCProcessPool:
         slot.pid = None
         slot.status = "idle"
         slot.current_config = None
+        slot.configs_processed = 0  # ★ 重置构型计数
         self._cleanup_ipc_files(slot.slot_id)
 
     def _shutdown_persistent_slot(self, slot: PersistentSlot) -> None:
@@ -561,7 +579,8 @@ class SCProcessPool:
                 "busy": busy_count,
                 "slots": {
                     sid: {"slot_id": s.slot_id, "status": s.status,
-                          "pid": s.pid, "current_config": s.current_config}
+                          "pid": s.pid, "current_config": s.current_config,
+                          "configs_processed": s.configs_processed}
                     for sid, s in self._persistent_slots.items()
                 },
             }

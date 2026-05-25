@@ -408,6 +408,11 @@ namespace AutoFluidSimulation.Bridge
 
             // 命令循环：监听 quit 文件命令或进程退出
             int exitCode = (int)ExitCode.Success;
+            // ★ 进程检测连续失败计数器：防止因瞬态异常（如进程句柄暂不可用）
+            //    误判 SpaceClaim 退出。累计 5 次连续失败才确认退出。
+            int consecutiveProcessCheckFailures = 0;
+            const int maxConsecutiveFailures = 5;
+
             try
             {
                 while (true)
@@ -431,7 +436,10 @@ namespace AutoFluidSimulation.Bridge
                         // 文件可能正被 transit 脚本读取，忽略
                     }
 
-                    // 检测 SpaceClaim 进程是否已退出
+                    // ★ 检测 SpaceClaim 进程是否已退出（容错增强版）
+                    //    单次 Refresh/HasExited 可能因瞬态异常（Win32Exception、
+                    //    InvalidOperationException）失败，不能直接判定退出。
+                    //    连续 N 次失败后才确认进程确实已退出。
                     try
                     {
                         workingProcess.Refresh();
@@ -440,11 +448,29 @@ namespace AutoFluidSimulation.Bridge
                             Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出，Bridge 退出");
                             break;
                         }
+                        // 检测成功 → 重置失败计数器
+                        consecutiveProcessCheckFailures = 0;
                     }
-                    catch
+                    catch (InvalidOperationException)
                     {
-                        Console.WriteLine("[BRIDGE] SpaceClaim 进程状态检查异常，Bridge 退出");
+                        // 进程对象已释放 → 确认退出
+                        Console.WriteLine("[BRIDGE] SpaceClaim 进程对象已释放，Bridge 退出");
                         break;
+                    }
+                    catch (Exception ex)
+                    {
+                        consecutiveProcessCheckFailures++;
+                        Console.Error.WriteLine(
+                            $"[BRIDGE] Warning: 进程状态检查异常 ({consecutiveProcessCheckFailures}/{maxConsecutiveFailures}): {ex.Message}");
+                        if (consecutiveProcessCheckFailures >= maxConsecutiveFailures)
+                        {
+                            Console.Error.WriteLine(
+                                "[BRIDGE] 进程状态检查连续失败，判定 SpaceClaim 已退出");
+                            break;
+                        }
+                        // 短暂等待后重试
+                        Thread.Sleep(2000);
+                        continue;
                     }
 
                     Thread.Sleep(1000);

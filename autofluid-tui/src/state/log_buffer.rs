@@ -76,6 +76,12 @@ impl LogBuffer {
         self.log_generation += 1;
     }
 
+    /// 清空详细日志缓冲区（daemon 重启时调用，避免新旧日志混淆）
+    pub fn clear_detail(&mut self) {
+        self.detail_buffer.clear();
+        self.log_generation += 1;
+    }
+
     pub fn push_info(&mut self, message: String) {
         if self.info_messages.len() >= MAX_INFO_BUFFER {
             self.info_messages.pop_front();

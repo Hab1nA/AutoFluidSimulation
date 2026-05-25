@@ -65,7 +65,13 @@ class _SpaceClaimLogger(object):
         return self._log_file
 
     def _write(self, level, msg):
-        """格式化并写入一条日志。"""
+        """格式化并写入一条日志（仅写文件，不 print）。
+
+        ★ IronPython/SpaceClaim 环境中 sys.stdout 的编码不可靠，
+           print() 可能在缓冲区刷新时抛出 UnicodeEncodeError，
+           且异常可能绕过硬编码的 except 子句（.NET 异常映射差异）。
+           因此本 logger 只写文件，不调用 print()。
+        """
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         level_name = self._LEVEL_NAMES.get(level, "INFO")
         line = "[{}] [{}] [{}] {}".format(timestamp, level_name, self._name, msg)
@@ -87,14 +93,6 @@ class _SpaceClaimLogger(object):
                 pass
         except (IOError, OSError):
             pass
-        try:
-            print(line)
-        except (UnicodeEncodeError, IOError, OSError):
-            # IronPython print 在某些编码环境下也可能失败
-            try:
-                print(line.encode("ascii", "replace").decode("ascii"))
-            except Exception:
-                pass
 
     def debug(self, msg):
         """记录 DEBUG 级别日志。"""
@@ -141,6 +139,24 @@ except (OSError, IOError):
 
 _log_path = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
 logger = _SpaceClaimLogger("spaceclaim_transit", _log_path)
+
+# --------------------------------------------------------------------------
+# ★ 重定向 stdout：IronPython/SpaceClaim 环境中 sys.stdout 的编码不可靠，
+#    print() / stdout.write() 可能在缓冲区刷新时抛出 UnicodeEncodeError。
+#    将所有输出重定向到 null 设备，日志仅通过文件记录。
+# --------------------------------------------------------------------------
+class _NullWriter(object):
+    """黑洞写入器：静默丢弃所有写入。"""
+    def write(self, data):
+        pass
+    def flush(self):
+        pass
+
+try:
+    sys.stdout = _NullWriter()
+    sys.stderr = _NullWriter()
+except Exception:
+    pass
 
 logger.info("=== SpaceClaim Transit Script 启动 ===")
 logger.info("日志文件: {}".format(logger.log_file))
@@ -236,45 +252,150 @@ def _get_script_args():
 # 文档关闭辅助
 # ============================================================================
 
-def _close_document(doc):
-    """关闭 SpaceClaim 文档，释放内部资源。
+# 常驻模式下已处理的构型计数（跨 process_step_file 调用持久化，仅用于日志）
+_persistent_config_count = 0
 
-    SpaceClaim API V23 的 Document 对象没有 Close() 方法。
-    通过多种方式尝试关闭，确保资源被释放：
 
-    1. Command.Execute("CloseWindow") — 通过 SpaceClaim 命令系统关闭当前窗口
-    2. doc.Window.Close() — 通过文档关联的 Window 对象关闭
-    3. Window.ActiveWindow.Close() — 关闭当前活动窗口
+def _get_document_count():
+    """获取 SpaceClaim 中当前打开的文档数量（通过所有窗口计数）。
 
-    Args:
-        doc: SpaceClaim Document 对象（Document.Open 返回值）
+    SpaceClaim API V23 没有 Document.All 属性。正确的做法是通过
+    Window.AllWindows（ICollection<Window>）按窗口计数，
+    每个窗口关联一个 Document。
+
+    Returns:
+        int: 打开的窗口数（≈文档数）；若 API 不可用返回 -1 表示未知。
     """
-    # 方式1: 通过命令系统关闭（最可靠，与 Command.Execute("Exit") 同一体系）
     try:
-        Command.Execute("CloseWindow")
-        return
+        all_wins = list(Window.AllWindows)
+        return len(all_wins)
+    except Exception:
+        return -1
+
+
+def _force_gc():
+    """强制执行 .NET 垃圾回收，释放 IronPython 持有的 .NET 对象引用。
+
+    在 IronPython/SpaceClaim 环境中，Python 变量（如 doc、part、
+    bodies、Selection）即使超出作用域，.NET GC 也可能不会立即
+    回收这些对象。显式调用 GC 有助于释放这些引用占用的内存。
+
+    注意：SpaceClaim 内嵌的 IronPython 中 clr.System 可能不可用，
+    需通过 clr.AddReference + import System 访问 .NET GC。
+    """
+    try:
+        import clr
+        clr.AddReference("System")
+        import System
+        System.GC.Collect()
+        System.GC.WaitForPendingFinalizers()
+        System.GC.Collect()  # 二次收集：回收已终结的对象
+        logger.debug(".NET GC 已强制执行")
+    except Exception as e:
+        logger.debug("强制 GC 失败（非关键）: {}".format(e))
+
+
+def _close_all_documents():
+    """关闭 SpaceClaim 中所有打开的窗口/文档，并验证关闭结果。
+
+    SpaceClaim API V23 的正确做法：
+    1. 通过 Window.AllWindows 获取所有窗口（ICollection<Window>）
+    2. 逐窗口调用 Window.Close() 关闭
+    3. 反复执行直到窗口数为 0
+    4. 辅以 CloseWindow / CloseAll 命令兜底
+    5. 强制执行 .NET GC 释放残留引用
+    6. 验证最终窗口数
+
+    Document 对象没有 Close() 方法，也没有 Document.All 属性；
+    正确关闭文档的唯一方式是通过其关联的 Window.Close()。
+
+    Returns:
+        int: 关闭后残留的窗口数（0 = 完全清理成功）。
+    """
+    doc_count_before = _get_document_count()
+    if doc_count_before <= 0:
+        # 无法统计或确实无窗口 → 仍需执行兜底清理
+        logger.debug("关闭前窗口数: {}（未知或无窗口），执行兜底清理...".format(
+            doc_count_before))
+        # 兜底：如果计数失败（API 可能异常），仍尝试命令方式清理
+        try:
+            Command.Execute("CloseAll")
+            time.sleep(0.5)
+        except Exception:
+            pass
+        _force_gc()
+        # 重新计数
+        after = _get_document_count()
+        logger.debug("兜底清理后窗口数: {}".format(after))
+        return after if after >= 0 else 0
+
+    logger.info("关闭前打开的窗口数: {}".format(doc_count_before))
+
+    # ---- 第1层: 通过 Window.AllWindows 逐窗口关闭（★ 核心方法）----
+    close_count = 0
+    try:
+        all_windows = list(Window.AllWindows)
+        logger.info("枚举到 {} 个窗口，逐窗口关闭...".format(len(all_windows)))
+        for win in all_windows:
+            try:
+                # Window.Close() — 这是 V23 API 中关闭窗口/文档的正确方法
+                win.Close()
+                close_count += 1
+                logger.debug("Window.Close() 调用成功 ({}/{})".format(
+                    close_count, len(all_windows)))
+                # 短暂等待 GUI 处理关闭事件
+                time.sleep(0.15)
+            except Exception as ex:
+                logger.debug("Window.Close() 异常: {}: {}".format(
+                    type(ex).__name__, ex))
+        if close_count > 0:
+            logger.info("第1层: 已关闭 {} 个窗口".format(close_count))
+            time.sleep(0.5)
+    except Exception as e:
+        logger.warning("枚举 Window.AllWindows 关闭时异常: {}: {}".format(
+            type(e).__name__, e))
+
+    # ---- 第2层: 反复执行 CloseWindow 命令，确保全部关闭 ----
+    max_close_attempts = max(doc_count_before, 5)
+    for attempt in range(max_close_attempts):
+        remaining = _get_document_count()
+        if remaining <= 0:
+            logger.info("第2层: 第{}次检查时窗口数已为 0".format(attempt + 1))
+            break
+        try:
+            Command.Execute("CloseWindow")
+            time.sleep(0.3)
+            remaining_after = _get_document_count()
+            logger.debug("第2层: 第{}次 CloseWindow 后窗口数: {}".format(
+                attempt + 1, remaining_after))
+            if remaining_after <= 0:
+                break
+        except Exception as e:
+            logger.debug("第2层: CloseWindow 异常（可能无窗口可关）: {}".format(e))
+            break
+
+    # ---- 第3层: CloseAll 命令兜底 ----
+    try:
+        Command.Execute("CloseAll")
+        time.sleep(0.5)
+        remaining = _get_document_count()
+        logger.debug("第3层: CloseAll 后窗口数: {}".format(remaining))
     except Exception:
         pass
 
-    # 方式2: 通过文档的 Window 属性关闭
-    try:
-        window = doc.Window
-        if window is not None:
-            window.Close()
-            return
-    except Exception:
-        pass
+    # ---- 第4层: 强制 .NET GC ----
+    _force_gc()
 
-    # 方式3: 关闭当前活动窗口
-    try:
-        window = Window.ActiveWindow
-        if window is not None:
-            window.Close()
-            return
-    except Exception:
-        pass
+    # ---- 验证 ----
+    doc_count_after = _get_document_count()
+    if doc_count_after > 0:
+        logger.warning(
+            "⚠ 仍有 {} 个窗口未关闭！内存可能持续累积".format(
+                doc_count_after))
+    else:
+        logger.info("所有窗口已关闭（窗口数: 0）")
 
-    logger.warning("所有文档关闭方式均失败，资源可能未释放")
+    return doc_count_after
 
 
 # ============================================================================
@@ -499,12 +620,21 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # ------------------------------------------------------------------
     # 不关闭文档会导致 SpaceClaim 内部文档句柄/内存累积，
     # 约 2-3 个文档后进程因资源耗尽崩溃。
-    # SpaceClaim API V23 的 Document 对象没有 Close() 方法，
-    # 需要通过 Command.Execute("CloseWindow") 或 Window 对象关闭。
+    # 使用 _close_all_documents() 确保所有文档（不仅是当前处理的）
+    # 都被关闭，防止残留文档累积。
     try:
         if doc is not None:
-            _close_document(doc)
-            logger.info("文档已关闭")
+            # ★ 先关闭所有文档（防止前次迭代的残留文档未释放）
+            remaining = _close_all_documents()
+            logger.info("文档关闭完成，残留文档数: {}".format(remaining))
+
+            # ★ 释放本地引用，帮助 IronPython GC 回收 .NET 对象
+            #    将 doc/part/body_selection 等引用置 None，
+            #    避免 IronPython 持有引用阻止 .NET GC
+            doc = None
+            part = None
+            body_selection = None
+            _force_gc()
     except Exception as e:
         logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
 
@@ -561,6 +691,10 @@ def _persistent_loop():
 
     # result_file 在每条命令中按 run_id 动态计算
     result_file = ""
+
+    # ★ 使用全局计数器追踪已处理的构型数（跨命令循环迭代持久化）
+    global _persistent_config_count
+    _persistent_config_count = 0
 
     while True:
         try:
@@ -619,11 +753,28 @@ def _persistent_loop():
             except (IOError, OSError):
                 pass
 
+            # ---- ★ 构型前清理：确保 SpaceClaim 处于干净状态 ----
+            # 在打开新 STEP 前关闭所有残留文档，防止内存累积。
+            # 即使上一个构型的关闭逻辑因异常跳过，本步骤也能兜底清理。
+            _persistent_config_count += 1
             logger.info("=" * 40)
-            logger.info("常驻模式: 开始处理构型 {} (run={})".format(
-                config_name, run_id))
+            logger.info("常驻模式: 准备处理第 {} 个构型 {} (run={})".format(
+                _persistent_config_count, config_name, run_id))
             logger.info("STEP 目录: {}".format(step_dir))
             logger.info("SCDOC 目录: {}".format(scdoc_dir))
+
+            # ★ 构型前强制清理所有文档 + GC
+            try:
+                doc_count_before = _get_document_count()
+                if doc_count_before > 0:
+                    logger.warning(
+                        "⚠ 处理前发现 {} 个残留文档，先行清理...".format(
+                            doc_count_before))
+                    _close_all_documents()
+                _force_gc()
+            except Exception as e:
+                logger.warning("构型前清理异常（非关键）: {}: {}".format(
+                    type(e).__name__, e))
 
             success = process_step_file(config_name, step_dir, scdoc_dir)
 
@@ -662,7 +813,8 @@ def _persistent_loop():
             except Exception:
                 pass
 
-    logger.info("常驻模式: 退出命令循环")
+    logger.info("常驻模式: 退出命令循环（已处理 {} 个构型）".format(
+        _persistent_config_count))
 
 
 def _write_result(result_file, config_name, success, message="",
@@ -670,8 +822,15 @@ def _write_result(result_file, config_name, success, message="",
     """写入结果文件。
 
     使用原子写入模式：先写 .tmp 文件再 rename，确保 Python 端
-    不会读到半写状态的文件。写入后立即 flush + fsync，确保数据
-    落盘——即使后续代码抛出异常，结果文件也已可被 Python 端检测。
+    不会读到半写状态的文件。
+
+    ★ IronPython 2.7 兼容性：
+      - io.open() 的 errors="replace" 在 IronPython 中可能不生效，
+        改用 codecs.open()（已在 logger 中验证可靠）。
+      - os.fsync(f.fileno()) 在 IronPython 中 .fileno() 可能返回
+        .NET 对象而非 int，单独包裹避免影响主写入流程。
+      - 使用 json.dumps + ensure_ascii=True（Python 2 默认行为）
+        预编码为 ASCII 安全形式，彻底避免 UnicodeEncodeError。
     """
     result = {
         "config": config_name,
@@ -681,16 +840,49 @@ def _write_result(result_file, config_name, success, message="",
     }
     if run_id:
         result["run_id"] = run_id
+
+    # ★ 预编码为 JSON 字符串（Python 2 的 json.dumps 默认 ensure_ascii=True，
+    #    所有非 ASCII 字符会被转义为 \uXXXX，彻底避免编码问题）
     try:
-        # 先写临时文件再重命名，确保原子性
+        json_text = json.dumps(result) + "\n"
+    except (TypeError, ValueError, UnicodeDecodeError) as e:
+        # 降级：仅写入 ASCII 安全字段
+        logger.error("JSON 序列化失败: {}: {}".format(type(e).__name__, e))
+        try:
+            fallback = {
+                "config": str(config_name),
+                "success": bool(success),
+                "message": "json_serialize_error",
+                "timestamp": time.time(),
+            }
+            if run_id:
+                fallback["run_id"] = run_id
+            json_text = json.dumps(fallback) + "\n"
+        except Exception:
+            # 最终降级：手动构造最小 JSON
+            json_text = (
+                '{"config":' + json.dumps(str(config_name)) +
+                ',"success":' + ("true" if success else "false") +
+                ',"message":"json_fatal_error",' +
+                '"timestamp":' + str(time.time()) + '}\n'
+            )
+
+    try:
         tmp_file = result_file + ".tmp"
-        with io.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
-            json.dump(result, f)
-            f.write("\n")
-            # ★ 立即 flush + fsync：确保数据落盘，
-            #   即使后续代码抛出异常，Python 端也能读到完整结果
+        # ★ 使用 codecs.open 替代 io.open：
+        #    IronPython 2.7 的 io.open 不一定将 errors 参数传递到底层
+        #    StreamWriter；codecs.open 对 errors 参数的支持更可靠。
+        with codecs.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
+            f.write(json_text)
             f.flush()
-            os.fsync(f.fileno())
+            # ★ fsync 单独包裹：.fileno() 在 IronPython 中可能返回
+            #    .NET 对象而非 int，导致 os.fsync 失败。
+            #    不影响写入——flush 已确保数据从缓冲区写出。
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+
         # Windows 下 rename 目标存在时会报错，先删除
         try:
             if os.path.exists(result_file):
@@ -699,29 +891,33 @@ def _write_result(result_file, config_name, success, message="",
             pass
         os.rename(tmp_file, result_file)
         logger.debug("结果文件已写入: {}".format(result_file))
+
     except Exception as e:
         # 捕获所有异常（包括 UnicodeEncodeError），确保不会因编码问题
         # 导致结果文件完全丢失。尝试以纯 ASCII 方式降级写入。
         logger.error("写入结果文件失败: {}: {}".format(type(e).__name__, e))
         try:
-            fallback = {
-                "config": config_name,
-                "success": bool(success),
-                "message": "result_write_error",
-                "timestamp": time.time(),
-            }
+            fallback_json = (
+                '{"config":"' + str(config_name).replace('"', '\\"') +
+                '","success":' + ("true" if success else "false") +
+                ',"message":"result_write_error",' +
+                '"timestamp":' + str(time.time()) + '}\n'
+            )
             tmp_file = result_file + ".tmp"
-            with io.open(tmp_file, "w", encoding="ascii", errors="replace") as f:
-                json.dump(fallback, f)
-                f.write("\n")
+            # ★ 直接用内置 open 写二进制：Python 2 的 str 即 bytes，
+            #    写入纯 ASCII 内容不会触发任何编码转换。
+            with open(tmp_file, "wb") as f:
+                f.write(fallback_json.encode("ascii", errors="replace"))
                 f.flush()
-                os.fsync(f.fileno())
             try:
                 if os.path.exists(result_file):
                     os.remove(result_file)
             except (IOError, OSError):
                 pass
             os.rename(tmp_file, result_file)
+            logger.info("降级写入结果文件成功: {}".format(result_file))
+        except Exception as e2:
+            logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
             logger.info("降级写入结果文件成功: {}".format(result_file))
         except Exception as e2:
             logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))

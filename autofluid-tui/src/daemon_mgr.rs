@@ -131,6 +131,10 @@ impl DaemonManager {
             match rt.block_on(ipc.connect()) {
                 Ok(()) => {
                     state.connected = true;
+                    // ★ 重置日志状态：新 daemon 的日志 ID 从 1 重新开始，
+                    // 必须清零 last_log_id 否则增量轮询会因 since_id 过高而收不到任何条目
+                    state.last_log_id = 0;
+                    log_buffer.clear_detail();
                     log_buffer.push_info("✅ 已连接到后台引擎".to_string());
                     return;
                 }
