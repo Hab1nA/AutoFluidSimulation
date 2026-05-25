@@ -100,6 +100,12 @@ class PipelineScheduler:
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
         )
+        self.meshing_monitor = MeshingMonitor(
+            state_manager=self.state,
+            remote_executor=self.runner.get_remote_executor(),
+            paused_event=self._paused,
+            stopped_event=self._stopped,
+        )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
             task_runner=self.runner,
@@ -107,12 +113,7 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
             worker_pool_manager=self.worker_pool,
-        )
-        self.meshing_monitor = MeshingMonitor(
-            state_manager=self.state,
-            remote_executor=self.runner.get_remote_executor(),
-            paused_event=self._paused,
-            stopped_event=self._stopped,
+            meshing_monitor=self.meshing_monitor,
         )
 
         # 注入 MeshingMonitor 到 WorkerPool

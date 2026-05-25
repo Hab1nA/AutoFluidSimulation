@@ -38,6 +38,7 @@ class SWPhaseHandler:
         paused_event: threading.Event,
         stopped_event: threading.Event,
         worker_pool_manager=None,
+        meshing_monitor=None,
     ):
         """
         初始化 SW 阶段处理器。
@@ -49,6 +50,7 @@ class SWPhaseHandler:
             paused_event: 暂停事件
             stopped_event: 停止事件
             worker_pool_manager: 工作线程池管理器（用于启动工作线程）
+            meshing_monitor: 网格划分监控器（用于提前启动消费线程）
         """
         self.state = state_manager
         self.runner = task_runner
@@ -56,6 +58,7 @@ class SWPhaseHandler:
         self._paused = paused_event
         self._stopped = stopped_event
         self.worker_pool_manager = worker_pool_manager
+        self.meshing_monitor = meshing_monitor
 
         # 文件监控器引用（在 start_pipeline 中设置）
         self._file_monitor: Optional[StepFileMonitor] = None
@@ -143,9 +146,13 @@ class SWPhaseHandler:
         # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
         #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
         #    实现边导出边处理的并行流水线）
+        #    同时启动 MeshingMonitor 消费线程，确保 Worker 完成 Transfer
+        #    后提交的构型能被及时消费，而非堆积到 SW 阶段结束后。
         self._ensure_file_monitor_running()
         if self.worker_pool_manager:
             self.worker_pool_manager.start_if_needed()
+        if self.meshing_monitor:
+            self.meshing_monitor.start_if_needed()
 
         # 执行 SW 步骤（含重试机制）
         max_retries = int(ENGINE_CONFIG["max_retries"])

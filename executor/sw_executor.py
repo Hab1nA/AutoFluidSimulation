@@ -489,7 +489,7 @@ class SWExecutor:
             return warnings
 
         file_size = os.path.getsize(excel_path)
-        logger.info(f"[SW-DesignTable]   文件大小: {file_size} bytes")
+        logger.info(f"[SW-DesignTable] 文件大小: {file_size} bytes")
 
         try:
             import openpyxl
@@ -510,7 +510,7 @@ class SWExecutor:
                     logger.warning(f"[SW-DesignTable] {warnings[-1]}")
                     return warnings
                 row1_text = " ".join(str(v) for v in row1 if v is not None)
-                logger.info(f"[SW-DesignTable]   第1行内容: {row1_text[:120]}")
+                logger.info(f"[SW-DesignTable] 第1行内容: {row1_text[:120]}")
 
                 has_design_table_header = "Design Table" in row1_text or "设计表" in row1_text
                 if not has_design_table_header:
@@ -525,7 +525,7 @@ class SWExecutor:
                     if row2_cells:
                         row2 = [cell.value for cell in row2_cells[0]]
                         row2_text = " | ".join(str(v) for v in row2 if v is not None)
-                        logger.info(f"[SW-DesignTable]   第2行内容: {row2_text[:200]}")
+                        logger.info(f"[SW-DesignTable] 第2行内容: {row2_text[:200]}")
                         has_param_headers = any(
                             isinstance(v, str) and ("$" in v or "@" in v)
                             for v in row2 if v is not None
@@ -544,7 +544,7 @@ class SWExecutor:
                 for row in ws.iter_rows(min_row=3, values_only=True):
                     if row[0] is not None:
                         data_rows += 1
-                logger.info(f"[SW-DesignTable]   数据行数 (第3行起): {data_rows}")
+                logger.info(f"[SW-DesignTable] 数据行数 (第3行起): {data_rows}")
 
             finally:
                 if wb is not None:
@@ -557,7 +557,7 @@ class SWExecutor:
             logger.warning(f"[SW-DesignTable] {warnings[-1]}", exc_info=True)
 
         if not warnings:
-            logger.info("[SW-DesignTable] ✓ Excel 设计表格式预验证通过")
+            logger.info("[SW-DesignTable] Excel 设计表格式预验证通过")
         return warnings
 
     def _model_has_design_table(self, doc) -> bool:
