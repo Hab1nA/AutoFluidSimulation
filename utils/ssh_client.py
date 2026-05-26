@@ -10,6 +10,7 @@ SSH 客户端模块 (SSH Client)
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import socket
@@ -806,8 +807,6 @@ class RemoteWorkstation:
         escaped_files = [f.replace("'", "''") for f in filenames]
 
         # 构建 PowerShell 脚本：逐文件计算哈希 → 排序拼接 → 组合 MD5
-        # ★ 全部使用单引号字符串 + 拼接，避免嵌套双引号在 SSH→cmd.exe
-        #    命令行解析时被错误拆分
         file_list_ps = ",".join(f"'{f}'" for f in escaped_files)
         ps_script = (
             f"$files = @({file_list_ps}); "
@@ -827,8 +826,15 @@ class RemoteWorkstation:
             f"$md5 = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes); "
             f"[System.BitConverter]::ToString($md5).Replace('-','').ToLower()"
         )
+
+        # ★ 使用 -EncodedCommand + Base64 传递脚本，消除所有转义/引号问题：
+        #   - $ 符号不会被外层 shell 意外展开
+        #   - 无需处理嵌套双引号/单引号的转义
+        #   - 命令字符串仅含 [A-Za-z0-9+/=]，通过 SSH/cmd.exe 时零歧义
+        script_bytes = ps_script.encode('utf-16-le')
+        encoded = base64.b64encode(script_bytes).decode('ascii')
         out, err, code = self.exec_command(
-            f'powershell -Command "{ps_script}"', timeout=60
+            f'powershell -EncodedCommand {encoded}', timeout=60
         )
 
         if code == 0 and out.strip():
