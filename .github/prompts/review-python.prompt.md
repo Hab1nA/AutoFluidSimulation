@@ -7,6 +7,7 @@
 1. 阅读 `.github/instructions/python.instructions.md`，掌握 Python 代码规范
 2. 阅读 `.github/instructions/implementation-planning.instructions.md` 中的架构概览，理解项目结构
 3. 阅读 `README.md` 和 `docs/code-style-guide.md`，了解项目全貌
+4. 使用仓库内 `.venv\Scripts\python.exe` 执行所有 Python 检查，不使用裸 `python`
 
 ## 🚫 语言隔离规则
 
@@ -53,7 +54,7 @@
 ### 第 3 步：测试验证
 
 ```bash
-python -m pytest tests/ -v
+.venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
 如测试失败，修复问题后重新测试，直到全部通过。

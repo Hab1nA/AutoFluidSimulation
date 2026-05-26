@@ -73,6 +73,26 @@ class _MockRemoteExecutor:
         return True
 
 
+class _MockSWExecutor:
+    """Mock SWExecutor，供 SWPhaseHandler 调用 _verify_step_exports / disconnect_sw_cached。"""
+
+    def __init__(self, state_manager):
+        self.state = state_manager
+
+    def _verify_step_exports(self, step_dir: str) -> int:
+        """Mock 安全网校验：直接返回已完成构型数。"""
+        from engine.config import STATUS_COMPLETED
+        count = 0
+        for cn in self.state.get_all_configs():
+            if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED:
+                count += 1
+        return count
+
+    def disconnect_sw_cached(self):
+        """Mock 清理（无实际 SW 连接）。"""
+        pass
+
+
 class MockTaskRunner:
     def __init__(self, state_manager: StateManager):
         self.state = state_manager
@@ -82,17 +102,35 @@ class MockTaskRunner:
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
         self._remote_executor = _MockRemoteExecutor(self.state)
+        self._sw_executor = _MockSWExecutor(state_manager)
 
     def execute_sw_step(self) -> bool:
+        """旧的批量方法（保留兼容性）。"""
         self._sw_call_count += 1
         print(f"  [MockTaskRunner] execute_sw_step() 第{self._sw_call_count}次调用"
               f" (delay={self._sw_delay}s, fail={self._sw_should_fail})")
+
+        if self._sw_should_fail:
+            all_configs = self.state.get_all_configs()
+            for cn in all_configs:
+                self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
+            return False
+
+        all_configs = self.state.get_all_configs()
+        for cn in all_configs:
+            self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+        return True
+
+    def execute_sw_per_config(self, config_name: int) -> bool:
+        """单构型 SW 导出（供 RetryManager 调用）。"""
+        self._sw_call_count += 1
+        print(f"  [MockTaskRunner] execute_sw_per_config({config_name}) "
+              f"第{self._sw_call_count}次调用 (fail={self._sw_should_fail})")
 
         if self._sw_delay > 0:
             steps = int(self._sw_delay / 0.5)
             for _ in range(steps):
                 time.sleep(0.5)
-                # 暂停感知：模拟生产代码的 pause_aware_sleep
                 stopped = getattr(self, "_stopped_event", None)
                 if stopped is not None and stopped.is_set():
                     return False
@@ -100,23 +138,11 @@ class MockTaskRunner:
                     self._pause_check_callback()
 
         if self._sw_should_fail:
-            print("  [MockTaskRunner] SW 宏模拟失败!")
-            all_configs = self.state.get_all_configs()
-            # 暂停期间失败：保留 Running 状态（与生产代码行为一致，
-            # 由 _execute_sw_macro 的暂停分支将 Running→Paused）
-            paused = getattr(self, "_paused_event", None)
-            is_paused = paused is not None and paused.is_set()
-            if not is_paused:
-                for cn in all_configs:
-                    self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
-            self.state.set_sw_macro_started(False)
+            print(f"  [MockTaskRunner] 构型{config_name} SW 模拟失败!")
             return False
 
-        all_configs = self.state.get_all_configs()
-        for cn in all_configs:
-            self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
-        self.state.set_sw_macro_started(True)
-        print(f"  [MockTaskRunner] SW 宏模拟成功 ({len(all_configs)} 个构型)")
+        self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+        print(f"  [MockTaskRunner] 构型{config_name} SW 模拟成功")
         return True
 
     def execute_sc_step(self, config_name: int) -> bool:
@@ -165,6 +191,12 @@ class MockTaskRunner:
 
     def run_system_check(self):
         return {"local_checks": {}, "remote_checks": {}}
+
+    def shutdown_sc_pool(self):
+        pass
+
+    def do_sc_final_cleanup(self):
+        pass
 
 
 import engine.scheduler.main as scheduler_main_mod
@@ -222,6 +254,37 @@ class MockStepFileMonitor:
 
     def _scan_existing_files(self):
         self._scan_existing_count += 1
+        # 若 step_dir 已设置，扫描真实目录以兼容其他测试文件的 StepFileMonitor 使用
+        if self.step_dir and os.path.isdir(self.step_dir):
+            for fname in os.listdir(self.step_dir):
+                fpath = os.path.join(self.step_dir, fname)
+                if os.path.isfile(fpath):
+                    self._known_files.add(fname)
+
+    def _scan_directory(self):
+        """扫描目录检测稳定文件（适配 test_sw_export_workflow 调用）。"""
+        if self.step_dir and os.path.isdir(self.step_dir):
+            for fname in os.listdir(self.step_dir):
+                fpath = os.path.join(self.step_dir, fname)
+                if os.path.isfile(fpath):
+                    self._known_files.add(fname)
+                    if self.on_file_ready:
+                        cn = self.parse_config_name(fname)
+                        if cn is not None:
+                            self.on_file_ready(cn, fpath)
+
+    def get_pending_configs(self) -> list[tuple[int, str]]:
+        """返回待处理的构型列表（委托给原始实现）。"""
+        # ★ 不能 from engine.file_monitor import StepFileMonitor（已被 mock 替换），
+        #    使用 teardown_mock_environment 前保存的 _OriginalStepFileMonitor 引用
+        return _OriginalStepFileMonitor.get_pending_configs(self)
+
+    @staticmethod
+    def parse_config_name(filename: str) -> int | None:
+        """从文件名解析构型编号（委托给原始实现）。"""
+        # ★ 不能 from engine.file_monitor import StepFileMonitor（已被 mock 替换），
+        #    使用 teardown_mock_environment 前保存的 _OriginalStepFileMonitor 引用
+        return _OriginalStepFileMonitor.parse_config_name(filename)
 
 
 def setup_mock_environment():
@@ -248,6 +311,9 @@ class TestContext:
         self._orig_db_path = IPC_CONFIG["db_path"]
         IPC_CONFIG["db_path"] = self.db_path
 
+        # 确保 mock 环境已设置（pytest 直接运行时不会调用 main()）
+        setup_mock_environment()
+
         self.state = StateManager(db_path=self.db_path)
 
         configs = {i: [1.0, 2.0, 3.0, 4.0] for i in range(1, num_configs + 1)}
@@ -258,6 +324,18 @@ class TestContext:
 
         from engine.scheduler import PipelineScheduler
         self.scheduler = PipelineScheduler(self.state, self.runner)
+
+        # Mock _prepare_sw_retry：跳过真实的 SW 进程清理（taskkill + 15s 等待），
+        # 仅保留文件监控器重置逻辑，使测试能在合理时间内完成
+        def _mock_prepare_sw_retry():
+            fm = self.scheduler.sw_phase_handler._file_monitor
+            if fm is not None:
+                fm._processed_files.clear()
+                fm._known_files.clear()
+                fm._detector._history.clear()
+                fm._detector._first_seen.clear()
+        self.scheduler.sw_phase_handler._prepare_sw_retry = _mock_prepare_sw_retry
+
         print("  [Setup] 调度器已创建")
 
     def cleanup(self):
@@ -490,6 +568,34 @@ def test_rapid_pause_start():
         ctx.cleanup()
 
 
+def test_pause_before_scheduler_thread_enters():
+    print("\n" + "=" * 60)
+    print("测试 5.1: start 后调度线程进入前收到 pause")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+
+        ctx.state.set_engine_status("running")
+        ctx.scheduler.pause()
+        ctx.assert_engine_status("paused", "预置暂停后")
+
+        t = ctx.run_pipeline_async()
+        t.join(timeout=5)
+
+        ctx.assert_engine_status("paused", "调度线程进入后")
+        assert ctx.runner._sw_call_count == 0, "暂停已到达时不应启动 SW 阶段"
+        assert ctx.scheduler._paused.is_set(), "调度器应保持暂停标志"
+
+        print("[PASS] 测试 5.1 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
 def test_start_when_already_running():
     print("\n" + "=" * 60)
     print("测试 6: Running 状态下重复 start")
@@ -699,6 +805,7 @@ def main():
         ("SW执行中暂停->失败->重试", test_pause_during_sw_then_fail),
         ("SW直接失败->重新启动", test_sw_fail_then_restart),
         ("快速连续pause/start", test_rapid_pause_start),
+        ("start后调度线程进入前收到pause", test_pause_before_scheduler_thread_enters),
         ("Running状态重复start", test_start_when_already_running),
         ("Stopped状态pause", test_pause_when_stopped),
         ("暂停后文件监控停止扫描", test_file_monitor_paused_on_pause),

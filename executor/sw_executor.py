@@ -59,6 +59,9 @@ class SWExecutor:
         self.state = state_manager
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
+        self._cached_sw_app = None
+        self._cached_doc = None
+        self._com_initialized = False
 
     def set_control_events(
         self,
@@ -193,6 +196,20 @@ class SWExecutor:
                         pass
                     return False
 
+                # ★ 部分构型失败：返回 False 以触发 sw_phase 的重试循环。
+                #   已成功的构型保持 COMPLETED 状态，重试时会被跳过；
+                #   仅失败构型（STATUS_ERROR）会被 _prepare_sw_retry 重置并重新导出。
+                if fail_cnt > 0:
+                    logger.warning(
+                        f"[SW] 部分构型导出失败 ({fail_cnt}/{success_cnt + fail_cnt})，"
+                        f"返回 False 触发重试（失败构型: {failed_cfgs}）"
+                    )
+                    try:
+                        sw_app.CloseDoc(os.path.basename(sw_model))
+                    except Exception:
+                        pass
+                    return False
+
                 # 4.5 暂停检查：若暂停标志已置位，跳过校验和清理，
                 #     保持 SW 进程存活以便恢复时继续使用
                 paused_during_export = (
@@ -228,6 +245,220 @@ class SWExecutor:
                 f"[SW] SW 步骤执行失败 ({type(e).__name__}: {e})", exc_info=True
             )
             return False
+
+    # ------------------------------------------------------------------
+    # 单构型导出（供 RetryManager 逐构型调用）
+    # ------------------------------------------------------------------
+
+    def export_sw_per_config(self, config_name: int) -> bool:
+        """导出单个构型的 STEP 文件（供 RetryManager 调用）。
+
+        执行流程：
+        1. 首次调用时建立 SW 连接、打开模型、导入设计表（缓存在实例属性）
+        2. 切换到目标构型 → 重建 → SaveAs STEP
+        3. 所有构型完成后由调用方调用 _disconnect_sw_cached() 清理
+
+        与 execute_sw_step() 的区别：
+        - execute_sw_step() 是旧的批量方法，内部处理所有构型
+        - export_sw_per_config() 是单构型方法，由 RetryManager 逐个调用，
+          状态管理（Running/Retrying/Error）完全由 RetryManager 负责
+
+        Args:
+            config_name: 构型编号
+
+        Returns:
+            True 表示该构型 STEP 文件导出成功
+        """
+        # ★ CoInitialize 仅在首次调用时执行（同一线程内幂等）
+        if not self._com_initialized:
+            import pythoncom
+            try:
+                pythoncom.CoInitialize()
+                self._com_initialized = True
+            except Exception:
+                pass  # 已初始化
+
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        sw_model = LOCAL_PATHS["sw_model"]
+        excel_path = LOCAL_PATHS.get("excel", "")
+        doc_type = self._guess_sw_doc_type(sw_model)
+
+        # ---- 首次调用：建立 SW 连接 ----
+        if self._cached_sw_app is None:
+            sw_app = None
+            doc = None
+            cache_ready = False
+            try:
+                sw_app = self._connect_sw()
+                if sw_app is None:
+                    logger.error(f"[SW] 构型{config_name}: 无法连接 SolidWorks")
+                    return False
+                try:
+                    sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
+                except Exception:
+                    pass
+                doc = self._open_sw_model(sw_app, sw_model, doc_type)
+                if doc is None:
+                    logger.error(f"[SW] 构型{config_name}: 无法打开模型")
+                    return False
+                if not self._import_design_table_with_retry(
+                    doc, sw_app, excel_path, sw_model
+                ):
+                    logger.error(f"[SW] 构型{config_name}: 设计表导入失败")
+                    return False
+                self._cached_sw_app = sw_app
+                self._cached_doc = doc
+                cache_ready = True
+                logger.info("[SW] COM 连接已建立（缓存供后续构型复用）")
+            except Exception as e:
+                logger.error(
+                    f"[SW] 构型{config_name}: SW 连接失败 "
+                    f"({type(e).__name__}: {e})", exc_info=True
+                )
+                return False
+            finally:
+                if not cache_ready:
+                    if sw_app is not None or doc is not None:
+                        try:
+                            self._disconnect_sw(sw_app, doc, sw_model)
+                        except Exception as e:
+                            logger.debug(f"[SW-Cleanup] 初始化失败后清理异常: {e}")
+                        finally:
+                            self._com_initialized = False
+                    else:
+                        self._uninitialize_com_if_needed()
+
+        sw_app = self._cached_sw_app
+        doc = self._cached_doc
+
+        # ---- 校验 STEP 目录 ----
+        if not step_dir:
+            logger.error("[SW] 未配置 STEP 输出目录 (step_dir)")
+            return False
+        try:
+            os.makedirs(step_dir, exist_ok=True)
+        except OSError as e:
+            logger.error(f"[SW] 无法创建 STEP 输出目录: {step_dir}: {e}")
+            return False
+
+        # ---- 检查文件是否已存在（断点续传 / 之前批次已成功） ----
+        filename = get_step_filename("SW", config_name)
+        if not filename:
+            logger.error(f"[SW] 构型{config_name}: 无法生成 STEP 文件名")
+            return False
+        filepath = os.path.join(step_dir, filename)
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+            logger.info(
+                f"[SW] 构型{config_name}: STEP 文件已存在，跳过导出"
+            )
+            return True
+
+        # ---- 暂停/停止检查 ----
+        if self._paused_event is not None and self._paused_event.is_set():
+            logger.info(f"[SW] 构型{config_name}: 暂停标志已置位，中止导出")
+            return False
+        if self._stopped_event is not None and self._stopped_event.is_set():
+            logger.info(f"[SW] 构型{config_name}: 停止标志已置位，中止导出")
+            return False
+
+        # ---- 切换构型 → 重建 → 导出 ----
+        import win32com.client
+
+        logger.info(f"[SW] 构型{config_name}: 开始导出 STEP...")
+        cn_str = str(config_name)
+
+        try:
+            doc.ShowConfiguration2(cn_str)
+        except Exception as e:
+            logger.error(
+                f"[SW] 构型{config_name}: ShowConfiguration2 失败 "
+                f"({type(e).__name__}: {e})"
+            )
+            return False
+
+        # 重建
+        ext = doc.Extension
+        rebuild_ok = False
+        try:
+            ext.Rebuild(0)
+            rebuild_ok = True
+        except TypeError:
+            try:
+                rebuild_fn = ext.Rebuild
+                if callable(rebuild_fn):
+                    rebuild_fn(0)
+                    rebuild_ok = True
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if not rebuild_ok:
+            try:
+                doc.Rebuild(0)
+                rebuild_ok = True
+            except Exception:
+                pass
+
+        # SaveAs STEP
+        import pythoncom
+        try:
+            save_errors = win32com.client.VARIANT(
+                pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+            )
+            save_warnings = win32com.client.VARIANT(
+                pythoncom.VT_BYREF | pythoncom.VT_I4, 0
+            )
+            export_data = win32com.client.VARIANT(
+                pythoncom.VT_DISPATCH, None
+            )
+            status = doc.Extension.SaveAs(
+                filepath,
+                self._SW_SAVE_AS_CURRENT_VERSION,
+                self._SW_SAVE_AS_OPTIONS_SILENT,
+                export_data,
+                save_errors,
+                save_warnings,
+            )
+            if status and os.path.exists(filepath):
+                logger.info(
+                    f"[SW] 构型{config_name}: {filename} 导出成功 "
+                    f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
+                )
+                return True
+            else:
+                logger.warning(
+                    f"[SW] 构型{config_name}: SaveAs 返回 {status}，"
+                    f"文件存在={os.path.exists(filepath)} "
+                    f"(Errors={save_errors.value})"
+                )
+                return False
+        except Exception as e:
+            logger.error(
+                f"[SW] 构型{config_name}: SaveAs 异常 "
+                f"({type(e).__name__}: {e})"
+            )
+            # ★ 清理缓存的 COM 连接，下次重试时重新建立
+            self.disconnect_sw_cached()
+            return False
+
+    def disconnect_sw_cached(self) -> None:
+        """清理通过 export_sw_per_config 缓存的 SW 连接。"""
+        sw_app = self._cached_sw_app
+        doc = self._cached_doc
+        self._cached_sw_app = None
+        self._cached_doc = None
+
+        if sw_app is None and doc is None:
+            self._uninitialize_com_if_needed()
+            return
+
+        sw_model = LOCAL_PATHS.get("sw_model", "")
+        try:
+            self._disconnect_sw(sw_app, doc, sw_model)
+        except Exception as e:
+            logger.debug(f"[SW-Cleanup] 清理缓存连接异常: {e}")
+        finally:
+            self._com_initialized = False
 
     # ------------------------------------------------------------------
     # SW 连接管理
@@ -291,6 +522,22 @@ class SWExecutor:
             pass
         logger.info("[SW-COM] 已通过 subprocess 启动并连接 SolidWorks")
         return sw_app
+
+    def _uninitialize_com_if_needed(self) -> None:
+        """释放当前线程的 COM 初始化状态。"""
+        if not self._com_initialized:
+            return
+        try:
+            import pythoncom
+            try:
+                pythoncom.CoFreeUnusedLibraries()
+            except Exception:
+                pass
+            pythoncom.CoUninitialize()
+        except Exception as e:
+            logger.debug(f"[SW-Cleanup] COM 反初始化异常: {e}")
+        finally:
+            self._com_initialized = False
 
     def _launch_sw_process(self) -> bool:
         """通过 subprocess 直接启动 SolidWorks.exe，轮询等待 COM 就绪。"""

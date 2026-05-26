@@ -124,6 +124,10 @@ class TaskRunner:
         """执行 SW 步骤（委托给 SWExecutor）。"""
         return self._sw_executor.execute_sw_step()
 
+    def execute_sw_per_config(self, config_name: int) -> bool:
+        """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
+        return self._sw_executor.export_sw_per_config(config_name)
+
     # ------------------------------------------------------------------
     # 阶段 2: SpaceClaim 脚本执行（本地 SCProcessPool）
     # ------------------------------------------------------------------

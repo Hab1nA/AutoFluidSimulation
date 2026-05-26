@@ -14,6 +14,7 @@ import json
 import os
 import tempfile
 import shutil
+import threading
 import time
 
 
@@ -352,3 +353,78 @@ class TestPerRunResultIsolation:
             data_a = json.load(f)
         assert data_a["config"] == "1"
         assert data_a["run_id"] == run_a
+
+
+class _FakeProcess:
+    returncode = None
+
+    def poll(self):
+        return None
+
+
+class TestScPauseSemantics:
+    """验证 SC pause 只阻止新命令，不取消已发送命令。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="sc_pause_test_")
+        self.step_dir = os.path.join(self.tmpdir, "steps")
+        self.scdoc_dir = os.path.join(self.tmpdir, "scdoc")
+        os.makedirs(self.step_dir, exist_ok=True)
+        os.makedirs(self.scdoc_dir, exist_ok=True)
+
+    def teardown_method(self):
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _pool_with_ready_slot(self, monkeypatch):
+        from engine.config import ENGINE_CONFIG, LOCAL_PATHS, OPERATION_TIMEOUTS
+        from engine.sc_process_pool import PersistentSlot, SCProcessPool
+
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", self.tmpdir)
+        monkeypatch.setitem(LOCAL_PATHS, "step_dir", self.step_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", self.scdoc_dir)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_timeout", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_scdoc_stable_seconds", 0.05)
+        monkeypatch.setitem(OPERATION_TIMEOUTS, "sc_poll_interval", 0.02)
+
+        pool = SCProcessPool()
+        pool._first_cleanup_done = True
+        slot = PersistentSlot(
+            slot_id=1,
+            process=_FakeProcess(),
+            pid=1234,
+            cmd_dir=pool._persistent_cmd_dir,
+            status="ready",
+        )
+        pool._persistent_slots[slot.slot_id] = slot
+        return pool, slot
+
+    def test_pause_before_send_does_not_write_command(self, monkeypatch):
+        pool, slot = self._pool_with_ready_slot(monkeypatch)
+        paused = threading.Event()
+        paused.set()
+
+        assert pool.run_config(1, paused_event=paused) is False
+
+        cmd_file = os.path.join(pool._persistent_cmd_dir, "sc_cmd_1.json")
+        assert not os.path.exists(cmd_file)
+        assert slot.status == "ready"
+        assert slot.current_config is None
+
+    def test_pause_after_send_waits_for_current_scdoc(self, monkeypatch):
+        pool, slot = self._pool_with_ready_slot(monkeypatch)
+        paused = threading.Event()
+        paused.set()
+        scdoc_file = os.path.join(self.scdoc_dir, "model_gen4_1.scdoc")
+
+        def create_scdoc():
+            time.sleep(0.05)
+            with open(scdoc_file, "wb") as f:
+                f.write(b"scdoc")
+
+        writer = threading.Thread(target=create_scdoc, daemon=True)
+        writer.start()
+
+        assert pool._send_persistent_command(slot, 1, paused, None) is True
+        writer.join(timeout=1)
+        assert slot.status == "ready"

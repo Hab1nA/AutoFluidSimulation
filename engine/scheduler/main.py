@@ -112,6 +112,7 @@ class PipelineScheduler:
             sc_queue=self._sc_queue,
             paused_event=self._paused,
             stopped_event=self._stopped,
+            retry_manager=self.retry_manager,
             worker_pool_manager=self.worker_pool,
             meshing_monitor=self.meshing_monitor,
         )
@@ -169,8 +170,14 @@ class PipelineScheduler:
         self._pipeline_thread = threading.current_thread()
 
         self._stopped.clear()
-        # 启动（或重启）时清除暂停标志：此方法由全新启动或 resume()→重启路径调用，
-        # resume() 已在调用前清除了 _paused，此处为防御性编程
+        # 若 start 命令刚创建调度线程，pause 命令可能在线程真正执行前到达。
+        # 此时必须尊重 pause，避免继续启动 SW 阶段。
+        if self._paused.is_set():
+            logger.info("调度器启动前已收到暂停指令，暂停启动流程，等待 resume 指令")
+            self.state.set_engine_status("paused")
+            return
+
+        # 正常启动（或 resume 已清除暂停后重启）时保持启动语义不变。
         self._paused.clear()
 
         # ---- 步骤 1: SW 阶段 ----
@@ -345,6 +352,8 @@ class PipelineScheduler:
         priority_enqueue: list[tuple[int, str]] = []   # (cn, step)
         normal_enqueue: list[tuple[int, str]] = []     # (cn, step)
         completed_count = 0
+        sc_enqueued = 0        # 在循环中累加，供汇总日志使用
+        meshing_submitted = 0  # 在循环中累加，供汇总日志使用
 
         for cn in self.state.get_all_configs():
             for step in STEP_NAMES:
@@ -356,7 +365,25 @@ class PipelineScheduler:
                 # ---- 找到第一个非 COMPLETED 步骤 ----
 
                 if status == STATUS_RUNNING:
-                    break
+                    # ★ 孤立 RUNNING 检测：Daemon 重启或 stop() 后，
+                    #   步骤可能停留在 RUNNING 状态（进程已不存在）。
+                    #   检查输出文件：存在则标记完成，否则重置为 Waiting 重新执行。
+                    if self._check_step_output_exists(cn, step, step_dir, scdoc_dir):
+                        self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                        continue
+                    else:
+                        self.state.set_step_status(cn, step, STATUS_WAITING)
+                        if step == "SW":
+                            # SW 步骤由 start_pipeline 统一处理
+                            break
+                        elif step in ("SC", "Transfer"):
+                            self._enqueue_sc(cn, step_dir)
+                            sc_enqueued += 1
+                        elif step == "Meshing":
+                            if self.meshing_monitor is not None:
+                                self.meshing_monitor.submit(cn)
+                                meshing_submitted += 1
+                        break
 
                 if status == STATUS_PAUSED:
                     if self._check_step_output_exists(cn, step, step_dir, scdoc_dir):
@@ -386,8 +413,6 @@ class PipelineScheduler:
                 completed_count += 1
 
         # ---- 统一入队（PAUSED 优先）----
-        sc_enqueued = 0
-        meshing_submitted = 0
         for cn, step in priority_enqueue:
             if step == "SC":
                 self._enqueue_sc(cn, step_dir)
@@ -496,6 +521,10 @@ class PipelineScheduler:
         self._stopped.set()
         self._paused.clear()  # 解除暂停以便线程退出
 
+        # ★ 将所有 Running/Retrying 步骤转为 Paused（与 pause() 行为一致），
+        #   防止重启后孤立 RUNNING 步骤导致构型卡死。
+        self.state.set_all_running_to_paused()
+
         # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
         self.state.set_engine_status("stopped")
 
@@ -544,11 +573,20 @@ class PipelineScheduler:
             or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("Meshing", 99)
         )
 
+        # 判断是否需要重置文件监控器（重置范围触及 SC 或更早步骤时需要）
+        need_monitor_reset = (
+            step_name is None
+            or step_name in ("SW", "SC")
+            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("SC", 99)
+        )
+
         # 全量重置（所有构型 + 所有步骤）需要额外清除引擎全局状态
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
             self.runner.reset_sc_pool()
+            if need_monitor_reset and self._file_monitor:
+                self._file_monitor.resume_and_reset()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
@@ -556,12 +594,16 @@ class PipelineScheduler:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            if need_monitor_reset and self._file_monitor:
+                self._file_monitor.resume_and_reset()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            if need_monitor_reset and self._file_monitor:
+                self._file_monitor.resume_and_reset()
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

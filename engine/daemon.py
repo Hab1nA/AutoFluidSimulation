@@ -475,6 +475,12 @@ class PipelineDaemon:
             msg = f"已清理 {step_name} 步骤的文件"
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
+
+        # 如果清理范围涉及 SW 步骤，重置文件监控器状态
+        if step_name == "all" or step_name == "SW":
+            if self.scheduler and self.scheduler._file_monitor:
+                self.scheduler._file_monitor.resume_and_reset()
+
         return True, None, msg
 
     def handle_reload_config(self, params: dict | None = None) -> tuple[bool, Any, str]:

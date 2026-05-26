@@ -102,6 +102,12 @@ class SCProcessPool:
             if slot.slot_id not in self._persistent_slots:
                 logger.error(f"[SC-Pool] 槽位{slot.slot_id} 在等待期间被清理")
                 return False
+            if stopped_event is not None and stopped_event.is_set():
+                logger.info(f"[SC-Pool] 构型{config_name} 因停止取消（未发送 SC 命令）")
+                return False
+            if paused_event is not None and paused_event.is_set():
+                logger.info(f"[SC-Pool] 构型{config_name} 因暂停暂缓（未发送 SC 命令）")
+                return False
             slot.status = "busy"
             slot.current_config = config_name
 
@@ -389,6 +395,7 @@ class SCProcessPool:
         # 用于稳定性检测的上一次采样
         last_size = -1
         last_size_stable_since = 0.0
+        pause_logged = False
 
         while True:
             # ---- 进程存活检查 ----
@@ -398,11 +405,16 @@ class SCProcessPool:
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
-            # ---- 暂停/停止检查 ----
+            # ---- 停止检查 ----
+            # pause 语义：命令一旦发送给 SpaceClaim，当前构型继续跑完；
+            # worker pool 会在 SC 完成后停在 Transfer 前，并在暂停期间不再取新任务。
             if paused_event is not None and paused_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因暂停取消")
-                self._cleanup_run_files(slot.slot_id, run_id)
-                return False
+                if not pause_logged:
+                    logger.debug(
+                        f"[SC-Pool] 构型{config_name} (run={run_id}) 已收到暂停，"
+                        "等待当前 SpaceClaim 命令自然完成"
+                    )
+                    pause_logged = True
 
             if stopped_event is not None and stopped_event.is_set():
                 logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消")

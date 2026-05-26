@@ -116,6 +116,7 @@ tmp1, tmp2, x, y
 ## 类型注解规范
 
 - 使用 Python 3.10+ 语法（`dict[str, list[int]]` 而非 `Dict[str, List[int]]`）
+- 当前项目标准解释器为仓库内 `.venv\Scripts\python.exe`（当前为 Python 3.13.9）
 - 公共方法必须有完整的参数和返回值类型注解
 - 私有方法建议添加返回值注解
 - 使用 `from __future__ import annotations` 启用延迟注解求值
@@ -128,9 +129,9 @@ tmp1, tmp2, x, y
 
 | 检查项 | 命令 | 标准 |
 |--------|------|------|
-| ruff linting | `python -m ruff check .` | 无新增 E/F/W 告警（忽略 E402/E501） |
-| mypy 类型检查 | `python -m mypy .` | 无新增类型错误 |
-| 单元测试 | `python -m pytest tests/` | 全部通过，无回归 |
+| ruff linting | `.venv\Scripts\python.exe -m ruff check .` | 无新增 E/F/W 告警（忽略 E402/E501） |
+| mypy 类型检查 | `.venv\Scripts\python.exe -m mypy .` | 无新增类型错误 |
+| 单元测试 | `.venv\Scripts\python.exe -m pytest tests/` | 全部通过，无回归 |
 
 ---
 

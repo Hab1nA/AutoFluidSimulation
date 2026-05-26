@@ -167,8 +167,8 @@ OPERATION_TIMEOUTS / ENGINE_CONFIG / LOCAL_PATHS / ...
 | 层级 | 语言 | 关键依赖 |
 |------|------|----------|
 | 配置体系 | TOML + Python | toml, python-dotenv, TypedDict |
-| 调度引擎 | Python 3.10 | SQLite WAL, threading, queue |
-| 任务执行 | Python 3.10 | pywin32 (COM), paramiko (SSH/SFTP) |
+| 调度引擎 | Python 3.10+（当前 `.venv` 为 3.13.9） | SQLite WAL, threading, queue |
+| 任务执行 | Python 3.10+（当前 `.venv` 为 3.13.9） | pywin32 (COM), paramiko (SSH/SFTP) |
 | IPC | Python → Rust | JSON over TCP (port 9527) |
 | TUI 前端 | Rust | tokio, ratatui, crossterm, serde, toml |
 | 代码桥接 | C# .NET 4.8 | SpaceClaim API |

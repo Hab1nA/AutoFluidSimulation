@@ -12,7 +12,7 @@ from typing import Optional
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
+    LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -37,6 +37,7 @@ class SWPhaseHandler:
         sc_queue: queue.Queue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
+        retry_manager,
         worker_pool_manager=None,
         meshing_monitor=None,
     ):
@@ -49,6 +50,7 @@ class SWPhaseHandler:
             sc_queue: SC 处理队列
             paused_event: 暂停事件
             stopped_event: 停止事件
+            retry_manager: 重试管理器（统一 SW/SC/Transfer/Meshing/Solver 重试逻辑）
             worker_pool_manager: 工作线程池管理器（用于启动工作线程）
             meshing_monitor: 网格划分监控器（用于提前启动消费线程）
         """
@@ -57,6 +59,7 @@ class SWPhaseHandler:
         self._sc_queue = sc_queue
         self._paused = paused_event
         self._stopped = stopped_event
+        self._retry_manager = retry_manager
         self.worker_pool_manager = worker_pool_manager
         self.meshing_monitor = meshing_monitor
 
@@ -118,6 +121,9 @@ class SWPhaseHandler:
         """
         执行 SW 宏。
 
+        使用 RetryManager 逐构型导出 STEP 文件，与 SC/Transfer/Meshing/Solver
+        步骤共享统一的重试逻辑（状态转换、暂停感知、退避等待）。
+
         Args:
             all_configs: 所有构型列表
 
@@ -154,72 +160,57 @@ class SWPhaseHandler:
         if self.meshing_monitor:
             self.meshing_monitor.start_if_needed()
 
-        # 执行 SW 步骤（含重试机制）
-        max_retries = int(ENGINE_CONFIG["max_retries"])
-        sw_success = False
-        for sw_attempt in range(1, max_retries + 1):
+        # ---- 通过 RetryManager 逐构型导出 STEP ----
+        # 每个构型独立重试，失败时 RetryManager 自动管理
+        # Running → Retrying → Running 状态转换和退避等待。
+        # SWExecutor 管理 COM 连接生命周期，首次调用时建立连接，
+        # 后续构型复用同一连接；重试时由 _prepare_sw_retry 清理进程。
+        for cn in all_configs:
             if self._stopped.is_set():
                 return False
 
-            if sw_attempt > 1:
-                self._prepare_sw_retry(all_configs, sw_attempt, max_retries)
-                if self._stopped.is_set():
-                    return False
-                # ★ _prepare_sw_retry 可能因暂停而早返回，跳过无意义的 execute_sw_step
-                if self._paused.is_set():
-                    break
+            # 跳过已完成的构型（断点续传 / 之前批次已成功）
+            if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED:
+                continue
 
-            logger.info(
-                f"[SW] 执行 SW 步骤 (尝试 {sw_attempt}/{max_retries})..."
+            ok = self._retry_manager.execute_with_retry(
+                cn, "SW", self.runner.execute_sw_per_config,
             )
-            sw_success = self.runner.execute_sw_step()
-            if sw_success:
-                break
+            if not ok and not self._paused.is_set() and not self._stopped.is_set():
+                # 构型所有重试均失败（非暂停/停止导致）→ 断开缓存连接，
+                # 使下一个构型重新建立连接（若 SW 进程已崩溃可快速失败）
+                self.runner._sw_executor.disconnect_sw_cached()
 
-        # 若最终仍失败，将仍为 Running/Retrying 的构型标记为 Error
-        if not sw_success and not self._paused.is_set():
+        # ---- 清理缓存的 SW 连接（无论成功与否） ----
+        self.runner._sw_executor.disconnect_sw_cached()
+
+        # ---- 汇总与善后 ----
+        if self._stopped.is_set():
+            return False
+
+        if self._paused.is_set():
+            logger.warning("[SW] SW 步骤在暂停期间中断，保留 Paused 状态以供恢复后重试")
             for cn in all_configs:
-                sw_st = self.state.get_step_status(cn, "SW")
-                if sw_st not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                    self.state.set_step_status(
-                        cn, "SW", STATUS_ERROR,
-                        f"SW 步骤失败（重试 {max_retries} 次后）"
-                    )
-            self.state.set_engine_status("stopped")
-            logger.error("[SW] SW 步骤失败，流水线中止")
+                if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
+                    self.state.set_step_status(cn, "SW", STATUS_PAUSED)
+            self.state.set_engine_status("paused")
             return False
 
-        if not sw_success:
-            # SW 步骤失败且处于暂停状态
-            if self._paused.is_set():
-                logger.warning("[SW] SW 步骤在暂停期间失败，保留 Paused 状态以供恢复后重试")
-                for cn in all_configs:
-                    if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
-                        self.state.set_step_status(cn, "SW", STATUS_PAUSED)
-                self.state.set_engine_status("paused")
-            return False
+        # ★ 通过最终状态判断成功与否（而非中间标志）
+        #   RetryManager 已将成功构型设为 COMPLETED、失败构型设为 ERROR
+        sw_errors = [cn for cn in all_configs
+                     if self.state.get_step_status(cn, "SW") == STATUS_ERROR]
+        sw_running = [cn for cn in all_configs
+                      if self.state.get_step_status(cn, "SW") == STATUS_RUNNING]
 
-        # 若执行到这里，说明 SW 步骤成功（sw_success=True）。
-        # execute_sw_step 内部可能已标记部分构型为 Error（如 STEP 文件缺失），
-        # 但 Error 是最终状态，即使处于暂停期间也保持不变，由 resume 的重试机制处理。
+        if sw_errors or sw_running:
+            # 有构型失败 → 清理 SW 进程并阻断下游
+            self._prepare_sw_retry()
 
-        # SW 阶段导出汇总
-        if not self._paused.is_set():
-            sw_completed = [cn for cn in all_configs
-                            if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED]
-            sw_errors = [cn for cn in all_configs
-                         if self.state.get_step_status(cn, "SW") == STATUS_ERROR]
-            sw_running = [cn for cn in all_configs
-                          if self.state.get_step_status(cn, "SW") == STATUS_RUNNING]
-            if sw_completed:
-                logger.info(
-                    f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
-                )
             if sw_errors:
                 logger.warning(
                     f"[SW] SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败"
                 )
-                # 阻断失败构型的下游步骤（避免 worker 线程误处理）
                 for cn in sw_errors:
                     for s in ["SC", "Transfer", "Meshing", "Solver"]:
                         if self.state.get_step_status(cn, s) == STATUS_WAITING:
@@ -232,6 +223,29 @@ class SWPhaseHandler:
                     f"[SW] {len(sw_running)} 个构型仍为 Running 状态 "
                     f"(可能导出中断): {sorted(sw_running)}"
                 )
+
+            if not sw_errors:
+                # 无 ERROR 但有 RUNNING → 全部构型均未完成，引擎停止
+                self.state.set_engine_status("stopped")
+                logger.error("[SW] SW 步骤失败，流水线中止")
+                return False
+
+        # 安全网校验 + 设置 sw_macro_started
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        total_found = self.runner._sw_executor._verify_step_exports(step_dir)
+        if total_found > 0 and not sw_errors:
+            self.state.set_sw_macro_started(True)
+            logger.info(
+                f"[SW] sw_macro_started=True "
+                f"（{total_found}/{len(all_configs)} 构型 STEP 就绪）"
+            )
+
+        sw_completed = [cn for cn in all_configs
+                        if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED]
+        if sw_completed:
+            logger.info(
+                f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
+            )
         return True
 
     def _handle_sw_breakpoint_resume(self, all_configs: list[int], recursion_depth: int) -> bool:
@@ -381,34 +395,27 @@ class SWPhaseHandler:
     # SW 重试准备
     # ------------------------------------------------------------------
 
-    def _prepare_sw_retry(self, all_configs: list[int], attempt: int, max_retries: int):
+    def _prepare_sw_retry(self):
         """
-        为 SW 步骤重试做准备：清理残留进程、重置监控器状态、设置 Retrying 状态。
+        为 SW 步骤重试做准备：清理残留 SW 进程、重置文件监控器状态。
 
-        Args:
-            all_configs: 所有构型列表
-            attempt: 当前重试次数 (1-based)
-            max_retries: 最大重试次数
+        状态管理（Running → Retrying → Running）已由 RetryManager 在
+        逐构型重试时自动处理，本方法仅负责 SW 进程级清理。
         """
-        # ★ 暂停时立即返回：重试准备（杀进程、等待冷却等）在暂停状态下无意义，
-        #   且其 ~16 秒阻塞会延迟 pipeline 线程退出，导致 resume 后新旧线程竞争。
-        #   暂停状态由 _execute_sw_macro 循环结束后的暂停分支统一处理。
+        # ★ 暂停时跳过进程清理（杀进程、冷却等待），但始终重置文件监控器状态。
+        #   文件监控器的 _processed_files 记录了旧 STEP 文件，若不清理，
+        #   恢复后重新导出的同名文件不会被检测到，导致 SC 队列缺少任务。
         if self._paused.is_set():
-            logger.info("[SW] 重试准备中检测到暂停标志，跳过重试准备")
+            logger.info("[SW] 重试准备中检测到暂停标志，跳过进程清理")
+            if self._file_monitor is not None:
+                self._file_monitor._processed_files.clear()
+                self._file_monitor._known_files.clear()
+                self._file_monitor._detector._history.clear()
+                self._file_monitor._detector._first_seen.clear()
+                logger.info("[SW] 文件监控器状态已重置（暂停期间仍清理，确保恢复后可检测新文件）")
             return
 
-        # 将所有 SW 步骤标记为 Retrying
-        for cn in all_configs:
-            sw_status = self.state.get_step_status(cn, "SW")
-            if sw_status not in (STATUS_COMPLETED, STATUS_PAUSED):
-                self.state.set_step_status(
-                    cn, "SW", STATUS_RETRYING,
-                    f"SW 步骤重试 {attempt}/{max_retries}"
-                )
-
-        logger.info(
-            f"[SW] SW 步骤重试 {attempt}/{max_retries}，等待 10 秒并清理残留进程..."
-        )
+        logger.info("[SW] SW 步骤重试准备：等待 10 秒并清理残留进程...")
         if not pause_aware_sleep(10, self._paused, self._stopped):
             return
 
@@ -449,9 +456,3 @@ class SWPhaseHandler:
             self._file_monitor._detector._history.clear()
             self._file_monitor._detector._first_seen.clear()
             logger.info("[SW] 文件监控器状态已重置（准备 SW 步骤重试）")
-
-        # 仅将 RETRYING 状态恢复为 Running（Paused 保持不变）
-        for cn in all_configs:
-            current_status = self.state.get_step_status(cn, "SW")
-            if current_status == STATUS_RETRYING:
-                self.state.set_step_status(cn, "SW", STATUS_RUNNING)
