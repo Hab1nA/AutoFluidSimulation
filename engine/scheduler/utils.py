@@ -132,6 +132,9 @@ def check_step_output_exists(
             f"/{filename}"
         )
         try:
+            if hasattr(ssh, "get_remote_file_size"):
+                size = ssh.get_remote_file_size(remote_scdoc)
+                return size is not None and size > 0
             return bool(ssh.check_remote_file(remote_scdoc))
         except Exception:
             return False

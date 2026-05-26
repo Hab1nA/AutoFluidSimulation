@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+import threading
+
+from engine.config import LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG, STATUS_ERROR
+from executor.remote_executor import RemoteExecutor
+
+
+class _StateRecorder:
+    def __init__(self) -> None:
+        self.status_updates: list[tuple[int, str, str, str]] = []
+
+    def set_step_status(
+        self,
+        config_name: int,
+        step_name: str,
+        status: str,
+        error_message: str = "",
+    ) -> None:
+        self.status_updates.append((config_name, step_name, status, error_message))
+
+
+def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    scdoc_file = scdoc_dir / "model_gen4_1.scdoc"
+    scdoc_file.write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+    monkeypatch.setitem(ENGINE_CONFIG, "transfer_timeout", 17)
+    monkeypatch.setitem(ENGINE_CONFIG, "ssh_upload_max_retries", 2)
+
+    paused = threading.Event()
+    stopped = threading.Event()
+    calls: list[dict[str, object]] = []
+
+    class _SSH:
+        def upload_file(
+            self,
+            local_path: str,
+            remote_path: str,
+            *,
+            timeout: int,
+            max_retries: int,
+            paused_event: threading.Event | None,
+            stopped_event: threading.Event | None,
+        ) -> bool:
+            calls.append(
+                {
+                    "local_path": local_path,
+                    "remote_path": remote_path,
+                    "timeout": timeout,
+                    "max_retries": max_retries,
+                    "paused_event": paused_event,
+                    "stopped_event": stopped_event,
+                }
+            )
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+    executor.set_control_events(paused, stopped)
+
+    assert executor.execute_transfer(1) is True
+    assert calls == [
+        {
+            "local_path": str(scdoc_file),
+            "remote_path": "D:/remote scdoc/model_gen4_1.scdoc",
+            "timeout": 17,
+            "max_retries": 2,
+            "paused_event": paused,
+            "stopped_event": stopped,
+        }
+    ]
+
+
+def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    (scdoc_dir / "model_gen4_2.scdoc").write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+
+    deleted: list[str] = []
+
+    class _SSH:
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            return False
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(2) is False
+    assert deleted == ["D:/remote scdoc/model_gen4_2.scdoc"]
+    assert state.status_updates[-1] == (
+        2,
+        "Transfer",
+        STATUS_ERROR,
+        "SFTP 上传失败",
+    )
+
+
+def test_execute_transfer_rejects_empty_local_scdoc(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    (scdoc_dir / "model_gen4_4.scdoc").write_bytes(b"")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+
+    class _SSH:
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            raise AssertionError("empty SCDOC must not be uploaded")
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(4) is False
+    assert state.status_updates[-1] == (
+        4,
+        "Transfer",
+        STATUS_ERROR,
+        "本地 SCDOC 文件为空",
+    )
+
+
+def test_execute_transfer_does_not_mark_error_when_pause_interrupts_upload(
+    tmp_path,
+    monkeypatch,
+):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    (scdoc_dir / "model_gen4_3.scdoc").write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+
+    paused = threading.Event()
+    stopped = threading.Event()
+    deleted: list[str] = []
+
+    class _SSH:
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            paused.set()
+            return False
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor.set_control_events(paused, stopped)
+
+    assert executor.execute_transfer(3) is False
+    assert deleted == ["D:/remote scdoc/model_gen4_3.scdoc"]
+    assert state.status_updates == []

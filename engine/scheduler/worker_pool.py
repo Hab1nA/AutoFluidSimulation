@@ -260,7 +260,12 @@ class WorkerPoolManager:
                             f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
                             f"/{scdoc_name}"
                         )
-                        if ssh.check_remote_file(remote_scdoc):
+                        if hasattr(ssh, "get_remote_file_size"):
+                            remote_size = ssh.get_remote_file_size(remote_scdoc)
+                            remote_exists = remote_size is not None and remote_size > 0
+                        else:
+                            remote_exists = ssh.check_remote_file(remote_scdoc)
+                        if remote_exists:
                             logger.info(
                                 f"构型{config_name} Transfer: "
                                 f"远程 SCDOC 已存在，跳过执行"

@@ -84,8 +84,7 @@ class TaskRunner:
         self._stopped_event = stopped_event
         # 将控制事件传递给 SW 执行器，使其逐构型循环可响应 pause/stop
         self._sw_executor.set_control_events(paused_event, stopped_event)
-        # 注：RemoteExecutor 不需要独立注入控制事件，它通过
-        # wait_meshing_completion/wait_solver_completion 的参数接收事件
+        self._remote_executor.set_control_events(paused_event, stopped_event)
 
     def get_remote_executor(self) -> RemoteExecutor:
         """获取远程执行器实例（公共接口，供外部模块创建 MeshingMonitor 等）。"""

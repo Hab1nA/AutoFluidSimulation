@@ -66,6 +66,17 @@ class RemoteExecutor:
         self.state = state_manager
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
+        self._paused_event: threading.Event | None = None
+        self._stopped_event: threading.Event | None = None
+
+    def set_control_events(
+        self,
+        paused_event: threading.Event,
+        stopped_event: threading.Event,
+    ) -> None:
+        """注入调度器暂停/停止事件，使 Transfer 上传可响应控制指令。"""
+        self._paused_event = paused_event
+        self._stopped_event = stopped_event
 
     def get_ssh_connection(self) -> "RemoteWorkstation":
         """获取 SSH 连接实例（公共接口，供外部模块查询远程文件状态）。"""
@@ -92,7 +103,14 @@ class RemoteExecutor:
             return {}
         try:
             with open(state_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            return {
+                str(key): str(value)
+                for key, value in data.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
         except (OSError, json.JSONDecodeError) as e:
             logger.warning(f"[Sync] 加载同步状态失败: {e}")
             return {}
@@ -158,15 +176,52 @@ class RemoteExecutor:
             logger.error(f"[Transfer] 本地 SCDOC 文件不存在: {local_file}")
             self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "本地文件不存在")
             return False
+        if os.path.getsize(local_file) <= 0:
+            logger.error(f"[Transfer] 本地 SCDOC 文件为空: {local_file}")
+            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "本地 SCDOC 文件为空")
+            return False
+
+        if self._stopped_event is not None and self._stopped_event.is_set():
+            logger.info(f"[Transfer] 构型{config_name} 因停止取消（未开始上传）")
+            return False
+        if self._paused_event is not None and self._paused_event.is_set():
+            logger.info(f"[Transfer] 构型{config_name} 因暂停暂缓（未开始上传）")
+            return False
 
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
-                success = ssh.upload_file(local_file, remote_file)
+                upload_max_retries_value = ENGINE_CONFIG.get("ssh_upload_max_retries", 3)
+                upload_timeout_value = ENGINE_CONFIG.get("transfer_timeout", 120)
+                upload_max_retries = (
+                    upload_max_retries_value
+                    if isinstance(upload_max_retries_value, int)
+                    else 3
+                )
+                upload_timeout = (
+                    upload_timeout_value
+                    if isinstance(upload_timeout_value, int)
+                    else 120
+                )
+                success = ssh.upload_file(
+                    local_file,
+                    remote_file,
+                    max_retries=upload_max_retries,
+                    timeout=upload_timeout,
+                    paused_event=self._paused_event,
+                    stopped_event=self._stopped_event,
+                )
                 if success:
                     logger.info(f"[Transfer] 文件传输完成: 构型{config_name}")
                     return True
                 else:
+                    ssh.delete_remote_file(remote_file)
+                    if self._stopped_event is not None and self._stopped_event.is_set():
+                        logger.info(f"[Transfer] 构型{config_name} 上传因停止中断")
+                        return False
+                    if self._paused_event is not None and self._paused_event.is_set():
+                        logger.info(f"[Transfer] 构型{config_name} 上传因暂停中断")
+                        return False
                     self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SFTP 上传失败")
                     return False
             except (OSError, ConnectionError) as e:

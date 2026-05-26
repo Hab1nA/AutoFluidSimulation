@@ -10,10 +10,12 @@ SSH 客户端模块 (SSH Client)
 """
 from __future__ import annotations
 
-import base64
+import hashlib
 import os
 import socket
 import time
+import threading
+from typing import Any
 
 try:
     import paramiko
@@ -23,8 +25,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-# PowerShell 完整路径（SSH 非交互会话 PATH 不含此目录，需用完整路径定位）
-_PS_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+class _UploadInterrupted(Exception):
+    """Raised internally when pause/stop interrupts an active SFTP upload."""
 
 
 class RemoteWorkstation:
@@ -129,19 +131,38 @@ class RemoteWorkstation:
     # 文件传输
     # ------------------------------------------------------------------
 
-    def upload_file(self, local_path: str, remote_path: str, max_retries: int = 3) -> bool:
+    def upload_file(
+        self,
+        local_path: str,
+        remote_path: str,
+        max_retries: int = 3,
+        *,
+        timeout: float | None = None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
+    ) -> bool:
         """通过 SFTP 上传文件到远程工作站（带重试机制）。
 
         Args:
             local_path: 本地文件路径
             remote_path: 远程文件路径
             max_retries: 最大重试次数
+            timeout: SFTP 通道读写超时（秒）
+            paused_event: 暂停事件；上传前或上传中置位时中断本次上传
+            stopped_event: 停止事件；上传前或上传中置位时中断本次上传
 
         Returns:
             上传成功返回 True，失败返回 False
         """
         for attempt in range(max_retries):
             try:
+                if stopped_event is not None and stopped_event.is_set():
+                    logger.info("[SSH] 文件上传因停止指令取消")
+                    return False
+                if paused_event is not None and paused_event.is_set():
+                    logger.info("[SSH] 文件上传因暂停指令暂缓")
+                    return False
+
                 # 每次尝试前确保连接有效（解决竞态条件）
                 if not self.ensure_connected():
                     if attempt < max_retries - 1:
@@ -157,10 +178,38 @@ class RemoteWorkstation:
                 # 再次确认 SFTP 连接有效
                 if self._sftp is None:
                     raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
-                self._sftp.put(local_path, remote_path)
+
+                channel = self._sftp.get_channel()
+                previous_timeout = None
+                if timeout is not None:
+                    try:
+                        previous_timeout = channel.gettimeout()
+                    except AttributeError:
+                        previous_timeout = None
+                    channel.settimeout(timeout)
+
+                def _check_upload_control(transferred: int, total: int) -> None:
+                    if stopped_event is not None and stopped_event.is_set():
+                        raise _UploadInterrupted("收到停止指令")
+                    if paused_event is not None and paused_event.is_set():
+                        raise _UploadInterrupted("收到暂停指令")
+
+                try:
+                    self._sftp.put(
+                        local_path,
+                        remote_path,
+                        callback=_check_upload_control,
+                    )
+                finally:
+                    if timeout is not None:
+                        channel.settimeout(previous_timeout)
                 logger.info(f"[SSH] 上传完成: {os.path.basename(local_path)}")
                 return True
-            except (paramiko.SSHException, OSError, EOFError) as e:
+            except _UploadInterrupted as e:
+                logger.info(f"[SSH] 文件上传已中断: {e}")
+                self.disconnect()
+                return False
+            except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
                 logger.error(f"[SSH] 文件上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                 self.disconnect()
                 if attempt < max_retries - 1:
@@ -168,6 +217,20 @@ class RemoteWorkstation:
                 else:
                     return False
         return False
+
+    def get_remote_file_size(self, remote_path: str) -> int | None:
+        """返回远程文件大小；文件不存在或连接异常时返回 None。"""
+        if not self.ensure_connected():
+            return None
+        if self._sftp is None:
+            return None
+        try:
+            return int(self._sftp.stat(remote_path).st_size)
+        except FileNotFoundError:
+            return None
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
+            return None
 
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
@@ -324,12 +387,8 @@ class RemoteWorkstation:
         """
         在远程工作站以独立后台进程方式执行命令。
 
-        使用 PowerShell -EncodedCommand + Start-Process 启动新的 Windows 进程，
-        该进程不依附于 SSH 会话，SSH 断开后继续运行。
-        任务完成后会创建指定的标志文件。
-
-        通过 -EncodedCommand（UTF-16LE + Base64）传递 PowerShell 脚本，
-        彻底避免 SSH → cmd.exe → PowerShell 之间的引号嵌套问题。
+        使用 Windows 计划任务启动独立进程，避免 SSH 非交互会话中的
+        Start-Process 静默失败。任务完成后会创建指定的标志文件。
 
         Args:
             command: 要执行的命令（如 conda run ... python script.py 5）
@@ -341,13 +400,6 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
-        ps_script = self._build_background_ps_script(command, flag_file)
-
-        # -EncodedCommand 接受 UTF-16LE + Base64 编码的脚本
-        # 完全绕过 SSH → cmd.exe 的引号转义链
-        encoded = base64.b64encode(ps_script.encode('utf-16-le')).decode('ascii')
-        full_command = f'"{_PS_EXE}" -NoProfile -EncodedCommand {encoded}'
-
         logger.info(f"[SSH] 启动远程后台任务: {command}")
         logger.debug(f"[SSH] 标志文件: {flag_file}")
 
@@ -355,11 +407,39 @@ class RemoteWorkstation:
             # 先清理旧的标志文件（使用 SFTP 删除，避免 shell 兼容性问题）
             self.delete_remote_file(flag_file)
 
-            # 通过 PowerShell 启动后台进程
-            _, stderr, exit_code = self.exec_command(full_command, timeout=15)
+            flag_dir = self._remote_dirname(flag_file)
+            self._ensure_remote_dir(flag_dir)
+
+            task_hash = hashlib.md5(
+                f"{time.time_ns()}:{command}:{flag_file}".encode("utf-8")
+            ).hexdigest()[:12]
+            task_name = f"AutoFluid_{task_hash}"
+            script_file = f"{flag_dir}/autofluid_bg_{task_hash}.cmd"
+            log_file = f"{flag_dir}/autofluid_bg_{task_hash}.log"
+            script = self._build_background_cmd_script(
+                command, flag_file, log_file, task_name=task_name
+            )
+            self._write_remote_text_file(script_file, script)
+
+            script_cmd_path = script_file.replace("/", "\\")
+            create_cmd = (
+                f'schtasks /Create /TN "{task_name}" /SC ONCE /ST 23:59 '
+                f'/TR "{script_cmd_path}" /F'
+            )
+            _, stderr, exit_code = self.exec_command(create_cmd, timeout=30)
+            if exit_code != 0:
+                logger.error(f"[SSH] 创建远程计划任务失败 (exit={exit_code}): {stderr[:200]}")
+                return False
+
+            run_cmd = f'schtasks /Run /TN "{task_name}"'
+            _, stderr, exit_code = self.exec_command(run_cmd, timeout=30)
 
             if exit_code == 0:
-                logger.info("[SSH] 远程后台任务已启动")
+                log_display = log_file.replace("/", "\\")
+                logger.info(
+                    f"[SSH] 远程后台任务已启动: {task_name} "
+                    f"(日志: {log_display})"
+                )
                 return True
             else:
                 logger.error(f"[SSH] 远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
@@ -369,22 +449,49 @@ class RemoteWorkstation:
             return False
 
     @staticmethod
-    def _build_background_ps_script(command: str, flag_file: str) -> str:
-        """构造用于 Start-Process 后台启动的 PowerShell 脚本。"""
-        # 转义单引号（PowerShell 单引号字符串中 ' 需写成 ''）
-        safe_cmd = command.replace("'", "''")
-        safe_flag = flag_file.replace("'", "''")
-        # 使用 -f 占位符替换可直接生成双引号字符，避免在单引号字符串中引入 \"
-        # 等字面量导致 cmd.exe 引号结构损坏。
+    def _build_background_cmd_script(
+        command: str,
+        flag_file: str,
+        log_file: str,
+        task_name: str | None = None,
+    ) -> str:
+        """构造计划任务实际执行的 cmd 脚本。"""
+        cmd_flag = flag_file.replace("/", "\\")
+        cmd_error_flag = f"{cmd_flag}.error"
+        cmd_log = log_file.replace("/", "\\")
+        cleanup_line = ""
+        if task_name:
+            cleanup_line = f'schtasks /Delete /TN "{task_name}" /F >nul 2>&1\r\n'
         return (
-            f"$c = '{safe_cmd}'\n"
-            f"$f = '{safe_flag}'\n"
-            # 这里必须使用 -f 生成双引号字面量，避免出现 `\"` 文本。
-            # 其中 ""{1}"" 会传给 cmd.exe 作为 "<flag>"，确保含空格路径被正确引用。
-            # 示例: $c='python run.py', $f='D:\flags\a b.flag' -> "python run.py && echo done > ""D:\flags\a b.flag"""
-            "$inner = '\"{0} && echo done > \"\"{1}\"\"\"' -f $c, $f\n"
-            'Start-Process -FilePath cmd.exe -ArgumentList "/c $inner" -WindowStyle Hidden'
+            "@echo off\r\n"
+            "setlocal\r\n"
+            f"{command} >> \"{cmd_log}\" 2>&1\r\n"
+            "set \"AF_EXIT=%ERRORLEVEL%\"\r\n"
+            "if \"%AF_EXIT%\"==\"0\" (\r\n"
+            f"  echo done > \"{cmd_flag}\"\r\n"
+            ") else (\r\n"
+            f"  echo error %AF_EXIT% > \"{cmd_error_flag}\"\r\n"
+            ")\r\n"
+            f"{cleanup_line}"
+            "exit /b %AF_EXIT%\r\n"
         )
+
+    @staticmethod
+    def _remote_dirname(remote_path: str) -> str:
+        """返回远程路径父目录，统一为 SFTP 兼容的正斜杠。"""
+        normalized = remote_path.replace("\\", "/")
+        return normalized.rsplit("/", 1)[0] if "/" in normalized else "."
+
+    def _write_remote_text_file(self, remote_path: str, content: str) -> None:
+        """通过 SFTP 写入远程 UTF-8 文本文件。"""
+        if not self.ensure_connected():
+            raise ConnectionError("SSH 未连接")
+        if self._sftp is None:
+            raise ConnectionError("SFTP 未连接")
+        normalized = remote_path.replace("\\", "/")
+        self._ensure_remote_dir(self._remote_dirname(normalized))
+        with self._sftp.open(normalized, "wb") as remote_file:
+            remote_file.write(content.encode("utf-8"))
 
     def wait_for_flag(
         self,
@@ -465,7 +572,7 @@ class RemoteWorkstation:
         Returns:
             包含自检结果的字典
         """
-        results = {
+        results: dict[str, Any] = {
             "ssh_connected": self.is_connected(),
             "conda_available": False,
             "python_version": "",
