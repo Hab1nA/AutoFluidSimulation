@@ -157,7 +157,12 @@ class RemoteExecutor:
     # ------------------------------------------------------------------
 
     def execute_transfer(self, config_name: int) -> bool:
-        """通过 SFTP 将 SCDOC 文件上传到远程工作站。"""
+        """通过 SFTP 将 SCDOC 文件上传到远程工作站。
+
+        内部先检查远程文件是否已存在且大小>0，若已存在则直接返回成功
+        （断点续传场景），避免重复上传。
+        所有 SSH/SFTP 操作均在 _ssh_lock 保护下执行，保证线程安全。
+        """
         _scdoc_name = get_step_filename("SC", config_name)
         if not _scdoc_name:
             logger.error("[Transfer] 无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
@@ -191,6 +196,25 @@ class RemoteExecutor:
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
+
+                # ★ 远程文件存在性检查（断点续传）：在锁内执行，保证线程安全。
+                #    原检查位于 worker_pool._process_transfer_step() 中且未持有
+                #    _ssh_lock，与 upload_file() 并发操作同一 SFTP 通道导致死锁。
+                try:
+                    remote_size = ssh.get_remote_file_size(remote_file)
+                    if remote_size is not None and remote_size > 0:
+                        logger.info(
+                            f"[Transfer] 远程 SCDOC 已存在 ({remote_size} bytes)，"
+                            f"构型{config_name} 跳过上传"
+                        )
+                        return True
+                except Exception as e:
+                    # 远程检查失败不影响后续上传流程（可能是临时网络问题）
+                    logger.debug(
+                        f"[Transfer] 构型{config_name} 远程文件检查异常"
+                        f"（将继续上传）: {e}"
+                    )
+
                 upload_max_retries_value = ENGINE_CONFIG.get("ssh_upload_max_retries", 3)
                 upload_timeout_value = ENGINE_CONFIG.get("transfer_timeout", 120)
                 upload_max_retries = (
@@ -592,9 +616,35 @@ class RemoteExecutor:
         self._save_last_sync_paths()
         return True
 
+    @staticmethod
+    def _compute_combined_hash(file_hashes: dict[str, Optional[str]]) -> str:
+        """计算文件哈希字典的组合 MD5 哈希值。
+
+        将各文件按名称排序后拼接为 "name:hash|..." 格式，
+        再计算 MD5，确保本地与远程计算方式一致。
+
+        Args:
+            file_hashes: 文件名到哈希值的映射（值为 None 表示文件缺失）
+
+        Returns:
+            组合 MD5 哈希值（小写十六进制字符串）
+        """
+        combined = "|".join(
+            f"{name}:{hash_val or 'MISSING'}"
+            for name, hash_val in sorted(file_hashes.items())
+        )
+        return hashlib.md5(combined.encode('utf-8')).hexdigest()
+
     def _sync_file_group(self, local_dir: str, remote_dir: str,
                          filenames: list, label: str) -> bool:
         """同步一组文件到远程目录。
+
+        采用两级哈希校验策略：
+        1. 第一级：计算本地与远程文件的组合哈希，若一致则所有文件均无需同步
+        2. 第二级：组合哈希不一致时，逐文件比对哈希值，仅上传变更的文件
+
+        ★ 锁策略优化：不在整个同步期间持有 _ssh_lock。改为逐文件获取/释放锁，
+          避免长时间阻塞 Transfer 等并发 SSH 操作。
 
         Args:
             local_dir: 本地文件目录
@@ -605,48 +655,100 @@ class RemoteExecutor:
         Returns:
             同步成功返回 True，失败返回 False
         """
+        # ---- 阶段 0: 计算本地文件哈希 ----
         local_hashes = self._calculate_local_hashes(local_dir, filenames)
         if local_hashes is None:
             return False
 
+        # ---- 阶段 1: 第一级校验 —— 组合哈希快速比对（1 次 SSH 调用） ----
+        local_combined = self._compute_combined_hash(local_hashes)
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+                remote_combined = ssh.get_remote_combined_file_hash(
+                    remote_dir, filenames
+                )
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[Sync] 获取{label}文件远程组合哈希异常: {e}")
+                return False
+
+        if remote_combined is not None and local_combined == remote_combined:
+            logger.info(f"[Sync] 所有{label}文件已是最新（组合哈希一致），无需同步")
+            return True
+
+        logger.debug(
+            f"[Sync] {label}组合哈希不一致"
+            f" (本地: {local_combined[:8]}... 远程: {remote_combined[:8] if remote_combined else 'None'}...)，"
+            f"进入逐文件比对"
+        )
+
+        # ---- 阶段 2: 第二级校验 —— 逐文件比对（N 次 SSH 调用） ----
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
                 remote_hashes = ssh.get_remote_file_hashes(remote_dir, filenames)
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[Sync] 获取{label}文件远程哈希异常: {e}")
+                return False
 
-                files_to_upload = []
-                for filename in filenames:
-                    local_hash = local_hashes.get(filename)
-                    remote_hash = remote_hashes.get(filename)
-                    if local_hash is None:
-                        logger.warning(f"[Sync] 本地{label}文件不存在: {filename}")
-                        continue
-                    if local_hash != remote_hash:
-                        files_to_upload.append(filename)
-                        logger.info(f"[Sync] {label}文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
+        # ---- 阶段 3: 比较哈希，确定需上传的文件（无锁） ----
+        files_to_upload = []
+        for filename in filenames:
+            local_hash = local_hashes.get(filename)
+            remote_hash = remote_hashes.get(filename)
+            if local_hash is None:
+                logger.warning(f"[Sync] 本地{label}文件不存在: {filename}")
+                continue
+            if local_hash != remote_hash:
+                files_to_upload.append(filename)
+                logger.info(f"[Sync] {label}文件变更: {filename} (本地: {local_hash[:8]}... 远程: {remote_hash[:8] if remote_hash else '不存在'})")
 
-                if not files_to_upload:
-                    logger.info(f"[Sync] 所有{label}文件已是最新，无需同步")
-                    return True
+        if not files_to_upload:
+            logger.info(f"[Sync] 所有{label}文件已是最新，无需同步")
+            return True
 
-                logger.info(f"[Sync] 需要上传 {len(files_to_upload)} 个{label}文件: {', '.join(files_to_upload)}")
-                path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
-                for filename in files_to_upload:
-                    local_file = os.path.join(local_dir, filename)
-                    remote_file = f"{remote_dir}/{filename}".replace("\\", "/")
+        logger.info(f"[Sync] 需要上传 {len(files_to_upload)} 个{label}文件: {', '.join(files_to_upload)}")
+
+        # ---- 阶段 3: 逐文件上传（每文件独立持锁，避免长时间阻塞） ----
+        path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
+        for filename in files_to_upload:
+            # ★ 上传前检查控制事件
+            if self._stopped_event is not None and self._stopped_event.is_set():
+                logger.info(f"[Sync] {label}同步因停止指令取消")
+                return False
+            if self._paused_event is not None and self._paused_event.is_set():
+                logger.info(f"[Sync] {label}同步因暂停指令暂缓")
+                return False
+
+            local_file = os.path.join(local_dir, filename)
+            remote_file = f"{remote_dir}/{filename}".replace("\\", "/")
+
+            # ★ 逐文件获取 SSH 锁，上传完成后立即释放，
+            #   允许 Transfer 等操作在文件间插入执行
+            with self._ssh_lock:
+                try:
+                    ssh = self._get_ssh()
                     if os.path.splitext(filename)[1] in path_aware_exts:
-                        if not self._upload_text_file_with_path_replacement(ssh, local_file, remote_file):
+                        if not self._upload_text_file_with_path_replacement(
+                            ssh, local_file, remote_file,
+                            paused_event=self._paused_event,
+                            stopped_event=self._stopped_event,
+                        ):
                             return False
                     else:
-                        if not ssh.upload_file(local_file, remote_file):
+                        if not ssh.upload_file(
+                            local_file, remote_file,
+                            paused_event=self._paused_event,
+                            stopped_event=self._stopped_event,
+                        ):
                             logger.error(f"[Sync] 上传{label}文件失败: {filename}")
                             return False
+                except (OSError, ConnectionError) as e:
+                    logger.error(f"[Sync] 上传{label}文件异常: {filename}: {e}")
+                    return False
 
-                logger.info(f"[Sync] {label}同步完成")
-                return True
-            except (OSError, ConnectionError) as e:
-                logger.error(f"[Sync] {label}同步异常: {e}")
-                return False
+        logger.info(f"[Sync] {label}同步完成")
+        return True
 
     def _calculate_local_hashes(self, local_dir: str, filenames: list) -> Optional[dict[str, Optional[str]]]:
         """计算本地目录中指定文件的 MD5 哈希值。
@@ -674,7 +776,10 @@ class RemoteExecutor:
                 ext = os.path.splitext(filename)[1]
                 if ext in path_aware_exts:
                     # 对包含占位符的文件，计算替换后内容的哈希
-                    with open(filepath, 'r', encoding='utf-8') as f:
+                    # ★ 使用 newline='' 保留原始换行符（\r\n），避免 Python
+                    #    文本模式的通用换行符转换（\r\n → \n）导致本地哈希与
+                    #    远程文件（通过 SFTP 二进制上传）的哈希永久不一致。
+                    with open(filepath, 'r', encoding='utf-8', newline='') as f:
                         content = f.read()
                     content = self._apply_placeholders(content)
                     file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
@@ -709,6 +814,8 @@ class RemoteExecutor:
         ssh: "RemoteWorkstation",
         local_file: str,
         remote_file: str,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """上传文本文件，将占位符替换为实际远程目录。
 
@@ -718,24 +825,35 @@ class RemoteExecutor:
             ssh: SSH 连接实例
             local_file: 本地文件路径
             remote_file: 远程文件路径
+            paused_event: 暂停事件（可选，用于中断上传）
+            stopped_event: 停止事件（可选，用于中断上传）
 
         Returns:
             上传成功返回 True，失败返回 False
         """
         try:
-            with open(local_file, 'r', encoding='utf-8') as f:
+            # ★ 使用 newline='' 保留原始换行符（\r\n），避免 Python
+            #    文本模式的通用换行符转换破坏哈希一致性。
+            with open(local_file, 'r', encoding='utf-8', newline='') as f:
                 content = f.read()
 
             # 替换所有占位符
             content = self._apply_placeholders(content)
 
-            # 写入临时文件
+            # ★ 写入临时文件时使用二进制模式，确保内容字节与
+            #    _calculate_local_hashes 中 encode('utf-8') 的字节完全一致，
+            #    避免文本模式的平台换行符转换（Windows 上 \n → \r\n）导致
+            #    上传后的远程文件哈希与本地计算的哈希不匹配。
             temp_file = local_file + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(content)
+            with open(temp_file, 'wb') as f:
+                f.write(content.encode('utf-8'))
 
-            # 上传临时文件
-            success = ssh.upload_file(temp_file, remote_file)
+            # ★ 上传临时文件（传递控制事件，允许暂停/停止中断大文件上传）
+            success = ssh.upload_file(
+                temp_file, remote_file,
+                paused_event=paused_event,
+                stopped_event=stopped_event,
+            )
 
             # 清理临时文件
             try:

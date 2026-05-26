@@ -477,9 +477,13 @@ class PipelineDaemon:
                 msg += f" (构型{config_name})"
 
         # 如果清理范围涉及 SW 步骤，重置文件监控器状态
+        # ★ 暂停感知：若当前处于暂停状态，使用 reset_only() 避免越过暂停
         if step_name == "all" or step_name == "SW":
             if self.scheduler and self.scheduler._file_monitor:
-                self.scheduler._file_monitor.resume_and_reset()
+                if self.scheduler.is_paused:
+                    self.scheduler._file_monitor.reset_only()
+                else:
+                    self.scheduler._file_monitor.resume_and_reset()
 
         return True, None, msg
 

@@ -780,3 +780,61 @@ class RemoteWorkstation:
             result[filename] = self.get_remote_file_hash(remote_path)
 
         return result
+
+    def get_remote_combined_file_hash(
+        self, remote_dir: str, filenames: list
+    ) -> str | None:
+        """获取远程目录中所有指定文件的组合 MD5 哈希值（单次 SSH 调用）。
+
+        在远程执行 PowerShell 脚本：逐文件计算 MD5 → 按文件名排序 →
+        拼接为 "name:hash|..." 格式 → 计算组合 MD5。
+        用于两级哈希校验的第一级快速比对。
+
+        Args:
+            remote_dir: 远程目录路径
+            filenames: 文件名列表
+
+        Returns:
+            组合 MD5 哈希值（小写十六进制字符串），失败返回 None
+        """
+        if not self.ensure_connected():
+            return None
+
+        remote_dir_normalized = remote_dir.replace("\\", "/")
+        # 对路径和文件名中的单引号进行 PowerShell 转义（'' → '）
+        escaped_dir = remote_dir_normalized.replace("'", "''")
+        escaped_files = [f.replace("'", "''") for f in filenames]
+
+        # 构建 PowerShell 脚本：逐文件计算哈希 → 排序拼接 → 组合 MD5
+        # ★ 全部使用单引号字符串 + 拼接，避免嵌套双引号在 SSH→cmd.exe
+        #    命令行解析时被错误拆分
+        file_list_ps = ",".join(f"'{f}'" for f in escaped_files)
+        ps_script = (
+            f"$files = @({file_list_ps}); "
+            f"$dir = '{escaped_dir}'; "
+            f"$results = @(); "
+            f"foreach ($f in $files) {{ "
+            f"  $p = Join-Path $dir $f; "
+            f"  if (Test-Path $p) {{ "
+            f"    $h = (Get-FileHash -Path $p -Algorithm MD5).Hash.ToLower(); "
+            f"    $results += ($f + ':' + $h) "
+            f"  }} else {{ "
+            f"    $results += ($f + ':MISSING') "
+            f"  }} "
+            f"}}; "
+            f"$combined = ($results | Sort-Object) -join '|'; "
+            f"$bytes = [System.Text.Encoding]::UTF8.GetBytes($combined); "
+            f"$md5 = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes); "
+            f"[System.BitConverter]::ToString($md5).Replace('-','').ToLower()"
+        )
+        out, err, code = self.exec_command(
+            f'powershell -Command "{ps_script}"', timeout=60
+        )
+
+        if code == 0 and out.strip():
+            return out.strip()
+        else:
+            logger.debug(
+                f"[SSH] 获取远程组合哈希失败: {remote_dir}, err={err}"
+            )
+            return None

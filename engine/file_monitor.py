@@ -247,15 +247,28 @@ class StepFileMonitor:
         logger.info("文件监控循环开始")
 
         while self._running:
+            # ---- 暂停期间：仅处理 _need_reset（清理状态），禁止扫描 ----
             if self._paused.is_set():
                 logger.info("文件监控已暂停，等待恢复指令...")
                 while self._paused.is_set() and self._running:
+                    # ★ 暂停中也响应待重置请求：清理已处理文件集合和检测器状态，
+                    #    使恢复后能重新扫描。但不触发 _scan_directory()，
+                    #    确保不会越过暂停向 SC 队列推送构型。
+                    if self._need_reset:
+                        self._need_reset = False
+                        self._processed_files.clear()
+                        self._detector._history.clear()
+                        self._detector._first_seen.clear()
+                        self._scan_existing_files()
+                        logger.info("文件监控状态已重置（暂停中，恢复后生效）")
+
                     self._wake_event.wait(timeout=1.0)
                     self._wake_event.clear()
                 if not self._running:
                     break
                 logger.info("文件监控已恢复")
 
+            # ---- 非暂停：处理 _need_reset 后立即扫描 ----
             if self._need_reset:
                 self._need_reset = False
                 self._processed_files.clear()
@@ -279,10 +292,21 @@ class StepFileMonitor:
         logger.info("STEP 文件监控已暂停")
 
     def resume_and_reset(self):
+        """恢复监控并重置已处理文件集合（用于非暂停状态下的 reset 操作）。"""
         self._need_reset = True
         self._paused.clear()
         self._wake_event.set()
         logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
+
+    def reset_only(self):
+        """仅重置已处理文件集合和检测器状态，不清除暂停标志。
+
+        用于暂停状态下的 reset/clean 操作：文件监控器需要清理内部状态
+        以便恢复后重新扫描，但不能在暂停期间越过暂停向 SC 队列推送构型。
+        """
+        self._need_reset = True
+        self._wake_event.set()
+        logger.info("STEP 文件监控状态已标记为待重置（暂停中，恢复后生效）")
 
     def resume_only(self):
         """仅恢复监控，不重置已处理文件集合。

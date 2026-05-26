@@ -252,6 +252,12 @@ class MockStepFileMonitor:
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（将执行重置和立即扫描）")
 
+    def reset_only(self):
+        """仅重置状态不清除暂停标志（与真实 StepFileMonitor 接口一致）。"""
+        self._need_reset = True
+        self._wake_event.set()
+        print("  [MockFileMonitor] 已标记为待重置（暂停中，恢复后生效）")
+
     def _scan_existing_files(self):
         self._scan_existing_count += 1
         # 若 step_dir 已设置，扫描真实目录以兼容其他测试文件的 StepFileMonitor 使用

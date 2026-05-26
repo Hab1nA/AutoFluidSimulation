@@ -1,7 +1,12 @@
 """
 工作线程池管理模块。
 
-负责管理 SC/Transfer/Meshing 工作线程的创建、启动和任务分发。
+负责管理 SC 和 Transfer 的独立工作线程池，通过队列解耦：
+  SC Worker:   SC 队列取任务 → 执行 SC → 推入 Transfer 队列
+  Transfer Worker: Transfer 队列取任务 → 执行 Transfer → 提交 MeshingMonitor
+
+SC 与 Transfer 解耦后，SC 常驻进程槽位在完成当前构型后可立即接收新任务，
+不再被 Transfer 的网络 I/O 阻塞。
 """
 
 import threading
@@ -10,8 +15,8 @@ import os
 import time
 
 from engine.config import (
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, REMOTE_CONFIG, get_step_filename,
+    STATUS_WAITING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -24,9 +29,12 @@ logger = setup_logger(__name__)
 
 class WorkerPoolManager:
     """
-    工作线程池管理器。
+    工作线程池管理器（SC/Transfer 解耦架构）。
 
-    管理多个工作线程，从 SC 队列获取构型，依次执行 SC → Transfer → Meshing。
+    SC 工作线程：从 SC 队列取构型 → 执行 SpaceClaim 转换 → 推入 Transfer 队列。
+    Transfer 工作线程：从 Transfer 队列取构型 → 执行文件传输 → 提交 MeshingMonitor。
+
+    SC 常驻槽位完成后可立即接收新构型，不再被 Transfer 网络 I/O 阻塞。
     """
 
     def __init__(
@@ -62,27 +70,41 @@ class WorkerPoolManager:
         # ---- MeshingMonitor（由 PipelineScheduler 注入） ----
         self._meshing_monitor = None
 
-        # ---- 工作线程 ----
-        self._worker_threads: list[threading.Thread] = []
+        # ---- Transfer 解耦队列 ----
+        # SC Worker 完成 SC 后将构型名称推入此队列，
+        # Transfer Worker 从此队列取任务执行传输。
+        self._transfer_queue: queue.Queue[int] = queue.Queue()
+
+        # ---- 工作线程（SC 与 Transfer 分离） ----
+        self._sc_worker_threads: list[threading.Thread] = []
+        self._transfer_worker_threads: list[threading.Thread] = []
 
         # ---- 工作线程数 ----
-        self._num_workers = 3  # SC/Transfer 并发工作线程数
+        self._num_sc_workers = 3       # SC 工作线程数（与 MAX_SLOTS 匹配）
+        self._num_transfer_workers = 1  # Transfer 工作线程数（SFTP 单线程保证安全）
 
-        logger.info("工作线程池管理器初始化完成")
+        # ---- SC 全部完成检测 ----
+        # 当 SC 队列为空且所有构型的 SC 步骤均已终结时，触发一次 SC 进程清理。
+        # 使用标志位防止多个 SC Worker 线程重复触发。
+        self._sc_cleanup_triggered = False
+        self._sc_cleanup_lock = threading.Lock()
+
+        logger.info("工作线程池管理器初始化完成（SC/Transfer 解耦架构）")
 
     def set_meshing_monitor(self, meshing_monitor) -> None:
         """注入 MeshingMonitor 实例。由 PipelineScheduler 在创建后调用。"""
         self._meshing_monitor = meshing_monitor
 
     def join_worker_threads(self, timeout: float = 3.0) -> None:
-        """等待所有工作线程退出。
+        """等待所有 SC 和 Transfer 工作线程退出。
 
         供外部模块（如 PipelineScheduler.stop()）调用，避免直接访问私有成员。
 
         Args:
             timeout: 每个线程的最大等待秒数
         """
-        for t in self._worker_threads:
+        all_threads = self._sc_worker_threads + self._transfer_worker_threads
+        for t in all_threads:
             if t.is_alive():
                 t.join(timeout=timeout)
 
@@ -91,62 +113,123 @@ class WorkerPoolManager:
     # ------------------------------------------------------------------
 
     def start_if_needed(self):
-        """仅在工作线程未启动或全部死亡时创建新的工作线程池。"""
-        alive_workers = [t for t in self._worker_threads if t.is_alive()]
-        self._worker_threads = alive_workers
-        if not alive_workers:
+        """仅在 SC 和 Transfer 工作线程均未启动或全部死亡时创建新的线程池。
+
+        每次调用均重置 SC 清理标志，确保新的流水线运行中能正确触发清理。
+        """
+        # ★ 每次流水线启动/恢复时重置 SC 清理标志
+        self._sc_cleanup_triggered = False
+
+        alive_sc = [t for t in self._sc_worker_threads if t.is_alive()]
+        alive_tf = [t for t in self._transfer_worker_threads if t.is_alive()]
+        self._sc_worker_threads = alive_sc
+        self._transfer_worker_threads = alive_tf
+        if not alive_sc and not alive_tf:
             self._start_worker_pool()
         else:
-            logger.debug(f"工作线程池已存在 ({len(alive_workers)} 个活跃线程)，跳过创建")
+            logger.debug(
+                f"工作线程池已存在 "
+                f"({len(alive_sc)} SC + {len(alive_tf)} Transfer 活跃线程)，跳过创建"
+            )
 
     def _start_worker_pool(self):
-        """启动多个工作线程，从队列取任务执行 SC → Transfer → Meshing。"""
-        for i in range(self._num_workers):
+        """启动 SC 和 Transfer 分离的独立工作线程池。
+
+        SC 工作线程：从 SC 队列取任务 → 执行 SpaceClaim 转换 → 推入 Transfer 队列。
+        Transfer 工作线程：从 Transfer 队列取任务 → 执行文件传输 → 提交 MeshingMonitor。
+        """
+        # SC 工作线程
+        for i in range(self._num_sc_workers):
             t = threading.Thread(
-                target=self._worker_loop,
-                name=f"PipelineWorker-{i+1}",
+                target=self._sc_worker_loop,
+                name=f"SCWorker-{i+1}",
                 daemon=True,
             )
             t.start()
-            self._worker_threads.append(t)
-        logger.info(f"已启动 {self._num_workers} 个工作线程")
+            self._sc_worker_threads.append(t)
 
-    def _worker_loop(self):
+        # Transfer 工作线程
+        for i in range(self._num_transfer_workers):
+            t = threading.Thread(
+                target=self._transfer_worker_loop,
+                name=f"TransferWorker-{i+1}",
+                daemon=True,
+            )
+            t.start()
+            self._transfer_worker_threads.append(t)
+
+        logger.info(
+            f"已启动 {self._num_sc_workers} 个 SC 工作线程 + "
+            f"{self._num_transfer_workers} 个 Transfer 工作线程"
+        )
+
+    # ==================================================================
+    # SC 工作线程
+    # ==================================================================
+
+    def _check_sc_all_done(self) -> bool:
+        """检查是否所有构型的 SC 步骤均已终结（Completed 或 Error）。
+
+        同时验证 SW 步骤已全部终结（确保不会再有新 STEP 文件产生
+        → 新 SC 任务入队）。
+
+        注意：不检查 Transfer 队列状态。SC 进程仅负责 STEP→SCDOC 转换，
+        SCDOC 文件写入磁盘后 SC 进程即不再被需要；Transfer 是纯文件传输，
+        不依赖 SC 进程。
+
+        Returns:
+            True 表示 SC 阶段已彻底完成，可安全清理 SC 进程。
         """
-        工作线程主循环。
+        all_configs = self.state.get_all_configs()
+        if not all_configs:
+            return False
 
-        从 SC 队列获取构型，依次执行：
-        SC → Transfer → Meshing
+        terminal_states = {STATUS_COMPLETED, STATUS_ERROR}
 
-        每个步骤完成后立即更新状态，支持断点续传。
+        for cn in all_configs:
+            sw_status = self.state.get_step_status(cn, "SW")
+            sc_status = self.state.get_step_status(cn, "SC")
+            # SW 必须已终结（确保不会再有新 STEP 文件产生）
+            if sw_status not in terminal_states:
+                return False
+            # SC 必须已终结
+            if sc_status not in terminal_states:
+                return False
+
+        return True
+
+    def _sc_worker_loop(self):
+        """SC 工作线程主循环。
+
+        从 SC 队列获取构型 → 执行 SC → 推入 Transfer 队列。
+        SC 完成后立即释放常驻槽位，不等待 Transfer 完成。
         """
-        logger.info(f"[{threading.current_thread().name}] 工作线程启动")
+        logger.info(f"[{threading.current_thread().name}] SC 工作线程启动")
 
         _last_queue_report = time.time()
-        _queue_report_interval = 30.0  # 每 30 秒输出一次队列健康状态
-        _consecutive_fatal_count = 0   # 连续兜底异常计数器（检测系统性故障）
+        _queue_report_interval = 30.0
+        _consecutive_fatal_count = 0
 
         while not self._stopped.is_set():
-            # 检查暂停
             if self._paused.is_set():
                 time.sleep(1)
                 continue
 
             try:
-                # 从队列获取任务（1秒超时以便检查停止/暂停标志）
                 config_name, _step_file = self._sc_queue.get(timeout=1)
             except queue.Empty:
-                # ---- 队列空闲时输出健康状态 ----
                 now = time.time()
                 if now - _last_queue_report >= _queue_report_interval:
                     qsize = self._sc_queue.qsize()
-                    active_workers = sum(1 for t in self._worker_threads if t.is_alive())
+                    tf_qsize = self._transfer_queue.qsize()
+                    active_sc = sum(1 for t in self._sc_worker_threads if t.is_alive())
+                    active_tf = sum(1 for t in self._transfer_worker_threads if t.is_alive())
                     logger.debug(
-                        f"[队列健康] 深度={qsize}, 活跃Worker={active_workers}, "
+                        f"[队列健康] SC深度={qsize}, Transfer深度={tf_qsize}, "
+                        f"活跃SC={active_sc}, 活跃Transfer={active_tf}, "
                         f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}"
                     )
                     _last_queue_report = now
-                    # 队列长时间为空且无活跃任务时记录 INFO
                     if qsize == 0:
                         waiting_configs = [
                             cn for cn in self.state.get_all_configs()
@@ -158,16 +241,34 @@ class WorkerPoolManager:
                                 f"[队列异常] {len(waiting_configs)} 个构型 SW 已完成但未入队: "
                                 f"{waiting_configs[:5]}{'...' if len(waiting_configs)>5 else ''}"
                             )
+
+                    # ★ SC 全部完成检测：当 SC 队列为空且所有构型 SC/SW 均已终结时，
+                    #   触发 SC 进程清理（不再等待 Meshing 全局屏障）。
+                    #   使用独立锁防止多个 SC Worker 线程重复触发。
+                    if qsize == 0 and not self._sc_cleanup_triggered:
+                        if self._check_sc_all_done():
+                            with self._sc_cleanup_lock:
+                                if not self._sc_cleanup_triggered:
+                                    self._sc_cleanup_triggered = True
+                                    logger.info(
+                                        "[WorkerPool] 检测到所有构型 SC 步骤已完成，"
+                                        "触发 SC 进程清理"
+                                    )
+                                    try:
+                                        self.runner.do_sc_final_cleanup()
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"[WorkerPool] SC 进程清理异常: {e}"
+                                        )
                 continue
 
-            logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name}")
+            logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name} SC 步骤")
 
             try:
-                self._process_single_config(config_name)
-                _consecutive_fatal_count = 0  # 成功处理，重置计数器
+                self._process_sc_step(config_name)
+                _consecutive_fatal_count = 0
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
-                logger.error(f"处理构型{config_name} 时发生未预期异常: {e}", exc_info=True)
-                # 只标记 SC+Transfer 步骤为 Error（Meshing 由 MeshingMonitor 管理）
+                logger.error(f"SC 步骤处理构型{config_name} 异常: {e}", exc_info=True)
                 for step in ["SC", "Transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)
@@ -175,21 +276,19 @@ class WorkerPoolManager:
                             self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
                     except Exception as mark_err:
                         logger.debug(f"标记构型{config_name}步骤{step}为Error时异常: {mark_err}")
-                # Transfer 失败时，Meshing 也无法执行，标记为 Error
                 self._mark_meshing_error_if_transfer_failed(config_name, str(e))
             except Exception as e:
-                # 兜底：捕获所有其他异常类型，防止工作线程意外崩溃
                 _consecutive_fatal_count += 1
                 if _consecutive_fatal_count >= 3:
                     logger.critical(
-                        f"处理构型{config_name} 时发生致命异常 "
-                        f"(连续第{_consecutive_fatal_count}次，可能存在系统性故障): "
+                        f"SC 步骤处理构型{config_name} 致命异常 "
+                        f"(连续第{_consecutive_fatal_count}次): "
                         f"{type(e).__name__}: {e}",
                         exc_info=True
                     )
                 else:
                     logger.critical(
-                        f"处理构型{config_name} 时发生致命异常: {type(e).__name__}: {e}",
+                        f"SC 步骤处理构型{config_name} 致命异常: {type(e).__name__}: {e}",
                         exc_info=True
                     )
                 for step in ["SC", "Transfer"]:
@@ -206,27 +305,23 @@ class WorkerPoolManager:
             finally:
                 self._sc_queue.task_done()
 
-        logger.info(f"[{threading.current_thread().name}] 工作线程退出")
+        logger.info(f"[{threading.current_thread().name}] SC 工作线程退出")
 
-    def _process_single_config(self, config_name: int):
-        """
-        处理单个构型的完整流水线（SC → Transfer → Meshing）。
+    def _process_sc_step(self, config_name: int):
+        """执行单个构型的 SC 步骤，成功后推入 Transfer 队列。
 
-        实现了断点续传：如果某步骤已经是 Completed，则跳过。
+        SC 失败时标记 Transfer/Meshing 为 Error 且不推入 Transfer 队列。
 
         Args:
             config_name: 构型名称
         """
-        # ---- SC 阶段 ----
-        # 注：STATUS_RUNNING 也包含在内，以处理以下场景：
-        # pause→kill SC进程→标记PAUSED→resume→set_all_paused_to_running()→RUNNING，
-        # 此时需重新执行 SC（进程已被终止，不可恢复）。
         sc_status = self.state.get_step_status(config_name, "SC")
-        if sc_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            # ★ 执行前检查暂停标志
+        # 排除 RUNNING：防止 _resume_paused_steps() 重复入队导致两个 Worker
+        # 同时执行同一构型的 SC 步骤（RetryManager 已将状态设为 RUNNING）
+        if sc_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
-            # ★ 执行前检查输出文件：若 SCDOC 已存在则直接标记完成，避免重复启动 SC
+
             scdoc_name = get_step_filename("SC", config_name)
             if scdoc_name:
                 scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
@@ -237,60 +332,120 @@ class WorkerPoolManager:
                     self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
                 elif not self._retry_manager.execute_with_retry(config_name, "SC",
                                                    self.runner.execute_sc_step):
+                    self._mark_meshing_error_if_transfer_failed(
+                        config_name, "SC 步骤失败"
+                    )
                     return
             elif not self._retry_manager.execute_with_retry(config_name, "SC",
                                                self.runner.execute_sc_step):
+                self._mark_meshing_error_if_transfer_failed(
+                    config_name, "SC 步骤失败"
+                )
                 return
 
-        # ★ SC 完成后检查暂停标志
-        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
-            return
+        # ★ SC 成功（或已 Completed），推入 Transfer 队列
+        self._transfer_queue.put(config_name)
+        logger.info(
+            f"构型{config_name} SC 完成，已推入 Transfer 队列 "
+            f"(队列深度: {self._transfer_queue.qsize()})"
+        )
 
-        # ---- Transfer 阶段 ----
-        transfer_status = self.state.get_step_status(config_name, "Transfer")
-        if transfer_status in (STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-            # ★ 执行前检查远程输出文件：若远程 SCDOC 已存在则跳过上传
-            transfer_skip = False
-            scdoc_name = get_step_filename("SC", config_name)
-            if scdoc_name:
+    # ==================================================================
+    # Transfer 工作线程
+    # ==================================================================
+
+    def _transfer_worker_loop(self):
+        """Transfer 工作线程主循环。
+
+        从 Transfer 队列获取构型 → 执行 Transfer → 提交 MeshingMonitor。
+        独立于 SC 工作线程，不阻塞 SC 常驻槽位的周转。
+        """
+        logger.info(f"[{threading.current_thread().name}] Transfer 工作线程启动")
+
+        _consecutive_fatal_count = 0
+
+        while not self._stopped.is_set():
+            if self._paused.is_set():
+                time.sleep(1)
+                continue
+
+            try:
+                config_name = self._transfer_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name} Transfer 步骤")
+
+            try:
+                self._process_transfer_step(config_name)
+                _consecutive_fatal_count = 0
+            except (RuntimeError, ValueError, OSError, ConnectionError) as e:
+                logger.error(f"Transfer 步骤处理构型{config_name} 异常: {e}", exc_info=True)
                 try:
-                    ssh = self.runner.get_ssh()
-                    if ssh is not None and ssh.is_connected():
-                        remote_scdoc = (
-                            f"{REMOTE_CONFIG['scdoc_dir'].replace(chr(92), '/')}"
-                            f"/{scdoc_name}"
-                        )
-                        if hasattr(ssh, "get_remote_file_size"):
-                            remote_size = ssh.get_remote_file_size(remote_scdoc)
-                            remote_exists = remote_size is not None and remote_size > 0
-                        else:
-                            remote_exists = ssh.check_remote_file(remote_scdoc)
-                        if remote_exists:
-                            logger.info(
-                                f"构型{config_name} Transfer: "
-                                f"远程 SCDOC 已存在，跳过执行"
-                            )
-                            self.state.set_step_status(
-                                config_name, "Transfer", STATUS_COMPLETED
-                            )
-                            transfer_skip = True
-                except (ConnectionError, TimeoutError, OSError) as e:
-                    logger.warning(
-                        f"构型{config_name} Transfer: SSH 检查远程文件失败: {e}"
+                    s = self.state.get_step_status(config_name, "Transfer")
+                    if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                        self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
+                except Exception as mark_err:
+                    logger.debug(f"标记构型{config_name} Transfer 为 Error 时异常: {mark_err}")
+                self._mark_meshing_error_if_transfer_failed(config_name, str(e))
+            except Exception as e:
+                _consecutive_fatal_count += 1
+                if _consecutive_fatal_count >= 3:
+                    logger.critical(
+                        f"Transfer 步骤处理构型{config_name} 致命异常 "
+                        f"(连续第{_consecutive_fatal_count}次): "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True
                     )
-            if not transfer_skip:
-                if not self._retry_manager.execute_with_retry(config_name, "Transfer",
-                                                 self.runner.execute_transfer):
-                    return
+                else:
+                    logger.critical(
+                        f"Transfer 步骤处理构型{config_name} 致命异常: {type(e).__name__}: {e}",
+                        exc_info=True
+                    )
+                try:
+                    s = self.state.get_step_status(config_name, "Transfer")
+                    if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                        self.state.set_step_status(config_name, "Transfer", STATUS_ERROR,
+                                                    f"致命异常: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
+                self._mark_meshing_error_if_transfer_failed(
+                    config_name, f"致命异常: {type(e).__name__}: {e}"
+                )
+            finally:
+                self._transfer_queue.task_done()
 
-        # ★ Transfer 完成后检查暂停标志
+        logger.info(f"[{threading.current_thread().name}] Transfer 工作线程退出")
+
+    def _process_transfer_step(self, config_name: int):
+        """执行单个构型的 Transfer 步骤，成功后提交 MeshingMonitor。
+
+        包含远程文件存在性检查，若远程 SCDOC 已存在则跳过传输。
+        Transfer 失败时标记 Meshing 为 Error。
+
+        Args:
+            config_name: 构型名称
+        """
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
-        # ---- 提交 Meshing 到 MeshingMonitor ----
+        transfer_status = self.state.get_step_status(config_name, "Transfer")
+        # 排除 RUNNING：防止重复入队导致两个 Worker 同时执行同一构型的 Transfer
+        if transfer_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+            # ★ 远程文件存在性检查已移入 remote_executor.execute_transfer() 内部，
+            #    在 _ssh_lock 保护下执行，避免与 upload_file() 并发操作 SFTP 通道
+            #    导致死锁。此处不再单独检查，直接委托 execute_transfer 处理。
+            if not self._retry_manager.execute_with_retry(config_name, "Transfer",
+                                             self.runner.execute_transfer):
+                self._mark_meshing_error_if_transfer_failed(
+                    config_name, "Transfer 步骤失败"
+                )
+                return
+
+        # ★ Transfer 成功（或已 Completed），提交 MeshingMonitor
         if self._meshing_monitor is not None:
             self._meshing_monitor.submit(config_name)
-            logger.info(f"构型{config_name} SC→Transfer 完成，已提交 MeshingMonitor")
+            logger.info(f"构型{config_name} Transfer 完成，已提交 MeshingMonitor")
         else:
             logger.warning(
                 f"构型{config_name} Transfer 完成但 MeshingMonitor 未就绪，"
@@ -298,13 +453,13 @@ class WorkerPoolManager:
             )
 
     def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:
-        """Transfer 失败时，将 Meshing 标记为 Error（若尚未完成）。"""
+        """上游步骤（SC 或 Transfer）失败时，将 Meshing 标记为 Error（若尚未完成）。"""
         meshing_st = self.state.get_step_status(config_name, "Meshing")
         if meshing_st not in (STATUS_COMPLETED, STATUS_ERROR):
             self.state.set_step_status(
                 config_name, "Meshing", STATUS_ERROR,
-                f"上游 Transfer 失败: {reason}",
+                f"上游步骤失败: {reason}",
             )
             logger.info(
-                f"构型{config_name} Meshing 因 Transfer 失败标记为 Error"
+                f"构型{config_name} Meshing 因上游步骤失败标记为 Error"
             )

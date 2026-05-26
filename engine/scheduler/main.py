@@ -177,8 +177,10 @@ class PipelineScheduler:
             self.state.set_engine_status("paused")
             return
 
-        # 正常启动（或 resume 已清除暂停后重启）时保持启动语义不变。
-        self._paused.clear()
+        # 注意：不在此处清除 _paused。
+        # - 初始启动时 _paused 应为 False，无需清除
+        # - resume() 已在调用 start_pipeline 之前清除 _paused
+        # - 避免与 IPC 线程的 pause() 产生 TOCTOU 竞态
 
         # ---- 步骤 1: SW 阶段 ----
         sw_result = self.sw_phase_handler.execute_sw_phase(_recursion_depth)
@@ -418,8 +420,9 @@ class PipelineScheduler:
                 self._enqueue_sc(cn, step_dir)
                 sc_enqueued += 1
             elif step == "Transfer":
-                # Transfer 需要 SC 先完成 → 入 SC 队列让 Worker 处理
-                # Worker._process_single_config 会检测 SC 已 Completed 并跳过
+                # Transfer 需要 SC 先完成 → 入 SC 队列
+                # SC Worker 检测 SC 已 Completed，跳过执行并推入 Transfer 队列，
+                # 由 Transfer Worker 负责实际传输
                 self._enqueue_sc(cn, step_dir)
                 sc_enqueued += 1
             elif step == "Meshing":
@@ -482,6 +485,13 @@ class PipelineScheduler:
 
     def resume(self):
         logger.info("收到继续指令")
+
+        # ★ 清除停止标志：resume 意味着从任何停止/暂停状态恢复，
+        #    必须确保 _stopped 已清除，否则 MeshingMonitor 等组件线程
+        #    会在启动后立即退出（_monitor_loop 检查 _stopped.is_set()）。
+        #    典型场景：引擎自动停止（如 SW 全失败）→ 用户 pause →
+        #    reset SC+ → start → _stopped 仍处于 set 状态。
+        self._stopped.clear()
 
         # ★ 断点续传扫描：对每个构型从 SW 起逐步检查，找到断点并入队
         #    已覆盖所有步骤的 PAUSED/WAITING/ERROR 状态，无需再调用
@@ -580,13 +590,21 @@ class PipelineScheduler:
             or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("SC", 99)
         )
 
+        # ★ 暂停感知：reset 操作不应越过暂停标志恢复文件监控。
+        #    若当前处于暂停状态，使用 reset_only() 仅清理内部状态；
+        #    若未暂停，使用 resume_and_reset() 恢复扫描。
+        _monitor_reset_method = (
+            self._file_monitor.reset_only if self._paused.is_set()
+            else self._file_monitor.resume_and_reset
+        ) if self._file_monitor else None
+
         # 全量重置（所有构型 + 所有步骤）需要额外清除引擎全局状态
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
             self.runner.reset_sc_pool()
-            if need_monitor_reset and self._file_monitor:
-                self._file_monitor.resume_and_reset()
+            if need_monitor_reset and _monitor_reset_method:
+                _monitor_reset_method()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
@@ -594,16 +612,16 @@ class PipelineScheduler:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
-            if need_monitor_reset and self._file_monitor:
-                self._file_monitor.resume_and_reset()
+            if need_monitor_reset and _monitor_reset_method:
+                _monitor_reset_method()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
-            if need_monitor_reset and self._file_monitor:
-                self._file_monitor.resume_and_reset()
+            if need_monitor_reset and _monitor_reset_method:
+                _monitor_reset_method()
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

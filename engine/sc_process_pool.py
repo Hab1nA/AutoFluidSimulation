@@ -132,6 +132,8 @@ class SCProcessPool:
             # 重置首次清理标志：下次进入 SC 阶段时需重新清理残留进程
             # （修复：stop() 后同一 Daemon 再次 start 时跳过清理的问题）
             self._first_cleanup_done = False
+            # ★ 同步重置末次清理标志：stop() 后的下次运行需重新执行 final cleanup
+            self._final_cleanup_done = False
 
     def _shutdown_all_internal(self):
         """全量清理（内部版本，调用方须已持有 _lock）。"""
@@ -193,8 +195,10 @@ class SCProcessPool:
                 if slot.process is not None and slot.process.poll() is None:
                     return slot
                 else:
-                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} 进程已死亡，清理")
+                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} 进程已死亡，清理并移除")
                     self._cleanup_persistent_slot(slot)
+                    # 从字典中移除孤立槽位，防止长期累积
+                    self._persistent_slots.pop(slot.slot_id, None)
             elif slot.status == "busy":
                 if slot.process is not None and slot.process.poll() is not None:
                     logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理并重新启动")
@@ -410,9 +414,9 @@ class SCProcessPool:
             # worker pool 会在 SC 完成后停在 Transfer 前，并在暂停期间不再取新任务。
             if paused_event is not None and paused_event.is_set():
                 if not pause_logged:
-                    logger.debug(
+                    logger.info(
                         f"[SC-Pool] 构型{config_name} (run={run_id}) 已收到暂停，"
-                        "等待当前 SpaceClaim 命令自然完成"
+                        "等待当前 SpaceClaim 命令自然完成（不中断进行中的转换）"
                     )
                     pause_logged = True
 

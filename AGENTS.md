@@ -1,8 +1,8 @@
 # AutoFluid Agent Guide
 
 This file adapts the existing Copilot instructions in `.github/` for Codex.
-Before editing code, use this file as the entry point and load only the
-language-specific instruction file needed for the files being changed.
+Before editing code, use this file as the entry point and load the
+language-specific instruction file(s) needed for the files being changed.
 
 ## Environment
 
@@ -40,19 +40,20 @@ Command forms:
   `.github/instructions/rust.instructions.md`.
 - For `bridge/**/*.cs` and `bridge/**/*.csproj`, read and follow
   `.github/instructions/csharp.instructions.md`.
-- For `.toml`, `.ini`, `.bat`, and project config files, choose the instruction
-  file for the language or subsystem that owns the file.
+- For `.toml`, `.ini`, `.bat`, and project config files, use
+  `.github/instructions/python.instructions.md` for root-level files,
+  `.github/instructions/rust.instructions.md` for files in `autofluid-tui/`,
+  and `.github/instructions/csharp.instructions.md` for files in `bridge/`.
 - If a task spans multiple languages, read each relevant instruction file, but
   keep edits language-scoped and avoid mixing one language's idioms into another.
 
 ## Cross-Language Guardrails
 
-- Never insert Python snippets into Rust or C# files.
-- Never insert Rust snippets into Python or C# files.
-- Never insert C# snippets into Python or Rust files.
+- Restrict all source code edits to the syntax of the target file's language.
+  Do not mix syntax between languages, even when implementing cross-language
+  interfaces like IPC. If a task requires cross-language coordination, edit
+  each file in its native language separately.
 - Do not copy external API examples or documentation blocks into source files.
-- If context from another language appears while editing one language, ignore it
-  unless the task explicitly concerns a cross-language interface.
 
 ## Architecture Snapshot
 
@@ -93,6 +94,9 @@ Quality gate after Python changes:
 - `.venv\Scripts\python.exe -m mypy .`
 - `.venv\Scripts\python.exe -m pytest tests/`
 
+If a quality gate command fails, analyze the output, fix the corresponding
+errors in the code, and re-run the command until it passes.
+
 ## Rust Rules
 
 - Rust code lives under `autofluid-tui/`.
@@ -108,6 +112,9 @@ Quality gate after Rust changes, from `autofluid-tui/`:
 - `cargo fmt --check`
 - `cargo test`
 
+If a quality gate command fails, analyze the output, fix the corresponding
+errors in the code, and re-run the command until it passes.
+
 ## C# Rules
 
 - C# bridge code lives under `bridge/SpaceClaimBridge/`.
@@ -115,7 +122,8 @@ Quality gate after Rust changes, from `autofluid-tui/`:
 - Use block-scoped namespaces, `PascalCase` types/methods, `_camelCase` private
   fields, and XML `///` comments for public types and methods.
 - Top-level execution should catch unhandled exceptions and return an
-  appropriate `ExitCode`.
+  `ExitCode` matching the Python `SCProcessPool` expectations
+  (e.g., `0` = Success, `1` = Error, `2` = Timeout).
 - Keep command-line arguments compatible with Python:
   `--script <path> --config <id> --stepdir <dir> --scdocdir <dir> [--timeout <sec>]`.
 
@@ -123,6 +131,9 @@ Quality gate after C# changes:
 
 - Run `compile.bat` or `compile_noref.bat` in `bridge/SpaceClaimBridge/`.
 - Manually verify Python-side `SCProcessPool` handles all `ExitCode` values.
+
+If a quality gate command fails, analyze the output, fix the corresponding
+errors in the code, and re-run the command until it passes.
 
 ## Review Mode
 
