@@ -100,15 +100,19 @@ impl IpcClient {
                 Err("连接已断开".to_string())
             }
             Ok(Err(e)) => {
-                // 读取 I/O 错误（含超长响应拒绝）
-                let stream = reader.into_inner();
-                self.stream = Some(stream);
+                // 读取 I/O 错误：丢弃 stream，防止后续通信脱序。
+                // BufReader 内部缓冲区中的字节已被 read() 从内核消耗，
+                // 但未被应用层消费；into_inner() 后这些字节永久丢失，
+                // 而内核缓冲区中可能残留后续字节 → 下次读取脱序。
+                // 直接丢弃 reader（含其内部缓冲区和底层 stream）最安全。
+                // self.stream 保持 None，调用方通过 is_connected() 感知断连。
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
-                // 读取超时：stream 仍然完好，归还以便下次重试
-                let stream = reader.into_inner();
-                self.stream = Some(stream);
+                // 读取超时：同样丢弃 stream，原因同上。
+                // 即使 BufReader 缓冲区为空（服务端尚未响应），服务端仍可能
+                // 在超时后继续处理并发送响应，复用 stream 会导致协议层脱序。
+                // 调用方需重新 connect() 以获得干净的字节流。
                 Err("请求超时".to_string())
             }
         }
