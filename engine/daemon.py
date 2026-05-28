@@ -241,25 +241,40 @@ class PipelineDaemon:
             self.shutdown()
 
     def shutdown(self):
-        """优雅关闭守护进程。"""
+        """优雅关闭守护进程。
+
+        每个清理步骤独立 try-except，确保任何一步失败都不阻断后续清理。
+        """
         logger.info("PipelineDaemon 正在关闭...")
         self._running = False
         self._stop_event.set()
 
-        # 停止调度器
+        # 停止调度器（内部已包含 disconnect_ssh）
         if self.scheduler:
-            self.scheduler.stop()
+            try:
+                self.scheduler.stop()
+            except Exception as e:
+                logger.warning(f"调度器停止异常: {e}")
 
-        # 断开 SSH
-        if self.runner:
-            self.runner.disconnect_ssh()
+        # 调度器不存在时才需要单独断开 SSH
+        elif self.runner:
+            try:
+                self.runner.disconnect_ssh()
+            except Exception as e:
+                logger.warning(f"SSH 断开异常: {e}")
 
         # 停止 IPC 服务器
         if self.ipc_server:
-            self.ipc_server.stop()
+            try:
+                self.ipc_server.stop()
+            except Exception as e:
+                logger.warning(f"IPC 服务器停止异常: {e}")
 
         # 释放进程锁
-        release_process_lock()
+        try:
+            release_process_lock()
+        except Exception as e:
+            logger.warning(f"进程锁释放异常: {e}")
 
         logger.info("PipelineDaemon 已关闭")
 
@@ -361,8 +376,8 @@ class PipelineDaemon:
     def handle_stop(self, params: dict | None = None) -> tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
-        # 在另一个线程中执行关闭，以便给客户端返回响应
-        threading.Thread(target=self.shutdown, daemon=True).start()
+        # 统一退出路径：仅设置 _stop_event，由 run() 的 finally 块执行 shutdown()
+        self._stop_event.set()
         return True, None, "后台引擎正在安全退出..."
 
     def handle_check(self, params: dict | None = None) -> tuple[bool, Any, str]:
