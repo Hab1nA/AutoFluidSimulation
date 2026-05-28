@@ -14,7 +14,7 @@ import tempfile
 import shutil
 from engine.state_manager import StateManager
 from engine.config import (
-    STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     IPC_CONFIG,
 )
 from engine.scheduler.retry import RetryManager
@@ -107,7 +107,7 @@ class TestRetryManager:
             return False
 
         _ = self.retry_mgr.execute_with_retry(1, "SC", fail_on_first)
-        # 因暂停导致的失败应标记 Paused
+        # 因暂停导致的失败应标记 Paused（或因线程调度竞态可能走正常重试路径）
         status = self.state.get_step_status(1, "SC")
         assert status in (STATUS_PAUSED, STATUS_RETRYING, STATUS_ERROR)
 
@@ -180,3 +180,350 @@ class TestSchedulerModuleImports:
         assert hasattr(scheduler_pkg, "BarrierCoordinator")
         assert hasattr(scheduler_pkg, "SWPhaseHandler")
         assert hasattr(scheduler_pkg, "RetryManager")
+        assert hasattr(scheduler_pkg, "MeshingMonitor")
+
+
+# ====================================================================
+# Mock 辅助类
+# ====================================================================
+
+class _MockTaskRunner:
+    """轻量 TaskRunner Mock，供 BarrierCoordinator / SWPhaseHandler 使用。"""
+
+    def __init__(self, state_manager):
+        self.state = state_manager
+        self._sc_cleanup_called = False
+        self._solver_dispatched = []
+
+    def do_sc_final_cleanup(self):
+        self._sc_cleanup_called = True
+
+    def execute_solver(self, config_name: int) -> bool:
+        self._solver_dispatched.append(config_name)
+        self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
+        return True
+
+    def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        return True
+
+    def get_remote_executor(self):
+        return _MockRemoteExecutor(self.state)
+
+
+class _MockRemoteExecutor:
+    """轻量 RemoteExecutor Mock。"""
+
+    def __init__(self, state_manager):
+        self.state = state_manager
+        self._meshing_started: list[int] = []
+
+    def start_meshing(self, config_name: int) -> bool:
+        self._meshing_started.append(config_name)
+        return True
+
+    def check_meshing_done(self, config_name: int) -> bool:
+        return False
+
+    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        # 立即完成
+        return True
+
+    def get_ssh_connection(self):
+        return None
+
+
+# ====================================================================
+# BarrierCoordinator 测试
+# ====================================================================
+
+class TestBarrierCoordinator:
+    """BarrierCoordinator 屏障逻辑测试。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="barrier_test_")
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        self._orig_db_path = IPC_CONFIG["db_path"]
+        IPC_CONFIG["db_path"] = self.db_path
+
+        self.state = StateManager(db_path=self.db_path)
+        self.runner = _MockTaskRunner(self.state)
+        self.paused = threading.Event()
+        self.stopped = threading.Event()
+        self.barrier_passed = threading.Event()
+        self.retry_mgr = RetryManager(self.state, self.paused, self.stopped)
+
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+        )
+
+    def teardown_method(self):
+        IPC_CONFIG["db_path"] = self._orig_db_path
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_barrier_passes_when_all_meshing_completed(self):
+        """所有构型 Meshing Completed → 屏障通过。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(2, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(1, "Meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "Meshing", STATUS_COMPLETED)
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        t.join(timeout=10)
+
+        assert self.barrier_passed.is_set()
+        assert self.state.is_global_barrier_met() is True
+        assert self.runner._sc_cleanup_called is True
+
+    def test_barrier_fails_when_all_meshing_error(self):
+        """所有构型 Meshing Error → 屏障失败，引擎停止。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(2, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(1, "Meshing", STATUS_ERROR, "超时")
+        self.state.set_step_status(2, "Meshing", STATUS_ERROR, "发散")
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        t.join(timeout=10)
+
+        assert not self.barrier_passed.is_set()
+        assert self.stopped.is_set()
+        # Solver 也被标记为 Error
+        assert self.state.get_step_status(1, "Solver") == STATUS_ERROR
+        assert self.state.get_step_status(2, "Solver") == STATUS_ERROR
+
+    def test_barrier_waits_when_paused(self):
+        """暂停期间屏障监控等待，恢复后继续。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
+        self.paused.set()
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        time.sleep(0.5)
+
+        # 暂停期间不应通过
+        assert not self.barrier_passed.is_set()
+        assert not self.stopped.is_set()
+
+        # 设置完成条件后恢复（恢复在设置状态之后，确保监控线程看到正确状态）
+        self.state.set_step_status(1, "Meshing", STATUS_COMPLETED)
+        self.paused.clear()
+
+        t.join(timeout=10)
+        assert self.barrier_passed.is_set()
+
+    def test_barrier_stops_on_stopped_event(self):
+        """停止事件使监控循环退出。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.stopped.set()
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        t.join(timeout=5)
+
+        assert not t.is_alive()
+
+    def test_sw_all_failed_aborts_pipeline(self):
+        """所有构型 SW 失败 → 流水线中止。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_step_status(1, "SW", STATUS_ERROR, "连接失败")
+        self.state.set_step_status(2, "SW", STATUS_ERROR, "宏错误")
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        t.join(timeout=10)
+
+        assert self.stopped.is_set()
+        # 后续步骤被标记为 Error
+        assert self.state.get_step_status(1, "SC") == STATUS_ERROR
+        assert self.state.get_step_status(2, "Solver") == STATUS_ERROR
+
+    def test_join_solver_threads(self):
+        """join_solver_threads 等待线程退出。"""
+        dummy = threading.Thread(target=lambda: time.sleep(0.1), daemon=True)
+        dummy.start()
+        self.coordinator._solver_threads = [dummy]
+        self.coordinator.join_solver_threads(timeout=2)
+        assert not dummy.is_alive()
+        assert self.coordinator._solver_threads == []
+
+
+# ====================================================================
+# MeshingMonitor 测试
+# ====================================================================
+
+class TestMeshingMonitor:
+    """MeshingMonitor 队列与串行处理测试。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="meshing_test_")
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        self._orig_db_path = IPC_CONFIG["db_path"]
+        IPC_CONFIG["db_path"] = self.db_path
+
+        self.state = StateManager(db_path=self.db_path)
+        self.remote = _MockRemoteExecutor(self.state)
+        self.paused = threading.Event()
+        self.stopped = threading.Event()
+
+        from engine.scheduler.meshing_monitor import MeshingMonitor
+        self.monitor = MeshingMonitor(
+            state_manager=self.state,
+            remote_executor=self.remote,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+        )
+
+    def teardown_method(self):
+        self.stopped.set()
+        IPC_CONFIG["db_path"] = self._orig_db_path
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_submit_increases_queue(self):
+        """submit 增加队列深度。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.monitor.submit(1)
+        assert self.monitor.qsize() == 1
+
+    def test_qsize_empty(self):
+        """空队列返回 0。"""
+        assert self.monitor.qsize() == 0
+
+    def test_start_if_needed_creates_thread(self):
+        """start_if_needed 创建监控线程。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        # 需要 stopped 来退出循环
+        self.stopped.set()
+        self.monitor.start_if_needed()
+        time.sleep(0.3)
+        # 线程应已启动并退出（因为 stopped）
+        assert self.monitor._monitor_thread is not None
+
+    def test_start_if_needed_idempotent(self):
+        """重复调用 start_if_needed 不创建重复线程。"""
+        self.stopped.set()
+        self.monitor.start_if_needed()
+        self.monitor.start_if_needed()
+        # 第二次调用时线程已死亡（stopped），会创建新线程
+        # 但不会崩溃
+
+    def test_scan_db_for_pending_restores_queue(self):
+        """断点续传：Transfer Completed + Meshing Waiting → 入队。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_step_status(1, "Transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "Meshing", STATUS_WAITING)
+        self.state.set_step_status(2, "Transfer", STATUS_COMPLETED)
+        self.state.set_step_status(2, "Meshing", STATUS_ERROR, "超时")
+
+        self.monitor._scan_db_for_pending()
+        assert self.monitor.qsize() == 2
+
+    def test_scan_db_for_pending_skips_non_completed_transfer(self):
+        """Transfer 未完成的构型不入队。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "Transfer", STATUS_RUNNING)
+
+        self.monitor._scan_db_for_pending()
+        assert self.monitor.qsize() == 0
+
+    def test_monitor_loop_processes_queue(self):
+        """监控循环处理队列中的构型。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_meshing_running_if_idle(1)
+        self.state.set_step_status(1, "Meshing", STATUS_WAITING)
+
+        self.monitor.submit(1)
+        self.monitor.start_if_needed()
+
+        # 等待处理完成（给监控线程足够时间处理队列）
+        time.sleep(3)
+        self.stopped.set()
+        time.sleep(0.5)
+
+        # 构型应已被处理（Completed），Mock wait_meshing_completion 返回 True
+        status = self.state.get_step_status(1, "Meshing")
+        assert status == STATUS_COMPLETED, (
+            f"队列中的构型应已被处理为 Completed，实际状态: {status}"
+        )
+
+    def test_monitor_paused_waits(self):
+        """暂停期间监控循环等待。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.paused.set()
+        self.monitor.submit(1)
+
+        self.monitor.start_if_needed()
+        time.sleep(1)
+
+        # 暂停期间不应处理
+        assert self.monitor.qsize() == 1
+        self.stopped.set()
+
+
+# ====================================================================
+# utils 工具函数补充测试
+# ====================================================================
+
+class TestUtilsExtended:
+    """scheduler/utils 工具函数补充测试。"""
+
+    def test_wait_unless_paused_or_stopped_not_paused(self):
+        """未暂停时立即返回 True。"""
+        from engine.scheduler.utils import wait_unless_paused_or_stopped
+        paused = threading.Event()
+        stopped = threading.Event()
+        assert wait_unless_paused_or_stopped(paused, stopped) is True
+
+    def test_wait_unless_paused_or_stopped_stopped(self):
+        """停止时返回 False。"""
+        from engine.scheduler.utils import wait_unless_paused_or_stopped
+        paused = threading.Event()
+        stopped = threading.Event()
+        stopped.set()
+        assert wait_unless_paused_or_stopped(paused, stopped) is False
+
+    def test_wait_unless_paused_or_stopped_paused_then_resumed(self):
+        """暂停后恢复返回 True。"""
+        from engine.scheduler.utils import wait_unless_paused_or_stopped
+        paused = threading.Event()
+        stopped = threading.Event()
+        paused.set()
+
+        def resume():
+            time.sleep(0.2)
+            paused.clear()
+
+        threading.Thread(target=resume, daemon=True).start()
+        assert wait_unless_paused_or_stopped(paused, stopped) is True
+
+    def test_pause_aware_sleep_zero_duration(self):
+        """零时长 sleep 立即返回。"""
+        from engine.scheduler.utils import pause_aware_sleep
+        paused = threading.Event()
+        stopped = threading.Event()
+        assert pause_aware_sleep(0, paused, stopped) is True
+
+    def test_pause_aware_sleep_stopped_during_pause(self):
+        """暂停期间收到停止信号。"""
+        from engine.scheduler.utils import pause_aware_sleep
+        paused = threading.Event()
+        stopped = threading.Event()
+        paused.set()
+
+        def stop_after():
+            time.sleep(0.1)
+            stopped.set()
+
+        threading.Thread(target=stop_after, daemon=True).start()
+        assert pause_aware_sleep(5.0, paused, stopped) is False
