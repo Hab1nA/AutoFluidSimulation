@@ -51,11 +51,11 @@ def read_model_configs(excel_path: str) -> dict[int, list[float]]:
         ValueError: 数据格式错误
         ImportError: openpyxl 库未安装
     """
-    openpyxl = _import_openpyxl()
-    logger.info(f"[Excel] 正在读取 Excel 参数表: {excel_path}")
-
     if not os.path.exists(excel_path):
         raise FileNotFoundError(f"Excel 文件不存在: {excel_path}")
+
+    openpyxl = _import_openpyxl()
+    logger.info(f"[Excel] 正在读取 Excel 参数表: {excel_path}")
 
     configs: dict[int, list[float]] = {}
     wb = None

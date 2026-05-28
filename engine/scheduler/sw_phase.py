@@ -181,6 +181,13 @@ class SWPhaseHandler:
                 # 使下一个构型重新建立连接（若 SW 进程已崩溃可快速失败）
                 self.runner._sw_executor.disconnect_sw_cached()
 
+            # ★ 暂停中断：立即退出循环，交给尾部暂停善后逻辑统一处理。
+            #   不中断会导致循环继续到下一构型并阻塞在
+            #   wait_unless_paused_or_stopped，resume 后该构型成功但
+            #   当前构型仍停留在 Paused 状态，成为漏网之鱼。
+            if self._paused.is_set():
+                break
+
         # ---- 清理缓存的 SW 连接（无论成功与否） ----
         self.runner._sw_executor.disconnect_sw_cached()
 
