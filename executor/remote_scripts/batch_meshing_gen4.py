@@ -14,6 +14,12 @@ import shutil
 import sys
 import time
 
+# 强制 Python 使用 UTF-8 编码，避免 conda run 在中文 Windows 上的 GBK 编码崩溃
+os.environ["PYTHONUTF8"] = "1"
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')  # type: ignore[union-attr]
+
 import ansys.fluent.core as pyfluent
 
 
@@ -103,24 +109,44 @@ def main() -> None:
 
     config_id = args.config_id
 
+    # 临时文件路径（用于 finally 清理）
+    temp_wft: str | None = None
+    temp_jou: str | None = None
+
     try:
         # 1. 构建文件路径
         import_file_name = os.path.join(args.scdoc_dir, f"model_gen4_{config_id}.scdoc")
         print(f"[{config_id}] 输入文件: {import_file_name}")
 
-        # 2. 更新工作流文件中的构型号占位符（路径和模板名已由 sync_scripts 处理）
-        print(f"[{config_id}] 正在更新工作流文件中的构型号: {args.workflow_path}")
-        with open(args.workflow_path, 'r', encoding='utf-8') as f:
+        # 2. 创建临时工作流文件副本，替换构型号占位符
+        #    避免就地修改共享的 wft 文件导致状态污染（崩溃后 {config} 已被替换）
+        scripts_dir = os.path.dirname(args.workflow_path)
+        temp_wft = os.path.join(scripts_dir, f"meshing_gen4_{config_id}.wft")
+        print(f"[{config_id}] 正在创建工作流副本: {temp_wft}")
+        shutil.copy2(args.workflow_path, temp_wft)
+        with open(temp_wft, 'r', encoding='utf-8') as f:
             content = f.read()
         content = content.replace('{config}', str(config_id))
-        with open(args.workflow_path, 'w', encoding='utf-8') as f:
+        with open(temp_wft, 'w', encoding='utf-8') as f:
             f.write(content)
 
-        # 3. 执行 Journal 文件
-        print(f"[{config_id}] 正在执行 Journal 文件: {args.journal_path}")
-        meshing_session.tui.file.read_journal(args.journal_path)
+        # 3. 创建临时 Journal 文件，引用临时工作流文件
+        temp_jou = os.path.join(scripts_dir, f"meshing_gen4_{config_id}.jou")
+        print(f"[{config_id}] 正在创建 Journal 副本: {temp_jou}")
+        with open(args.journal_path, 'r', encoding='utf-8') as f:
+            jou_content = f.read()
+        jou_content = jou_content.replace(
+            'meshing_gen4.wft',
+            f'meshing_gen4_{config_id}.wft'
+        )
+        with open(temp_jou, 'w', encoding='utf-8') as f:
+            f.write(jou_content)
 
-        # 4. 保存网格
+        # 4. 执行临时 Journal 文件
+        print(f"[{config_id}] 正在执行 Journal 文件: {temp_jou}")
+        meshing_session.tui.file.read_journal(temp_jou)
+
+        # 5. 保存网格
         mesh_file_name = f"model_gen4_{config_id}.msh.h5"
         mesh_full_path = os.path.join(args.output_dir, mesh_file_name)
         print(f"[{config_id}] 正在保存网格: {mesh_full_path}")
@@ -145,6 +171,16 @@ def main() -> None:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
         meshing_session.exit()
         sys.exit(1)
+
+    finally:
+        # 清理临时文件
+        for temp_file in (temp_wft, temp_jou):
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                    print(f"[{config_id}] 已清理临时文件: {os.path.basename(temp_file)}")
+                except Exception as cleanup_err:
+                    print(f"[{config_id}] 清理临时文件失败: {cleanup_err}")
 
     # 6. 退出 Fluent
     meshing_session.exit()

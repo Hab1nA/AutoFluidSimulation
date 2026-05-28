@@ -466,6 +466,8 @@ class RemoteWorkstation:
         return (
             "@echo off\r\n"
             "setlocal\r\n"
+            "set PYTHONUTF8=1\r\n"
+            "set PYTHONIOENCODING=utf-8\r\n"
             f"{command} >> \"{cmd_log}\" 2>&1\r\n"
             "set \"AF_EXIT=%ERRORLEVEL%\"\r\n"
             "if \"%AF_EXIT%\"==\"0\" (\r\n"

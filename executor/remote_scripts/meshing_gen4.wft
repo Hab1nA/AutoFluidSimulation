@@ -1,6 +1,6 @@
 {
     "workflow": {
-        "version": "23.1",
+        "version": "24.1",
         "ROOT": {
             "TaskObject:TaskObject1": {
                 "Arguments": {
@@ -325,7 +325,7 @@
         }
     },
     "meshing": {
-        "version": "23.1",
+        "version": "24.1",
         "ROOT": {
             "GlobalSettings": {
                 "AreaUnit": "mm^2",
@@ -357,7 +357,7 @@
         }
     },
     "PartManagement": {
-        "version": "23.1",
+        "version": "24.1",
         "ROOT": {
             "Node:Node1": {
                 "Name": "Meshing Model",
