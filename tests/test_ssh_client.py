@@ -12,6 +12,19 @@ def test_build_background_cmd_script_writes_done_or_error_flag():
     assert r'>> "D:\flags\job.log" 2>&1' in script
     assert r'echo done > "D:\flags\job.done"' in script
     assert r'echo error %AF_EXIT% > "D:\flags\job.done.error"' in script
+    # working_dir 未指定时不应包含 cd /d
+    assert "cd /d" not in script
+
+
+def test_build_background_cmd_script_with_working_dir():
+    script = RemoteWorkstation._build_background_cmd_script(
+        r'conda run python script.py',
+        r"D:/flags/job.done",
+        r"D:/flags/job.log",
+        working_dir=r"D:\xkz_1020",
+    )
+    assert r'cd /d "D:\xkz_1020"' in script
+    assert r'echo done > "D:\flags\job.done"' in script
 
 
 def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
@@ -39,7 +52,9 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
                         "_write_remote_text_file",
                         side_effect=lambda path, content: written.append((path, content)),
                     ):
-                        assert host.exec_background(command, flag_file) is True
+                        result, task_name = host.exec_background(command, flag_file)
+                        assert result is True
+                        assert task_name.startswith("AutoFluid_")
 
     assert len(calls) == 2
     assert calls[0][0].startswith('schtasks /Create /TN "AutoFluid_')

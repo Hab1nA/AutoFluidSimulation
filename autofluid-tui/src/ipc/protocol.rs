@@ -66,7 +66,7 @@ impl IpcRequest {
                 // 保留 fallback 以防御性处理极端情况（如内存不足）。
                 log::warn!("[IPC] 序列化失败: {e}");
                 let fallback = format!(
-                    r#"{{"status":"error","request_id":"","data":null,"message":"内部序列化错误: {e}"}}"#
+                    r#"{{"command":"error","request_id":"","params":{{"error":"内部序列化错误: {e}"}}}}"#
                 );
                 let mut bytes = fallback.into_bytes();
                 bytes.push(b'\n');

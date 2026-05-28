@@ -126,8 +126,15 @@ def cleanup_working_dirs(config_id: int, working_dirs: list[str]) -> None:
             print(f"[{config_id}] 目录不存在，无需清空: {dir_path}")
 
 
-def cleanup_log_files(config_id: int, output_dir: str) -> None:
-    """清理日志文件。"""
+def cleanup_log_files(config_id: int, log_dir: str) -> None:
+    """清理 Fluent 写入的 report 日志文件。
+
+    Args:
+        config_id: 构型编号
+        log_dir: Fluent 进程实际写入日志的目录（通常为 scripts_dir，
+                  因为 .set 文件中 report 路径为相对路径，
+                  Fluent 会写入其 CWD）
+    """
     files_to_delete = [
         "report-def-p-rfile.out",
         "report-def-v-rfile.out",
@@ -135,7 +142,7 @@ def cleanup_log_files(config_id: int, output_dir: str) -> None:
     ]
 
     for f in files_to_delete:
-        path = os.path.join(output_dir, f)
+        path = os.path.join(log_dir, f)
         if os.path.exists(path):
             try:
                 os.remove(path)
@@ -185,12 +192,18 @@ def main() -> None:
 
     config_id = args.config_id
 
+    # ★ scripts_dir：report 文件的实际写入目录（Fluent CWD 为 schtasks 默认的
+    #   System32，但 cmd 脚本中命令为绝对路径，Fluent 以启动目录为 CWD）。
+    #   .set 文件中 report 路径为 ".\\report-def-*.out"（相对路径），
+    #   实际写入位置取决于 Fluent 启动时的 CWD。
+    #   通过 os.getcwd() 捕获启动目录（即 cmd 脚本所在目录 = scripts_dir）。
+    scripts_dir = os.getcwd()
+
     try:
         # 6.1 读取网格文件
         import_file_name = os.path.join(args.msh_dir, f"model_gen4_{config_id}.msh.h5")
         if not os.path.exists(import_file_name):
             print(f"错误：未找到网格文件 {import_file_name}")
-            solver_session.exit()
             sys.exit(1)
 
         print(f"[{config_id}] 正在读取网格文件: {import_file_name}")
@@ -220,19 +233,20 @@ def main() -> None:
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
-        solver_session.exit()
         sys.exit(1)
 
-    # --- 7. 最后的清理工作 (日志 + 工作目录缓存) ---
-    print(f"[{config_id}] 正在清理日志文件...")
-    cleanup_log_files(config_id, args.output_dir)
+    finally:
+        # ★ finally 确保无论成功/异常都执行清理和 Fluent 退出
+        # --- 7. 最后的清理工作 (日志 + 工作目录缓存) ---
+        print(f"[{config_id}] 正在清理日志文件...")
+        cleanup_log_files(config_id, scripts_dir)
 
-    print(f"[{config_id}] 正在清空工作目录...")
-    cleanup_working_dirs(config_id, [args.working_dir_t, args.working_dir_v])
+        print(f"[{config_id}] 正在清空工作目录...")
+        cleanup_working_dirs(config_id, [args.working_dir_t, args.working_dir_v])
 
-    # --- 8. 退出 Fluent ---
-    solver_session.exit()
-    print(f"模型 {config_id} 的仿真计算完成！")
+        # --- 8. 退出 Fluent ---
+        solver_session.exit()
+        print(f"模型 {config_id} 的仿真计算完成！")
 
 
 if __name__ == "__main__":

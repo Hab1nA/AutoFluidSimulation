@@ -169,11 +169,10 @@ def main() -> None:
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
-        meshing_session.exit()
         sys.exit(1)
 
     finally:
-        # 清理临时文件
+        # ★ finally 确保无论成功/异常都执行临时文件清理和 Fluent 退出
         for temp_file in (temp_wft, temp_jou):
             if temp_file and os.path.exists(temp_file):
                 try:
@@ -182,9 +181,8 @@ def main() -> None:
                 except Exception as cleanup_err:
                     print(f"[{config_id}] 清理临时文件失败: {cleanup_err}")
 
-    # 6. 退出 Fluent
-    meshing_session.exit()
-    print(f"模型 {config_id} 的网格生成完成！")
+        meshing_session.exit()
+        print(f"模型 {config_id} 的网格生成完成！")
 
 
 if __name__ == "__main__":

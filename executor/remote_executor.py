@@ -68,6 +68,8 @@ class RemoteExecutor:
         self._ssh_lock = ssh_lock
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
+        # 跟踪远程后台任务名称（用于超时后终止）
+        self._remote_tasks: dict[int, str] = {}  # config_name → task_name
 
     def set_control_events(
         self,
@@ -307,8 +309,12 @@ class RemoteExecutor:
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
-                success = ssh.exec_background(command, flag_file)
+                success, task_name = ssh.exec_background(
+                    command, flag_file,
+                    working_dir=str(REMOTE_CONFIG["scripts_dir"]),
+                )
                 if success:
+                    self._remote_tasks[config_name] = task_name
                     logger.info(f"{log_prefix} 网格划分后台任务已启动: 构型{config_name}")
                 else:
                     logger.error(f"{log_prefix} 网格划分远程任务启动失败: 构型{config_name}")
@@ -386,6 +392,8 @@ class RemoteExecutor:
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
+                        # 正常完成，清理任务跟踪记录
+                        self._remote_tasks.pop(config_name, None)
                         return True
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
@@ -393,6 +401,8 @@ class RemoteExecutor:
             time.sleep(poll_interval)
 
         logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
+        # 超时后终止远程进程，防止资源泄漏和重试冲突
+        self._kill_remote_task_for_config(config_name, "Meshing")
         return False
 
     # ------------------------------------------------------------------
@@ -414,6 +424,11 @@ class RemoteExecutor:
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
+        # ★ --anim-dir 使用 normpath 消除 .. 相对路径段，确保在 schtasks
+        #   默认 CWD (System32) 下也能正确解析
+        anim_dir = os.path.normpath(
+            os.path.join(str(REMOTE_CONFIG["working_dir"]), "..", "animation")
+        )
         command = (
             f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_solver_gen4.py" {config_name}'
             f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
@@ -421,7 +436,7 @@ class RemoteExecutor:
             f' --post-journal-path "{scripts_dir}/solver_post_gen4.jou"'
             f' --msh-dir "{REMOTE_CONFIG["msh_dir"]}"'
             f' --output-dir "{REMOTE_CONFIG["result_dir"]}"'
-            f' --anim-dir "{REMOTE_CONFIG["working_dir"]}/../animation"'
+            f' --anim-dir "{anim_dir}"'
             f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
             f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
         )
@@ -451,8 +466,12 @@ class RemoteExecutor:
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
-                success = ssh.exec_background(command, flag_file)
+                success, task_name = ssh.exec_background(
+                    command, flag_file,
+                    working_dir=str(REMOTE_CONFIG["scripts_dir"]),
+                )
                 if success:
+                    self._remote_tasks[config_name] = task_name
                     logger.info(f"[Solver] 仿真求解后台任务已启动: 构型{config_name}")
                     return True
                 else:
@@ -512,6 +531,8 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
+                            # 正常完成，清理任务跟踪记录
+                            self._remote_tasks.pop(config_name, None)
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -554,7 +575,36 @@ class RemoteExecutor:
             time.sleep(poll_interval)
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
+        # 超时后终止远程进程，防止资源泄漏和重试冲突
+        self._kill_remote_task_for_config(config_name, "Solver")
         return False
+
+    # ------------------------------------------------------------------
+    # 远程进程生命周期管理
+    # ------------------------------------------------------------------
+
+    def _kill_remote_task_for_config(self, config_name: int, step_name: str) -> None:
+        """超时后终止远程后台任务。
+
+        从 _remote_tasks 中取出任务名称，调用 SSH kill_remote_task 终止。
+        无论终止是否成功，都清理跟踪记录。
+
+        Args:
+            config_name: 构型编号
+            step_name: 步骤名（用于日志）
+        """
+        task_name = self._remote_tasks.pop(config_name, None)
+        if not task_name:
+            logger.debug(f"[{step_name}] 构型{config_name} 无远程任务记录，跳过终止")
+            return
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+                ssh.kill_remote_task(task_name)
+                logger.info(f"[{step_name}] 构型{config_name} 已请求终止远程任务: {task_name}")
+            except (OSError, ConnectionError) as e:
+                logger.warning(f"[{step_name}] 构型{config_name} 终止远程任务异常: {e}")
 
     # ------------------------------------------------------------------
     # 脚本同步

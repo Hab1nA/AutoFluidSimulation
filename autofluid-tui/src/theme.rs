@@ -115,7 +115,7 @@ impl Default for AppTheme {
             table_bg: Color::Rgb(26, 26, 46),
             panel_bg: Color::Rgb(13, 13, 13),
             gray_1: Color::Rgb(51, 51, 51),
-            gray_3: Color::Rgb(100, 160, 100),
+            gray_3: Color::Rgb(120, 120, 120),
             gray_4: Color::Rgb(180, 180, 180),
             gray_5: Color::Rgb(200, 200, 200),
             scrollbar_track: Color::Rgb(80, 80, 80),

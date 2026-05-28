@@ -62,9 +62,6 @@ pub fn handle_mouse(
             handle_mouse_down(
                 state,
                 log_buffer,
-                ipc,
-                rt,
-                full_quit,
                 col,
                 row,
                 &layout,
@@ -459,9 +456,6 @@ fn handle_drag(state: &mut AppState, col: u16, row: u16) {
 fn handle_mouse_down(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
-    _ipc: &mut IpcClient,
-    _rt: &tokio::runtime::Runtime,
-    _full_quit: &mut bool,
     col: u16,
     row: u16,
     layout: &AppLayout,

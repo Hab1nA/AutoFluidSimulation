@@ -384,7 +384,7 @@ class RemoteWorkstation:
         # 如果解析失败，返回原始输出（已去除多余空白）
         return wmic_output.strip()
 
-    def exec_background(self, command: str, flag_file: str) -> bool:
+    def exec_background(self, command: str, flag_file: str, *, working_dir: str | None = None) -> tuple[bool, str]:
         """
         在远程工作站以独立后台进程方式执行命令。
 
@@ -394,12 +394,15 @@ class RemoteWorkstation:
         Args:
             command: 要执行的命令（如 conda run ... python script.py 5）
             flag_file: 任务完成标志文件路径（远程路径）
+            working_dir: 远程工作目录（cmd 脚本 cd /d 到此目录后再执行命令，
+                         确保子进程的 CWD 正确；None 则不设置）
 
         Returns:
-            True 表示后台进程启动成功
+            (success, task_name) 元组：success 表示后台进程是否启动成功，
+            task_name 为计划任务名称（可用于 kill_remote_task 终止）
         """
         if not self.ensure_connected():
-            return False
+            return (False, "")
 
         logger.info(f"[SSH] 启动远程后台任务: {command}")
         logger.debug(f"[SSH] 标志文件: {flag_file}")
@@ -418,7 +421,8 @@ class RemoteWorkstation:
             script_file = f"{flag_dir}/autofluid_bg_{task_hash}.cmd"
             log_file = f"{flag_dir}/autofluid_bg_{task_hash}.log"
             script = self._build_background_cmd_script(
-                command, flag_file, log_file, task_name=task_name
+                command, flag_file, log_file, task_name=task_name,
+                working_dir=working_dir,
             )
             self._write_remote_text_file(script_file, script)
 
@@ -430,7 +434,7 @@ class RemoteWorkstation:
             _, stderr, exit_code = self.exec_command(create_cmd, timeout=30)
             if exit_code != 0:
                 logger.error(f"[SSH] 创建远程计划任务失败 (exit={exit_code}): {stderr[:200]}")
-                return False
+                return (False, task_name)
 
             run_cmd = f'schtasks /Run /TN "{task_name}"'
             _, stderr, exit_code = self.exec_command(run_cmd, timeout=30)
@@ -441,12 +445,47 @@ class RemoteWorkstation:
                     f"[SSH] 远程后台任务已启动: {task_name} "
                     f"(日志: {log_display})"
                 )
-                return True
+                return (True, task_name)
             else:
                 logger.error(f"[SSH] 远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
-                return False
+                return (False, task_name)
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] 启动远程后台任务异常: {e}")
+            return (False, "")
+
+    def kill_remote_task(self, task_name: str) -> bool:
+        """终止远程计划任务及其子进程。
+
+        先尝试 schtasks /End 优雅终止（发送 WM_CLOSE），若任务仍存在
+        则用 schtasks /Delete 强制移除。用于超时后清理仍在运行的远程进程。
+
+        Args:
+            task_name: 计划任务名称（由 exec_background 返回）
+
+        Returns:
+            True 表示任务已被终止或本就不存在
+        """
+        if not task_name:
+            return True
+        if not self.ensure_connected():
+            return False
+
+        try:
+            # 先尝试优雅终止（向任务进程发送终止信号）
+            end_cmd = f'schtasks /End /TN "{task_name}"'
+            _, _, end_code = self.exec_command(end_cmd, timeout=15)
+
+            # 删除计划任务（无论 End 是否成功）
+            del_cmd = f'schtasks /Delete /TN "{task_name}" /F'
+            _, _, del_code = self.exec_command(del_cmd, timeout=15)
+
+            if end_code == 0 or del_code == 0:
+                logger.info(f"[SSH] 远程任务已终止: {task_name}")
+            else:
+                logger.debug(f"[SSH] 远程任务已不存在（可能已完成自清理）: {task_name}")
+            return True
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
             return False
 
     @staticmethod
@@ -455,6 +494,7 @@ class RemoteWorkstation:
         flag_file: str,
         log_file: str,
         task_name: str | None = None,
+        working_dir: str | None = None,
     ) -> str:
         """构造计划任务实际执行的 cmd 脚本。"""
         cmd_flag = flag_file.replace("/", "\\")
@@ -463,11 +503,16 @@ class RemoteWorkstation:
         cleanup_line = ""
         if task_name:
             cleanup_line = f'schtasks /Delete /TN "{task_name}" /F >nul 2>&1\r\n'
+        cd_line = ""
+        if working_dir:
+            cmd_working = working_dir.replace("/", "\\")
+            cd_line = f'cd /d "{cmd_working}"\r\n'
         return (
             "@echo off\r\n"
             "setlocal\r\n"
             "set PYTHONUTF8=1\r\n"
             "set PYTHONIOENCODING=utf-8\r\n"
+            f"{cd_line}"
             f"{command} >> \"{cmd_log}\" 2>&1\r\n"
             "set \"AF_EXIT=%ERRORLEVEL%\"\r\n"
             "if \"%AF_EXIT%\"==\"0\" (\r\n"

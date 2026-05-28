@@ -428,41 +428,42 @@ pub async fn execute_confirm_action(
     }
 }
 
+const HELP_LINES: &[&str] = &[
+    "可用命令:",
+    "  help                       - 显示此帮助",
+    "  start                      - 启动或继续流水线",
+    "  pause                      - 暂停流水线",
+    "  settings                   - 打开程序设置页面",
+    "  check                      - 系统自检",
+    "  status                     - 显示状态摘要",
+    "  reset <XX|all> <step|all>  - 重置构型步骤状态",
+    "  clean <XX|all> <step|all>  - 清理构型步骤文件",
+    "  daemon start               - 启动后台引擎并自动连接",
+    "  daemon stop                - 停止后台引擎（TUI 继续运行）",
+    "  daemon restart             - 重启后台引擎（等同于 stop + start）",
+    "  quit                       - 退出界面（引擎继续运行）",
+    "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
+    "",
+    "日志命令:",
+    "  filter debug               - 仅显示 DEBUG 级别日志",
+    "  filter info                - 仅显示 INFO 级别日志",
+    "  filter warning             - 仅显示 WARNING 级别日志",
+    "  filter error               - 仅显示 ERROR 级别日志",
+    "  filter critical            - 仅显示 CRITICAL 级别日志",
+    "  filter remote              - 仅显示远程命令日志",
+    "  filter local               - 仅显示本地命令日志",
+    "  filter com                 - 仅显示 COM 自动化日志",
+    "  filter scheduler           - 仅显示调度器日志",
+    "  filter system              - 仅显示系统日志",
+    "  filter ipc                 - 仅显示 IPC 通信日志",
+    "  filter clear               - 清除过滤，显示全部",
+    "  filter status              - 查看当前过滤状态",
+    "  export                     - 导出当前日志到文件",
+    "  export <filename>          - 导出日志为指定文件名",
+];
+
 fn show_help(log_buffer: &mut LogBuffer) {
-    let help_lines = vec![
-        "可用命令:",
-        "  help                       - 显示此帮助",
-        "  start                      - 启动或继续流水线",
-        "  pause                      - 暂停流水线",
-        "  settings                   - 打开程序设置页面",
-        "  check                      - 系统自检",
-        "  status                     - 显示状态摘要",
-        "  reset <XX|all> <step|all>  - 重置构型步骤状态",
-        "  clean <XX|all> <step|all>  - 清理构型步骤文件",
-        "  daemon start               - 启动后台引擎并自动连接",
-        "  daemon stop                - 停止后台引擎（TUI 继续运行）",
-        "  daemon restart             - 重启后台引擎（等同于 stop + start）",
-        "  quit                       - 退出界面（引擎继续运行）",
-        "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
-        "",
-        "日志命令:",
-        "  filter debug               - 仅显示 DEBUG 级别日志",
-        "  filter info                - 仅显示 INFO 级别日志",
-        "  filter warning             - 仅显示 WARNING 级别日志",
-        "  filter error               - 仅显示 ERROR 级别日志",
-        "  filter critical            - 仅显示 CRITICAL 级别日志",
-        "  filter remote              - 仅显示远程命令日志",
-        "  filter local               - 仅显示本地命令日志",
-        "  filter com                 - 仅显示 COM 自动化日志",
-        "  filter scheduler           - 仅显示调度器日志",
-        "  filter system              - 仅显示系统日志",
-        "  filter ipc                 - 仅显示 IPC 通信日志",
-        "  filter clear               - 清除过滤，显示全部",
-        "  filter status              - 查看当前过滤状态",
-        "  export                     - 导出当前日志到文件",
-        "  export <filename>          - 导出日志为指定文件名",
-    ];
-    for line in help_lines {
+    for line in HELP_LINES {
         log_buffer.push_info(line.to_string());
     }
 }
