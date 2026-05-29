@@ -1,10 +1,14 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
+
+/// 等待 daemon 进程自行退出的超时时间（秒）。
+/// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
+const DAEMON_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
 
 pub struct DaemonManager {
     process: Option<Child>,
@@ -62,52 +66,43 @@ impl DaemonManager {
     }
 
     pub fn stop(&mut self, project_dir: &str) -> Result<(), String> {
-        let mut stopped = false;
-
+        // full_quit IPC 命令已在主循环中发送，daemon 的 shutdown() 正在执行。
+        // 仅等待进程自行退出，不做额外干预——与 Ctrl+C 行为一致。
         if let Some(mut child) = self.process.take() {
-            stopped = true;
-
-            #[cfg(target_os = "windows")]
-            {
-                let pid = child.id();
-                let _ = Command::new("taskkill")
-                    .args(["/pid", &pid.to_string(), "/f"])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                let _ = child.kill();
-            }
-
-            let _ = child.wait();
+            Self::wait_for_exit(&mut child);
+        } else if let Some(_pid) = Self::read_pid_file(project_dir) {
+            Self::wait_for_pid_exit(project_dir);
         }
-
-        if !stopped {
-            if let Some(pid) = Self::read_pid_file(project_dir) {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = Command::new("taskkill")
-                        .args(["/pid", &pid.to_string(), "/f"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-
-                #[cfg(not(target_os = "windows"))]
-                {
-                    // 使用标准 SIGTERM 信号（15），而非不规范的自由格式
-                    let _ = Command::new("kill")
-                        .args(["-s", "TERM", &pid.to_string()])
-                        .status();
-                }
-            }
-        }
-
         Self::remove_pid_file(project_dir);
         Ok(())
+    }
+
+    /// 等待子进程自行退出。
+    fn wait_for_exit(child: &mut Child) {
+        let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+                Err(_) => return,
+            }
+        }
+        // 超时仅记录，不强杀——daemon 可能仍在清理中
+        eprintln!("[TUI] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)，TUI 退出");
+    }
+
+    /// 等待外部 daemon 进程自行退出（通过 PID 文件检测）。
+    fn wait_for_pid_exit(project_dir: &str) {
+        let pid_file = Self::pid_file_path(project_dir);
+        let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
+        while Instant::now() < deadline {
+            // PID 文件被删除说明 daemon shutdown 已完成
+            if !pid_file.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("[TUI] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)，TUI 退出");
     }
 
     // ------------------------------------------------------------------
