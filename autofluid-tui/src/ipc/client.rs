@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -7,12 +7,18 @@ use super::protocol::{IpcRequest, IpcResponse};
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9527;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// check 命令涉及远程 SSH 自检（含 conda/目录/文件/磁盘/进程检查），需要更长超时。
+const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB 行长度上限
+/// 自动重连冷却时间：防止 daemon 不可用时频繁重连。
+const RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
 
 pub struct IpcClient {
     host: String,
     port: u16,
     stream: Option<TcpStream>,
+    /// 上次重连尝试时间，用于冷却。
+    last_reconnect: Option<Instant>,
 }
 
 impl IpcClient {
@@ -21,6 +27,7 @@ impl IpcClient {
             host: host.unwrap_or(DEFAULT_HOST).to_string(),
             port: port.unwrap_or(DEFAULT_PORT),
             stream: None,
+            last_reconnect: None,
         }
     }
 
@@ -33,6 +40,7 @@ impl IpcClient {
         match tokio::time::timeout(DEFAULT_TIMEOUT, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 self.stream = Some(stream);
+                self.last_reconnect = None; // 连接成功，清除冷却
                 Ok(())
             }
             Ok(Err(e)) => Err(format!("连接失败: {}", e)),
@@ -46,7 +54,22 @@ impl IpcClient {
         }
     }
 
+    /// 发送 IPC 请求并等待响应（使用默认超时）。
     pub async fn send_request(&mut self, request: &IpcRequest) -> Result<IpcResponse, String> {
+        self.send_request_with_timeout(request, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// 发送 IPC 请求并等待响应（使用自定义超时）。
+    ///
+    /// 用于已知耗时较长的命令（如 `check` 涉及远程 SSH 自检）。
+    /// 任何导致 stream 丢失的错误（超时/读取失败/对端关闭）都会自动尝试重连，
+    /// 确保客户端不会永久停留在断连状态。
+    pub async fn send_request_with_timeout(
+        &mut self,
+        request: &IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse, String> {
         let mut stream = match self.stream.take() {
             Some(s) => s,
             None => return Err("未连接".to_string()),
@@ -54,7 +77,8 @@ impl IpcClient {
 
         let data = request.serialize();
         if let Err(e) = stream.write_all(&data).await {
-            // 发送失败：stream 可能已损坏，丢弃连接
+            // 发送失败：stream 可能已损坏，丢弃连接后自动重连
+            self.auto_reconnect("发送失败").await;
             return Err(format!("发送失败: {}", e));
         }
 
@@ -62,7 +86,7 @@ impl IpcClient {
         let mut buffer = Vec::new();
 
         // 带长度限制的行读取：防止异常长响应导致内存溢出
-        let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let read_result = tokio::time::timeout(timeout, async {
             loop {
                 let mut byte = [0u8; 1];
                 match reader.read(&mut byte).await {
@@ -92,11 +116,15 @@ impl IpcClient {
                 self.stream = Some(stream);
                 match IpcResponse::deserialize(&buffer) {
                     Some(resp) => Ok(resp),
-                    None => Err("无效响应格式".to_string()),
+                    None => {
+                        self.auto_reconnect("响应解析失败").await;
+                        Err("无效响应格式".to_string())
+                    }
                 }
             }
             Ok(Ok(false)) => {
-                // 对端关闭连接 → stream 已不可用，丢弃
+                // 对端关闭连接 → stream 已不可用，自动重连
+                self.auto_reconnect("对端关闭").await;
                 Err("连接已断开".to_string())
             }
             Ok(Err(e)) => {
@@ -105,16 +133,36 @@ impl IpcClient {
                 // 但未被应用层消费；into_inner() 后这些字节永久丢失，
                 // 而内核缓冲区中可能残留后续字节 → 下次读取脱序。
                 // 直接丢弃 reader（含其内部缓冲区和底层 stream）最安全。
-                // self.stream 保持 None，调用方通过 is_connected() 感知断连。
+                self.auto_reconnect("读取失败").await;
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
                 // 读取超时：同样丢弃 stream，原因同上。
-                // 即使 BufReader 缓冲区为空（服务端尚未响应），服务端仍可能
-                // 在超时后继续处理并发送响应，复用 stream 会导致协议层脱序。
-                // 调用方需重新 connect() 以获得干净的字节流。
+                // 服务端可能仍在处理旧请求（旧连接线程完成后自行清理），
+                // 新连接获得干净的字节流，不会与旧请求混淆。
+                self.auto_reconnect("请求超时").await;
                 Err("请求超时".to_string())
             }
+        }
+    }
+
+    /// 内部方法：连接丢失后自动尝试重连（带冷却时间）。
+    ///
+    /// 静默执行——成功时恢复 `self.stream`，失败时仅记录日志。
+    /// 调用方无需感知重连结果，下次 `is_connected()` 即可反映真实状态。
+    /// 冷却机制：连续重连间隔不少于 RECONNECT_COOLDOWN，防止 daemon 不可用时频繁重连。
+    async fn auto_reconnect(&mut self, reason: &str) {
+        if let Some(last) = self.last_reconnect {
+            if last.elapsed() < RECONNECT_COOLDOWN {
+                log::debug!("[IPC] {}，重连冷却中，跳过", reason);
+                return;
+            }
+        }
+        self.last_reconnect = Some(Instant::now());
+        log::info!("[IPC] {}，尝试自动重连...", reason);
+        match self.connect().await {
+            Ok(()) => log::info!("[IPC] 自动重连成功"),
+            Err(e) => log::warn!("[IPC] 自动重连失败: {}", e),
         }
     }
 
@@ -134,7 +182,7 @@ impl IpcClient {
     }
 
     pub async fn check_system(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_CHECK))
+        self.send_request_with_timeout(&IpcRequest::new(super::protocol::CMD_CHECK), CHECK_TIMEOUT)
             .await
     }
 

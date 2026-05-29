@@ -357,7 +357,36 @@ class RemoteWorkstation:
 
     @staticmethod
     def _decode_remote_output(raw: bytes) -> str:
-        """解码远程 Windows 输出，优先 GBK（中文 Windows），回退 UTF-8。"""
+        """解码远程 Windows 输出，支持 UTF-16LE（PowerShell SSH 默认）、GBK、UTF-8。
+
+        PowerShell 通过 SSH 输出时默认使用 UTF-16LE 编码（每个 ASCII 字符
+        后跟 NUL 字节）。若用 GBK 解码会产生含 NUL 的乱码字符串。
+        通过检测 NUL 字节密度识别 UTF-16LE 并优先解码。
+        """
+        if not raw:
+            return ""
+
+        # UTF-16LE BOM 检测 (FF FE)
+        if raw[:2] == b"\xff\xfe":
+            return raw[2:].decode("utf-16-le", errors="replace")
+
+        # 无 BOM 的 UTF-16LE 启发式检测：
+        # ASCII 字符在 UTF-16LE 中表现为 'char\x00' 交替模式，
+        # 约 50% 的字节是 NUL。正常 GBK/UTF-8 文本几乎不含 NUL。
+        if len(raw) >= 4:
+            sample = raw[: min(len(raw), 200)]
+            null_ratio = sample.count(0) / len(sample)
+            if null_ratio > 0.3:
+                try:
+                    decoded = raw.decode("utf-16-le")
+                    # 去除可能的 BOM 字符
+                    if decoded and decoded[0] == "\ufeff":
+                        decoded = decoded[1:]
+                    return decoded
+                except UnicodeDecodeError:
+                    pass
+
+        # 原有逻辑：GBK 优先（中文 Windows），回退 UTF-8
         for encoding in ("gbk", "utf-8"):
             try:
                 return raw.decode(encoding)
@@ -607,9 +636,12 @@ class RemoteWorkstation:
         """
         执行远程工作站系统自检。
 
+        优化：将大量独立 SSH 调用合并为少量 PowerShell 批量命令，
+        避免 23+ 次串行 exec_command 导致 TUI 超时。
+
         Args:
-            conda_exe: conda 可执行文件的完整远程路径（用于 SSH 非交互会话中定位 conda）
-            conda_env: conda 环境名称（用于检测 Python 版本）
+            conda_exe: conda 可执行文件的完整远程路径
+            conda_env: conda 环境名称
             remote_dirs: 需要检查存在性的远程目录 {显示名: 路径}
             mpi_bin_dir: ANSYS Fluent MPI 安装目录
             scripts_dir: 远程脚本部署目录
@@ -635,12 +667,12 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return results
 
-        # ---- Conda 检查 ----
+        # ---- Conda 检查（1 次 SSH） ----
         if conda_exe:
-            out, err, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
+            out, _, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
             results["conda_available"] = (code == 0 and "found" in out)
         else:
-            out, err, code = self.exec_command("where conda")
+            out, _, code = self.exec_command("where conda")
             results["conda_available"] = (code == 0)
 
         results["remote_programs"].append({
@@ -649,10 +681,10 @@ class RemoteWorkstation:
             "exists": results["conda_available"],
         })
 
-        # Conda 环境
+        # ---- Conda 环境 + Python 版本（1 次 SSH） ----
         conda_env_ok = False
         if conda_exe and conda_env and results["conda_available"]:
-            out, err, code = self.exec_command(
+            out, _, code = self.exec_command(
                 f'"{conda_exe}" run -n {conda_env} python --version'
             )
             if code == 0 and out.strip():
@@ -667,67 +699,122 @@ class RemoteWorkstation:
 
         # Python 版本（回退系统 PATH）
         if not results["python_version"]:
-            out, err, code = self.exec_command("python --version")
+            out, _, code = self.exec_command("python --version")
             if code == 0:
                 results["python_version"] = out.strip()
 
-        # ---- 远程目录 + MPI 逐个检查（独立 SSH 调用） ----
-        # 注意：不能将多个 @if exist 用 & 拼接为单条命令——
-        # cmd.exe 的 else 分支会吞噬行内 & 后续的所有命令，
-        # 导致仅第一个检查执行，其余全部被跳过。
+        # ---- 批量路径检查（单次 PowerShell 调用） ----
+        # 将目录、脚本、引用文件三类路径合并为一次 PowerShell Test-Path 调用，
+        # 避免 23+ 次独立 SSH exec_command 导致总耗时超过 TUI 超时。
+        all_paths: list[tuple[str, str, str]] = []  # (kind, label, path)
+        # kind: "dir" | "mpi" | "script" | "ref"
+
         all_dirs: dict[str, str] = dict(remote_dirs) if remote_dirs else {}
         if mpi_bin_dir:
             all_dirs["MPI安装目录"] = mpi_bin_dir
-
         for label, path in all_dirs.items():
-            cmd = f'@if exist "{path}" (echo 1) else (echo 0)'
-            out, err, code = self.exec_command(cmd)
-            exists = code == 0 and out.strip() == "1"
-            logger.debug(f"[SSH] 目录检查: {label} ({path}) → exists={exists}")
-            entry = {"label": label, "path": path, "exists": exists}
-            if label == "MPI安装目录":
-                results["remote_programs"].append(entry)
-            else:
-                results["remote_dirs"].append(entry)
+            kind = "mpi" if label == "MPI安装目录" else "dir"
+            all_paths.append((kind, label, path))
 
-        # ---- 脚本部署逐个检查（独立 SSH 调用） ----
         if scripts_dir and script_files:
             results["scripts_status"]["total"] = len(script_files)
-            missing = []
             for filename in script_files:
                 remote_path = f"{scripts_dir}/{filename}".replace("\\", "/")
-                cmd = f'@if exist "{remote_path}" (echo 1) else (echo 0)'
-                out, err, code = self.exec_command(cmd)
-                if code != 0 or out.strip() != "1":
-                    missing.append(filename)
-            results["scripts_status"]["missing"] = missing
-            results["scripts_status"]["deployed"] = len(script_files) - len(missing)
+                all_paths.append(("script", filename, remote_path))
 
-        # ---- 引用文件部署逐个检查（独立 SSH 调用） ----
         if ref_files_dir and ref_files:
             results["ref_files_status"]["total"] = len(ref_files)
-            missing = []
             for filename in ref_files:
                 remote_path = f"{ref_files_dir}/{filename}".replace("\\", "/")
-                cmd = f'@if exist "{remote_path}" (echo 1) else (echo 0)'
-                out, err, code = self.exec_command(cmd)
-                if code != 0 or out.strip() != "1":
-                    missing.append(filename)
-            results["ref_files_status"]["missing"] = missing
-            results["ref_files_status"]["deployed"] = len(ref_files) - len(missing)
+                all_paths.append(("ref", filename, remote_path))
 
-        # ---- 磁盘空间 ----
-        out, err, code = self.exec_command("wmic logicaldisk where DeviceID='D:' get FreeSpace,Size")
+        if all_paths:
+            # 使用 cmd.exe 批处理文件 + SFTP 写入，彻底绕过命令行长度和编码问题。
+            # PowerShell 可能因组策略拒绝执行 .ps1（"拒绝访问"），cmd.exe 无此限制。
+            # 每行一个 @if exist 检查（原项目已验证可用），输出 1 或 0。
+            bat_lines = []
+            for _, _, p in all_paths:
+                bat_lines.append(
+                    f'@if exist "{p}" (echo 1) else (echo 0)'
+                )
+            bat_script = "\r\n".join(bat_lines) + "\r\n"
+
+            script_sftp = "C:/Windows/Temp/_af_check_paths.bat"
+            # SFTP 路径 → Windows 路径（与 exec_background 中 script_cmd_path 一致）
+            script_win = script_sftp.replace("/", "\\")
+            out, code = "", -1
+            try:
+                self._write_remote_text_file(script_sftp, bat_script)
+                out, _, code = self.exec_command(
+                    f'cmd /c "{script_win}"', timeout=30
+                )
+            finally:
+                try:
+                    self.delete_remote_file(script_sftp)
+                except (OSError, EOFError):
+                    pass
+
+            # 解析结果：每行一个 1 或 0
+            flags: list[bool] = []
+            if code == 0:
+                for line in out.strip().splitlines():
+                    cleaned = line.replace("\x00", "").replace("\ufeff", "").strip()
+                    if cleaned in ("1", "0"):
+                        flags.append(cleaned == "1")
+
+            if len(flags) != len(all_paths):
+                logger.error(
+                    f"[SSH] 批量路径检查失败 (exit={code}, "
+                    f"期望 {len(all_paths)} 行, 实际 {len(flags)} 行, "
+                    f"stdout前100字符: {out[:100]!r})"
+                )
+                # 检查失败时假设所有路径不存在，避免误报"全部通过"
+                flags = [False] * len(all_paths)
+
+            # 将结果分发到各个字段
+            script_missing: list[str] = []
+            ref_missing: list[str] = []
+            for (kind, label, path), exists in zip(all_paths, flags):
+                if kind == "mpi":
+                    results["remote_programs"].append({
+                        "label": label, "path": path, "exists": exists,
+                    })
+                elif kind == "dir":
+                    logger.debug(f"[SSH] 目录检查: {label} ({path}) → exists={exists}")
+                    results["remote_dirs"].append({
+                        "label": label, "path": path, "exists": exists,
+                    })
+                elif kind == "script":
+                    if not exists:
+                        script_missing.append(label)
+                elif kind == "ref":
+                    if not exists:
+                        ref_missing.append(label)
+
+            results["scripts_status"]["missing"] = script_missing
+            results["scripts_status"]["deployed"] = (
+                results["scripts_status"]["total"] - len(script_missing)
+            )
+            results["ref_files_status"]["missing"] = ref_missing
+            results["ref_files_status"]["deployed"] = (
+                results["ref_files_status"]["total"] - len(ref_missing)
+            )
+
+        # ---- 磁盘空间 + 后台进程（2 次 SSH，已足够快） ----
+        # wmic 和 tasklist 各 1 次，无需批量化。
+        out, err, code = self.exec_command(
+            "wmic logicaldisk where DeviceID='D:' get FreeSpace,Size"
+        )
         if code == 0:
             results["disk_space"] = self._parse_disk_space(out)
 
-        # ---- 后台进程 ----
         out, err, code = self.exec_command(
             'tasklist /FI "IMAGENAME eq python.exe" /FO CSV /NH'
         )
         if code == 0 and out.strip():
             results["background_processes"] = [
-                line.split(',')[0].strip('"') for line in out.strip().split('\n') if line.strip()
+                line.split(',')[0].strip('"')
+                for line in out.strip().split('\n') if line.strip()
             ]
 
         return results

@@ -111,6 +111,7 @@ async fn cmd_check(
         log_buffer.push_info("❌ 未连接到后台引擎".to_string());
         return CommandResult::None;
     }
+    log_buffer.push_info("🔍 正在系统自检（含远程 SSH 检测，请耐心等待）...".to_string());
     match ipc.check_system().await {
         Ok(resp) if resp.is_ok() => {
             log_buffer.push_info("✅ 系统自检完成".to_string());
@@ -122,7 +123,13 @@ async fn cmd_check(
             log_buffer.push_info(format!("❌ 系统自检失败: {}", resp.message));
         }
         Err(e) => {
-            log_buffer.push_info(format!("❌ 通信失败: {}", e));
+            // 自动重连已在 send_request_with_timeout 内部完成，
+            // 此处仅根据当前连接状态告知用户结果。
+            if ipc.is_connected() {
+                log_buffer.push_info(format!("❌ 通信失败: {}（连接已自动恢复）", e));
+            } else {
+                log_buffer.push_info(format!("❌ 通信失败: {}（自动重连失败，请手动重连）", e));
+            }
         }
     }
     CommandResult::None

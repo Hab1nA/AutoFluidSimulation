@@ -215,7 +215,15 @@ class IPCServer:
                 except socket.timeout:
                     continue
                 except (ConnectionError, OSError) as e:
-                    logger.error(f"[IPC] 处理客户端消息异常: {e}")
+                    # 客户端超时后主动关闭连接是正常行为（如 check 命令耗时较长），
+                    # 连接重置/中止属于预期的客户端断连，降级为 DEBUG 日志。
+                    err_no = getattr(e, 'errno', None) or getattr(e, 'winerror', None)
+                    if err_no in (10053, 10054, 104, 107):
+                        # 10053=WSAECONNABORTED, 10054=WSAECONNRESET
+                        # 104=ECONNRESET, 107=ECONNABORTED (Linux)
+                        logger.debug(f"[IPC] 客户端主动断开: {e}")
+                    else:
+                        logger.error(f"[IPC] 处理客户端消息异常: {e}")
                     break
         finally:
             try:

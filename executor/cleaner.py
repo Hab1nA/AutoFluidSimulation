@@ -92,7 +92,20 @@ class FileCleaner:
             else:
                 results["remote_checks"]["ssh"] = "连接失败"
         except (OSError, ConnectionError) as e:
+            logger.error(f"[SSH] 远程自检异常: {e}")
             results["remote_checks"]["ssh"] = f"错误: {e}"
+            # 保持结构一致性：填充默认值，避免 TUI 缺失字段
+            results["remote_checks"].update({
+                "ssh_connected": False,
+                "conda_available": False,
+                "python_version": "",
+                "disk_space": "",
+                "background_processes": [],
+                "remote_dirs": [],
+                "remote_programs": [],
+                "scripts_status": {"total": 0, "deployed": 0, "missing": []},
+                "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
+            })
 
         return results
 
