@@ -77,6 +77,12 @@ class PipelineScheduler:
         # SC 处理队列：(config_name, step_file_path)
         self._sc_queue: queue.Queue[tuple[int, str]] = queue.Queue()
 
+        # ★ 已入队构型集合（防止重复入队）
+        #   resume 时 _resume_paused_steps() 和文件监控器可能同时触发入队，
+        #   使用此集合去重，避免同一构型被多个 SC Worker 同时处理。
+        self._sc_enqueued: set[int] = set()
+        self._sc_enqueued_lock = threading.Lock()
+
         # ---- 子模块 ----
         self.retry_manager = RetryManager(
             state_manager=self.state,
@@ -295,6 +301,17 @@ class PipelineScheduler:
         if current_sw != STATUS_COMPLETED:
             self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
 
+        # ★ 快速跳过：若 SC 已在队列中或正在执行/已完成，直接返回
+        current_sc = self.state.get_step_status(config_name, "SC")
+        if current_sc in (STATUS_RUNNING, STATUS_COMPLETED):
+            logger.debug(f"构型{config_name} STEP 文件就绪，但 SC 已 {current_sc}，跳过入队")
+            return
+
+        with self._sc_enqueued_lock:
+            if config_name in self._sc_enqueued:
+                logger.debug(f"构型{config_name} STEP 文件就绪，但 SC 已在队列中，跳过入队")
+                return
+
         # 断点续传防护：若 SC/Transfer/Meshing 已全部完成，跳过推入队列
         downstream_completed = all(
             self.state.get_step_status(config_name, s) == STATUS_COMPLETED
@@ -304,22 +321,28 @@ class PipelineScheduler:
             logger.info(f"构型{config_name} 下游步骤已完成，跳过入队")
             return
 
-        # 推入 SC 处理队列
-        self._sc_queue.put((config_name, filepath))
-        logger.info(f"构型{config_name} 已推入 SC 处理队列 (队列长度: {self._sc_queue.qsize()})")
+        # 推入 SC 处理队列（通过 _enqueue_sc 实现去重）
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        self._enqueue_sc(config_name, step_dir)
 
     # ------------------------------------------------------------------
     # 控制接口
     # ------------------------------------------------------------------
 
     def pause(self):
+        """暂停流水线。
+
+        注意：不再立即将 Running 步骤标记为 Paused。
+        正在执行的步骤会继续运行直到完成，然后根据执行结果决定最终状态
+        （Completed/Error），避免 pause→resume 时步骤被重复入队。
+        """
         logger.info("收到暂停指令")
         self._paused.set()
-        self.state.set_all_running_to_paused()
+        # 不再调用 set_all_running_to_paused()，让正在运行的步骤自然完成
         self.state.set_engine_status("paused")
         if self._file_monitor is not None:
             self._file_monitor.pause()
-        logger.info("流水线已暂停，所有运行中/重试中步骤已标记为 Paused")
+        logger.info("流水线已暂停，正在运行的步骤将继续执行直到完成")
 
     @property
     def is_paused(self) -> bool:
@@ -476,12 +499,30 @@ class PipelineScheduler:
         )
 
     def _enqueue_sc(self, cn: int, step_dir: str) -> None:
-        """将构型的 SC 步骤推入处理队列。"""
+        """将构型的 SC 步骤推入处理队列（带去重）。
+
+        使用 _sc_enqueued 集合跟踪已入队的构型，防止重复入队。
+        resume 时 _resume_paused_steps() 和文件监控器可能同时触发入队，
+        重复入队会导致同一构型被多个 SC Worker 同时处理。
+        """
+        with self._sc_enqueued_lock:
+            if cn in self._sc_enqueued:
+                logger.debug(f"构型{cn} 已在 SC 队列中，跳过重复入队")
+                return
+
         sw_filename = get_step_filename("SW", cn)
         if sw_filename:
             step_file = os.path.join(step_dir, sw_filename)
             if os.path.exists(step_file):
+                with self._sc_enqueued_lock:
+                    self._sc_enqueued.add(cn)
                 self._sc_queue.put((cn, step_file))
+                logger.info(f"构型{cn} 已推入 SC 处理队列 (队列长度: {self._sc_queue.qsize()})")
+
+    def _dequeue_sc(self, cn: int) -> None:
+        """从已入队集合中移除构型（SC Worker 开始处理时调用）。"""
+        with self._sc_enqueued_lock:
+            self._sc_enqueued.discard(cn)
 
     def resume(self):
         logger.info("收到继续指令")
@@ -531,8 +572,10 @@ class PipelineScheduler:
         self._stopped.set()
         self._paused.clear()  # 解除暂停以便线程退出
 
-        # ★ 将所有 Running/Retrying 步骤转为 Paused（与 pause() 行为一致），
+        # ★ 将所有 Running/Retrying 步骤转为 Paused，
         #   防止重启后孤立 RUNNING 步骤导致构型卡死。
+        #   注意：pause() 不再调用此方法（允许 running 步骤自然完成），
+        #   但 stop() 仍需调用，因为停止意味着强制终止所有活动。
         self.state.set_all_running_to_paused()
 
         # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
@@ -543,6 +586,10 @@ class PipelineScheduler:
             self.runner.shutdown_sc_pool()
         except Exception as e:
             logger.debug(f"SCPool 停止清理异常: {e}")
+
+        # ★ 清除已入队构型集合（停止后重新启动时需要重新入队）
+        with self._sc_enqueued_lock:
+            self._sc_enqueued.clear()
 
         try:
             # 等待关键线程退出
@@ -605,6 +652,9 @@ class PipelineScheduler:
             self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
+            # ★ 清除已入队构型集合（全量重置）
+            with self._sc_enqueued_lock:
+                self._sc_enqueued.clear()
         elif config_name == "all":
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
@@ -614,6 +664,9 @@ class PipelineScheduler:
                 self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
+            # ★ 清除已入队构型集合（全量重置指定步骤）
+            with self._sc_enqueued_lock:
+                self._sc_enqueued.clear()
         else:
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
@@ -622,6 +675,9 @@ class PipelineScheduler:
                 self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
+            # ★ 从已入队集合中移除指定构型
+            with self._sc_enqueued_lock:
+                self._sc_enqueued.discard(config_name)
 
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")
 

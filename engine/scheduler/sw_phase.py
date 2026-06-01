@@ -321,11 +321,21 @@ class SWPhaseHandler:
             # 防御性回退：未注入时自行创建（独立测试场景）
             # 注意：回退创建的监控器使用简化的回退回调，生产环境应始终由
             # PipelineScheduler 注入带有完整 _on_step_file_ready 逻辑的实例
+            _fallback_enqueued: set[int] = set()
+
             def _fallback_on_file_ready(config_name: int, filepath: str) -> None:
                 if self._paused.is_set():
                     return
                 if self.state.get_step_status(config_name, "SW") != STATUS_COMPLETED:
                     self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+                # ★ 去重：防止重复入队
+                if config_name in _fallback_enqueued:
+                    return
+                # ★ 断点续传防护：若 SC 已在执行或已完成，跳过
+                sc_status = self.state.get_step_status(config_name, "SC")
+                if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
+                    return
+                _fallback_enqueued.add(config_name)
                 self._sc_queue.put((config_name, filepath))
                 logger.info(f"[SW] 构型{config_name} 已推入 SC 处理队列 (回退回调)")
 
