@@ -414,15 +414,19 @@ class TestScPauseSemantics:
     def test_pause_after_send_waits_for_current_scdoc(self, monkeypatch):
         pool, slot = self._pool_with_ready_slot(monkeypatch)
         paused = threading.Event()
-        paused.set()
         scdoc_file = os.path.join(self.scdoc_dir, "model_gen4_1.scdoc")
+        cmd_file = os.path.join(pool._persistent_cmd_dir, "sc_cmd_1.json")
 
-        def create_scdoc():
+        def pause_after_send_and_create_scdoc():
+            deadline = time.time() + 1
+            while not os.path.exists(cmd_file) and time.time() < deadline:
+                time.sleep(0.01)
+            paused.set()
             time.sleep(0.05)
             with open(scdoc_file, "wb") as f:
                 f.write(b"scdoc")
 
-        writer = threading.Thread(target=create_scdoc, daemon=True)
+        writer = threading.Thread(target=pause_after_send_and_create_scdoc, daemon=True)
         writer.start()
 
         assert pool._send_persistent_command(slot, 1, paused, None) is True

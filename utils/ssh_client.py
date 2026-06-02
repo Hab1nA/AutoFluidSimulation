@@ -3,19 +3,20 @@
 SSH 客户端模块 (SSH Client)
 基于 paramiko 封装远程 Windows 工作站的 SSH 操作。
 关键功能：
-- 通过 PowerShell -EncodedCommand + Start-Process 拉起独立后台进程（SSH 断开后进程存活）
+- 通过 Windows 计划任务拉起独立后台进程（SSH 断开后进程存活）
 - 通过轮询标志文件判断远程任务是否完成
 - 文件上传 (SFTP)
 ===============================================================================
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
+import re
 import socket
 import time
 import threading
+import uuid
 from typing import Any
 
 try:
@@ -874,7 +875,7 @@ class RemoteWorkstation:
     def get_remote_file_hash(self, remote_path: str) -> str | None:
         """获取远程文件的 MD5 哈希值。
 
-        使用 PowerShell Get-FileHash 命令计算远程文件的哈希值。
+        使用 cmd.exe + certutil 计算远程文件哈希，避免依赖 PowerShell。
 
         Args:
             remote_path: 远程文件路径
@@ -882,22 +883,18 @@ class RemoteWorkstation:
         Returns:
             文件的 MD5 哈希值（小写十六进制字符串），失败返回 None
         """
-        if not self.ensure_connected():
-            return None
-
-        # 使用 PowerShell 计算文件哈希
         normalized_path = remote_path.replace("\\", "/")
-        ps_command = f'Get-FileHash -Path "{normalized_path}" -Algorithm MD5 | Select-Object -ExpandProperty Hash'
-        out, err, code = self.exec_command(f'powershell -Command "{ps_command}"', timeout=30)
-
-        if code == 0 and out.strip():
-            # 返回小写的哈希值
-            return out.strip().lower()
-        else:
-            logger.debug(f"[SSH] 获取远程文件哈希失败 (可能文件不存在): {remote_path}")
+        remote_dir = self._remote_dirname(normalized_path)
+        filename = normalized_path.rsplit("/", 1)[-1]
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, [filename])
+        if hashes is None:
+            logger.debug(f"[SSH] 获取远程文件哈希失败: {remote_path}")
             return None
+        return hashes[filename]
 
-    def get_remote_file_hashes(self, remote_dir: str, filenames: list) -> dict:
+    def get_remote_file_hashes(
+        self, remote_dir: str, filenames: list[str]
+    ) -> dict[str, str | None]:
         """批量获取远程文件的 MD5 哈希值。
 
         Args:
@@ -906,23 +903,22 @@ class RemoteWorkstation:
 
         Returns:
             字典，键为文件名，值为 MD5 哈希值（文件不存在则值为 None）
+
+        Raises:
+            ConnectionError: 远程批处理执行失败或输出不完整
         """
-        result = {}
-        remote_dir_normalized = remote_dir.replace("\\", "/")
-
-        for filename in filenames:
-            remote_path = f"{remote_dir_normalized}/{filename}"
-            result[filename] = self.get_remote_file_hash(remote_path)
-
-        return result
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, filenames)
+        if hashes is None:
+            raise ConnectionError("批量获取远程文件哈希失败")
+        return hashes
 
     def get_remote_combined_file_hash(
-        self, remote_dir: str, filenames: list
+        self, remote_dir: str, filenames: list[str]
     ) -> str | None:
         """获取远程目录中所有指定文件的组合 MD5 哈希值（单次 SSH 调用）。
 
-        在远程执行 PowerShell 脚本：逐文件计算 MD5 → 按文件名排序 →
-        拼接为 "name:hash|..." 格式 → 计算组合 MD5。
+        在远程通过 cmd.exe + certutil 批量计算各文件 MD5，再在本地按文件名排序，
+        拼接为 "name:hash|..." 格式并计算组合 MD5。
         用于两级哈希校验的第一级快速比对。
 
         Args:
@@ -932,49 +928,82 @@ class RemoteWorkstation:
         Returns:
             组合 MD5 哈希值（小写十六进制字符串），失败返回 None
         """
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, filenames)
+        if hashes is None:
+            logger.debug(f"[SSH] 获取远程组合哈希失败: {remote_dir}")
+            return None
+        combined = "|".join(
+            f"{name}:{hash_value or 'MISSING'}"
+            for name, hash_value in sorted(hashes.items())
+        )
+        return hashlib.md5(combined.encode("utf-8")).hexdigest()
+
+    def _get_remote_file_hashes_via_cmd(
+        self, remote_dir: str, filenames: list[str]
+    ) -> dict[str, str | None] | None:
+        """通过临时 cmd 批处理和 certutil 一次性计算多个远程文件哈希。"""
         if not self.ensure_connected():
             return None
 
         remote_dir_normalized = remote_dir.replace("\\", "/")
-        # 对路径和文件名中的单引号进行 PowerShell 转义（'' → '）
-        escaped_dir = remote_dir_normalized.replace("'", "''")
-        escaped_files = [f.replace("'", "''") for f in filenames]
+        bat_lines = ["@echo off"]
+        for index, filename in enumerate(filenames):
+            remote_path = f"{remote_dir_normalized}/{filename}"
+            if '"' in remote_path:
+                logger.error(f"[SSH] 远程文件路径包含非法双引号: {remote_path}")
+                return None
+            escaped_path = remote_path.replace("%", "%%")
+            bat_lines.extend([
+                f'@if exist "{escaped_path}" (',
+                f"  @echo __AF_HASH_BEGIN__{index}",
+                f'  @certutil -hashfile "{escaped_path}" MD5',
+                f"  @echo __AF_HASH_END__{index}",
+                ") else (",
+                f"  @echo __AF_HASH_MISSING__{index}",
+                ")",
+            ])
 
-        # 构建 PowerShell 脚本：逐文件计算哈希 → 排序拼接 → 组合 MD5
-        file_list_ps = ",".join(f"'{f}'" for f in escaped_files)
-        ps_script = (
-            f"$files = @({file_list_ps}); "
-            f"$dir = '{escaped_dir}'; "
-            f"$results = @(); "
-            f"foreach ($f in $files) {{ "
-            f"  $p = Join-Path $dir $f; "
-            f"  if (Test-Path $p) {{ "
-            f"    $h = (Get-FileHash -Path $p -Algorithm MD5).Hash.ToLower(); "
-            f"    $results += ($f + ':' + $h) "
-            f"  }} else {{ "
-            f"    $results += ($f + ':MISSING') "
-            f"  }} "
-            f"}}; "
-            f"$combined = ($results | Sort-Object) -join '|'; "
-            f"$bytes = [System.Text.Encoding]::UTF8.GetBytes($combined); "
-            f"$md5 = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes); "
-            f"[System.BitConverter]::ToString($md5).Replace('-','').ToLower()"
-        )
+        script_sftp = f"C:/Windows/Temp/_af_hash_files_{uuid.uuid4().hex}.bat"
+        script_win = script_sftp.replace("/", "\\")
+        try:
+            self._write_remote_text_file(script_sftp, "\r\n".join(bat_lines) + "\r\n")
+            out, err, code = self.exec_command(f'cmd /c "{script_win}"', timeout=60)
+        finally:
+            try:
+                self.delete_remote_file(script_sftp)
+            except (OSError, EOFError):
+                pass
 
-        # ★ 使用 -EncodedCommand + Base64 传递脚本，消除所有转义/引号问题：
-        #   - $ 符号不会被外层 shell 意外展开
-        #   - 无需处理嵌套双引号/单引号的转义
-        #   - 命令字符串仅含 [A-Za-z0-9+/=]，通过 SSH/cmd.exe 时零歧义
-        script_bytes = ps_script.encode('utf-16-le')
-        encoded = base64.b64encode(script_bytes).decode('ascii')
-        out, err, code = self.exec_command(
-            f'powershell -EncodedCommand {encoded}', timeout=60
-        )
-
-        if code == 0 and out.strip():
-            return out.strip()
-        else:
-            logger.debug(
-                f"[SSH] 获取远程组合哈希失败: {remote_dir}, err={err}"
-            )
+        if code != 0:
+            logger.error(f"[SSH] 批量获取远程文件哈希失败 (exit={code}): {err}")
             return None
+
+        return self._parse_remote_file_hashes(out, filenames)
+
+    @staticmethod
+    def _parse_remote_file_hashes(
+        output: str, filenames: list[str]
+    ) -> dict[str, str | None] | None:
+        """解析 certutil 批处理输出；缺失文件与异常输出使用不同语义。"""
+        cleaned_output = output.replace("\x00", "").replace("\ufeff", "")
+        result: dict[str, str | None] = {}
+        for index, filename in enumerate(filenames):
+            if f"__AF_HASH_MISSING__{index}" in cleaned_output:
+                result[filename] = None
+                continue
+
+            begin_marker = f"__AF_HASH_BEGIN__{index}"
+            end_marker = f"__AF_HASH_END__{index}"
+            begin = cleaned_output.find(begin_marker)
+            end = cleaned_output.find(end_marker, begin + len(begin_marker))
+            if begin == -1 or end == -1:
+                logger.error(f"[SSH] 远程文件哈希输出缺少标记: {filename}")
+                return None
+
+            section = cleaned_output[begin + len(begin_marker):end]
+            match = re.search(r"(?im)^[0-9a-f]{32}\s*$", section)
+            if match is None:
+                logger.error(f"[SSH] 远程文件哈希输出无法解析: {filename}")
+                return None
+            result[filename] = match.group(0).strip().lower()
+        return result

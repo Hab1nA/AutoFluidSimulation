@@ -1,4 +1,7 @@
+import hashlib
 from unittest.mock import patch
+
+import pytest
 
 from utils.ssh_client import RemoteWorkstation
 
@@ -102,3 +105,114 @@ def test_upload_file_applies_sftp_channel_timeout():
 
     assert sftp.uploads == [("local.scdoc", "D:/remote/model.scdoc")]
     assert timeouts == [9, None]
+
+
+def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    written: list[tuple[str, str]] = []
+    deleted: list[str] = []
+    commands: list[tuple[str, int]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        commands.append((command, timeout))
+        return (
+            "__AF_HASH_BEGIN__0\r\n"
+            "MD5 的 D:/remote/alpha.txt 哈希:\r\n"
+            "0123456789ABCDEF0123456789ABCDEF\r\n"
+            "CertUtil: -hashfile 命令成功完成。\r\n"
+            "__AF_HASH_END__0\r\n"
+            "__AF_HASH_MISSING__1\r\n",
+            "",
+            0,
+        )
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "_write_remote_text_file",
+                side_effect=lambda path, content: written.append((path, content)),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    hashes = host.get_remote_file_hashes(
+                        r"D:\remote", ["alpha.txt", "missing.txt"]
+                    )
+
+    assert hashes == {
+        "alpha.txt": "0123456789abcdef0123456789abcdef",
+        "missing.txt": None,
+    }
+    assert len(written) == 1
+    script_path, script_content = written[0]
+    assert script_path.startswith("C:/Windows/Temp/_af_hash_files_")
+    assert script_path.endswith(".bat")
+    assert deleted == [script_path]
+    assert commands == [(f'cmd /c "{script_path.replace("/", "\\")}"', 60)]
+    assert "powershell" not in commands[0][0].lower()
+    assert 'certutil -hashfile "D:/remote/alpha.txt" MD5' in script_content
+    assert '__AF_HASH_MISSING__1' in script_content
+
+
+def test_get_remote_file_hashes_raises_when_cmd_batch_fails_and_cleans_up():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    written: list[str] = []
+    deleted: list[str] = []
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", return_value=("", "access denied", 1)):
+            with patch.object(
+                host,
+                "_write_remote_text_file",
+                side_effect=lambda path, content: written.append(path),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    with pytest.raises(ConnectionError, match="批量获取远程文件哈希失败"):
+                        host.get_remote_file_hashes(r"D:\remote", ["alpha.txt"])
+
+    assert len(written) == 1
+    assert deleted == written
+
+
+def test_get_remote_file_hashes_raises_when_cmd_batch_output_is_invalid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(
+            host,
+            "exec_command",
+            return_value=("__AF_HASH_BEGIN__0\r\ninvalid\r\n__AF_HASH_END__0\r\n", "", 0),
+        ):
+            with patch.object(host, "_write_remote_text_file"):
+                with patch.object(host, "delete_remote_file", return_value=True):
+                    with pytest.raises(ConnectionError, match="批量获取远程文件哈希失败"):
+                        host.get_remote_file_hashes(r"D:\remote", ["alpha.txt"])
+
+
+def test_get_remote_combined_file_hash_uses_cmd_batch_hashes():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    expected = hashlib.md5(
+        b"alpha.txt:0123456789abcdef0123456789abcdef|missing.txt:MISSING"
+    ).hexdigest()
+
+    with patch.object(
+        host,
+        "_get_remote_file_hashes_via_cmd",
+        return_value={
+            "alpha.txt": "0123456789abcdef0123456789abcdef",
+            "missing.txt": None,
+        },
+    ) as batch_hashes:
+        combined = host.get_remote_combined_file_hash(
+            r"D:\remote", ["alpha.txt", "missing.txt"]
+        )
+
+    assert combined == expected
+    batch_hashes.assert_called_once_with(r"D:\remote", ["alpha.txt", "missing.txt"])

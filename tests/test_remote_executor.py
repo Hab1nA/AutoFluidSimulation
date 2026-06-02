@@ -160,3 +160,26 @@ def test_execute_transfer_does_not_mark_error_when_pause_interrupts_upload(
     assert executor.execute_transfer(3) is False
     assert deleted == ["D:/remote scdoc/model_gen4_3.scdoc"]
     assert state.status_updates == []
+
+
+def test_sync_file_group_does_not_upload_when_remote_hash_lookup_fails(tmp_path):
+    (tmp_path / "alpha.txt").write_bytes(b"content")
+
+    class _SSH:
+        def get_remote_combined_file_hash(self, remote_dir: str, filenames: list[str]):
+            return None
+
+        def get_remote_file_hashes(self, remote_dir: str, filenames: list[str]):
+            raise ConnectionError("hash lookup failed")
+
+        def upload_file(self, *args, **kwargs):
+            raise AssertionError("must not upload when remote hash lookup fails")
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor._sync_file_group(
+        str(tmp_path),
+        r"D:\remote",
+        ["alpha.txt"],
+        "测试",
+    ) is False

@@ -6,7 +6,6 @@ SW 阶段处理模块。
 
 import threading
 import subprocess
-import queue
 import os
 from typing import Optional
 
@@ -17,7 +16,8 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.file_monitor import StepFileMonitor
-from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped, check_step_output_exists
+from engine.scheduler.utils import pause_aware_sleep, check_step_output_exists, PauseGuard
+from engine.scheduler.work_queue import UniqueWorkQueue
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -34,7 +34,7 @@ class SWPhaseHandler:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue[tuple[int, str]],
+        sc_queue: UniqueWorkQueue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         retry_manager,
@@ -60,6 +60,7 @@ class SWPhaseHandler:
         self._paused = paused_event
         self._stopped = stopped_event
         self._retry_manager = retry_manager
+        self._guard = PauseGuard(paused_event, stopped_event)
         self.worker_pool_manager = worker_pool_manager
         self.meshing_monitor = meshing_monitor
 
@@ -138,11 +139,11 @@ class SWPhaseHandler:
             if current_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
                 self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
-        # ---- SW 步骤前暂停检查 ----
+        # ---- SW 步骤前暂停检查（统一使用 PauseGuard） ----
         if self._paused.is_set():
             logger.info("[SW] SW 步骤启动前检测到暂停标志，等待继续指令...")
             self.state.set_engine_status("paused")
-            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+            if self._guard.check_should_abort():
                 return False
             # 恢复后重新标记 SW 为 Running
             for cn in all_configs:
@@ -336,8 +337,8 @@ class SWPhaseHandler:
                 if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
                     return
                 _fallback_enqueued.add(config_name)
-                self._sc_queue.put((config_name, filepath))
-                logger.info(f"[SW] 构型{config_name} 已推入 SC 处理队列 (回退回调)")
+                if self._sc_queue.submit((config_name, filepath)):
+                    logger.info(f"[SW] 构型{config_name} 已推入 SC 处理队列 (回退回调)")
 
             self._file_monitor = StepFileMonitor(
                 step_dir=None,

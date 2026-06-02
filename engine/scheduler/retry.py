@@ -13,7 +13,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from utils.logger import setup_logger
 
-from .utils import pause_aware_sleep, wait_unless_paused_or_stopped
+from .utils import pause_aware_sleep, PauseGuard
 
 logger = setup_logger(__name__)
 
@@ -42,6 +42,7 @@ class RetryManager:
         self.state = state_manager
         self._paused = paused_event
         self._stopped = stopped_event
+        self._guard = PauseGuard(paused_event, stopped_event, state_manager)
 
         logger.info("重试管理器初始化完成")
 
@@ -71,7 +72,7 @@ class RetryManager:
                 return False
 
             # 检查暂停（在设置状态前检查，避免竞态）
-            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+            if self._guard.check_should_abort():
                 return False
 
             # 设置 Running 状态
@@ -81,7 +82,7 @@ class RetryManager:
             # 防止 pause() 在 set_step_status 之后被调用导致的竞态窗口
             if self._paused.is_set():
                 self.state.set_step_status(config_name, step_name, STATUS_PAUSED)
-                if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+                if self._guard.check_should_abort():
                     return False
                 # 恢复后重新设置运行状态
                 self.state.set_step_status(config_name, step_name, STATUS_RUNNING)
@@ -96,15 +97,7 @@ class RetryManager:
                     #   但此处又覆盖为 COMPLETED 的竞态。
                     #   SC 步骤通过内部轮询循环检测 pause 并返回 False 来避免此问题，
                     #   但 Transfer 等同步步骤无法中途检测 pause，因此在此统一保护。
-                    if self._paused.is_set():
-                        self.state.set_step_status(
-                            config_name, step_name, STATUS_PAUSED,
-                            "执行完成但系统已暂停"
-                        )
-                        logger.info(
-                            f"[{step_name}] 构型{config_name} 执行成功但系统已暂停，"
-                            f"标记为 Paused 而非 Completed"
-                        )
+                    if self._guard.mark_paused_on_success(config_name, step_name):
                         return False
                     # 对于 Meshing 和 Solver，状态由调用者设置（因为需要等待远程完成）
                     if step_name not in ("Meshing", "Solver"):
@@ -113,15 +106,7 @@ class RetryManager:
                 else:
                     # ★ 检查是否因暂停/停止导致执行失败
                     # （例如 execute_sc_step 在轮询中检测到暂停标志，终止了 SC 进程）
-                    if self._paused.is_set():
-                        self.state.set_step_status(
-                            config_name, step_name, STATUS_PAUSED,
-                            "暂停——任务已中断，恢复后将重新执行"
-                        )
-                        logger.info(
-                            f"[{step_name}] 构型{config_name} 因暂停中断，"
-                            f"已标记为 Paused"
-                        )
+                    if self._guard.mark_paused_if_flagged(config_name, step_name):
                         return False  # 用户主动暂停，不重试
                     if self._stopped.is_set():
                         return False  # 引擎已停止，不重试

@@ -14,7 +14,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
 from utils.logger import setup_logger
-from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped
+from engine.scheduler.utils import pause_aware_sleep, PauseGuard
 
 logger = setup_logger(__name__)
 
@@ -53,6 +53,7 @@ class BarrierCoordinator:
         self._stopped = stopped_event
         self._barrier_passed = barrier_passed_event
         self._retry_manager = retry_manager
+        self._guard = PauseGuard(paused_event, stopped_event)
 
         # ---- Solver 线程 ----
         self._solver_threads: list[threading.Thread] = []
@@ -193,8 +194,8 @@ class BarrierCoordinator:
         所有构型的 Solver 在屏障通过后并行启动。
         若暂停标志已置位，则等待恢复后再分发。
         """
-        # ★ 分发前检查暂停标志
-        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+        # ★ 分发前检查暂停标志（统一使用 PauseGuard）
+        if self._guard.check_should_abort():
             logger.warning("Solver 分发前检测到停止标志，取消分发")
             return
 
@@ -228,8 +229,8 @@ class BarrierCoordinator:
         Args:
             config_name: 构型名称
         """
-        # ★ 执行前检查暂停标志
-        if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+        # ★ 执行前检查暂停标志（统一使用 PauseGuard）
+        if self._guard.check_should_abort():
             return
 
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
@@ -237,8 +238,8 @@ class BarrierCoordinator:
         # 启动远程求解后台任务
         if self._retry_manager.execute_with_retry(config_name, "Solver",
                                      self.runner.execute_solver):
-            # ★ 启动远程求解后检查暂停标志
-            if not wait_unless_paused_or_stopped(self._paused, self._stopped):
+            # ★ 启动远程求解后检查暂停标志（统一使用 PauseGuard）
+            if self._guard.check_should_abort():
                 return
 
             # 轮询等待求解完成

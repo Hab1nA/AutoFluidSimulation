@@ -16,6 +16,20 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# ---- 快速预检：已有 Daemon 运行时直接退出，不创建日志目录 ----
+from utils.process_utils import check_ipc_ready, read_pid_file, is_process_alive
+from engine.config import IPC_CONFIG
+
+_PID_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+_DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
+
+_stale_pid = read_pid_file(_DAEMON_PID_FILE)
+if _stale_pid is not None and is_process_alive(_stale_pid):
+    if check_ipc_ready(IPC_CONFIG["host"], IPC_CONFIG["port"]):
+        print(f"[Daemon] 已有 Daemon 实例运行中 (PID: {_stale_pid})，跳过启动")
+        sys.exit(0)
+
+# ---- 正式初始化日志会话 ----
 from utils.logger import init_session
 
 session_timestamp = os.environ.get("AUTOFLUID_SESSION_TIMESTAMP")

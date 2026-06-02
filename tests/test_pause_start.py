@@ -40,7 +40,7 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
     STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    IPC_CONFIG,
+    ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
 
@@ -246,6 +246,19 @@ class MockStepFileMonitor:
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（仅清除暂停标志）")
 
+    def clear_tracking(self):
+        self._processed_files.clear()
+        self._known_files.clear()
+        self._detector._history.clear()
+        self._detector._first_seen.clear()
+
+    def request_reset(self):
+        self._need_reset = True
+        self._wake_event.set()
+
+    def wake(self):
+        self._wake_event.set()
+
     def resume_and_reset(self):
         self._need_reset = True
         self._paused.clear()
@@ -336,18 +349,19 @@ class TestContext:
         def _mock_prepare_sw_retry():
             fm = self.scheduler.sw_phase_handler._file_monitor
             if fm is not None:
-                fm._processed_files.clear()
-                fm._known_files.clear()
-                fm._detector._history.clear()
-                fm._detector._first_seen.clear()
+                fm.clear_tracking()
         self.scheduler.sw_phase_handler._prepare_sw_retry = _mock_prepare_sw_retry
 
         print("  [Setup] 调度器已创建")
 
     def cleanup(self):
-        IPC_CONFIG["db_path"] = self._orig_db_path
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
+        try:
+            self.scheduler.stop()
+        finally:
+            IPC_CONFIG["db_path"] = self._orig_db_path
+            teardown_mock_environment()
+            if os.path.exists(self.tmpdir):
+                shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def assert_engine_status(self, expected: str, msg: str = ""):
         actual = self.state.get_engine_status()
@@ -515,18 +529,20 @@ def test_sw_fail_then_restart():
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
+    original_max_retries = ENGINE_CONFIG["max_retries"]
     try:
+        ENGINE_CONFIG["max_retries"] = 1
         ctx.runner._sw_should_fail = True
         ctx.runner._sw_delay = 0.1
 
         t1 = ctx.run_pipeline_async()
-
+        t1.join(timeout=5)
+        assert not t1.is_alive(), "SW 失败线程未能退出"
         ok = ctx.wait_for_condition(
             lambda: ctx.state.get_engine_status() == "stopped",
-            timeout=15
+            timeout=10,
         )
-        t1.join(timeout=5)
-        assert ok, "引擎未能进入 stopped 状态"
+        assert ok, "全 SW 失败后引擎未能进入 stopped 状态"
         ctx.assert_engine_status("stopped", "SW 失败后")
 
         ctx.runner._sw_should_fail = False
@@ -539,6 +555,7 @@ def test_sw_fail_then_restart():
         print("[PASS] 测试 4 通过")
 
     finally:
+        ENGINE_CONFIG["max_retries"] = original_max_retries
         ctx.scheduler.stop()
         ctx.cleanup()
 

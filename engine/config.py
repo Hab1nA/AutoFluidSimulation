@@ -5,6 +5,7 @@
 ===============================================================================
 """
 import os
+import re
 import sys
 from typing import Any, Optional, TypedDict, cast
 
@@ -426,8 +427,7 @@ def _expand_env_vars(value: Any) -> Any:
     """展开字符串值中的 ${VAR} 环境变量引用。非字符串值原样返回。"""
     if not isinstance(value, str):
         return value
-    import re
-    def _replace(m: "re.Match[str]") -> str:
+    def _replace(m: re.Match[str]) -> str:
         var_name = m.group(1)
         return os.environ.get(var_name, m.group(0))  # 未定义则保留原文
     return re.sub(r'\$\{(\w+)\}', _replace, value)
@@ -499,9 +499,9 @@ def reload_config_from_toml() -> bool:
 # reload_config_from_toml()
 
 
-def validate_config() -> list:
+def validate_config() -> list[str]:
     """验证配置完整性，返回警告信息列表。"""
-    warnings = []
+    warnings: list[str] = []
 
     if not REMOTE_CONFIG["password"]:
         warnings.append(

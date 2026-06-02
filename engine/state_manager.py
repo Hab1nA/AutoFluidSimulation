@@ -379,7 +379,7 @@ class StateManager:
     # 批量状态操作（用于 reset 命令）
     # ------------------------------------------------------------------
 
-    def reset_config_steps(self, config_name, from_step: str | None = None):
+    def reset_config_steps(self, config_name: int | str, from_step: str | None = None) -> None:
         """
         重置指定构型的步骤状态。
 
@@ -391,7 +391,7 @@ class StateManager:
             for cn in self.get_all_configs():
                 self._reset_single_config(cn, from_step)
         else:
-            self._reset_single_config(config_name, from_step)
+            self._reset_single_config(int(config_name), from_step)
 
     def _reset_single_config(self, config_name: int, from_step: str | None = None):
         """重置单个构型的步骤状态（内部方法）。"""

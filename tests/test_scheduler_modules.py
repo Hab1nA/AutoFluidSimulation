@@ -10,6 +10,8 @@ scheduler 子模块的单元测试。
 import threading
 import time
 import os
+import subprocess
+import sys
 import tempfile
 import shutil
 from engine.state_manager import StateManager
@@ -181,6 +183,53 @@ class TestSchedulerModuleImports:
         assert hasattr(scheduler_pkg, "SWPhaseHandler")
         assert hasattr(scheduler_pkg, "RetryManager")
         assert hasattr(scheduler_pkg, "MeshingMonitor")
+
+    def test_daemon_imports_in_fresh_process(self):
+        """daemon 冷启动导入不能被 scheduler 包初始化形成的循环依赖阻断。"""
+        result = subprocess.run(
+            [sys.executable, "-c", "from engine.daemon import main"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+class TestSWPhaseHandlerFallback:
+    """验证 SW 独立模式文件监控回调。"""
+
+    def test_fallback_monitor_submits_to_unique_work_queue(self, monkeypatch):
+        """独立模式发现 STEP 文件时应使用去重队列接口提交。"""
+        from engine.file_monitor import StepFileMonitor
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        class _State:
+            @staticmethod
+            def get_step_status(config_name: int, step_name: str) -> str:
+                return STATUS_WAITING
+
+            @staticmethod
+            def set_step_status(config_name: int, step_name: str, status: str) -> None:
+                return None
+
+        monkeypatch.setattr(StepFileMonitor, "start", lambda self: None)
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=object(),
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        handler._ensure_file_monitor_running()
+        assert handler._file_monitor is not None
+        assert handler._file_monitor.on_file_ready is not None
+        handler._file_monitor.on_file_ready(1, "model_gen4.SLDPRT_1.step")
+
+        assert sc_queue.get_nowait() == (1, "model_gen4.SLDPRT_1.step")
 
 
 # ====================================================================
@@ -396,6 +445,13 @@ class TestMeshingMonitor:
         self.monitor.submit(1)
         assert self.monitor.qsize() == 1
 
+    def test_submit_deduplicates_pending_config(self):
+        """重复来源提交同一构型时只保留一个待处理任务。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.monitor.submit(1)
+        self.monitor.submit(1)
+        assert self.monitor.qsize() == 1
+
     def test_qsize_empty(self):
         """空队列返回 0。"""
         assert self.monitor.qsize() == 0
@@ -527,3 +583,22 @@ class TestUtilsExtended:
 
         threading.Thread(target=stop_after, daemon=True).start()
         assert pause_aware_sleep(5.0, paused, stopped) is False
+
+    def test_pause_aware_sleep_excludes_paused_duration(self):
+        """恢复后仍应完成剩余的有效等待时长。"""
+        from engine.scheduler.utils import pause_aware_sleep
+        paused = threading.Event()
+        stopped = threading.Event()
+        resumed_at: list[float] = []
+        paused.set()
+
+        def resume_after() -> None:
+            time.sleep(0.1)
+            resumed_at.append(time.monotonic())
+            paused.clear()
+
+        threading.Thread(target=resume_after, daemon=True).start()
+        started_at = time.monotonic()
+        assert pause_aware_sleep(0.15, paused, stopped, check_interval=0.01) is True
+        assert time.monotonic() - started_at < 0.5
+        assert time.monotonic() - resumed_at[0] >= 0.12

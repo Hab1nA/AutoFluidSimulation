@@ -22,6 +22,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import wait_unless_paused_or_stopped
+from engine.scheduler.work_queue import UniqueWorkQueue
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -41,7 +42,7 @@ class WorkerPoolManager:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue[tuple[int, str]],
+        sc_queue: UniqueWorkQueue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         barrier_passed_event: threading.Event,
@@ -73,7 +74,7 @@ class WorkerPoolManager:
         # ---- Transfer 解耦队列 ----
         # SC Worker 完成 SC 后将构型名称推入此队列，
         # Transfer Worker 从此队列取任务执行传输。
-        self._transfer_queue: queue.Queue[int] = queue.Queue()
+        self._transfer_queue = UniqueWorkQueue[int]()
 
         # ---- 工作线程（SC 与 Transfer 分离） ----
         self._sc_worker_threads: list[threading.Thread] = []
@@ -94,6 +95,17 @@ class WorkerPoolManager:
     def set_meshing_monitor(self, meshing_monitor) -> None:
         """注入 MeshingMonitor 实例。由 PipelineScheduler 在创建后调用。"""
         self._meshing_monitor = meshing_monitor
+
+    def submit_transfer(self, config_name: int) -> bool:
+        """提交 Transfer 任务；排队或执行中的构型不会重复提交。"""
+        if not self._transfer_queue.submit(config_name):
+            logger.debug(f"构型{config_name} 已在 Transfer 队列或执行中，跳过重复提交")
+            return False
+        logger.info(
+            f"构型{config_name} 已推入 Transfer 队列 "
+            f"(队列深度: {self._transfer_queue.qsize()})"
+        )
+        return True
 
     def join_worker_threads(self, timeout: float = 3.0) -> None:
         """等待所有 SC 和 Transfer 工作线程退出。
@@ -303,7 +315,7 @@ class WorkerPoolManager:
                     config_name, f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
-                self._sc_queue.task_done()
+                self._sc_queue.complete((config_name, _step_file))
 
         logger.info(f"[{threading.current_thread().name}] SC 工作线程退出")
 
@@ -358,11 +370,7 @@ class WorkerPoolManager:
 
         # ★ SC 成功（或已 Completed），推入 Transfer 队列
         if sc_status == STATUS_COMPLETED:
-            self._transfer_queue.put(config_name)
-            logger.info(
-                f"构型{config_name} SC 完成，已推入 Transfer 队列 "
-                f"(队列深度: {self._transfer_queue.qsize()})"
-            )
+            self.submit_transfer(config_name)
         else:
             logger.warning(
                 f"[WorkerPool] 构型{config_name} SC 执行后状态为 {sc_status}，"
@@ -432,7 +440,7 @@ class WorkerPoolManager:
                     config_name, f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
-                self._transfer_queue.task_done()
+                self._transfer_queue.complete(config_name)
 
         logger.info(f"[{threading.current_thread().name}] Transfer 工作线程退出")
 

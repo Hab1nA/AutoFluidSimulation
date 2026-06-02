@@ -36,6 +36,8 @@ impl IpcClient {
     }
 
     pub async fn connect(&mut self) -> Result<(), String> {
+        // 先关闭已有连接，防止连接泄漏导致服务端出现重复连接
+        self.disconnect().await;
         let addr = format!("{}:{}", self.host, self.port);
         match tokio::time::timeout(DEFAULT_TIMEOUT, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
@@ -151,6 +153,10 @@ impl IpcClient {
     /// 静默执行——成功时恢复 `self.stream`，失败时仅记录日志。
     /// 调用方无需感知重连结果，下次 `is_connected()` 即可反映真实状态。
     /// 冷却机制：连续重连间隔不少于 RECONNECT_COOLDOWN，防止 daemon 不可用时频繁重连。
+    ///
+    /// 注意：此方法通常在 `send_request_with_timeout` 内部调用，此时 `self.stream`
+    /// 已被 `take()` 取出放入 `BufReader`。重连会创建全新连接，旧连接的清理
+    /// 依赖 `BufReader` 的 drop——短暂窗口内服务端可能看到两个活跃连接。
     async fn auto_reconnect(&mut self, reason: &str) {
         if let Some(last) = self.last_reconnect {
             if last.elapsed() < RECONNECT_COOLDOWN {
@@ -160,6 +166,9 @@ impl IpcClient {
         }
         self.last_reconnect = Some(Instant::now());
         log::info!("[IPC] {}，尝试自动重连...", reason);
+        // connect() 内部会先 disconnect()，确保 self.stream 中的旧连接被关闭。
+        // 注意：send_request_with_timeout 中 take() 取出的 stream 不受此影响，
+        // 旧 stream 的关闭由 BufReader 的 drop 保证。
         match self.connect().await {
             Ok(()) => log::info!("[IPC] 自动重连成功"),
             Err(e) => log::warn!("[IPC] 自动重连失败: {}", e),

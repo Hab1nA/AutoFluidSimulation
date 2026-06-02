@@ -24,6 +24,7 @@ from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     STATUS_ERROR, get_step_filename, STEP_FILE_PATTERNS,
 )
+from engine.scheduler.utils import wait_unless_paused_or_stopped
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -217,18 +218,8 @@ class RemoteExecutor:
                         f"（将继续上传）: {e}"
                     )
 
-                upload_max_retries_value = ENGINE_CONFIG.get("ssh_upload_max_retries", 3)
-                upload_timeout_value = ENGINE_CONFIG.get("transfer_timeout", 120)
-                upload_max_retries = (
-                    upload_max_retries_value
-                    if isinstance(upload_max_retries_value, int)
-                    else 3
-                )
-                upload_timeout = (
-                    upload_timeout_value
-                    if isinstance(upload_timeout_value, int)
-                    else 120
-                )
+                upload_max_retries = int(ENGINE_CONFIG.get("ssh_upload_max_retries", 3))  # type: ignore[call-overload]
+                upload_timeout = ENGINE_CONFIG["transfer_timeout"]
                 success = ssh.upload_file(
                     local_file,
                     remote_file,
@@ -367,7 +358,10 @@ class RemoteExecutor:
         paused_event: Optional[threading.Event] = None,
         stopped_event: Optional[threading.Event] = None,
     ) -> bool:
-        """轮询等待网格划分完成（逐次短暂持 SSH 锁，不在整个等待期间持锁）。"""
+        """轮询等待网格划分完成（逐次短暂持 SSH 锁，不在整个等待期间持锁）。
+
+        暂停期间冻结超时计时器，防止恢复运行后立即触发超时。
+        """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
@@ -376,12 +370,16 @@ class RemoteExecutor:
         logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
         while time.time() - start_time < timeout:
+            # ★ 使用统一的暂停等待函数，替代手写内联循环
             if paused_event is not None:
-                while paused_event.is_set():
-                    if stopped_event is not None and stopped_event.is_set():
-                        logger.info(f"[Meshing] 等待构型{config_name} 期间收到停止指令")
-                        return False
-                    time.sleep(1)
+                pause_start = time.time()
+                if not wait_unless_paused_or_stopped(paused_event, stopped_event or threading.Event()):
+                    logger.info(f"[Meshing] 等待构型{config_name} 期间收到停止指令")
+                    return False
+                # 暂停补偿：将超时计时器向后推移暂停时长
+                pause_duration = time.time() - pause_start
+                if pause_duration > 0:
+                    start_time += pause_duration
             if stopped_event is not None and stopped_event.is_set():
                 logger.info(f"[Meshing] 等待构型{config_name} 期间收到停止指令")
                 return False
@@ -507,17 +505,17 @@ class RemoteExecutor:
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
         while time.time() - start_time < timeout:
-            # ---- 暂停/停止响应 ----
+            # ---- 暂停/停止响应（统一使用 wait_unless_paused_or_stopped） ----
             if paused_event is not None:
                 pause_start = time.time()
-                while paused_event.is_set():
-                    if stopped_event is not None and stopped_event.is_set():
-                        return False
-                    time.sleep(1)
-                # 暂停补偿：将 first_file_seen_time 向后推移暂停时长
+                if not wait_unless_paused_or_stopped(paused_event, stopped_event or threading.Event()):
+                    return False
+                # 暂停补偿：将超时计时器和文件宽限计时器向后推移暂停时长
                 pause_duration = time.time() - pause_start
-                if first_file_seen_time is not None and pause_duration > 0:
-                    first_file_seen_time += pause_duration
+                if pause_duration > 0:
+                    start_time += pause_duration
+                    if first_file_seen_time is not None:
+                        first_file_seen_time += pause_duration
             if stopped_event is not None and stopped_event.is_set():
                 return False
 

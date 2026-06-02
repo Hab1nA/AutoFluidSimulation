@@ -19,6 +19,7 @@ import threading
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from engine.scheduler.control import PipelineControl
     from engine.state_manager import StateManager
 
 from engine.config import (
@@ -56,6 +57,7 @@ class TaskRunner:
 
         self._paused_event: Optional[threading.Event] = None
         self._stopped_event: Optional[threading.Event] = None
+        self._pipeline_control: Optional[PipelineControl] = None
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -85,6 +87,11 @@ class TaskRunner:
         # 将控制事件传递给 SW 执行器，使其逐构型循环可响应 pause/stop
         self._sw_executor.set_control_events(paused_event, stopped_event)
         self._remote_executor.set_control_events(paused_event, stopped_event)
+
+    def set_pipeline_control(self, pipeline_control: PipelineControl) -> None:
+        """注入统一控制层，用于序列化外部副作用启动边界。"""
+        self._pipeline_control = pipeline_control
+        self._sw_executor.set_pipeline_control(pipeline_control)
 
     def get_remote_executor(self) -> RemoteExecutor:
         """获取远程执行器实例（公共接口，供外部模块创建 MeshingMonitor 等）。"""
@@ -170,6 +177,7 @@ class TaskRunner:
             config_name,
             paused_event=self._paused_event,
             stopped_event=self._stopped_event,
+            pipeline_control=self._pipeline_control,
         )
 
     # ------------------------------------------------------------------

@@ -20,6 +20,12 @@ import tempfile
 import time
 import gc
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from engine.scheduler.control import PipelineControl
 
 from engine.config import (
     LOCAL_PATHS, ENGINE_CONFIG,
@@ -59,6 +65,7 @@ class SWExecutor:
         self.state = state_manager
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
+        self._pipeline_control: PipelineControl | None = None
         self._cached_sw_app = None
         self._cached_doc = None
         self._com_initialized = False
@@ -77,11 +84,34 @@ class SWExecutor:
         self._paused_event = paused_event
         self._stopped_event = stopped_event
 
+    def set_pipeline_control(self, pipeline_control: PipelineControl) -> None:
+        """注入统一控制层，用于锁定单构型 COM 操作窗口。"""
+        self._pipeline_control = pipeline_control
+
+    @contextmanager
+    def _external_start(self) -> Iterator[bool]:
+        """锁定一个 SW 外部操作窗口。"""
+        if self._pipeline_control is not None:
+            with self._pipeline_control.external_start() as allowed:
+                yield allowed
+            return
+        paused = self._paused_event is not None and self._paused_event.is_set()
+        stopped = self._stopped_event is not None and self._stopped_event.is_set()
+        yield not paused and not stopped
+
     # ------------------------------------------------------------------
     # 入口
     # ------------------------------------------------------------------
 
     def execute_sw_step(self) -> bool:
+        """在统一 gate 下执行旧版批量 SW 导出。"""
+        with self._external_start() as allowed:
+            if not allowed:
+                logger.info("[SW] 暂停或停止状态下跳过批量导出")
+                return False
+            return self._execute_sw_step_admitted()
+
+    def _execute_sw_step_admitted(self) -> bool:
         """SolidWorks STEP 批量导出（直接 COM 调用）。
 
         执行流程：
@@ -251,6 +281,14 @@ class SWExecutor:
     # ------------------------------------------------------------------
 
     def export_sw_per_config(self, config_name: int) -> bool:
+        """在统一 gate 下执行单构型 SW 导出。"""
+        with self._external_start() as allowed:
+            if not allowed:
+                logger.info(f"[SW] 构型{config_name}: 暂停或停止状态下跳过导出")
+                return False
+            return self._export_sw_per_config_admitted(config_name)
+
+    def _export_sw_per_config_admitted(self, config_name: int) -> bool:
         """导出单个构型的 STEP 文件（供 RetryManager 调用）。
 
         执行流程：
