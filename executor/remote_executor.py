@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from engine.config import (
     LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
+    OPERATION_TIMEOUTS,
     STATUS_ERROR, get_step_filename, STEP_FILE_PATTERNS,
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
@@ -218,7 +219,7 @@ class RemoteExecutor:
                         f"（将继续上传）: {e}"
                     )
 
-                upload_max_retries = int(ENGINE_CONFIG.get("ssh_upload_max_retries", 3))  # type: ignore[call-overload]
+                upload_max_retries = self._upload_max_retries()
                 upload_timeout = ENGINE_CONFIG["transfer_timeout"]
                 success = ssh.upload_file(
                     local_file,
@@ -249,6 +250,27 @@ class RemoteExecutor:
     # ------------------------------------------------------------------
     # 网格划分
     # ------------------------------------------------------------------
+
+    def _upload_max_retries(self) -> int:
+        """返回 SFTP 上传重试次数，配置异常时回退到默认值。"""
+        default_retries = 3
+        raw_retries = OPERATION_TIMEOUTS.get("ssh_upload_max_retries", default_retries)
+        try:
+            retries = int(raw_retries)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[Transfer] ssh_upload_max_retries 配置无效: {raw_retries!r}，"
+                f"回退为 {default_retries}"
+            )
+            return default_retries
+
+        if retries < 1:
+            logger.warning(
+                f"[Transfer] ssh_upload_max_retries 必须 >= 1，当前为 {retries}，"
+                f"回退为 {default_retries}"
+            )
+            return default_retries
+        return retries
 
     def _meshing_processor_count(self) -> int:
         """返回 Fluent Meshing 启动核心数，配置异常时回退到保守默认值。"""

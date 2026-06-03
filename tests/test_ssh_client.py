@@ -1,9 +1,15 @@
+import base64
 import hashlib
 from unittest.mock import patch
 
 import pytest
 
 from utils.ssh_client import RemoteWorkstation
+
+
+def _decode_encoded_command(script: str) -> str:
+    encoded_command = script.split("-EncodedCommand ", 1)[1].split(" ", 1)[0]
+    return base64.b64decode(encoded_command).decode("utf-16le")
 
 
 def test_build_background_cmd_script_writes_done_or_error_flag():
@@ -14,11 +20,14 @@ def test_build_background_cmd_script_writes_done_or_error_flag():
     )
     assert r'>> "D:\flags\job.log" 2>&1' in script
     assert r'set "AF_PID_FILE=D:\flags\job.done.pid"' in script
-    assert "Start-Process -FilePath 'cmd.exe'" in script
+    ps_script = _decode_encoded_command(script)
+    assert "Start-Process -FilePath 'cmd.exe'" in ps_script
+    assert r'''-ArgumentList '/d','/s','/c','"C:\ProgramData\anaconda3\Scripts\conda.exe" run -n pyfluent python run.py' ''' in ps_script
+    assert "AF_CMD" not in script
     assert r'echo done > "D:\flags\job.done"' in script
     assert r'echo error %AF_EXIT% > "D:\flags\job.done.error"' in script
     assert r'del /f /q "%AF_PID_FILE%"' in script
-    assert "-WindowStyle Hidden" in script
+    assert "-WindowStyle Hidden" in ps_script
     # working_dir 未指定时不应包含 cd /d
     assert "cd /d" not in script
 
@@ -30,7 +39,7 @@ def test_build_background_cmd_script_interactive_calls_command_directly():
         r"D:/flags/job.log",
         interactive=True,
     )
-    assert "call %AF_CMD%" in script
+    assert "call conda run python script.py" in script
     assert "Start-Process" not in script
 
 
@@ -93,7 +102,7 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
     script_path, script_content = written[0]
     assert script_path.startswith("D:/flags/autofluid_bg_")
     assert r'set "AF_PID_FILE=D:\flags\autofluid_bg_' in script_content
-    assert command in script_content
+    assert command in _decode_encoded_command(script_content)
     assert r'echo done > "D:\flags\task done.flag"' in script_content
     assert 'schtasks /Delete /TN "AutoFluid_' in script_content
     assert deleted == [flag_file, f"{flag_file}.error"]
@@ -128,7 +137,7 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
     assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
     assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
     assert calls[2][0].endswith('" /DISABLE')
-    assert "call %AF_CMD%" in written[0][1]
+    assert "call conda run python meshing.py" in written[0][1]
     assert "Start-Process" not in written[0][1]
 
 

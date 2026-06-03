@@ -125,10 +125,11 @@ def check_ipc_ready(host: str = "127.0.0.1", port: int = 9527) -> bool:
     Returns:
         True 表示端口已就绪可连接，False 表示未就绪
     """
+    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1.0)
-            s.connect((host, port))
+            s.connect((connect_host, port))
             return True
     except (ConnectionRefusedError, socket.timeout, OSError):
         return False

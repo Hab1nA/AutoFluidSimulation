@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 
-from engine.config import LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG, STATUS_ERROR
+from engine.config import LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG, OPERATION_TIMEOUTS, STATUS_ERROR
 from executor.remote_executor import RemoteExecutor
 
 
@@ -30,7 +30,7 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
     monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
     monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
     monkeypatch.setitem(ENGINE_CONFIG, "transfer_timeout", 17)
-    monkeypatch.setitem(ENGINE_CONFIG, "ssh_upload_max_retries", 2)
+    monkeypatch.setitem(OPERATION_TIMEOUTS, "ssh_upload_max_retries", 2)
 
     paused = threading.Event()
     stopped = threading.Event()
@@ -73,6 +73,32 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
             "stopped_event": stopped,
         }
     ]
+
+
+def test_execute_transfer_falls_back_when_upload_retries_invalid(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    scdoc_file = scdoc_dir / "model_gen4_6.scdoc"
+    scdoc_file.write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+    monkeypatch.setitem(OPERATION_TIMEOUTS, "ssh_upload_max_retries", "bad")
+
+    calls: list[int] = []
+
+    class _SSH:
+        def get_remote_file_size(self, remote_path: str):
+            return None
+
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            calls.append(kwargs["max_retries"])
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(6) is True
+    assert calls == [3]
 
 
 def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path, monkeypatch):
