@@ -3,19 +3,20 @@
 SSH 客户端模块 (SSH Client)
 基于 paramiko 封装远程 Windows 工作站的 SSH 操作。
 关键功能：
-- 通过 PowerShell -EncodedCommand + Start-Process 拉起独立后台进程（SSH 断开后进程存活）
+- 通过 Windows 计划任务拉起独立后台进程（SSH 断开后进程存活）
 - 通过轮询标志文件判断远程任务是否完成
 - 文件上传 (SFTP)
 ===============================================================================
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
+import re
 import socket
 import time
 import threading
+import uuid
 from typing import Any
 
 try:
@@ -55,6 +56,7 @@ class RemoteWorkstation:
         self.password = password
         self._ssh: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
+        self._task_pid_files: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -413,7 +415,14 @@ class RemoteWorkstation:
         # 如果解析失败，返回原始输出（已去除多余空白）
         return wmic_output.strip()
 
-    def exec_background(self, command: str, flag_file: str, *, working_dir: str | None = None) -> tuple[bool, str]:
+    def exec_background(
+        self,
+        command: str,
+        flag_file: str,
+        *,
+        working_dir: str | None = None,
+        interactive: bool = False,
+    ) -> tuple[bool, str]:
         """
         在远程工作站以独立后台进程方式执行命令。
 
@@ -425,6 +434,8 @@ class RemoteWorkstation:
             flag_file: 任务完成标志文件路径（远程路径）
             working_dir: 远程工作目录（cmd 脚本 cd /d 到此目录后再执行命令，
                          确保子进程的 CWD 正确；None 则不设置）
+            interactive: 是否在当前登录用户的交互式桌面运行。Fluent Meshing
+                         需要 GUI 执行 journal 中的 GUI 操作，因此必须启用。
 
         Returns:
             (success, task_name) 元组：success 表示后台进程是否启动成功，
@@ -439,6 +450,7 @@ class RemoteWorkstation:
         try:
             # 先清理旧的标志文件（使用 SFTP 删除，避免 shell 兼容性问题）
             self.delete_remote_file(flag_file)
+            self.delete_remote_file(f"{flag_file}.error")
 
             flag_dir = self._remote_dirname(flag_file)
             self._ensure_remote_dir(flag_dir)
@@ -449,17 +461,22 @@ class RemoteWorkstation:
             task_name = f"AutoFluid_{task_hash}"
             script_file = f"{flag_dir}/autofluid_bg_{task_hash}.cmd"
             log_file = f"{flag_dir}/autofluid_bg_{task_hash}.log"
+            pid_file = f"{flag_dir}/autofluid_bg_{task_hash}.pid"
             script = self._build_background_cmd_script(
-                command, flag_file, log_file, task_name=task_name,
-                working_dir=working_dir,
+                command, flag_file, log_file, pid_file=pid_file, task_name=task_name,
+                working_dir=working_dir, interactive=interactive,
             )
             self._write_remote_text_file(script_file, script)
+            if not interactive:
+                self._task_pid_files[task_name] = pid_file
 
             script_cmd_path = script_file.replace("/", "\\")
             create_cmd = (
                 f'schtasks /Create /TN "{task_name}" /SC ONCE /ST 23:59 '
                 f'/TR "{script_cmd_path}" /F'
             )
+            if interactive:
+                create_cmd += " /IT"
             _, stderr, exit_code = self.exec_command(create_cmd, timeout=30)
             if exit_code != 0:
                 logger.error(f"[SSH] 创建远程计划任务失败 (exit={exit_code}): {stderr[:200]}")
@@ -469,6 +486,13 @@ class RemoteWorkstation:
             _, stderr, exit_code = self.exec_command(run_cmd, timeout=30)
 
             if exit_code == 0:
+                disable_cmd = f'schtasks /Change /TN "{task_name}" /DISABLE'
+                _, disable_stderr, disable_code = self.exec_command(disable_cmd, timeout=30)
+                if disable_code != 0:
+                    logger.warning(
+                        f"[SSH] 禁用远程计划任务失败，可能在计划时间被二次触发 "
+                        f"(exit={disable_code}): {disable_stderr[:200]}"
+                    )
                 log_display = log_file.replace("/", "\\")
                 logger.info(
                     f"[SSH] 远程后台任务已启动: {task_name} "
@@ -485,8 +509,8 @@ class RemoteWorkstation:
     def kill_remote_task(self, task_name: str) -> bool:
         """终止远程计划任务及其子进程。
 
-        先尝试 schtasks /End 优雅终止（发送 WM_CLOSE），若任务仍存在
-        则用 schtasks /Delete 强制移除。用于超时后清理仍在运行的远程进程。
+        先按 wrapper 脚本记录的子进程 PID 终止进程树，再结束并删除计划任务。
+        用于超时后清理仍在运行的远程进程，避免按镜像名误杀其他 Fluent 任务。
 
         Args:
             task_name: 计划任务名称（由 exec_background 返回）
@@ -499,7 +523,21 @@ class RemoteWorkstation:
         if not self.ensure_connected():
             return False
 
+        pid_file = self._task_pid_files.pop(task_name, None)
         try:
+            if pid_file:
+                pid = self._read_remote_pid_file(pid_file)
+                if pid is not None:
+                    kill_cmd = f"taskkill /PID {pid} /T /F"
+                    out, err, kill_code = self.exec_command(kill_cmd, timeout=60)
+                    no_match = "没有运行的任务匹配指定标准" in out
+                    if kill_code != 0 and not no_match:
+                        logger.warning(
+                            f"[SSH] taskkill PID {pid} 返回非零码 {kill_code}: {err or out}"
+                        )
+                    elif kill_code == 0:
+                        logger.info(f"[SSH] 已按 PID 终止远程任务进程树: {pid}")
+
             # 先尝试优雅终止（向任务进程发送终止信号）
             end_cmd = f'schtasks /End /TN "{task_name}"'
             _, _, end_code = self.exec_command(end_cmd, timeout=15)
@@ -507,6 +545,9 @@ class RemoteWorkstation:
             # 删除计划任务（无论 End 是否成功）
             del_cmd = f'schtasks /Delete /TN "{task_name}" /F'
             _, _, del_code = self.exec_command(del_cmd, timeout=15)
+
+            if pid_file:
+                self.delete_remote_file(pid_file)
 
             if end_code == 0 or del_code == 0:
                 logger.info(f"[SSH] 远程任务已终止: {task_name}")
@@ -517,18 +558,35 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
             return False
 
+    def _read_remote_pid_file(self, pid_file: str) -> int | None:
+        """读取远程 wrapper 记录的子进程 PID。"""
+        cmd_pid_file = pid_file.replace("/", "\\")
+        out, err, code = self.exec_command(f'cmd /c type "{cmd_pid_file}"', timeout=15)
+        if code != 0:
+            logger.warning(f"[SSH] 读取远程任务 PID 失败: {pid_file}: {err or out}")
+            return None
+        cleaned = out.replace("\x00", "").replace("\ufeff", "").strip()
+        match = re.search(r"\b\d+\b", cleaned)
+        if match is None:
+            logger.warning(f"[SSH] 远程任务 PID 文件内容无效: {pid_file}: {cleaned!r}")
+            return None
+        return int(match.group(0))
+
     @staticmethod
     def _build_background_cmd_script(
         command: str,
         flag_file: str,
         log_file: str,
+        pid_file: str | None = None,
         task_name: str | None = None,
         working_dir: str | None = None,
+        interactive: bool = False,
     ) -> str:
         """构造计划任务实际执行的 cmd 脚本。"""
         cmd_flag = flag_file.replace("/", "\\")
         cmd_error_flag = f"{cmd_flag}.error"
         cmd_log = log_file.replace("/", "\\")
+        cmd_pid = (pid_file or f"{flag_file}.pid").replace("/", "\\")
         cleanup_line = ""
         if task_name:
             cleanup_line = f'schtasks /Delete /TN "{task_name}" /F >nul 2>&1\r\n'
@@ -536,19 +594,34 @@ class RemoteWorkstation:
         if working_dir:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
+        if interactive:
+            command_runner = f"call %AF_CMD% >> \"{cmd_log}\" 2>&1\r\n"
+        else:
+            command_runner = (
+                "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+                "\"$p = Start-Process -FilePath 'cmd.exe' "
+                "-ArgumentList '/d','/s','/c',$env:AF_CMD "
+                "-PassThru -WindowStyle Hidden; "
+                "Set-Content -LiteralPath $env:AF_PID_FILE -Value $p.Id -Encoding ascii; "
+                "$p.WaitForExit(); exit $p.ExitCode\" "
+                f">> \"{cmd_log}\" 2>&1\r\n"
+            )
         return (
             "@echo off\r\n"
             "setlocal\r\n"
             "set PYTHONUTF8=1\r\n"
             "set PYTHONIOENCODING=utf-8\r\n"
+            f"set \"AF_CMD={command}\"\r\n"
+            f"set \"AF_PID_FILE={cmd_pid}\"\r\n"
             f"{cd_line}"
-            f"{command} >> \"{cmd_log}\" 2>&1\r\n"
+            f"{command_runner}"
             "set \"AF_EXIT=%ERRORLEVEL%\"\r\n"
             "if \"%AF_EXIT%\"==\"0\" (\r\n"
             f"  echo done > \"{cmd_flag}\"\r\n"
             ") else (\r\n"
             f"  echo error %AF_EXIT% > \"{cmd_error_flag}\"\r\n"
             ")\r\n"
+            "del /f /q \"%AF_PID_FILE%\" >nul 2>&1\r\n"
             f"{cleanup_line}"
             "exit /b %AF_EXIT%\r\n"
         )
@@ -595,6 +668,7 @@ class RemoteWorkstation:
             True 表示标志文件已出现（任务完成），False 表示超时或外部停止
         """
         logger.info(f"[SSH] 等待远程任务完成，标志文件: {flag_file}")
+        error_flag = f"{flag_file}.error"
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -609,6 +683,11 @@ class RemoteWorkstation:
             # ★ 响应停止指令
             if stopped_event is not None and stopped_event.is_set():
                 logger.info("[SSH] 等待远程任务期间收到停止指令，提前退出")
+                return False
+
+            if self.check_remote_file(error_flag):
+                logger.error(f"[SSH] 远程任务执行失败（检测到错误标志文件）: {error_flag}")
+                self.delete_remote_file(error_flag)
                 return False
 
             if self.check_remote_file(flag_file):
@@ -874,7 +953,7 @@ class RemoteWorkstation:
     def get_remote_file_hash(self, remote_path: str) -> str | None:
         """获取远程文件的 MD5 哈希值。
 
-        使用 PowerShell Get-FileHash 命令计算远程文件的哈希值。
+        使用 cmd.exe + certutil 计算远程文件哈希，避免依赖 PowerShell。
 
         Args:
             remote_path: 远程文件路径
@@ -882,22 +961,18 @@ class RemoteWorkstation:
         Returns:
             文件的 MD5 哈希值（小写十六进制字符串），失败返回 None
         """
-        if not self.ensure_connected():
-            return None
-
-        # 使用 PowerShell 计算文件哈希
         normalized_path = remote_path.replace("\\", "/")
-        ps_command = f'Get-FileHash -Path "{normalized_path}" -Algorithm MD5 | Select-Object -ExpandProperty Hash'
-        out, err, code = self.exec_command(f'powershell -Command "{ps_command}"', timeout=30)
-
-        if code == 0 and out.strip():
-            # 返回小写的哈希值
-            return out.strip().lower()
-        else:
-            logger.debug(f"[SSH] 获取远程文件哈希失败 (可能文件不存在): {remote_path}")
+        remote_dir = self._remote_dirname(normalized_path)
+        filename = normalized_path.rsplit("/", 1)[-1]
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, [filename])
+        if hashes is None:
+            logger.debug(f"[SSH] 获取远程文件哈希失败: {remote_path}")
             return None
+        return hashes[filename]
 
-    def get_remote_file_hashes(self, remote_dir: str, filenames: list) -> dict:
+    def get_remote_file_hashes(
+        self, remote_dir: str, filenames: list[str]
+    ) -> dict[str, str | None]:
         """批量获取远程文件的 MD5 哈希值。
 
         Args:
@@ -906,23 +981,22 @@ class RemoteWorkstation:
 
         Returns:
             字典，键为文件名，值为 MD5 哈希值（文件不存在则值为 None）
+
+        Raises:
+            ConnectionError: 远程批处理执行失败或输出不完整
         """
-        result = {}
-        remote_dir_normalized = remote_dir.replace("\\", "/")
-
-        for filename in filenames:
-            remote_path = f"{remote_dir_normalized}/{filename}"
-            result[filename] = self.get_remote_file_hash(remote_path)
-
-        return result
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, filenames)
+        if hashes is None:
+            raise ConnectionError("批量获取远程文件哈希失败")
+        return hashes
 
     def get_remote_combined_file_hash(
-        self, remote_dir: str, filenames: list
+        self, remote_dir: str, filenames: list[str]
     ) -> str | None:
         """获取远程目录中所有指定文件的组合 MD5 哈希值（单次 SSH 调用）。
 
-        在远程执行 PowerShell 脚本：逐文件计算 MD5 → 按文件名排序 →
-        拼接为 "name:hash|..." 格式 → 计算组合 MD5。
+        在远程通过 cmd.exe + certutil 批量计算各文件 MD5，再在本地按文件名排序，
+        拼接为 "name:hash|..." 格式并计算组合 MD5。
         用于两级哈希校验的第一级快速比对。
 
         Args:
@@ -932,49 +1006,82 @@ class RemoteWorkstation:
         Returns:
             组合 MD5 哈希值（小写十六进制字符串），失败返回 None
         """
+        hashes = self._get_remote_file_hashes_via_cmd(remote_dir, filenames)
+        if hashes is None:
+            logger.debug(f"[SSH] 获取远程组合哈希失败: {remote_dir}")
+            return None
+        combined = "|".join(
+            f"{name}:{hash_value or 'MISSING'}"
+            for name, hash_value in sorted(hashes.items())
+        )
+        return hashlib.md5(combined.encode("utf-8")).hexdigest()
+
+    def _get_remote_file_hashes_via_cmd(
+        self, remote_dir: str, filenames: list[str]
+    ) -> dict[str, str | None] | None:
+        """通过临时 cmd 批处理和 certutil 一次性计算多个远程文件哈希。"""
         if not self.ensure_connected():
             return None
 
         remote_dir_normalized = remote_dir.replace("\\", "/")
-        # 对路径和文件名中的单引号进行 PowerShell 转义（'' → '）
-        escaped_dir = remote_dir_normalized.replace("'", "''")
-        escaped_files = [f.replace("'", "''") for f in filenames]
+        bat_lines = ["@echo off"]
+        for index, filename in enumerate(filenames):
+            remote_path = f"{remote_dir_normalized}/{filename}"
+            if '"' in remote_path:
+                logger.error(f"[SSH] 远程文件路径包含非法双引号: {remote_path}")
+                return None
+            escaped_path = remote_path.replace("%", "%%")
+            bat_lines.extend([
+                f'@if exist "{escaped_path}" (',
+                f"  @echo __AF_HASH_BEGIN__{index}",
+                f'  @certutil -hashfile "{escaped_path}" MD5',
+                f"  @echo __AF_HASH_END__{index}",
+                ") else (",
+                f"  @echo __AF_HASH_MISSING__{index}",
+                ")",
+            ])
 
-        # 构建 PowerShell 脚本：逐文件计算哈希 → 排序拼接 → 组合 MD5
-        file_list_ps = ",".join(f"'{f}'" for f in escaped_files)
-        ps_script = (
-            f"$files = @({file_list_ps}); "
-            f"$dir = '{escaped_dir}'; "
-            f"$results = @(); "
-            f"foreach ($f in $files) {{ "
-            f"  $p = Join-Path $dir $f; "
-            f"  if (Test-Path $p) {{ "
-            f"    $h = (Get-FileHash -Path $p -Algorithm MD5).Hash.ToLower(); "
-            f"    $results += ($f + ':' + $h) "
-            f"  }} else {{ "
-            f"    $results += ($f + ':MISSING') "
-            f"  }} "
-            f"}}; "
-            f"$combined = ($results | Sort-Object) -join '|'; "
-            f"$bytes = [System.Text.Encoding]::UTF8.GetBytes($combined); "
-            f"$md5 = [System.Security.Cryptography.MD5]::Create().ComputeHash($bytes); "
-            f"[System.BitConverter]::ToString($md5).Replace('-','').ToLower()"
-        )
+        script_sftp = f"C:/Windows/Temp/_af_hash_files_{uuid.uuid4().hex}.bat"
+        script_win = script_sftp.replace("/", "\\")
+        try:
+            self._write_remote_text_file(script_sftp, "\r\n".join(bat_lines) + "\r\n")
+            out, err, code = self.exec_command(f'cmd /c "{script_win}"', timeout=60)
+        finally:
+            try:
+                self.delete_remote_file(script_sftp)
+            except (OSError, EOFError):
+                pass
 
-        # ★ 使用 -EncodedCommand + Base64 传递脚本，消除所有转义/引号问题：
-        #   - $ 符号不会被外层 shell 意外展开
-        #   - 无需处理嵌套双引号/单引号的转义
-        #   - 命令字符串仅含 [A-Za-z0-9+/=]，通过 SSH/cmd.exe 时零歧义
-        script_bytes = ps_script.encode('utf-16-le')
-        encoded = base64.b64encode(script_bytes).decode('ascii')
-        out, err, code = self.exec_command(
-            f'powershell -EncodedCommand {encoded}', timeout=60
-        )
-
-        if code == 0 and out.strip():
-            return out.strip()
-        else:
-            logger.debug(
-                f"[SSH] 获取远程组合哈希失败: {remote_dir}, err={err}"
-            )
+        if code != 0:
+            logger.error(f"[SSH] 批量获取远程文件哈希失败 (exit={code}): {err}")
             return None
+
+        return self._parse_remote_file_hashes(out, filenames)
+
+    @staticmethod
+    def _parse_remote_file_hashes(
+        output: str, filenames: list[str]
+    ) -> dict[str, str | None] | None:
+        """解析 certutil 批处理输出；缺失文件与异常输出使用不同语义。"""
+        cleaned_output = output.replace("\x00", "").replace("\ufeff", "")
+        result: dict[str, str | None] = {}
+        for index, filename in enumerate(filenames):
+            if f"__AF_HASH_MISSING__{index}" in cleaned_output:
+                result[filename] = None
+                continue
+
+            begin_marker = f"__AF_HASH_BEGIN__{index}"
+            end_marker = f"__AF_HASH_END__{index}"
+            begin = cleaned_output.find(begin_marker)
+            end = cleaned_output.find(end_marker, begin + len(begin_marker))
+            if begin == -1 or end == -1:
+                logger.error(f"[SSH] 远程文件哈希输出缺少标记: {filename}")
+                return None
+
+            section = cleaned_output[begin + len(begin_marker):end]
+            match = re.search(r"(?im)^[0-9a-f]{32}\s*$", section)
+            if match is None:
+                logger.error(f"[SSH] 远程文件哈希输出无法解析: {filename}")
+                return None
+            result[filename] = match.group(0).strip().lower()
+        return result

@@ -15,13 +15,14 @@ import os
 import time
 
 from engine.config import (
-    STATUS_WAITING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import wait_unless_paused_or_stopped
+from engine.scheduler.work_queue import UniqueWorkQueue
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -41,7 +42,7 @@ class WorkerPoolManager:
         self,
         state_manager: StateManager,
         task_runner: TaskRunner,
-        sc_queue: queue.Queue[tuple[int, str]],
+        sc_queue: UniqueWorkQueue[tuple[int, str]],
         paused_event: threading.Event,
         stopped_event: threading.Event,
         barrier_passed_event: threading.Event,
@@ -73,7 +74,7 @@ class WorkerPoolManager:
         # ---- Transfer 解耦队列 ----
         # SC Worker 完成 SC 后将构型名称推入此队列，
         # Transfer Worker 从此队列取任务执行传输。
-        self._transfer_queue: queue.Queue[int] = queue.Queue()
+        self._transfer_queue = UniqueWorkQueue[int]()
 
         # ---- 工作线程（SC 与 Transfer 分离） ----
         self._sc_worker_threads: list[threading.Thread] = []
@@ -94,6 +95,17 @@ class WorkerPoolManager:
     def set_meshing_monitor(self, meshing_monitor) -> None:
         """注入 MeshingMonitor 实例。由 PipelineScheduler 在创建后调用。"""
         self._meshing_monitor = meshing_monitor
+
+    def submit_transfer(self, config_name: int) -> bool:
+        """提交 Transfer 任务；排队或执行中的构型不会重复提交。"""
+        if not self._transfer_queue.submit(config_name):
+            logger.debug(f"构型{config_name} 已在 Transfer 队列或执行中，跳过重复提交")
+            return False
+        logger.info(
+            f"构型{config_name} 已推入 Transfer 队列 "
+            f"(队列深度: {self._transfer_queue.qsize()})"
+        )
+        return True
 
     def join_worker_threads(self, timeout: float = 3.0) -> None:
         """等待所有 SC 和 Transfer 工作线程退出。
@@ -303,7 +315,7 @@ class WorkerPoolManager:
                     config_name, f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
-                self._sc_queue.task_done()
+                self._sc_queue.complete((config_name, _step_file))
 
         logger.info(f"[{threading.current_thread().name}] SC 工作线程退出")
 
@@ -316,6 +328,16 @@ class WorkerPoolManager:
             config_name: 构型名称
         """
         sc_status = self.state.get_step_status(config_name, "SC")
+
+        # ★ 重复入队检测：若 SC 已处于 Running 或 Completed，说明该构型
+        #   被重复推入了队列（如 resume + 文件监控器同时触发），直接跳过。
+        if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
+            logger.warning(
+                f"[WorkerPool] 检测到重复入队：构型{config_name} SC 已处于 {sc_status} 状态，"
+                f"跳过本次处理（可能是 resume 与文件监控器同时入队导致）"
+            )
+            return
+
         # 排除 RUNNING：防止 _resume_paused_steps() 重复入队导致两个 Worker
         # 同时执行同一构型的 SC 步骤（RetryManager 已将状态设为 RUNNING）
         if sc_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
@@ -343,12 +365,17 @@ class WorkerPoolManager:
                 )
                 return
 
+            # ★ 执行完成后再次确认状态，仅在 SC 确实 Completed 时推入 Transfer
+            sc_status = self.state.get_step_status(config_name, "SC")
+
         # ★ SC 成功（或已 Completed），推入 Transfer 队列
-        self._transfer_queue.put(config_name)
-        logger.info(
-            f"构型{config_name} SC 完成，已推入 Transfer 队列 "
-            f"(队列深度: {self._transfer_queue.qsize()})"
-        )
+        if sc_status == STATUS_COMPLETED:
+            self.submit_transfer(config_name)
+        else:
+            logger.warning(
+                f"[WorkerPool] 构型{config_name} SC 执行后状态为 {sc_status}，"
+                f"未推入 Transfer 队列"
+            )
 
     # ==================================================================
     # Transfer 工作线程
@@ -413,7 +440,7 @@ class WorkerPoolManager:
                     config_name, f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
-                self._transfer_queue.task_done()
+                self._transfer_queue.complete(config_name)
 
         logger.info(f"[{threading.current_thread().name}] Transfer 工作线程退出")
 
@@ -430,6 +457,16 @@ class WorkerPoolManager:
             return
 
         transfer_status = self.state.get_step_status(config_name, "Transfer")
+
+        # ★ 重复入队检测：若 Transfer 已处于 Running 或 Completed，说明该构型
+        #   被重复推入了队列，直接跳过。
+        if transfer_status in (STATUS_RUNNING, STATUS_COMPLETED):
+            logger.warning(
+                f"[WorkerPool] 检测到重复入队：构型{config_name} Transfer 已处于 {transfer_status} 状态，"
+                f"跳过本次处理"
+            )
+            return
+
         # 排除 RUNNING：防止重复入队导致两个 Worker 同时执行同一构型的 Transfer
         if transfer_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
             # ★ 远程文件存在性检查已移入 remote_executor.execute_transfer() 内部，
@@ -442,14 +479,23 @@ class WorkerPoolManager:
                 )
                 return
 
+            # ★ 执行完成后再次确认状态
+            transfer_status = self.state.get_step_status(config_name, "Transfer")
+
         # ★ Transfer 成功（或已 Completed），提交 MeshingMonitor
-        if self._meshing_monitor is not None:
-            self._meshing_monitor.submit(config_name)
-            logger.info(f"构型{config_name} Transfer 完成，已提交 MeshingMonitor")
+        if transfer_status == STATUS_COMPLETED:
+            if self._meshing_monitor is not None:
+                self._meshing_monitor.submit(config_name)
+                logger.info(f"构型{config_name} Transfer 完成，已提交 MeshingMonitor")
+            else:
+                logger.warning(
+                    f"构型{config_name} Transfer 完成但 MeshingMonitor 未就绪，"
+                    f"Meshing 将在下次重启时由断点续传处理"
+                )
         else:
             logger.warning(
-                f"构型{config_name} Transfer 完成但 MeshingMonitor 未就绪，"
-                f"Meshing 将在下次重启时由断点续传处理"
+                f"[WorkerPool] 构型{config_name} Transfer 执行后状态为 {transfer_status}，"
+                f"未提交 MeshingMonitor"
             )
 
     def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:

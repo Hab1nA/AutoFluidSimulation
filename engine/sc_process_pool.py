@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 SpaceClaim 进程池 — 常驻模式实现。
 
@@ -23,7 +25,12 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional, Dict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Optional, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from engine.scheduler.control import PipelineControl
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import setup_logger
@@ -74,21 +81,26 @@ class SCProcessPool:
 
     def run_config(self, config_name: int,
                    paused_event: Optional[threading.Event] = None,
-                   stopped_event: Optional[threading.Event] = None) -> bool:
+                   stopped_event: Optional[threading.Event] = None,
+                   pipeline_control: Optional[PipelineControl] = None) -> bool:
         """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
-        with self._lock:
-            # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
-            #   而非在 SW 阶段或 start_pipeline 时过早执行。
-            #   注意：调用 _shutdown_all_internal() 而非 shutdown_all()，
-            #   因为当前已持有 _lock，shutdown_all() 会再次获取锁导致死锁。
-            if not self._first_cleanup_done:
-                logger.info("[SC-Pool] === 首次全体 SC 进程清理（首个构型进入 SC 步骤时）===")
-                self._shutdown_all_internal()
-                self._first_cleanup_done = True
-
-            slot = self._get_or_create_persistent_slot()
-            if slot is None:
+        with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
+            if not allowed:
+                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未启动槽位）")
                 return False
+            with self._lock:
+                # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
+                #   而非在 SW 阶段或 start_pipeline 时过早执行。
+                #   注意：调用 _shutdown_all_internal() 而非 shutdown_all()，
+                #   因为当前已持有 _lock，shutdown_all() 会再次获取锁导致死锁。
+                if not self._first_cleanup_done:
+                    logger.info("[SC-Pool] === 首次全体 SC 进程清理（首个构型进入 SC 步骤时）===")
+                    self._shutdown_all_internal()
+                    self._first_cleanup_done = True
+
+                slot = self._get_or_create_persistent_slot()
+                if slot is None:
+                    return False
 
         # ★ 槽位就绪等待：在锁外执行，避免长时间阻塞其他线程。
         #   新创建的槽位处于 "starting" 状态，需等待 Bridge 写入就绪文件；
@@ -112,7 +124,9 @@ class SCProcessPool:
             slot.current_config = config_name
 
         try:
-            result = self._send_persistent_command(slot, config_name, paused_event, stopped_event)
+            result = self._send_persistent_command(
+                slot, config_name, paused_event, stopped_event, pipeline_control,
+            )
             if result:
                 slot.configs_processed += 1
             return result
@@ -342,9 +356,26 @@ class SCProcessPool:
     # 命令发送与结果等待
     # ==================================================================
 
+    @contextmanager
+    def _external_start(
+        self,
+        pipeline_control: Optional[PipelineControl],
+        paused_event: Optional[threading.Event],
+        stopped_event: Optional[threading.Event],
+    ) -> Iterator[bool]:
+        """锁定一个 SC 槽位或命令启动窗口。"""
+        if pipeline_control is not None:
+            with pipeline_control.external_start() as allowed:
+                yield allowed
+            return
+        paused = paused_event is not None and paused_event.is_set()
+        stopped = stopped_event is not None and stopped_event.is_set()
+        yield not paused and not stopped
+
     def _send_persistent_command(self, slot: PersistentSlot, config_name: int,
-                                 paused_event: Optional[threading.Event],
-                                 stopped_event: Optional[threading.Event]) -> bool:
+                                  paused_event: Optional[threading.Event],
+                                  stopped_event: Optional[threading.Event],
+                                  pipeline_control: Optional[PipelineControl] = None) -> bool:
         """向常驻进程发送命令，通过 SCDOC 文件检测判定完成。
 
         ★ 核心设计：与 SW 步骤的 FileStableDetector 统一，直接轮询
@@ -372,9 +403,6 @@ class SCProcessPool:
         result_file = os.path.join(self._persistent_cmd_dir,
                                    f"sc_result_{slot.slot_id}_{run_id}.json")
 
-        # ★ 记录命令发送时刻：仅接受此时刻之后创建/修改的 SCDOC 文件
-        command_sent_at = time.time()
-
         cmd_data = {
             "command": "process",
             "run_id": run_id,
@@ -382,12 +410,18 @@ class SCProcessPool:
             "stepdir": step_dir,
             "scdocdir": scdoc_dir,
         }
-        try:
-            with open(cmd_file, "w") as f:
-                json.dump(cmd_data, f)
-        except OSError as e:
-            logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
-            return False
+        with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
+            if not allowed:
+                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未发送 SC 命令）")
+                return False
+            # 仅接受命令发送后创建或修改的 SCDOC 文件。
+            command_sent_at = time.time()
+            try:
+                with open(cmd_file, "w") as f:
+                    json.dump(cmd_data, f)
+            except OSError as e:
+                logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
+                return False
 
         logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})")
 

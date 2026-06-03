@@ -5,6 +5,7 @@
 ===============================================================================
 """
 import os
+import re
 import sys
 from typing import Any, Optional, TypedDict, cast
 
@@ -101,7 +102,9 @@ class EngineConfig(TypedDict):
     sc_timeout: int
     transfer_timeout: int
     meshing_timeout: int
+    meshing_processor_count: int
     solver_timeout: int
+    solver_processor_count: int
     max_retries: int
     state_refresh_interval: float
     sc_persistent_ready_timeout: int
@@ -322,8 +325,12 @@ ENGINE_CONFIG: EngineConfig = {
     "transfer_timeout": 120,
     # 网格划分超时（秒）
     "meshing_timeout": 600,
+    # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
+    "meshing_processor_count": 8,
     # 求解超时（秒）
     "solver_timeout": 7200,
+    # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
+    "solver_processor_count": 128,
     # 最大重试次数
     "max_retries": 3,
     # 全局状态刷新间隔（秒）
@@ -426,8 +433,7 @@ def _expand_env_vars(value: Any) -> Any:
     """展开字符串值中的 ${VAR} 环境变量引用。非字符串值原样返回。"""
     if not isinstance(value, str):
         return value
-    import re
-    def _replace(m: "re.Match[str]") -> str:
+    def _replace(m: re.Match[str]) -> str:
         var_name = m.group(1)
         return os.environ.get(var_name, m.group(0))  # 未定义则保留原文
     return re.sub(r'\$\{(\w+)\}', _replace, value)
@@ -499,9 +505,9 @@ def reload_config_from_toml() -> bool:
 # reload_config_from_toml()
 
 
-def validate_config() -> list:
+def validate_config() -> list[str]:
     """验证配置完整性，返回警告信息列表。"""
-    warnings = []
+    warnings: list[str] = []
 
     if not REMOTE_CONFIG["password"]:
         warnings.append(

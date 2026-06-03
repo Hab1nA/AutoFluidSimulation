@@ -164,7 +164,8 @@ class StepFileMonitor:
         )
         self._processed_files: set[str] = set()
         self._known_files: set[str] = set()
-        # 暂停控制：优先使用调度器传入的共享 Event，实现暂停标志同步
+        # 暂停控制：共享 Event 由调度器拥有，监控器只能读取和唤醒。
+        self._owns_paused_event = shared_paused_event is None
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
@@ -235,8 +236,7 @@ class StepFileMonitor:
         self._wake_event.set()
         if self._monitor_thread and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=5)
-        self._detector._history.clear()
-        self._detector._first_seen.clear()
+        self.clear_tracking()
         logger.info("STEP 文件监控已停止")
 
     # ------------------------------------------------------------------
@@ -256,9 +256,7 @@ class StepFileMonitor:
                     #    确保不会越过暂停向 SC 队列推送构型。
                     if self._need_reset:
                         self._need_reset = False
-                        self._processed_files.clear()
-                        self._detector._history.clear()
-                        self._detector._first_seen.clear()
+                        self.clear_tracking()
                         self._scan_existing_files()
                         logger.info("文件监控状态已重置（暂停中，恢复后生效）")
 
@@ -271,9 +269,7 @@ class StepFileMonitor:
             # ---- 非暂停：处理 _need_reset 后立即扫描 ----
             if self._need_reset:
                 self._need_reset = False
-                self._processed_files.clear()
-                self._detector._history.clear()
-                self._detector._first_seen.clear()
+                self.clear_tracking()
                 self._scan_existing_files()
                 logger.info("文件监控状态已重置，执行立即扫描")
 
@@ -291,32 +287,38 @@ class StepFileMonitor:
         self._paused.set()
         logger.info("STEP 文件监控已暂停")
 
-    def resume_and_reset(self):
-        """恢复监控并重置已处理文件集合（用于非暂停状态下的 reset 操作）。"""
+    def clear_tracking(self) -> None:
+        """立即清空文件追踪状态，供 SW 重试等同步清理场景使用。"""
+        self._processed_files.clear()
+        self._known_files.clear()
+        self._detector._history.clear()
+        self._detector._first_seen.clear()
+
+    def request_reset(self) -> None:
+        """请求监控线程清理追踪状态并重新扫描，不修改共享 pause。"""
         self._need_reset = True
-        self._paused.clear()
         self._wake_event.set()
-        logger.info("STEP 文件监控已恢复（将执行重置和立即扫描）")
+        logger.info("STEP 文件监控状态已标记为待重置")
+
+    def wake(self) -> None:
+        """唤醒监控线程，不修改共享 pause 或追踪状态。"""
+        self._wake_event.set()
+
+    def resume_and_reset(self):
+        """兼容接口：本地模式恢复后请求重置；共享模式仅请求重置。"""
+        if self._owns_paused_event:
+            self._paused.clear()
+        self.request_reset()
 
     def reset_only(self):
-        """仅重置已处理文件集合和检测器状态，不清除暂停标志。
-
-        用于暂停状态下的 reset/clean 操作：文件监控器需要清理内部状态
-        以便恢复后重新扫描，但不能在暂停期间越过暂停向 SC 队列推送构型。
-        """
-        self._need_reset = True
-        self._wake_event.set()
-        logger.info("STEP 文件监控状态已标记为待重置（暂停中，恢复后生效）")
+        """兼容接口：请求重置，不清除暂停标志。"""
+        self.request_reset()
 
     def resume_only(self):
-        """仅恢复监控，不重置已处理文件集合。
-
-        用于 pause→resume 场景：_resume_paused_steps() 已完成断点续传扫描，
-        文件监控器只需继续检测新写入的 STEP 文件，无需重新扫描旧文件。
-        """
-        self._paused.clear()
-        self._wake_event.set()
-        logger.info("STEP 文件监控已恢复（仅清除暂停标志）")
+        """兼容接口：本地模式恢复；共享模式仅唤醒。"""
+        if self._owns_paused_event:
+            self._paused.clear()
+        self.wake()
 
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""

@@ -1,4 +1,7 @@
+import hashlib
 from unittest.mock import patch
+
+import pytest
 
 from utils.ssh_client import RemoteWorkstation
 
@@ -10,10 +13,25 @@ def test_build_background_cmd_script_writes_done_or_error_flag():
         r"D:/flags/job.log",
     )
     assert r'>> "D:\flags\job.log" 2>&1' in script
+    assert r'set "AF_PID_FILE=D:\flags\job.done.pid"' in script
+    assert "Start-Process -FilePath 'cmd.exe'" in script
     assert r'echo done > "D:\flags\job.done"' in script
     assert r'echo error %AF_EXIT% > "D:\flags\job.done.error"' in script
+    assert r'del /f /q "%AF_PID_FILE%"' in script
+    assert "-WindowStyle Hidden" in script
     # working_dir 未指定时不应包含 cd /d
     assert "cd /d" not in script
+
+
+def test_build_background_cmd_script_interactive_calls_command_directly():
+    script = RemoteWorkstation._build_background_cmd_script(
+        r'conda run python script.py',
+        r"D:/flags/job.done",
+        r"D:/flags/job.log",
+        interactive=True,
+    )
+    assert "call %AF_CMD%" in script
+    assert "Start-Process" not in script
 
 
 def test_build_background_cmd_script_with_working_dir():
@@ -30,6 +48,7 @@ def test_build_background_cmd_script_with_working_dir():
 def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
     written: list[tuple[str, str]] = []
 
     def fake_exec(command: str, timeout: int = 30):
@@ -45,7 +64,11 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
 
     with patch.object(host, "ensure_connected", return_value=True):
         with patch.object(host, "exec_command", side_effect=fake_exec):
-            with patch.object(host, "delete_remote_file", return_value=True):
+            with patch.object(
+                host,
+                "delete_remote_file",
+                side_effect=lambda path: deleted.append(path) or True,
+            ):
                 with patch.object(host, "_ensure_remote_dir") as ensure_dir:
                     with patch.object(
                         host,
@@ -56,18 +79,113 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
                         assert result is True
                         assert task_name.startswith("AutoFluid_")
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0][0].startswith('schtasks /Create /TN "AutoFluid_')
+    assert " /IT" not in calls[0][0]
     assert calls[0][1] == 30
     assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
     assert calls[1][1] == 30
+    assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
+    assert calls[2][0].endswith('" /DISABLE')
+    assert calls[2][1] == 30
     ensure_dir.assert_any_call("D:/flags")
     assert len(written) == 1
     script_path, script_content = written[0]
     assert script_path.startswith("D:/flags/autofluid_bg_")
+    assert r'set "AF_PID_FILE=D:\flags\autofluid_bg_' in script_content
     assert command in script_content
     assert r'echo done > "D:\flags\task done.flag"' in script_content
     assert 'schtasks /Delete /TN "AutoFluid_' in script_content
+    assert deleted == [flag_file, f"{flag_file}.error"]
+
+
+def test_exec_background_interactive_creates_interactive_scheduled_task():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+    written: list[tuple[str, str]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with patch.object(host, "_ensure_remote_dir"):
+                    with patch.object(
+                        host,
+                        "_write_remote_text_file",
+                        side_effect=lambda path, content: written.append((path, content)),
+                    ):
+                        result, _ = host.exec_background(
+                            r"conda run python meshing.py",
+                            r"D:/flags/job.done",
+                            interactive=True,
+                        )
+
+    assert result is True
+    assert calls[0][0].endswith(" /IT")
+    assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
+    assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
+    assert calls[2][0].endswith('" /DISABLE')
+    assert "call %AF_CMD%" in written[0][1]
+    assert "Start-Process" not in written[0][1]
+
+
+def test_wait_for_flag_returns_false_immediately_when_error_flag_exists():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    flag_file = r"D:/flags/job.done"
+    checked: list[str] = []
+    deleted: list[str] = []
+
+    def fake_check(remote_path: str) -> bool:
+        checked.append(remote_path)
+        return remote_path == f"{flag_file}.error"
+
+    with patch.object(host, "check_remote_file", side_effect=fake_check):
+        with patch.object(
+            host,
+            "delete_remote_file",
+            side_effect=lambda path: deleted.append(path) or True,
+        ):
+            with patch(
+                "utils.ssh_client.time.sleep",
+                side_effect=AssertionError("error flag should stop polling immediately"),
+            ):
+                assert host.wait_for_flag(flag_file, timeout=60, poll_interval=10) is False
+
+    assert checked == [f"{flag_file}.error"]
+    assert deleted == [f"{flag_file}.error"]
+
+
+def test_kill_remote_task_kills_recorded_child_pid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    host._task_pid_files["AutoFluid_job"] = r"D:/flags/autofluid_bg_job.pid"
+    calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        if command == r'cmd /c type "D:\flags\autofluid_bg_job.pid"':
+            return ("4321\r\n", "", 0)
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "delete_remote_file",
+                side_effect=lambda path: deleted.append(path) or True,
+            ):
+                assert host.kill_remote_task("AutoFluid_job") is True
+
+    assert calls == [
+        (r'cmd /c type "D:\flags\autofluid_bg_job.pid"', 15),
+        ("taskkill /PID 4321 /T /F", 60),
+        ('schtasks /End /TN "AutoFluid_job"', 15),
+        ('schtasks /Delete /TN "AutoFluid_job" /F', 15),
+    ]
+    assert deleted == [r"D:/flags/autofluid_bg_job.pid"]
 
 
 def test_upload_file_applies_sftp_channel_timeout():
@@ -102,3 +220,114 @@ def test_upload_file_applies_sftp_channel_timeout():
 
     assert sftp.uploads == [("local.scdoc", "D:/remote/model.scdoc")]
     assert timeouts == [9, None]
+
+
+def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    written: list[tuple[str, str]] = []
+    deleted: list[str] = []
+    commands: list[tuple[str, int]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        commands.append((command, timeout))
+        return (
+            "__AF_HASH_BEGIN__0\r\n"
+            "MD5 的 D:/remote/alpha.txt 哈希:\r\n"
+            "0123456789ABCDEF0123456789ABCDEF\r\n"
+            "CertUtil: -hashfile 命令成功完成。\r\n"
+            "__AF_HASH_END__0\r\n"
+            "__AF_HASH_MISSING__1\r\n",
+            "",
+            0,
+        )
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "_write_remote_text_file",
+                side_effect=lambda path, content: written.append((path, content)),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    hashes = host.get_remote_file_hashes(
+                        r"D:\remote", ["alpha.txt", "missing.txt"]
+                    )
+
+    assert hashes == {
+        "alpha.txt": "0123456789abcdef0123456789abcdef",
+        "missing.txt": None,
+    }
+    assert len(written) == 1
+    script_path, script_content = written[0]
+    assert script_path.startswith("C:/Windows/Temp/_af_hash_files_")
+    assert script_path.endswith(".bat")
+    assert deleted == [script_path]
+    assert commands == [(f'cmd /c "{script_path.replace("/", "\\")}"', 60)]
+    assert "powershell" not in commands[0][0].lower()
+    assert 'certutil -hashfile "D:/remote/alpha.txt" MD5' in script_content
+    assert '__AF_HASH_MISSING__1' in script_content
+
+
+def test_get_remote_file_hashes_raises_when_cmd_batch_fails_and_cleans_up():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    written: list[str] = []
+    deleted: list[str] = []
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", return_value=("", "access denied", 1)):
+            with patch.object(
+                host,
+                "_write_remote_text_file",
+                side_effect=lambda path, content: written.append(path),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    with pytest.raises(ConnectionError, match="批量获取远程文件哈希失败"):
+                        host.get_remote_file_hashes(r"D:\remote", ["alpha.txt"])
+
+    assert len(written) == 1
+    assert deleted == written
+
+
+def test_get_remote_file_hashes_raises_when_cmd_batch_output_is_invalid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(
+            host,
+            "exec_command",
+            return_value=("__AF_HASH_BEGIN__0\r\ninvalid\r\n__AF_HASH_END__0\r\n", "", 0),
+        ):
+            with patch.object(host, "_write_remote_text_file"):
+                with patch.object(host, "delete_remote_file", return_value=True):
+                    with pytest.raises(ConnectionError, match="批量获取远程文件哈希失败"):
+                        host.get_remote_file_hashes(r"D:\remote", ["alpha.txt"])
+
+
+def test_get_remote_combined_file_hash_uses_cmd_batch_hashes():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    expected = hashlib.md5(
+        b"alpha.txt:0123456789abcdef0123456789abcdef|missing.txt:MISSING"
+    ).hexdigest()
+
+    with patch.object(
+        host,
+        "_get_remote_file_hashes_via_cmd",
+        return_value={
+            "alpha.txt": "0123456789abcdef0123456789abcdef",
+            "missing.txt": None,
+        },
+    ) as batch_hashes:
+        combined = host.get_remote_combined_file_hash(
+            r"D:\remote", ["alpha.txt", "missing.txt"]
+        )
+
+    assert combined == expected
+    batch_hashes.assert_called_once_with(r"D:\remote", ["alpha.txt", "missing.txt"])

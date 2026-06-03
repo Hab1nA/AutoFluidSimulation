@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import time
+from typing import Any
 
 # 强制 Python 使用 UTF-8 编码，避免 conda run 在中文 Windows 上的 GBK 编码崩溃
 os.environ["PYTHONUTF8"] = "1"
@@ -49,11 +50,13 @@ def parse_args() -> argparse.Namespace:
                         help='SCDOC 输入目录')
     parser.add_argument('--output-dir', type=str, required=True,
                         help='网格输出目录')
+    parser.add_argument('--working-dir', type=str, required=True,
+                        help='Fluent 启动工作目录')
 
     # Fluent 参数
     parser.add_argument('--processor-count', type=int,
-                        default=64,
-                        help='处理器核心数 (默认: 64)')
+                        default=8,
+                        help='处理器核心数 (默认: 8)')
 
     return parser.parse_args()
 
@@ -72,13 +75,40 @@ def setup_mpi_environment(mpi_bin_dir: str) -> None:
     print(f"[环境] I_MPI_ROOT = {mpi_root}")
 
 
+def _require_file(path: str, label: str) -> None:
+    """验证 Meshing 启动前必须存在的输入文件。"""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"{label}不存在: {path}")
+
+
+def _ensure_session_healthy(meshing_session: Any, stage: str) -> None:
+    """确认 Fluent server 仍可通过 PyFluent gRPC 通道访问。"""
+    try:
+        if meshing_session.is_server_healthy():
+            print(f"[健康检查] Fluent server 正常: {stage}")
+            return
+    except Exception as e:
+        raise RuntimeError(f"Fluent server 健康检查失败 ({stage}): {e}") from e
+    raise RuntimeError(f"Fluent server 健康检查失败 ({stage}): server unhealthy")
+
+
 def main() -> None:
     """主函数。"""
     args = parse_args()
+    config_id = args.config_id
 
     # 验证参数
-    if args.config_id < 0:
+    if config_id < 0:
         raise ValueError("参数 config_id 必须是大于等于0的整数。")
+    if args.processor_count <= 0:
+        raise ValueError("参数 --processor-count 必须是大于0的整数。")
+
+    # 在占用 Fluent 许可证和启动 GUI 前完成输入文件校验。
+    import_file_name = os.path.join(args.scdoc_dir, f"model_gen4_{config_id}.scdoc")
+    _require_file(args.workflow_path, "工作流文件")
+    _require_file(args.journal_path, "Journal 文件")
+    _require_file(import_file_name, "SCDOC 输入文件")
+    os.makedirs(args.working_dir, exist_ok=True)
 
     # 设置环境变量
     setup_mpi_environment(args.mpi_bin_dir)
@@ -90,6 +120,7 @@ def main() -> None:
     print(f"[配置] Journal 文件: {args.journal_path}")
     print(f"[配置] SCDOC 目录: {args.scdoc_dir}")
     print(f"[配置] 输出目录: {args.output_dir}")
+    print(f"[配置] Fluent 工作目录: {args.working_dir}")
     print(f"[配置] 处理器核心数: {args.processor_count}")
 
     # 确保输出目录存在
@@ -104,18 +135,18 @@ def main() -> None:
         product_version=pyfluent.FluentVersion.v241,
         cleanup_on_exit=True,
         ui_mode="gui",
-        env={"lang": "zh"}
+        cwd=args.working_dir,
+        start_watchdog=False,
     )
-
-    config_id = args.config_id
 
     # 临时文件路径（用于 finally 清理）
     temp_wft: str | None = None
     temp_jou: str | None = None
 
     try:
+        _ensure_session_healthy(meshing_session, "启动后")
+
         # 1. 构建文件路径
-        import_file_name = os.path.join(args.scdoc_dir, f"model_gen4_{config_id}.scdoc")
         print(f"[{config_id}] 输入文件: {import_file_name}")
 
         # 2. 创建临时工作流文件副本，替换构型号占位符
@@ -143,8 +174,10 @@ def main() -> None:
             f.write(jou_content)
 
         # 4. 执行临时 Journal 文件
+        _ensure_session_healthy(meshing_session, "执行 Journal 前")
         print(f"[{config_id}] 正在执行 Journal 文件: {temp_jou}")
         meshing_session.tui.file.read_journal(temp_jou)
+        _ensure_session_healthy(meshing_session, "执行 Journal 后")
 
         # 5. 保存网格
         mesh_file_name = f"model_gen4_{config_id}.msh.h5"
@@ -169,7 +202,7 @@ def main() -> None:
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
-        sys.exit(1)
+        raise
 
     finally:
         # ★ finally 确保无论成功/异常都执行临时文件清理和 Fluent 退出
@@ -181,8 +214,12 @@ def main() -> None:
                 except Exception as cleanup_err:
                     print(f"[{config_id}] 清理临时文件失败: {cleanup_err}")
 
-        meshing_session.exit()
-        print(f"模型 {config_id} 的网格生成完成！")
+        try:
+            meshing_session.exit()
+        except Exception as cleanup_err:
+            print(f"[{config_id}] Fluent 退出失败: {cleanup_err}")
+
+    print(f"模型 {config_id} 的网格生成完成！")
 
 
 if __name__ == "__main__":

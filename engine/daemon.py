@@ -296,7 +296,7 @@ class PipelineDaemon:
     # IPC 命令处理器
     # ------------------------------------------------------------------
 
-    def handle_start(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_start(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 start 命令（启动或继续流水线）。
 
         状态机：
@@ -354,7 +354,7 @@ class PipelineDaemon:
 
         return True, None, "流水线已启动"
 
-    def handle_pause(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_pause(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 pause 命令。
 
         暂停行为取决于当前所处阶段：
@@ -373,28 +373,28 @@ class PipelineDaemon:
         self.scheduler.pause()
         return True, None, "流水线已暂停（当前运行步骤完成后不再取新任务）"
 
-    def handle_stop(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
         # 统一退出路径：仅设置 _stop_event，由 run() 的 finally 块执行 shutdown()
         self._stop_event.set()
         return True, None, "后台引擎正在安全退出..."
 
-    def handle_check(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_check(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 check 命令（系统自检）。"""
         if self.runner is None:
             raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
 
-    def handle_get_all_status(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_get_all_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取所有构型的状态。"""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
         statuses = self.state.get_all_statuses()
         return True, statuses, ""
 
-    def handle_get_statistics(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_get_statistics(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取统计信息。"""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
@@ -405,7 +405,7 @@ class PipelineDaemon:
         stats["barrier_passed"] = self.state.is_global_barrier_met()
         return True, stats, ""
 
-    def handle_get_engine_status(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_get_engine_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取引擎状态。"""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
@@ -491,18 +491,15 @@ class PipelineDaemon:
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
 
-        # 如果清理范围涉及 SW 步骤，重置文件监控器状态
-        # ★ 暂停感知：若当前处于暂停状态，使用 reset_only() 避免越过暂停
+        # 如果清理范围涉及 SW 步骤，请求文件监控器重置追踪状态。
+        # 监控器不会修改调度器拥有的共享 pause。
         if step_name == "all" or step_name == "SW":
-            if self.scheduler and self.scheduler._file_monitor:
-                if self.scheduler.is_paused:
-                    self.scheduler._file_monitor.reset_only()
-                else:
-                    self.scheduler._file_monitor.resume_and_reset()
+            if self.scheduler:
+                self.scheduler.request_file_monitor_reset()
 
         return True, None, msg
 
-    def handle_reload_config(self, params: dict | None = None) -> tuple[bool, Any, str]:
+    def handle_reload_config(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""
         if self._pipeline_ever_started:
             logger.warning("[Config] 流水线已启动过，拒绝重新加载配置（需重启 Daemon）")

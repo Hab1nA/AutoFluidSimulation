@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import threading
 
-from engine.config import LOCAL_PATHS, REMOTE_CONFIG, STATUS_ERROR
+from engine.config import ENGINE_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, STATUS_ERROR
 from executor.remote_executor import RemoteExecutor
 
 
@@ -127,12 +127,15 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 8)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         command, flag_file = executor._build_meshing_command(5)
 
         assert "5" in command
         assert "batch_meshing_gen4.py" in command
+        assert "run --no-capture-output -n pyfluent python -u" in command
+        assert "--processor-count 8" in command
         assert "meshing_done_5.txt" in flag_file
 
     def test_command_contains_all_paths(self, monkeypatch):
@@ -143,7 +146,9 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 4)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         command, _ = executor._build_meshing_command(1)
@@ -153,6 +158,100 @@ class TestBuildMeshingCommand:
         assert "--journal-path" in command
         assert "--scdoc-dir" in command
         assert "--output-dir" in command
+        assert '--working-dir "D:\\working"' in command
+        assert "--processor-count 4" in command
+
+    def test_invalid_meshing_processor_count_falls_back_to_default(self, monkeypatch):
+        """无效 Meshing 核心数配置回退到保守默认值。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 0)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_meshing_command(1)
+
+        assert "--processor-count 8" in command
+
+    def test_timeout_cleanup_kills_tracked_remote_task(self, monkeypatch):
+        """Meshing 超时清理时终止已跟踪的远程任务。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 0)
+
+        killed: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, _remote_path: str) -> bool:
+                return False
+
+            def kill_remote_task(self, task_name: str) -> bool:
+                killed.append(task_name)
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        executor._remote_tasks[7] = "AutoFluid_meshing"
+
+        assert executor.wait_meshing_completion(7) is False
+        assert killed == ["AutoFluid_meshing"]
+
+
+class TestBuildSolverCommand:
+    """验证远程 Solver 命令构建。"""
+
+    def test_command_streams_conda_output(self, monkeypatch):
+        """Solver 命令使用实时输出参数。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 128)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, flag_file = executor._build_solver_command(2)
+
+        assert "batch_solver_gen4.py" in command
+        assert "run --no-capture-output -n pyfluent python -u" in command
+        assert "--processor-count 128" in command
+        assert "solver_done_2.txt" in flag_file
+
+    def test_command_uses_configured_solver_processor_count(self, monkeypatch):
+        """Solver 命令使用配置的核心数。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 64)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_solver_command(3)
+
+        assert "--processor-count 64" in command
+
+    def test_invalid_solver_processor_count_falls_back_to_default(self, monkeypatch):
+        """无效 Solver 核心数配置回退到默认值。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 0)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_solver_command(3)
+
+        assert "--processor-count 128" in command
 
 
 # ====================================================================
@@ -216,6 +315,70 @@ class TestExecuteMeshing:
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         assert executor.execute_meshing("1") is False
         assert executor.execute_meshing(1.5) is False
+
+    def test_run_meshing_uses_configured_working_dir(self, monkeypatch):
+        """Meshing 后台任务使用仿真工作目录启动 Fluent。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 8)
+        captured: dict[str, str | None] = {}
+
+        class _SSH:
+            def exec_background(
+                self,
+                command: str,
+                flag_file: str,
+                *,
+                working_dir: str | None = None,
+                interactive: bool = False,
+            ) -> tuple[bool, str]:
+                captured["command"] = command
+                captured["flag_file"] = flag_file
+                captured["working_dir"] = working_dir
+                captured["interactive"] = str(interactive)
+                return (True, "AutoFluid_meshing")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+
+        assert executor._run_meshing_command(2) is True
+        assert captured["working_dir"] == r"D:\working"
+        assert captured["interactive"] == "True"
+        assert '--working-dir "D:\\working"' in str(captured["command"])
+
+    def test_wait_meshing_completion_cleans_remote_task(self, monkeypatch):
+        """Meshing 完成后清理计划任务条目，避免远程任务列表堆积。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 30)
+
+        deleted: list[str] = []
+        killed: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                return path == "D:/flags/meshing_done_4.txt"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def kill_remote_task(self, task_name: str) -> bool:
+                killed.append(task_name)
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        executor._remote_tasks[4] = "AutoFluid_done_task"
+
+        assert executor.wait_meshing_completion(4) is True
+        assert deleted == ["D:/flags/meshing_done_4.txt"]
+        assert killed == ["AutoFluid_done_task"]
+        assert 4 not in executor._remote_tasks
 
 
 class TestExecuteSolver:

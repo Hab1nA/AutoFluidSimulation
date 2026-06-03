@@ -282,6 +282,32 @@ fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<Validation
             severity: Severity::Error,
         });
     }
+    if config.global_settings.meshing_processor_count == 0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.meshing_processor_count".to_string(),
+            message: "网格核心数至少为 1".to_string(),
+            severity: Severity::Error,
+        });
+    } else if config.global_settings.meshing_processor_count > 32 {
+        errors.push(ValidationError {
+            field_name: "global_settings.meshing_processor_count".to_string(),
+            message: "Fluent Meshing 高核心数可能导致体网格阶段不稳定".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+    if config.global_settings.solver_processor_count == 0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.solver_processor_count".to_string(),
+            message: "求解核心数至少为 1".to_string(),
+            severity: Severity::Error,
+        });
+    } else if !(64..=128).contains(&config.global_settings.solver_processor_count) {
+        errors.push(ValidationError {
+            field_name: "global_settings.solver_processor_count".to_string(),
+            message: "Solver 建议使用 64-128 核".to_string(),
+            severity: Severity::Warning,
+        });
+    }
     if config.global_settings.state_refresh_interval <= 0.0 {
         errors.push(ValidationError {
             field_name: "global_settings.state_refresh_interval".to_string(),
@@ -392,6 +418,39 @@ mod tests {
             .iter()
             .any(|e| e.field_name == "global_settings.solver_timeout"
                 && matches!(e.severity, Severity::Error)));
+    }
+
+    #[test]
+    fn test_zero_meshing_processor_count_reports_error() {
+        let mut config = SettingsConfig::default();
+        config.global_settings.meshing_processor_count = 0;
+        let errors = validate_config(&config);
+        assert!(errors.iter().any(
+            |e| e.field_name == "global_settings.meshing_processor_count"
+                && matches!(e.severity, Severity::Error)
+        ));
+    }
+
+    #[test]
+    fn test_zero_solver_processor_count_reports_error() {
+        let mut config = SettingsConfig::default();
+        config.global_settings.solver_processor_count = 0;
+        let errors = validate_config(&config);
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "global_settings.solver_processor_count"
+                && matches!(e.severity, Severity::Error)));
+    }
+
+    #[test]
+    fn test_low_solver_processor_count_reports_warning() {
+        let mut config = SettingsConfig::default();
+        config.global_settings.solver_processor_count = 32;
+        let errors = validate_config(&config);
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "global_settings.solver_processor_count"
+                && matches!(e.severity, Severity::Warning)));
     }
 
     #[test]

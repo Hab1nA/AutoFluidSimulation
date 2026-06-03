@@ -326,7 +326,8 @@ class TestPauseResume:
         monitor.pause()
         assert paused.is_set() is True
 
-    def test_resume_only_clears_flag(self, tmp_path):
+    def test_resume_only_preserves_shared_flag(self, tmp_path):
+        """监控器不能清除由调度器拥有的共享暂停标志。"""
         paused = threading.Event()
         monitor = StepFileMonitor(
             step_dir=str(tmp_path),
@@ -334,9 +335,10 @@ class TestPauseResume:
         )
         paused.set()
         monitor.resume_only()
-        assert paused.is_set() is False
+        assert paused.is_set() is True
 
-    def test_resume_and_reset_clears_flag(self, tmp_path):
+    def test_resume_and_reset_preserves_shared_flag(self, tmp_path):
+        """reset 请求不能覆盖并发到达的共享 pause。"""
         paused = threading.Event()
         monitor = StepFileMonitor(
             step_dir=str(tmp_path),
@@ -344,7 +346,7 @@ class TestPauseResume:
         )
         paused.set()
         monitor.resume_and_reset()
-        assert paused.is_set() is False
+        assert paused.is_set() is True
         assert monitor._need_reset is True
 
     def test_reset_only_preserves_pause(self, tmp_path):
@@ -358,6 +360,21 @@ class TestPauseResume:
         monitor.reset_only()
         assert paused.is_set() is True  # 暂停标志保持
         assert monitor._need_reset is True
+
+    def test_clear_tracking_resets_monitor_state(self, tmp_path):
+        """SW 重试应通过公共 API 清理全部文件追踪状态。"""
+        monitor = StepFileMonitor(step_dir=str(tmp_path))
+        monitor._processed_files.add("model_gen4.SLDPRT_1.step")
+        monitor._known_files.add("model_gen4.SLDPRT_1.step")
+        monitor._detector._history["step"] = [(0.0, 1)]
+        monitor._detector._first_seen["step"] = 0.0
+
+        monitor.clear_tracking()
+
+        assert monitor._processed_files == set()
+        assert monitor._known_files == set()
+        assert monitor._detector._history == {}
+        assert monitor._detector._first_seen == {}
 
 
 # ====================================================================

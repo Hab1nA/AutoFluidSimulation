@@ -27,6 +27,7 @@ from engine.scheduler.utils import (
     pause_aware_sleep, wait_unless_paused_or_stopped,
     check_step_output_exists,
 )
+from engine.scheduler.work_queue import UniqueWorkQueue
 
 logger = setup_logger(__name__)
 
@@ -50,7 +51,7 @@ class MeshingMonitor:
         self._paused = paused_event
         self._stopped = stopped_event
 
-        self._meshing_queue: queue.Queue[int] = queue.Queue()
+        self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: Optional[threading.Thread] = None
         self._in_flight_config: Optional[int] = None  # 当前正在执行 Meshing 的构型
 
@@ -62,7 +63,9 @@ class MeshingMonitor:
 
     def submit(self, config_name: int) -> None:
         """将构型提交到 Meshing 队列。由 Worker 线程调用。"""
-        self._meshing_queue.put(config_name)
+        if not self._meshing_queue.submit(config_name):
+            logger.debug(f"[MeshingMonitor] 构型{config_name} 已存在，跳过重复提交")
+            return
         logger.info(
             f"[MeshingMonitor] 构型{config_name} 已入队 "
             f"(队列深度: {self._meshing_queue.qsize()})"
@@ -118,8 +121,9 @@ class MeshingMonitor:
             )
 
             self._in_flight_config = config_name
+            should_requeue = False
             try:
-                self._process_single_meshing(config_name)
+                should_requeue = self._process_single_meshing(config_name)
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(
                     f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
@@ -138,7 +142,10 @@ class MeshingMonitor:
                 )
             finally:
                 self._in_flight_config = None
-                self._meshing_queue.task_done()
+                if should_requeue:
+                    self._meshing_queue.requeue(config_name)
+                else:
+                    self._meshing_queue.complete(config_name)
 
         logger.info("[MeshingMonitor] 监控循环退出")
 
@@ -146,17 +153,17 @@ class MeshingMonitor:
     # 单构型处理
     # ------------------------------------------------------------------
 
-    def _process_single_meshing(self, config_name: int) -> None:
+    def _process_single_meshing(self, config_name: int) -> bool:
         """处理单个构型的 Meshing 阶段。"""
         # ---- 暂停/停止检查 ----
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
-            return
+            return False
 
         # ---- 断点续传：检查远程输出是否已存在（复用共享工具函数） ----
         if self._check_remote_outputs_exist(config_name):
             self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 远程输出已存在，标记完成")
-            return
+            return False
 
         # ---- 检查是否为重启后仍在运行的 Meshing ----
         meshing_status = self.state.get_step_status(config_name, "Meshing")
@@ -166,7 +173,7 @@ class MeshingMonitor:
             if self._remote_executor.check_meshing_done(config_name):
                 self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
                 logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 重启后检测到完成标志")
-                return
+                return False
             # ★ 重置为 Waiting：清除孤儿 Running 状态，避免原子防护误判
             self.state.set_step_status(config_name, "Meshing", STATUS_WAITING)
             logger.warning(
@@ -178,9 +185,9 @@ class MeshingMonitor:
         max_retries = int(ENGINE_CONFIG["max_retries"])
         for attempt in range(1, max_retries + 1):
             if self._stopped.is_set():
-                return
+                return False
             if not wait_unless_paused_or_stopped(self._paused, self._stopped):
-                return
+                return False
 
             # ★ 原子防护：确保同一时刻只有一个构型处于 Meshing Running
             if not self.state.set_meshing_running_if_idle(config_name):
@@ -188,8 +195,7 @@ class MeshingMonitor:
                     f"[MeshingMonitor] 构型{config_name} 被跳过："
                     f"另一个构型正在执行网格划分，重新入队"
                 )
-                self._meshing_queue.put(config_name)
-                return
+                return True
 
             logger.info(
                 f"[MeshingMonitor] 启动构型{config_name} Meshing "
@@ -211,14 +217,14 @@ class MeshingMonitor:
                     f"{5 * attempt}s 后重试"
                 )
                 if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
-                    return
+                    return False
             else:
                 self.state.set_step_status(
                     config_name, "Meshing", STATUS_ERROR,
                     f"Meshing 启动重试 {max_retries} 次后仍然失败",
                 )
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
-                return
+                return False
 
         # ---- 轮询等待完成 ----
         logger.info(f"[MeshingMonitor] 等待构型{config_name} 网格划分完成...")
@@ -244,6 +250,7 @@ class MeshingMonitor:
                 self.state.set_step_status(
                     config_name, "Meshing", STATUS_ERROR, "网格划分超时",
                 )
+        return False
 
     # ------------------------------------------------------------------
     # 断点续传
@@ -272,7 +279,7 @@ class MeshingMonitor:
 
         if pending:
             for cn in sorted(pending):
-                self._meshing_queue.put(cn)
+                self.submit(cn)
             logger.info(
                 f"[MeshingMonitor] 断点续传: {len(pending)} 个构型补充入队 "
                 f"{sorted(pending)}"

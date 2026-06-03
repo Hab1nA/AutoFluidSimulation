@@ -61,6 +61,8 @@ env/
 # 本地 Agent / 工具配置
 # ============================================================================
 .claude/
+.cursor/
+.kagent/
 start_codewhale.bat
 scripts/
 
@@ -106,6 +108,10 @@ data/*.pid
 data/**/*.pid
 data/*.db
 data/**/*.db
+data/*.db-shm
+data/**/*.db-shm
+data/*.db-wal
+data/**/*.db-wal
 data/*.json
 data/**/*.json
 
@@ -117,3 +123,5 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+
+.kagent/
