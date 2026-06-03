@@ -134,6 +134,22 @@ class TaskRunner:
         """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
         return self._sw_executor.export_sw_per_config(config_name)
 
+    def shutdown_sw_processes(self) -> None:
+        """全量清理 SolidWorks 进程。"""
+        self._sw_executor.shutdown_all()
+
+    def do_sw_first_cleanup(self) -> None:
+        """首次 SW 全体清理（进入 SW 阶段前调用）。"""
+        self._sw_executor.do_first_cleanup()
+
+    def do_sw_final_cleanup(self) -> None:
+        """末次 SW 全体清理（SW 阶段全部完成后调用）。"""
+        self._sw_executor.do_final_cleanup()
+
+    def reset_sw_cleanup(self) -> None:
+        """重置 SW 全量清理状态。"""
+        self._sw_executor.reset_cleanup_state()
+
     # ------------------------------------------------------------------
     # 阶段 2: SpaceClaim 脚本执行（本地 SCProcessPool）
     # ------------------------------------------------------------------

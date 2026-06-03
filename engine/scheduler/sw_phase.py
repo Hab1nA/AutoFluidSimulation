@@ -5,7 +5,6 @@ SW 阶段处理模块。
 """
 
 import threading
-import subprocess
 import os
 from typing import Optional
 
@@ -150,6 +149,8 @@ class SWPhaseHandler:
                 if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
                     self.state.set_step_status(cn, "SW", STATUS_RUNNING)
 
+        self._call_runner_cleanup("do_sw_first_cleanup")
+
         # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
         #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
         #    实现边导出边处理的并行流水线）
@@ -237,6 +238,8 @@ class SWPhaseHandler:
                 self.state.set_engine_status("stopped")
                 logger.error("[SW] SW 步骤失败，流水线中止")
                 return False
+        else:
+            self._call_runner_cleanup("do_sw_final_cleanup")
 
         # 安全网校验 + 设置 sw_macro_started
         step_dir = LOCAL_PATHS.get("step_dir", "")
@@ -310,7 +313,15 @@ class SWPhaseHandler:
             self.needs_recurse = True
             return False  # 需要外部递归调用 start_pipeline
 
+        self._call_runner_cleanup("do_sw_final_cleanup")
+
         return True
+
+    def _call_runner_cleanup(self, method_name: str) -> None:
+        """调用 TaskRunner 上的清理入口，兼容独立测试中的轻量 mock。"""
+        cleanup = getattr(self.runner, method_name, None)
+        if callable(cleanup):
+            cleanup()
 
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。
@@ -437,31 +448,7 @@ class SWPhaseHandler:
         if not pause_aware_sleep(10, self._paused, self._stopped):
             return
 
-        # 终止残留 SW 进程
-        try:
-            subprocess.run(
-                ["taskkill", "/f", "/im", "SLDWORKS.exe"],
-                capture_output=True, timeout=30,
-            )
-        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-            pass
-
-        # 等待 SW 进程完全退出
-        logger.info("[SW-Cleanup] 等待 SolidWorks 进程完全退出...")
-        for _ in range(10):
-            if not pause_aware_sleep(1, self._paused, self._stopped):
-                return
-            try:
-                check = subprocess.run(
-                    ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
-                     "/fo", "csv", "/nh"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if "SLDWORKS.exe" not in check.stdout:
-                    logger.info("[SW-Cleanup] ✓ SolidWorks 进程已退出")
-                    break
-            except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-                break
+        self._call_runner_cleanup("shutdown_sw_processes")
 
         # 额外冷却确保 COM 子系统完全释放
         if not pause_aware_sleep(5, self._paused, self._stopped):

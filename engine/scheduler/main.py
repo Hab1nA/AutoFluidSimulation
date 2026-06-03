@@ -558,7 +558,14 @@ class PipelineScheduler:
         # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
         self.state.set_engine_status("stopped")
 
-        # 清理所有 SC 进程（容错：任何清理步骤失败不阻断整体停止流程）
+        # 清理本地 CAD 进程（容错：任何清理步骤失败不阻断整体停止流程）
+        shutdown_sw_processes = getattr(self.runner, "shutdown_sw_processes", None)
+        if callable(shutdown_sw_processes):
+            try:
+                shutdown_sw_processes()
+            except Exception as e:
+                logger.debug(f"SW 停止清理异常: {e}")
+
         try:
             self.runner.shutdown_sc_pool()
         except Exception as e:
@@ -588,6 +595,14 @@ class PipelineScheduler:
 
         logger.info("流水线已停止")
 
+    def _reset_sw_cleanup_if_needed(self, should_reset: bool) -> None:
+        """按需重置 SolidWorks 全量清理状态。"""
+        if not should_reset:
+            return
+        reset_sw_cleanup = getattr(self.runner, "reset_sw_cleanup", None)
+        if callable(reset_sw_cleanup):
+            reset_sw_cleanup()
+
     def reset_config(self, config_name, step_name: str | None = None):
         """
         重置指定构型的指定步骤（及后续步骤）。
@@ -612,6 +627,11 @@ class PipelineScheduler:
             or step_name in ("SW", "SC")
             or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("SC", 99)
         )
+        need_sw_cleanup_reset = (
+            step_name is None
+            or step_name == "SW"
+            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("SW", 99)
+        )
 
         # ★ 暂停感知：reset 操作不应越过暂停标志恢复文件监控。
         #    若当前处于暂停状态，使用 reset_only() 仅清理内部状态；
@@ -625,6 +645,7 @@ class PipelineScheduler:
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
+            self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
@@ -636,6 +657,7 @@ class PipelineScheduler:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
             self._sc_queue.clear()
@@ -645,6 +667,7 @@ class PipelineScheduler:
                 self._barrier_passed.clear()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
         logger.info(f"已重置 config={config_name} step={step_name or 'all'}")

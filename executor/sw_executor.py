@@ -69,6 +69,9 @@ class SWExecutor:
         self._cached_sw_app = None
         self._cached_doc = None
         self._com_initialized = False
+        self._cleanup_lock = threading.RLock()
+        self._first_cleanup_done = False
+        self._final_cleanup_done = False
 
     def set_control_events(
         self,
@@ -499,6 +502,48 @@ class SWExecutor:
             self._com_initialized = False
 
     # ------------------------------------------------------------------
+    # 全量清理（首次/末次）
+    # ------------------------------------------------------------------
+
+    def shutdown_all(self) -> None:
+        """全量清理 SolidWorks 进程并重置清理标志。"""
+        with self._cleanup_lock:
+            self._shutdown_all_internal()
+            self._first_cleanup_done = False
+            self._final_cleanup_done = False
+
+    def _shutdown_all_internal(self) -> None:
+        """全量清理（内部版本，调用方须已持有 _cleanup_lock）。"""
+        logger.info("[SW-Cleanup] 执行全量 SolidWorks 进程清理...")
+        self.disconnect_sw_cached()
+        self._terminate_sw_processes()
+        logger.info("[SW-Cleanup] 全量清理完成")
+
+    def do_first_cleanup(self) -> None:
+        """首次 SW 全体清理（进入 SW 阶段前调用）。"""
+        with self._cleanup_lock:
+            if not self._first_cleanup_done:
+                logger.info("[SW-Cleanup] === 首次全体 SW 进程清理（进入 SW 阶段前）===")
+                self._shutdown_all_internal()
+                self._first_cleanup_done = True
+
+    def do_final_cleanup(self) -> None:
+        """末次 SW 全体清理（SW 阶段全部完成后调用）。"""
+        with self._cleanup_lock:
+            if not self._final_cleanup_done:
+                logger.info("[SW-Cleanup] === 末次全体 SW 进程清理（SW 阶段全部完成后）===")
+                self._shutdown_all_internal()
+                self._final_cleanup_done = True
+
+    def reset_cleanup_state(self) -> None:
+        """重置 SW 全量清理状态。"""
+        with self._cleanup_lock:
+            self._first_cleanup_done = False
+            self._final_cleanup_done = False
+            self.disconnect_sw_cached()
+            logger.info("[SW-Cleanup] 已重置全量清理状态")
+
+    # ------------------------------------------------------------------
     # SW 连接管理
     # ------------------------------------------------------------------
 
@@ -622,11 +667,7 @@ class SWExecutor:
         if os.name != "nt":
             return
         try:
-            result = subprocess.run(
-                ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe", "/fo", "csv", "/nh"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "SLDWORKS.exe" in result.stdout:
+            if self._is_sw_process_running(timeout=10):
                 logger.info("[SW-Cleanup] 检测到残留 SolidWorks 进程，正在终止...")
                 kill_result = subprocess.run(
                     ["taskkill", "/f", "/im", "SLDWORKS.exe"],
@@ -642,6 +683,21 @@ class SWExecutor:
                     )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[SW-Cleanup] 检查/终止 SW 进程时异常: {e}")
+
+    @staticmethod
+    def _is_sw_process_running(timeout: int = 5) -> bool:
+        """检查当前 Windows 会话中是否存在 SolidWorks 进程。"""
+        if os.name != "nt":
+            return False
+        try:
+            result = subprocess.run(
+                ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.debug(f"[SW-Cleanup] 检查 SolidWorks 进程时异常: {e}")
+            return False
+        return "SLDWORKS.exe" in result.stdout
 
     def _open_sw_model(self, sw_app, sw_model: str, doc_type: int):
         """通过 OpenDoc6 打开 SW 模型文件并验证 COM 代理有效性。"""
@@ -729,17 +785,9 @@ class SWExecutor:
                 sw_exited = False
                 for _ in range(OPERATION_TIMEOUTS["sw_exit_wait_seconds"]):
                     time.sleep(1)
-                    try:
-                        result = subprocess.run(
-                            ["tasklist", "/fi", "IMAGENAME eq SLDWORKS.exe",
-                             "/fo", "csv", "/nh"],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                        if "SLDWORKS.exe" not in result.stdout:
-                            sw_exited = True
-                            logger.info("[SW-Cleanup] ✓ SolidWorks 进程已退出")
-                            break
-                    except Exception:
+                    if not self._is_sw_process_running(timeout=5):
+                        sw_exited = True
+                        logger.info("[SW-Cleanup] ✓ SolidWorks 进程已退出")
                         break
                 if not sw_exited:
                     logger.warning(
