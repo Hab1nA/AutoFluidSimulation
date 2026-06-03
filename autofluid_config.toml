@@ -47,8 +47,10 @@ sc_gui_stable_delay = 5
 [global_settings]
 watchdog_interval = 1.0
 transfer_timeout = 120
-meshing_timeout = 600
-solver_timeout = 7200
+meshing_timeout = 1800
+meshing_processor_count = 8
+solver_timeout = 10800
+solver_processor_count = 128
 max_retries = 3
 state_refresh_interval = 0.5
 ssh_connection = 10

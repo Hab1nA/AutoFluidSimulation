@@ -102,7 +102,9 @@ class EngineConfig(TypedDict):
     sc_timeout: int
     transfer_timeout: int
     meshing_timeout: int
+    meshing_processor_count: int
     solver_timeout: int
+    solver_processor_count: int
     max_retries: int
     state_refresh_interval: float
     sc_persistent_ready_timeout: int
@@ -323,8 +325,12 @@ ENGINE_CONFIG: EngineConfig = {
     "transfer_timeout": 120,
     # 网格划分超时（秒）
     "meshing_timeout": 600,
+    # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
+    "meshing_processor_count": 8,
     # 求解超时（秒）
     "solver_timeout": 7200,
+    # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
+    "solver_processor_count": 128,
     # 最大重试次数
     "max_retries": 3,
     # 全局状态刷新间隔（秒）

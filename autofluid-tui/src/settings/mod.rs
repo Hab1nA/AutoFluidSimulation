@@ -137,12 +137,24 @@ pub struct GlobalSettings {
     pub watchdog_interval: f64,
     pub transfer_timeout: u64,
     pub meshing_timeout: u64,
+    #[serde(default = "default_meshing_processor_count")]
+    pub meshing_processor_count: u32,
     pub solver_timeout: u64,
+    #[serde(default = "default_solver_processor_count")]
+    pub solver_processor_count: u32,
     pub max_retries: u32,
     pub state_refresh_interval: f64,
     pub ssh_connection: u64,
     pub dir_recursion_limit: u32,
     pub ssh_upload_max_retries: u32,
+}
+
+fn default_meshing_processor_count() -> u32 {
+    8
+}
+
+fn default_solver_processor_count() -> u32 {
+    128
 }
 
 impl Default for GlobalSettings {
@@ -151,7 +163,9 @@ impl Default for GlobalSettings {
             watchdog_interval: 1.0,
             transfer_timeout: 120,
             meshing_timeout: 600,
+            meshing_processor_count: 8,
             solver_timeout: 7200,
+            solver_processor_count: 128,
             max_retries: 3,
             state_refresh_interval: 0.5,
             ssh_connection: 10,
@@ -219,7 +233,7 @@ impl SettingCategory {
             SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
-            SettingCategory::GlobalSettings => 9,
+            SettingCategory::GlobalSettings => 11,
         }
     }
 
@@ -284,12 +298,14 @@ impl SettingCategory {
                 0 => "watchdog_interval",
                 1 => "transfer_timeout",
                 2 => "meshing_timeout",
-                3 => "solver_timeout",
-                4 => "max_retries",
-                5 => "state_refresh_interval",
-                6 => "ssh_connection",
-                7 => "dir_recursion_limit",
-                8 => "ssh_upload_max_retries",
+                3 => "meshing_processor_count",
+                4 => "solver_timeout",
+                5 => "solver_processor_count",
+                6 => "max_retries",
+                7 => "state_refresh_interval",
+                8 => "ssh_connection",
+                9 => "dir_recursion_limit",
+                10 => "ssh_upload_max_retries",
                 _ => "",
             },
         }
@@ -356,12 +372,14 @@ impl SettingCategory {
                 0 => "看门狗间隔(秒)",
                 1 => "传输超时(秒)",
                 2 => "网格超时(秒)",
-                3 => "求解超时(秒)",
-                4 => "最大重试",
-                5 => "状态刷新间隔(秒)",
-                6 => "SSH连接超时(秒)",
-                7 => "目录递归深度限制",
-                8 => "SSH上传最大重试",
+                3 => "网格核心数",
+                4 => "求解超时(秒)",
+                5 => "求解核心数",
+                6 => "最大重试",
+                7 => "状态刷新间隔(秒)",
+                8 => "SSH连接超时(秒)",
+                9 => "目录递归深度限制",
+                10 => "SSH上传最大重试",
                 _ => "",
             },
         }
@@ -539,16 +557,26 @@ impl SettingsState {
                 0 => self.config.global_settings.watchdog_interval.to_string(),
                 1 => self.config.global_settings.transfer_timeout.to_string(),
                 2 => self.config.global_settings.meshing_timeout.to_string(),
-                3 => self.config.global_settings.solver_timeout.to_string(),
-                4 => self.config.global_settings.max_retries.to_string(),
+                3 => self
+                    .config
+                    .global_settings
+                    .meshing_processor_count
+                    .to_string(),
+                4 => self.config.global_settings.solver_timeout.to_string(),
                 5 => self
+                    .config
+                    .global_settings
+                    .solver_processor_count
+                    .to_string(),
+                6 => self.config.global_settings.max_retries.to_string(),
+                7 => self
                     .config
                     .global_settings
                     .state_refresh_interval
                     .to_string(),
-                6 => self.config.global_settings.ssh_connection.to_string(),
-                7 => self.config.global_settings.dir_recursion_limit.to_string(),
-                8 => self
+                8 => self.config.global_settings.ssh_connection.to_string(),
+                9 => self.config.global_settings.dir_recursion_limit.to_string(),
+                10 => self
                     .config
                     .global_settings
                     .ssh_upload_max_retries
@@ -674,31 +702,41 @@ impl SettingsState {
                     }
                 }
                 3 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.meshing_processor_count = v;
+                    }
+                }
+                4 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.global_settings.solver_timeout = v;
                     }
                 }
-                4 => {
+                5 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.solver_processor_count = v;
+                    }
+                }
+                6 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.max_retries = v;
                     }
                 }
-                5 => {
+                7 => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.config.global_settings.state_refresh_interval = v;
                     }
                 }
-                6 => {
+                8 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.global_settings.ssh_connection = v;
                     }
                 }
-                7 => {
+                9 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.dir_recursion_limit = v;
                     }
                 }
-                8 => {
+                10 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.ssh_upload_max_retries = v;
                     }

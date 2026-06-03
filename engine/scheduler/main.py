@@ -203,10 +203,12 @@ class PipelineScheduler:
         # ★ 暂停检查：SW 阶段完成后，若暂停标志已置位，停止后续组件启动。
         #   避免 pause 指令在 SW 宏执行期间到达后，宏完成后仍启动文件监控、
         #   工作线程池、屏障监控等下游组件（不符合暂停语义）。
-        if self._paused.is_set():
-            logger.info("SW 阶段已完成，但暂停标志已置位，暂停后续组件启动，等待 resume 指令")
-            self.state.set_engine_status("paused")
-            return
+        with self._control.external_start() as can_start_downstream:
+            if not can_start_downstream:
+                logger.info("SW 阶段已完成，但暂停标志已置位，暂停后续组件启动，等待 resume 指令")
+                if self._paused.is_set():
+                    self.state.set_engine_status("paused")
+                return
 
         # ---- 步骤 1.5: 同步下游步骤状态与文件系统 ----
         self.sw_phase_handler.scan_completed_downstream()

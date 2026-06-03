@@ -250,6 +250,26 @@ class RemoteExecutor:
     # 网格划分
     # ------------------------------------------------------------------
 
+    def _meshing_processor_count(self) -> int:
+        """返回 Fluent Meshing 启动核心数，配置异常时回退到保守默认值。"""
+        default_count = 8
+        raw_count = ENGINE_CONFIG.get("meshing_processor_count", default_count)
+        try:
+            processor_count = int(raw_count)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[Meshing] meshing_processor_count 配置无效: {raw_count!r}，"
+                f"使用默认值 {default_count}"
+            )
+            return default_count
+        if processor_count < 1:
+            logger.warning(
+                f"[Meshing] meshing_processor_count 必须大于 0，"
+                f"当前为 {processor_count}，使用默认值 {default_count}"
+            )
+            return default_count
+        return processor_count
+
     def _build_meshing_command(self, config_name: int) -> tuple[str, str]:
         """构建远程网格划分命令和标志文件路径。
 
@@ -263,15 +283,19 @@ class RemoteExecutor:
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
+        processor_count = self._meshing_processor_count()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
         command = (
-            f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_meshing_gen4.py" {config_name}'
+            f'"{conda_exe}" run --no-capture-output -n {conda_env} '
+            f'python -u "{scripts_dir}/batch_meshing_gen4.py" {config_name}'
             f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
             f' --workflow-path "{scripts_dir}/meshing_gen4.wft"'
             f' --journal-path "{scripts_dir}/meshing_gen4.jou"'
             f' --scdoc-dir "{REMOTE_CONFIG["scdoc_dir"]}"'
             f' --output-dir "{REMOTE_CONFIG["msh_dir"]}"'
+            f' --working-dir "{REMOTE_CONFIG["working_dir"]}"'
+            f' --processor-count {processor_count}'
         )
         return command, flag_file
 
@@ -302,7 +326,7 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
                 success, task_name = ssh.exec_background(
                     command, flag_file,
-                    working_dir=str(REMOTE_CONFIG["scripts_dir"]),
+                    working_dir=str(REMOTE_CONFIG["working_dir"]),
                 )
                 if success:
                     self._remote_tasks[config_name] = task_name
@@ -363,6 +387,7 @@ class RemoteExecutor:
         暂停期间冻结超时计时器，防止恢复运行后立即触发超时。
         """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        error_flag = f"{flag_file}.error"
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
         start_time = time.time()
@@ -387,6 +412,13 @@ class RemoteExecutor:
             try:
                 with self._ssh_lock:
                     ssh = self._get_ssh()
+                    if ssh.check_remote_file(error_flag):
+                        logger.error(
+                            f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
+                        )
+                        ssh.delete_remote_file(error_flag)
+                        self._remote_tasks.pop(config_name, None)
+                        return False
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
@@ -407,6 +439,26 @@ class RemoteExecutor:
     # 仿真求解
     # ------------------------------------------------------------------
 
+    def _solver_processor_count(self) -> int:
+        """返回 Fluent Solver 启动核心数，配置异常时回退到默认值。"""
+        default_count = 128
+        raw_count = ENGINE_CONFIG.get("solver_processor_count", default_count)
+        try:
+            processor_count = int(raw_count)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"[Solver] solver_processor_count 配置无效: {raw_count!r}，"
+                f"使用默认值 {default_count}"
+            )
+            return default_count
+        if processor_count < 1:
+            logger.warning(
+                f"[Solver] solver_processor_count 必须大于 0，"
+                f"当前为 {processor_count}，使用默认值 {default_count}"
+            )
+            return default_count
+        return processor_count
+
     def _build_solver_command(self, config_name: int) -> tuple[str, str]:
         """构建远程仿真求解命令和标志文件路径。
 
@@ -420,6 +472,7 @@ class RemoteExecutor:
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
+        processor_count = self._solver_processor_count()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
         # ★ --anim-dir 使用 normpath 消除 .. 相对路径段，确保在 schtasks
@@ -428,7 +481,8 @@ class RemoteExecutor:
             os.path.join(str(REMOTE_CONFIG["working_dir"]), "..", "animation")
         )
         command = (
-            f'"{conda_exe}" run -n {conda_env} python "{scripts_dir}/batch_solver_gen4.py" {config_name}'
+            f'"{conda_exe}" run --no-capture-output -n {conda_env} '
+            f'python -u "{scripts_dir}/batch_solver_gen4.py" {config_name}'
             f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
             f' --journal-path "{scripts_dir}/solver_gen4.jou"'
             f' --post-journal-path "{scripts_dir}/solver_post_gen4.jou"'
@@ -437,6 +491,7 @@ class RemoteExecutor:
             f' --anim-dir "{anim_dir}"'
             f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
             f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
+            f' --processor-count {processor_count}'
         )
         return command, flag_file
 
@@ -490,6 +545,7 @@ class RemoteExecutor:
         若仅存在一个文件，宽限 60s 等待另一个；超时则清理部分文件并返回错误。
         """
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+        error_flag = f"{flag_file}.error"
         result_dir = str(REMOTE_CONFIG["result_dir"]).replace(chr(92), "/")
         cas_name = get_step_filename("Solver", config_name)
         dat_name = get_step_filename("SolverData", config_name)
@@ -522,6 +578,13 @@ class RemoteExecutor:
             try:
                 with self._ssh_lock:
                     ssh = self._get_ssh()
+                    if ssh.check_remote_file(error_flag):
+                        logger.error(
+                            f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
+                        )
+                        ssh.delete_remote_file(error_flag)
+                        self._remote_tasks.pop(config_name, None)
+                        return False
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
                         cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
@@ -581,7 +644,11 @@ class RemoteExecutor:
     # 远程进程生命周期管理
     # ------------------------------------------------------------------
 
-    def _kill_remote_task_for_config(self, config_name: int, step_name: str) -> None:
+    def _kill_remote_task_for_config(
+        self,
+        config_name: int,
+        step_name: str,
+    ) -> None:
         """超时后终止远程后台任务。
 
         从 _remote_tasks 中取出任务名称，调用 SSH kill_remote_task 终止。
@@ -845,13 +912,16 @@ class RemoteExecutor:
 
     def _apply_placeholders(self, content: str) -> str:
         """将模板中的所有占位符替换为实际远程目录值。"""
-        scripts_dir = str(REMOTE_CONFIG["scripts_dir"])
+        def fluent_path(path: object) -> str:
+            return str(path).replace("\\", "/")
+
+        scripts_dir = fluent_path(REMOTE_CONFIG["scripts_dir"])
         content = content.replace('{{REMOTE_ROOT}}', scripts_dir)
-        content = content.replace('{{REMOTE_SCDOC_DIR}}', str(REMOTE_CONFIG["scdoc_dir"]))
-        content = content.replace('{{REMOTE_WORKING_DIR}}', str(REMOTE_CONFIG["working_dir"]))
-        content = content.replace('{{REMOTE_REF_FILES_DIR}}', str(REMOTE_CONFIG["ref_files_dir"]))
-        content = content.replace('{{REMOTE_MSH_DIR}}', str(REMOTE_CONFIG["msh_dir"]))
-        content = content.replace('{{REMOTE_RESULT_DIR}}', str(REMOTE_CONFIG["result_dir"]))
+        content = content.replace('{{REMOTE_SCDOC_DIR}}', fluent_path(REMOTE_CONFIG["scdoc_dir"]))
+        content = content.replace('{{REMOTE_WORKING_DIR}}', fluent_path(REMOTE_CONFIG["working_dir"]))
+        content = content.replace('{{REMOTE_REF_FILES_DIR}}', fluent_path(REMOTE_CONFIG["ref_files_dir"]))
+        content = content.replace('{{REMOTE_MSH_DIR}}', fluent_path(REMOTE_CONFIG["msh_dir"]))
+        content = content.replace('{{REMOTE_RESULT_DIR}}', fluent_path(REMOTE_CONFIG["result_dir"]))
         sc_pattern = STEP_FILE_PATTERNS.get("SC", "")
         if sc_pattern:
             content = content.replace('{{SC_FILENAME}}', sc_pattern)

@@ -665,17 +665,29 @@ class TestReloadConfigFromToml:
         import engine.config as cfg
         from engine.config import ENGINE_CONFIG
 
-        original = ENGINE_CONFIG.get("state_refresh_interval", 0.5)
+        original_refresh = ENGINE_CONFIG.get("state_refresh_interval", 0.5)
+        original_meshing_processor_count = ENGINE_CONFIG.get("meshing_processor_count", 8)
+        original_solver_processor_count = ENGINE_CONFIG.get("solver_processor_count", 128)
 
         def _mock_load(*args, **kwargs):
-            return {"global_settings": {"state_refresh_interval": 2.0}}
+            return {
+                "global_settings": {
+                    "state_refresh_interval": 2.0,
+                    "meshing_processor_count": 4,
+                    "solver_processor_count": 64,
+                }
+            }
 
         monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
         try:
             assert cfg.reload_config_from_toml() is True
             assert ENGINE_CONFIG["state_refresh_interval"] == 2.0
+            assert ENGINE_CONFIG["meshing_processor_count"] == 4
+            assert ENGINE_CONFIG["solver_processor_count"] == 64
         finally:
-            ENGINE_CONFIG["state_refresh_interval"] = original
+            ENGINE_CONFIG["state_refresh_interval"] = original_refresh
+            ENGINE_CONFIG["meshing_processor_count"] = original_meshing_processor_count
+            ENGINE_CONFIG["solver_processor_count"] = original_solver_processor_count
 
     def test_env_var_still_overrides_toml(self, monkeypatch):
         import engine.config as cfg
@@ -712,7 +724,8 @@ class TestConfigDictCompleteness:
 
     _ENGINE_REQUIRED_KEYS = {
         "watchdog_interval", "sw_macro_timeout", "max_retries",
-        "sc_timeout", "transfer_timeout", "meshing_timeout", "solver_timeout",
+        "sc_timeout", "transfer_timeout", "meshing_timeout",
+        "meshing_processor_count", "solver_timeout", "solver_processor_count",
     }
 
     def test_remote_config_keys(self):

@@ -13,8 +13,11 @@ def test_build_background_cmd_script_writes_done_or_error_flag():
         r"D:/flags/job.log",
     )
     assert r'>> "D:\flags\job.log" 2>&1' in script
+    assert r'set "AF_PID_FILE=D:\flags\job.done.pid"' in script
+    assert "Start-Process -FilePath 'cmd.exe'" in script
     assert r'echo done > "D:\flags\job.done"' in script
     assert r'echo error %AF_EXIT% > "D:\flags\job.done.error"' in script
+    assert r'del /f /q "%AF_PID_FILE%"' in script
     # working_dir 未指定时不应包含 cd /d
     assert "cd /d" not in script
 
@@ -33,6 +36,7 @@ def test_build_background_cmd_script_with_working_dir():
 def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
     written: list[tuple[str, str]] = []
 
     def fake_exec(command: str, timeout: int = 30):
@@ -48,7 +52,11 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
 
     with patch.object(host, "ensure_connected", return_value=True):
         with patch.object(host, "exec_command", side_effect=fake_exec):
-            with patch.object(host, "delete_remote_file", return_value=True):
+            with patch.object(
+                host,
+                "delete_remote_file",
+                side_effect=lambda path: deleted.append(path) or True,
+            ):
                 with patch.object(host, "_ensure_remote_dir") as ensure_dir:
                     with patch.object(
                         host,
@@ -68,9 +76,67 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
     assert len(written) == 1
     script_path, script_content = written[0]
     assert script_path.startswith("D:/flags/autofluid_bg_")
+    assert r'set "AF_PID_FILE=D:\flags\autofluid_bg_' in script_content
     assert command in script_content
     assert r'echo done > "D:\flags\task done.flag"' in script_content
     assert 'schtasks /Delete /TN "AutoFluid_' in script_content
+    assert deleted == [flag_file, f"{flag_file}.error"]
+
+
+def test_wait_for_flag_returns_false_immediately_when_error_flag_exists():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    flag_file = r"D:/flags/job.done"
+    checked: list[str] = []
+    deleted: list[str] = []
+
+    def fake_check(remote_path: str) -> bool:
+        checked.append(remote_path)
+        return remote_path == f"{flag_file}.error"
+
+    with patch.object(host, "check_remote_file", side_effect=fake_check):
+        with patch.object(
+            host,
+            "delete_remote_file",
+            side_effect=lambda path: deleted.append(path) or True,
+        ):
+            with patch(
+                "utils.ssh_client.time.sleep",
+                side_effect=AssertionError("error flag should stop polling immediately"),
+            ):
+                assert host.wait_for_flag(flag_file, timeout=60, poll_interval=10) is False
+
+    assert checked == [f"{flag_file}.error"]
+    assert deleted == [f"{flag_file}.error"]
+
+
+def test_kill_remote_task_kills_recorded_child_pid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    host._task_pid_files["AutoFluid_job"] = r"D:/flags/autofluid_bg_job.pid"
+    calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        if command == r'cmd /c type "D:\flags\autofluid_bg_job.pid"':
+            return ("4321\r\n", "", 0)
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "delete_remote_file",
+                side_effect=lambda path: deleted.append(path) or True,
+            ):
+                assert host.kill_remote_task("AutoFluid_job") is True
+
+    assert calls == [
+        (r'cmd /c type "D:\flags\autofluid_bg_job.pid"', 15),
+        ("taskkill /PID 4321 /T /F", 60),
+        ('schtasks /End /TN "AutoFluid_job"', 15),
+        ('schtasks /Delete /TN "AutoFluid_job" /F', 15),
+    ]
+    assert deleted == [r"D:/flags/autofluid_bg_job.pid"]
 
 
 def test_upload_file_applies_sftp_channel_timeout():
