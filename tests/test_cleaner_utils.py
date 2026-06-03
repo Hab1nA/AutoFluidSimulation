@@ -220,6 +220,16 @@ class TestCheckIpcReady:
             port = s.getsockname()[1]
             assert check_ipc_ready("127.0.0.1", port) is True
 
+    def test_wildcard_host_uses_loopback_for_probe(self):
+        """服务端监听通配地址时，客户端探测应连接本机回环地址。"""
+        from utils.process_utils import check_ipc_ready
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+            assert check_ipc_ready("0.0.0.0", port) is True
+
     def test_port_closed_returns_false(self):
         """端口未打开时返回 False。"""
         from utils.process_utils import check_ipc_ready

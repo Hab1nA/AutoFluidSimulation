@@ -10,6 +10,7 @@ SSH 客户端模块 (SSH Client)
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
@@ -595,15 +596,20 @@ class RemoteWorkstation:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
-            command_runner = f"call %AF_CMD% >> \"{cmd_log}\" 2>&1\r\n"
+            command_runner = f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
         else:
-            command_runner = (
-                "powershell -NoProfile -ExecutionPolicy Bypass -Command "
-                "\"$p = Start-Process -FilePath 'cmd.exe' "
-                "-ArgumentList '/d','/s','/c',$env:AF_CMD "
+            ps_command_arg = command.replace("'", "''")
+            ps_script = (
+                "$p = Start-Process -FilePath 'cmd.exe' "
+                f"-ArgumentList '/d','/s','/c','{ps_command_arg}' "
                 "-PassThru -WindowStyle Hidden; "
                 "Set-Content -LiteralPath $env:AF_PID_FILE -Value $p.Id -Encoding ascii; "
-                "$p.WaitForExit(); exit $p.ExitCode\" "
+                "$p.WaitForExit(); exit $p.ExitCode"
+            )
+            encoded_script = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+            command_runner = (
+                "powershell -NoProfile -ExecutionPolicy Bypass "
+                f"-EncodedCommand {encoded_script} "
                 f">> \"{cmd_log}\" 2>&1\r\n"
             )
         return (
@@ -611,7 +617,6 @@ class RemoteWorkstation:
             "setlocal\r\n"
             "set PYTHONUTF8=1\r\n"
             "set PYTHONIOENCODING=utf-8\r\n"
-            f"set \"AF_CMD={command}\"\r\n"
             f"set \"AF_PID_FILE={cmd_pid}\"\r\n"
             f"{cd_line}"
             f"{command_runner}"
