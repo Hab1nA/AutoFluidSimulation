@@ -93,6 +93,9 @@ def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path
             deleted.append(remote_path)
             return True
 
+        def kill_remote_task(self, task_name: str) -> bool:
+            return True
+
     state = _StateRecorder()
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
 
@@ -154,6 +157,9 @@ def test_execute_transfer_does_not_mark_error_when_pause_interrupts_upload(
             deleted.append(remote_path)
             return True
 
+        def kill_remote_task(self, task_name: str) -> bool:
+            return True
+
     state = _StateRecorder()
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor.set_control_events(paused, stopped)
@@ -203,6 +209,9 @@ def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeyp
             deleted.append(remote_path)
             return True
 
+        def kill_remote_task(self, task_name: str) -> bool:
+            return True
+
     executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
     executor._remote_tasks[3] = "AutoFluid_meshing"
     monkeypatch.setattr(
@@ -234,6 +243,9 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
 
         def delete_remote_file(self, remote_path: str) -> bool:
             deleted.append(remote_path)
+            return True
+
+        def kill_remote_task(self, task_name: str) -> bool:
             return True
 
     executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())

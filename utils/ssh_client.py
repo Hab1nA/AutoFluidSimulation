@@ -415,7 +415,14 @@ class RemoteWorkstation:
         # 如果解析失败，返回原始输出（已去除多余空白）
         return wmic_output.strip()
 
-    def exec_background(self, command: str, flag_file: str, *, working_dir: str | None = None) -> tuple[bool, str]:
+    def exec_background(
+        self,
+        command: str,
+        flag_file: str,
+        *,
+        working_dir: str | None = None,
+        interactive: bool = False,
+    ) -> tuple[bool, str]:
         """
         在远程工作站以独立后台进程方式执行命令。
 
@@ -427,6 +434,8 @@ class RemoteWorkstation:
             flag_file: 任务完成标志文件路径（远程路径）
             working_dir: 远程工作目录（cmd 脚本 cd /d 到此目录后再执行命令，
                          确保子进程的 CWD 正确；None 则不设置）
+            interactive: 是否在当前登录用户的交互式桌面运行。Fluent Meshing
+                         需要 GUI 执行 journal 中的 GUI 操作，因此必须启用。
 
         Returns:
             (success, task_name) 元组：success 表示后台进程是否启动成功，
@@ -455,16 +464,19 @@ class RemoteWorkstation:
             pid_file = f"{flag_dir}/autofluid_bg_{task_hash}.pid"
             script = self._build_background_cmd_script(
                 command, flag_file, log_file, pid_file=pid_file, task_name=task_name,
-                working_dir=working_dir,
+                working_dir=working_dir, interactive=interactive,
             )
             self._write_remote_text_file(script_file, script)
-            self._task_pid_files[task_name] = pid_file
+            if not interactive:
+                self._task_pid_files[task_name] = pid_file
 
             script_cmd_path = script_file.replace("/", "\\")
             create_cmd = (
                 f'schtasks /Create /TN "{task_name}" /SC ONCE /ST 23:59 '
                 f'/TR "{script_cmd_path}" /F'
             )
+            if interactive:
+                create_cmd += " /IT"
             _, stderr, exit_code = self.exec_command(create_cmd, timeout=30)
             if exit_code != 0:
                 logger.error(f"[SSH] 创建远程计划任务失败 (exit={exit_code}): {stderr[:200]}")
@@ -474,6 +486,13 @@ class RemoteWorkstation:
             _, stderr, exit_code = self.exec_command(run_cmd, timeout=30)
 
             if exit_code == 0:
+                disable_cmd = f'schtasks /Change /TN "{task_name}" /DISABLE'
+                _, disable_stderr, disable_code = self.exec_command(disable_cmd, timeout=30)
+                if disable_code != 0:
+                    logger.warning(
+                        f"[SSH] 禁用远程计划任务失败，可能在计划时间被二次触发 "
+                        f"(exit={disable_code}): {disable_stderr[:200]}"
+                    )
                 log_display = log_file.replace("/", "\\")
                 logger.info(
                     f"[SSH] 远程后台任务已启动: {task_name} "
@@ -561,6 +580,7 @@ class RemoteWorkstation:
         pid_file: str | None = None,
         task_name: str | None = None,
         working_dir: str | None = None,
+        interactive: bool = False,
     ) -> str:
         """构造计划任务实际执行的 cmd 脚本。"""
         cmd_flag = flag_file.replace("/", "\\")
@@ -574,6 +594,18 @@ class RemoteWorkstation:
         if working_dir:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
+        if interactive:
+            command_runner = f"call %AF_CMD% >> \"{cmd_log}\" 2>&1\r\n"
+        else:
+            command_runner = (
+                "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+                "\"$p = Start-Process -FilePath 'cmd.exe' "
+                "-ArgumentList '/d','/s','/c',$env:AF_CMD "
+                "-PassThru -WindowStyle Hidden; "
+                "Set-Content -LiteralPath $env:AF_PID_FILE -Value $p.Id -Encoding ascii; "
+                "$p.WaitForExit(); exit $p.ExitCode\" "
+                f">> \"{cmd_log}\" 2>&1\r\n"
+            )
         return (
             "@echo off\r\n"
             "setlocal\r\n"
@@ -582,13 +614,7 @@ class RemoteWorkstation:
             f"set \"AF_CMD={command}\"\r\n"
             f"set \"AF_PID_FILE={cmd_pid}\"\r\n"
             f"{cd_line}"
-            "powershell -NoProfile -ExecutionPolicy Bypass -Command "
-            "\"$p = Start-Process -FilePath 'cmd.exe' "
-            "-ArgumentList '/d','/s','/c',$env:AF_CMD "
-            "-PassThru -WindowStyle Hidden; "
-            "Set-Content -LiteralPath $env:AF_PID_FILE -Value $p.Id -Encoding ascii; "
-            "$p.WaitForExit(); exit $p.ExitCode\" "
-            f">> \"{cmd_log}\" 2>&1\r\n"
+            f"{command_runner}"
             "set \"AF_EXIT=%ERRORLEVEL%\"\r\n"
             "if \"%AF_EXIT%\"==\"0\" (\r\n"
             f"  echo done > \"{cmd_flag}\"\r\n"

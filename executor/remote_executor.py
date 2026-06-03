@@ -327,6 +327,7 @@ class RemoteExecutor:
                 success, task_name = ssh.exec_background(
                     command, flag_file,
                     working_dir=str(REMOTE_CONFIG["working_dir"]),
+                    interactive=True,
                 )
                 if success:
                     self._remote_tasks[config_name] = task_name
@@ -371,6 +372,7 @@ class RemoteExecutor:
                 if ssh.check_remote_file(flag_file):
                     logger.info(f"[Meshing] 构型{config_name} 网格划分完成（检测到标志文件）")
                     ssh.delete_remote_file(flag_file)
+                    self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
                     return True
             return False
         except (OSError, ConnectionError) as e:
@@ -417,13 +419,12 @@ class RemoteExecutor:
                             f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._remote_tasks.pop(config_name, None)
+                        self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
                         return False
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
-                        # 正常完成，清理任务跟踪记录
-                        self._remote_tasks.pop(config_name, None)
+                        self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
                         return True
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
@@ -583,7 +584,7 @@ class RemoteExecutor:
                             f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._remote_tasks.pop(config_name, None)
+                        self._cleanup_completed_remote_task(config_name, "Solver", ssh)
                         return False
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
@@ -592,8 +593,7 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            # 正常完成，清理任务跟踪记录
-                            self._remote_tasks.pop(config_name, None)
+                            self._cleanup_completed_remote_task(config_name, "Solver", ssh)
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -629,6 +629,7 @@ class RemoteExecutor:
                                 ssh.delete_remote_file(dat_file)
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
+                            self._cleanup_completed_remote_task(config_name, "Solver", ssh)
                             return False
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
@@ -670,6 +671,21 @@ class RemoteExecutor:
                 logger.info(f"[{step_name}] 构型{config_name} 已请求终止远程任务: {task_name}")
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[{step_name}] 构型{config_name} 终止远程任务异常: {e}")
+
+    def _cleanup_completed_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        ssh: "RemoteWorkstation",
+    ) -> None:
+        """清理已结束任务的计划任务条目和本地跟踪记录。"""
+        task_name = self._remote_tasks.pop(config_name, None)
+        if not task_name:
+            return
+        if ssh.kill_remote_task(task_name):
+            logger.info(f"[{step_name}] 构型{config_name} 已清理远程任务条目: {task_name}")
+        else:
+            logger.warning(f"[{step_name}] 构型{config_name} 清理远程任务条目失败: {task_name}")
 
     # ------------------------------------------------------------------
     # 脚本同步

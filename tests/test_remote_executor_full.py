@@ -336,10 +336,12 @@ class TestExecuteMeshing:
                 flag_file: str,
                 *,
                 working_dir: str | None = None,
+                interactive: bool = False,
             ) -> tuple[bool, str]:
                 captured["command"] = command
                 captured["flag_file"] = flag_file
                 captured["working_dir"] = working_dir
+                captured["interactive"] = str(interactive)
                 return (True, "AutoFluid_meshing")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
@@ -347,7 +349,36 @@ class TestExecuteMeshing:
 
         assert executor._run_meshing_command(2) is True
         assert captured["working_dir"] == r"D:\working"
+        assert captured["interactive"] == "True"
         assert '--working-dir "D:\\working"' in str(captured["command"])
+
+    def test_wait_meshing_completion_cleans_remote_task(self, monkeypatch):
+        """Meshing 完成后清理计划任务条目，避免远程任务列表堆积。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 30)
+
+        deleted: list[str] = []
+        killed: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                return path == "D:/flags/meshing_done_4.txt"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def kill_remote_task(self, task_name: str) -> bool:
+                killed.append(task_name)
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        executor._remote_tasks[4] = "AutoFluid_done_task"
+
+        assert executor.wait_meshing_completion(4) is True
+        assert deleted == ["D:/flags/meshing_done_4.txt"]
+        assert killed == ["AutoFluid_done_task"]
+        assert 4 not in executor._remote_tasks
 
 
 class TestExecuteSolver:

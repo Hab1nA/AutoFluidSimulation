@@ -168,6 +168,7 @@ def test_launch_does_not_force_localized_fluent_gui(tmp_path, monkeypatch):
     module.main()
 
     assert "env" not in launch_kwargs
+    assert launch_kwargs["ui_mode"] == "gui"
     assert launch_kwargs["start_watchdog"] is False
 
 

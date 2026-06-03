@@ -18,8 +18,20 @@ def test_build_background_cmd_script_writes_done_or_error_flag():
     assert r'echo done > "D:\flags\job.done"' in script
     assert r'echo error %AF_EXIT% > "D:\flags\job.done.error"' in script
     assert r'del /f /q "%AF_PID_FILE%"' in script
+    assert "-WindowStyle Hidden" in script
     # working_dir 未指定时不应包含 cd /d
     assert "cd /d" not in script
+
+
+def test_build_background_cmd_script_interactive_calls_command_directly():
+    script = RemoteWorkstation._build_background_cmd_script(
+        r'conda run python script.py',
+        r"D:/flags/job.done",
+        r"D:/flags/job.log",
+        interactive=True,
+    )
+    assert "call %AF_CMD%" in script
+    assert "Start-Process" not in script
 
 
 def test_build_background_cmd_script_with_working_dir():
@@ -67,11 +79,15 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
                         assert result is True
                         assert task_name.startswith("AutoFluid_")
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert calls[0][0].startswith('schtasks /Create /TN "AutoFluid_')
+    assert " /IT" not in calls[0][0]
     assert calls[0][1] == 30
     assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
     assert calls[1][1] == 30
+    assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
+    assert calls[2][0].endswith('" /DISABLE')
+    assert calls[2][1] == 30
     ensure_dir.assert_any_call("D:/flags")
     assert len(written) == 1
     script_path, script_content = written[0]
@@ -81,6 +97,39 @@ def test_exec_background_uses_scheduled_task_and_writes_wrapper_script():
     assert r'echo done > "D:\flags\task done.flag"' in script_content
     assert 'schtasks /Delete /TN "AutoFluid_' in script_content
     assert deleted == [flag_file, f"{flag_file}.error"]
+
+
+def test_exec_background_interactive_creates_interactive_scheduled_task():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+    written: list[tuple[str, str]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with patch.object(host, "_ensure_remote_dir"):
+                    with patch.object(
+                        host,
+                        "_write_remote_text_file",
+                        side_effect=lambda path, content: written.append((path, content)),
+                    ):
+                        result, _ = host.exec_background(
+                            r"conda run python meshing.py",
+                            r"D:/flags/job.done",
+                            interactive=True,
+                        )
+
+    assert result is True
+    assert calls[0][0].endswith(" /IT")
+    assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
+    assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
+    assert calls[2][0].endswith('" /DISABLE')
+    assert "call %AF_CMD%" in written[0][1]
+    assert "Start-Process" not in written[0][1]
 
 
 def test_wait_for_flag_returns_false_immediately_when_error_flag_exists():
