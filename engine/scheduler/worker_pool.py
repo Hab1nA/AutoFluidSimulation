@@ -110,6 +110,14 @@ class WorkerPoolManager:
         )
         return True
 
+    def is_transfer_in_flight(self, config_name: int) -> bool:
+        """检查指定构型是否在 Transfer 队列中（排队或执行中）。"""
+        return self._transfer_queue.has_claim(config_name)
+
+    def is_sc_in_flight(self, config_name: int) -> bool:
+        """检查指定构型是否在 SC 队列中（排队或执行中）。"""
+        return self._sc_queue.has_claim(config_name)
+
     def join_worker_threads(self, timeout: float = 3.0) -> None:
         """等待所有 SC 和 Transfer 工作线程退出。
 

@@ -417,6 +417,16 @@ class PipelineScheduler:
                 if status == STATUS_COMPLETED:
                     continue
 
+                # ★ 全局 in-flight 保护：无论步骤处于何种非 COMPLETED 状态，
+                #   只要队列中有该构型的 claim 或 MeshingMonitor 正在处理，
+                #   就跳过该构型（不重置状态、不重复入队）。
+                if self._is_step_in_flight(cn, step):
+                    logger.debug(
+                        f"{log_prefix} 构型{cn} [{step}] 状态={status} "
+                        f"但正在活跃处理中，跳过"
+                    )
+                    break  # 该构型有活跃步骤，不重置，不检查后续步骤
+
                 # ---- 找到第一个非 COMPLETED 步骤 ----
 
                 if status == STATUS_RUNNING:
@@ -507,6 +517,23 @@ class PipelineScheduler:
         return check_step_output_exists(
             cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh
         )
+
+    def _is_step_in_flight(self, cn: int, step: str) -> bool:
+        """检查指定构型的指定步骤是否正在被活跃处理（排队或执行中）。
+
+        用于 _resume_paused_steps() 区分"孤儿 Running"与"活跃 Running"，
+        避免将正在执行的步骤误重置为 Waiting。
+        """
+        if step == "sc":
+            return self.worker_pool.is_sc_in_flight(cn)
+        elif step == "transfer":
+            return self.worker_pool.is_transfer_in_flight(cn)
+        elif step == "meshing":
+            return (
+                self.meshing_monitor is not None
+                and self.meshing_monitor.get_in_flight_config() == cn
+            )
+        return False  # sw/solver 由 start_pipeline/屏障统一管理
 
     def _enqueue_sc(self, cn: int, step_dir: str) -> None:
         """将构型的 SC 步骤推入处理队列（带去重）。

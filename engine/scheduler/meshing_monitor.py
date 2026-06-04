@@ -76,6 +76,10 @@ class MeshingMonitor:
         """返回当前队列深度。"""
         return self._meshing_queue.qsize()
 
+    def get_in_flight_config(self) -> int | None:
+        """返回当前正在执行 Meshing 的构型编号，无则返回 None。"""
+        return self._in_flight_config
+
     # ------------------------------------------------------------------
     # 线程生命周期
     # ------------------------------------------------------------------
@@ -130,20 +134,42 @@ class MeshingMonitor:
                     f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
                     exc_info=True,
                 )
-                self.state.set_step_status(config_name, "meshing", STATUS_ERROR, str(e))
+                # ★ 不标记 ERROR：避免 _scan_db_for_pending() 重复入队
+                #   检查重试次数，未达上限则 requeue
+                retry_count = self.state.increment_retry(config_name, "meshing")
+                max_retries = int(ENGINE_CONFIG["max_retries"])
+                if retry_count < max_retries:
+                    self.state.set_step_status(
+                        config_name, "meshing", STATUS_RETRYING,
+                        f"异常重试 {retry_count}/{max_retries}",
+                    )
+                    should_requeue = True
+                else:
+                    self.state.set_step_status(
+                        config_name, "meshing", STATUS_ERROR,
+                        f"Meshing 异常重试 {retry_count} 次后放弃: {e}",
+                    )
             except Exception as e:
                 logger.critical(
                     f"[MeshingMonitor] 处理构型{config_name} 致命异常: "
                     f"{type(e).__name__}: {e}",
                     exc_info=True,
                 )
-                self.state.set_step_status(
-                    config_name, "meshing", STATUS_ERROR,
-                    f"致命异常: {type(e).__name__}: {e}",
-                )
+                retry_count = self.state.increment_retry(config_name, "meshing")
+                max_retries = int(ENGINE_CONFIG["max_retries"])
+                if retry_count < max_retries:
+                    should_requeue = True
+                else:
+                    self.state.set_step_status(
+                        config_name, "meshing", STATUS_ERROR,
+                        f"致命异常重试 {retry_count} 次后放弃: {type(e).__name__}: {e}",
+                    )
             finally:
                 self._in_flight_config = None
                 if should_requeue:
+                    logger.warning(
+                        f"[MeshingMonitor] 构型{config_name} 异常，重新入队"
+                    )
                     self._meshing_queue.requeue(config_name)
                 else:
                     self._meshing_queue.complete(config_name)

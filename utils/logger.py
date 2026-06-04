@@ -385,7 +385,13 @@ class LogBroadcastHandler(logging.Handler):
 
     @staticmethod
     def _is_config_scoped_log(record: logging.LogRecord) -> bool:
-        """Return True for log messages tied to a single configuration."""
+        """Return True for log messages tied to a single configuration.
+
+        仅过滤 INFO/DEBUG 级别的构型详情日志，WARNING/ERROR/CRITICAL
+        始终放行，确保 TUI 详细日志面板不遗漏关键告警。
+        """
+        if record.levelno >= logging.WARNING:
+            return False
         message = record.getMessage()
         return any(pattern.search(message) for pattern in _CONFIG_SCOPED_LOG_PATTERNS)
 

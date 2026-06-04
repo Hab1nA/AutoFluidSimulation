@@ -856,9 +856,37 @@ def test_config_scoped_excel_logs_do_not_emit_aggregate_summary():
     print("  ✅ Excel 逐构型日志不生成详细日志摘要")
 
 
-# ============================================================================
-# 测试 11: raw_message 字段与 TUI 显示格式
-# ============================================================================
+def test_config_scoped_log_passes_through_warning_and_above():
+    """WARNING/ERROR/CRITICAL 级别的构型日志应被放行（不被过滤）。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.main")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    # WARNING 级别含"构型N"的日志应被放行
+    test_logger.warning("检测到重复入队：构型8 Transfer 已在队列中")
+    # ERROR 级别含"构型N"的日志应被放行
+    test_logger.error("构型3 Meshing 异常重试 3 次后放弃")
+    # CRITICAL 级别含"构型N"的日志应被放行
+    test_logger.critical("构型5 致命异常: RuntimeError: 连接中断")
+
+    # INFO 级别含"构型N"的日志仍应被过滤
+    test_logger.info("状态更新: 构型1 [sc] -> Completed")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    # 3 条 WARNING/ERROR/CRITICAL 应被放行，1 条 INFO 应被过滤
+    assert result["total"] == 3, (
+        f"预期 3 条 WARNING+ 日志被放行，实际: {result['total']}"
+    )
+
+    levels = [e["level"] for e in result["entries"]]
+    assert "WARNING" in levels
+    assert "ERROR" in levels
+    assert "CRITICAL" in levels
+    assert "INFO" not in levels
+
+    test_logger.removeHandler(handler)
+    print("  ✅ WARNING+ 级别的构型日志被放行，INFO 仍被过滤")
 
 def test_raw_message_contains_logger_name_and_msg():
     """测试 raw_message 仅包含 logger 名和消息内容，不含时间戳和级别。"""
@@ -1096,6 +1124,7 @@ def main():
         ("逐构型过滤: 操作上下文", test_config_scoped_log_suppression_matches_operation_context),
         ("逐构型过滤: 单条日志", test_single_config_scoped_log_is_suppressed),
         ("逐构型过滤: Excel摘要", test_config_scoped_excel_logs_do_not_emit_aggregate_summary),
+        ("逐构型过滤: WARNING+放行", test_config_scoped_log_passes_through_warning_and_above),
         ("raw_message: 不含时间戳和级别", test_raw_message_contains_logger_name_and_msg),
         ("raw_message: message保留完整格式", test_message_still_has_full_format),
         ("raw_message: 比message更短", test_raw_message_vs_message_difference),

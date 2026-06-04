@@ -43,6 +43,11 @@ class UniqueWorkQueue(Generic[T]):
             self._claims.discard(self._key(item))
         self._queue.task_done()
 
+    def has_claim(self, key: Hashable) -> bool:
+        """检查指定 key 是否有活跃 claim（排队中或执行中）。"""
+        with self._lock:
+            return key in self._claims
+
     def requeue(self, item: T) -> None:
         """保留 claim 并将当前任务放回队列尾部。"""
         self._queue.put(item)

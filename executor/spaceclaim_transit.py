@@ -689,8 +689,8 @@ def _persistent_loop():
     poll_interval = 1.0
     logger.info("常驻模式: 开始轮询命令文件 {}".format(cmd_file))
 
-    # result_file 在每条命令中按 run_id 动态计算
-    result_file = ""
+    # ★ 基于 slot_id 的默认路径，确保外层 handler 在任何异常下都能写入有效路径
+    result_file = os.path.join(cmd_dir, "sc_result_{}".format(slot_id))
 
     # ★ 使用全局计数器追踪已处理的构型数（跨命令循环迭代持久化）
     global _persistent_config_count
@@ -778,9 +778,19 @@ def _persistent_loop():
 
             success = process_step_file(config_name, step_dir, scdoc_dir)
 
-            _write_result(result_file, config_name, success,
-                          "转换成功" if success else "转换失败",
-                          run_id=run_id)
+            # ★ _write_result 独立包裹：编码异常不逃逸到外层 BaseException handler
+            #   _write_result 内部已有 4 层降级保护，此处仅兜底极端编码异常
+            try:
+                _write_result(result_file, config_name, success,
+                              "转换成功" if success else "转换失败",
+                              run_id=run_id)
+            except (UnicodeEncodeError, UnicodeDecodeError) as write_err:
+                # 编码异常：_write_result 的降级路径可能已写入部分结果，
+                # 但不应让外层 handler 再写入 success=false 覆盖
+                try:
+                    logger.error("常驻模式: 结果写入编码异常（已忽略）: {}".format(write_err))
+                except Exception:
+                    pass
 
             # ★ 日志调用单独包裹：即使日志器因编码问题崩溃，
             #   也不会导致异常传播到外层 except（那会覆盖已写入的结果文件）

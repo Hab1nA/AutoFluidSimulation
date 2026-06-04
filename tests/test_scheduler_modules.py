@@ -475,6 +475,10 @@ class TestBarrierCoordinator:
         )
 
     def teardown_method(self):
+        # ★ 先停止所有后台线程再清理数据库，避免 SolverDispatcher 线程
+        #   在 teardown 删除 DB 后仍尝试访问 sqlite 文件。
+        self.stopped.set()
+        self.coordinator.join_solver_threads(timeout=5)
         IPC_CONFIG["db_path"] = self._orig_db_path
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -632,6 +636,19 @@ class TestMeshingMonitor:
     def test_qsize_empty(self):
         """空队列返回 0。"""
         assert self.monitor.qsize() == 0
+
+    def test_get_in_flight_config_initial_none(self):
+        """初始状态无 in-flight 构型。"""
+        assert self.monitor.get_in_flight_config() is None
+
+    def test_get_in_flight_config_reflects_active_config(self):
+        """get_in_flight_config 应反映当前正在处理的构型编号。"""
+        # 通过 _in_flight_config 内部属性直接验证
+        self.monitor._in_flight_config = 5
+        assert self.monitor.get_in_flight_config() == 5
+
+        self.monitor._in_flight_config = None
+        assert self.monitor.get_in_flight_config() is None
 
     def test_start_if_needed_creates_thread(self):
         """start_if_needed 创建监控线程。"""
