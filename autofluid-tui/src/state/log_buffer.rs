@@ -150,6 +150,7 @@ impl LogBuffer {
 
 fn log_info_message(message: &str) {
     let trimmed = message.trim_start();
+    // ✅ 成功、❌ 错误、⚠ 警告、⏳ 等待中、⏸ 暂停
     if trimmed.starts_with('❌') || trimmed.contains("失败") || trimmed.contains("错误") {
         log::error!("[TUI] 高级信息: {message}");
     } else if trimmed.starts_with('⚠') || trimmed.contains("警告") || trimmed.contains("超时")

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
@@ -50,14 +50,14 @@ class TaskRunner:
             state_manager: StateManager 实例，用于读写任务状态
         """
         self.state = state_manager
-        self._ssh: Optional[RemoteWorkstation] = None
+        self._ssh: RemoteWorkstation | None = None
         self._ssh_lock = threading.RLock()
 
         self._sc_pool = SCProcessPool()
 
-        self._paused_event: Optional[threading.Event] = None
-        self._stopped_event: Optional[threading.Event] = None
-        self._pipeline_control: Optional[PipelineControl] = None
+        self._paused_event: threading.Event | None = None
+        self._stopped_event: threading.Event | None = None
+        self._pipeline_control: PipelineControl | None = None
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -214,8 +214,8 @@ class TaskRunner:
 
     def wait_meshing_completion(
         self, config_name: int,
-        paused_event: Optional[threading.Event] = None,
-        stopped_event: Optional[threading.Event] = None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """等待网格划分完成（委托给 RemoteExecutor）。"""
         return self._remote_executor.wait_meshing_completion(
@@ -232,8 +232,8 @@ class TaskRunner:
 
     def wait_solver_completion(
         self, config_name: int,
-        paused_event: Optional[threading.Event] = None,
-        stopped_event: Optional[threading.Event] = None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """等待求解完成（委托给 RemoteExecutor）。"""
         return self._remote_executor.wait_solver_completion(

@@ -6,7 +6,6 @@ SW 阶段处理模块。
 
 import threading
 import os
-from typing import Optional
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
@@ -64,7 +63,7 @@ class SWPhaseHandler:
         self.meshing_monitor = meshing_monitor
 
         # 文件监控器引用（在 start_pipeline 中设置）
-        self._file_monitor: Optional[StepFileMonitor] = None
+        self._file_monitor: StepFileMonitor | None = None
 
         # 是否需要递归调用 start_pipeline（断点续传检测到 SW Error）
         self.needs_recurse: bool = False

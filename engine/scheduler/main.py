@@ -18,7 +18,6 @@ DAG 任务调度器 (Pipeline Scheduler)
 """
 import threading
 import os
-from typing import Optional
 
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG,
@@ -129,15 +128,15 @@ class PipelineScheduler:
         self.worker_pool.set_meshing_monitor(self.meshing_monitor)
 
         # ---- 工作线程 ----
-        self._barrier_thread: Optional[threading.Thread] = None
+        self._barrier_thread: threading.Thread | None = None
         # 预创建文件监控器并注入 SW 阶段处理器（避免双重实例）
-        self._file_monitor: Optional[StepFileMonitor] = StepFileMonitor(
+        self._file_monitor: StepFileMonitor | None = StepFileMonitor(
             step_dir=None,
             on_file_ready=self._on_step_file_ready,
             shared_paused_event=self._paused,
         )
         self.sw_phase_handler.set_file_monitor(self._file_monitor)
-        self._pipeline_thread: Optional[threading.Thread] = None  # 主调度线程引用
+        self._pipeline_thread: threading.Thread | None = None  # 主调度线程引用
 
         # 恢复全局屏障状态（断点续传）
         if self.state.is_global_barrier_met():

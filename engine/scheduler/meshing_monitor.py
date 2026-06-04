@@ -14,7 +14,6 @@
 import queue
 import threading
 import time
-from typing import Optional
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
@@ -52,8 +51,8 @@ class MeshingMonitor:
         self._stopped = stopped_event
 
         self._meshing_queue = UniqueWorkQueue[int]()
-        self._monitor_thread: Optional[threading.Thread] = None
-        self._in_flight_config: Optional[int] = None  # 当前正在执行 Meshing 的构型
+        self._monitor_thread: threading.Thread | None = None
+        self._in_flight_config: int | None = None  # 当前正在执行 Meshing 的构型
 
         logger.info("[MeshingMonitor] 初始化完成")
 

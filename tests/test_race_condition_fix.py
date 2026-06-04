@@ -24,7 +24,6 @@ import threading
 import time
 import tempfile
 import shutil
-import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,9 +33,9 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED,
     STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, IPC_CONFIG, STEP_NAMES, LOCAL_PATHS,
+    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
 )
 from engine.state_manager import StateManager
 

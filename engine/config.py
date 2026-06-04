@@ -4,10 +4,12 @@
 所有路径、SSH连接信息、环境变量等在此集中定义。
 ===============================================================================
 """
+from __future__ import annotations
+
 import os
 import re
 import sys
-from typing import Any, Optional, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -342,7 +344,7 @@ ENGINE_CONFIG: EngineConfig = {
 }
 
 
-def get_step_filename(step_name: str, config_name: int) -> Optional[str]:
+def get_step_filename(step_name: str, config_name: int) -> str | None:
     """根据 STEP_FILE_PATTERNS 生成文件名。"""
     pattern = STEP_FILE_PATTERNS.get(step_name)
     if not pattern:
@@ -403,7 +405,7 @@ def _apply_env_overrides():
                 REMOTE_CONFIG[key] = env_val
 
 
-def load_toml_config(toml_path: Optional[str] = None) -> dict[str, Any]:
+def load_toml_config(toml_path: str | None = None) -> dict[str, Any]:
     """
     从 autofluid_config.toml 加载配置。
     若文件不存在或无法解析，返回空字典。

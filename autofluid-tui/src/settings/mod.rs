@@ -246,14 +246,20 @@ impl SettingCategory {
                 3 => "step_dir",
                 4 => "sc_exe",
                 5 => "scdoc_dir",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "LocalPaths: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::RemoteConnection => match idx {
                 0 => "host",
                 1 => "port",
                 2 => "username",
                 3 => "password",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "RemoteConnection: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "working_dir",
@@ -266,7 +272,10 @@ impl SettingCategory {
                 7 => "conda_env",
                 8 => "conda_exe",
                 9 => "mpi_bin_dir",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "RemoteDirs: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::StepPatterns => match idx {
                 0 => "sw",
@@ -274,7 +283,10 @@ impl SettingCategory {
                 2 => "meshing",
                 3 => "solver",
                 4 => "solverdata",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "StepPatterns: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::SolidWorks => match idx {
                 0 => "sw_macro_timeout",
@@ -284,7 +296,10 @@ impl SettingCategory {
                 4 => "sw_startup",
                 5 => "sw_dispatch_startup_delay",
                 6 => "sw_exit_wait_seconds",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "SolidWorks: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::SpaceClaim => match idx {
                 0 => "sc_timeout",
@@ -292,7 +307,10 @@ impl SettingCategory {
                 2 => "sc_process_appear_timeout",
                 3 => "sc_gui_ready_timeout",
                 4 => "sc_gui_stable_delay",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "SpaceClaim: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "watchdog_interval",
@@ -306,7 +324,10 @@ impl SettingCategory {
                 8 => "ssh_connection",
                 9 => "dir_recursion_limit",
                 10 => "ssh_upload_max_retries",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "GlobalSettings: invalid field index {idx}");
+                    ""
+                }
             },
         }
     }
@@ -320,14 +341,20 @@ impl SettingCategory {
                 3 => "STEP输出目录",
                 4 => "SC可执行文件",
                 5 => "SCDOC输出目录",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "LocalPaths: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::RemoteConnection => match idx {
                 0 => "主机地址",
                 1 => "SSH端口",
                 2 => "用户名",
                 3 => "密码",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "RemoteConnection: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "仿真工作目录",
@@ -340,7 +367,10 @@ impl SettingCategory {
                 7 => "Conda环境名",
                 8 => "Conda可执行文件",
                 9 => "MPI安装目录",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "RemoteDirs: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::StepPatterns => match idx {
                 0 => "SW步骤模板",
@@ -348,7 +378,10 @@ impl SettingCategory {
                 2 => "Meshing模板",
                 3 => "Solver模板",
                 4 => "Solver数据模板",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "StepPatterns: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::SolidWorks => match idx {
                 0 => "宏超时(秒)",
@@ -358,7 +391,10 @@ impl SettingCategory {
                 4 => "启动超时(秒)",
                 5 => "调度启动延迟(秒)",
                 6 => "退出等待(秒)",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "SolidWorks: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::SpaceClaim => match idx {
                 0 => "脚本超时(秒)",
@@ -366,7 +402,10 @@ impl SettingCategory {
                 2 => "进程出现等待(秒)",
                 3 => "窗口就绪超时(秒)",
                 4 => "窗口稳定等待(秒)",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "SpaceClaim: invalid field index {idx}");
+                    ""
+                }
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "看门狗间隔(秒)",
@@ -380,7 +419,10 @@ impl SettingCategory {
                 8 => "SSH连接超时(秒)",
                 9 => "目录递归深度限制",
                 10 => "SSH上传最大重试",
-                _ => "",
+                _ => {
+                    debug_assert!(false, "GlobalSettings: invalid field index {idx}");
+                    ""
+                }
             },
         }
     }
@@ -407,13 +449,10 @@ impl SettingCategory {
         }
     }
 
-    /// 判断字段是否为本地文件/目录路径（需要存在性检查）
+    /// 判断字段是否为本地文件/目录路径（需要存在性检查）。
+    /// 当前仅 `LocalPaths` category 的所有字段为本地路径。
     pub fn is_path_field(self, _idx: usize) -> bool {
-        match self {
-            SettingCategory::LocalPaths => true,
-            // RemoteDirs 中的所有路径都指向远程工作站，不做本地存在性检查
-            _ => false,
-        }
+        matches!(self, SettingCategory::LocalPaths)
     }
 }
 
@@ -497,90 +536,82 @@ impl SettingsState {
     }
 
     pub fn get_field_value(&self, category: SettingCategory, idx: usize) -> String {
+        macro_rules! field_val {
+            ($config:expr, $field:ident) => {
+                $config.$field.to_string()
+            };
+            ($config:expr, $field:ident, string) => {
+                $config.$field.clone()
+            };
+        }
         match category {
             SettingCategory::LocalPaths => match idx {
-                0 => self.config.local_paths.sw_exe.clone(),
-                1 => self.config.local_paths.sw_model.clone(),
-                2 => self.config.local_paths.excel.clone(),
-                3 => self.config.local_paths.step_dir.clone(),
-                4 => self.config.local_paths.sc_exe.clone(),
-                5 => self.config.local_paths.scdoc_dir.clone(),
+                0 => field_val!(self.config.local_paths, sw_exe, string),
+                1 => field_val!(self.config.local_paths, sw_model, string),
+                2 => field_val!(self.config.local_paths, excel, string),
+                3 => field_val!(self.config.local_paths, step_dir, string),
+                4 => field_val!(self.config.local_paths, sc_exe, string),
+                5 => field_val!(self.config.local_paths, scdoc_dir, string),
                 _ => String::new(),
             },
             SettingCategory::RemoteConnection => match idx {
-                0 => self.config.remote_config.host.clone(),
-                1 => self.config.remote_config.port.to_string(),
-                2 => self.config.remote_config.username.clone(),
-                3 => self.config.remote_config.password.clone(),
+                0 => field_val!(self.config.remote_config, host, string),
+                1 => field_val!(self.config.remote_config, port),
+                2 => field_val!(self.config.remote_config, username, string),
+                3 => field_val!(self.config.remote_config, password, string),
                 _ => String::new(),
             },
             SettingCategory::RemoteDirs => match idx {
-                0 => self.config.remote_config.working_dir.clone(),
-                1 => self.config.remote_config.scripts_dir.clone(),
-                2 => self.config.remote_config.ref_files_dir.clone(),
-                3 => self.config.remote_config.scdoc_dir.clone(),
-                4 => self.config.remote_config.msh_dir.clone(),
-                5 => self.config.remote_config.result_dir.clone(),
-                6 => self.config.remote_config.flag_dir.clone(),
-                7 => self.config.remote_config.conda_env.clone(),
-                8 => self.config.remote_config.conda_exe.clone(),
-                9 => self.config.remote_config.mpi_bin_dir.clone(),
+                0 => field_val!(self.config.remote_config, working_dir, string),
+                1 => field_val!(self.config.remote_config, scripts_dir, string),
+                2 => field_val!(self.config.remote_config, ref_files_dir, string),
+                3 => field_val!(self.config.remote_config, scdoc_dir, string),
+                4 => field_val!(self.config.remote_config, msh_dir, string),
+                5 => field_val!(self.config.remote_config, result_dir, string),
+                6 => field_val!(self.config.remote_config, flag_dir, string),
+                7 => field_val!(self.config.remote_config, conda_env, string),
+                8 => field_val!(self.config.remote_config, conda_exe, string),
+                9 => field_val!(self.config.remote_config, mpi_bin_dir, string),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
-                0 => self.config.step_file_patterns.sw.clone(),
-                1 => self.config.step_file_patterns.sc.clone(),
-                2 => self.config.step_file_patterns.meshing.clone(),
-                3 => self.config.step_file_patterns.solver.clone(),
-                4 => self.config.step_file_patterns.solver_dat.clone(),
+                0 => field_val!(self.config.step_file_patterns, sw, string),
+                1 => field_val!(self.config.step_file_patterns, sc, string),
+                2 => field_val!(self.config.step_file_patterns, meshing, string),
+                3 => field_val!(self.config.step_file_patterns, solver, string),
+                4 => field_val!(self.config.step_file_patterns, solver_dat, string),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
-                0 => self.config.solidworks.sw_macro_timeout.to_string(),
-                1 => self.config.solidworks.sw_close_doc_on_finish.to_string(),
-                2 => self.config.solidworks.sw_exit_on_finish.to_string(),
-                3 => self.config.solidworks.sw_visible.to_string(),
-                4 => self.config.solidworks.sw_startup.to_string(),
-                5 => self.config.solidworks.sw_dispatch_startup_delay.to_string(),
-                6 => self.config.solidworks.sw_exit_wait_seconds.to_string(),
+                0 => field_val!(self.config.solidworks, sw_macro_timeout),
+                1 => field_val!(self.config.solidworks, sw_close_doc_on_finish),
+                2 => field_val!(self.config.solidworks, sw_exit_on_finish),
+                3 => field_val!(self.config.solidworks, sw_visible),
+                4 => field_val!(self.config.solidworks, sw_startup),
+                5 => field_val!(self.config.solidworks, sw_dispatch_startup_delay),
+                6 => field_val!(self.config.solidworks, sw_exit_wait_seconds),
                 _ => String::new(),
             },
             SettingCategory::SpaceClaim => match idx {
-                0 => self.config.spaceclaim.sc_timeout.to_string(),
-                1 => self.config.spaceclaim.sc_poll_interval.to_string(),
-                2 => self.config.spaceclaim.sc_process_appear_timeout.to_string(),
-                3 => self.config.spaceclaim.sc_gui_ready_timeout.to_string(),
-                4 => self.config.spaceclaim.sc_gui_stable_delay.to_string(),
+                0 => field_val!(self.config.spaceclaim, sc_timeout),
+                1 => field_val!(self.config.spaceclaim, sc_poll_interval),
+                2 => field_val!(self.config.spaceclaim, sc_process_appear_timeout),
+                3 => field_val!(self.config.spaceclaim, sc_gui_ready_timeout),
+                4 => field_val!(self.config.spaceclaim, sc_gui_stable_delay),
                 _ => String::new(),
             },
             SettingCategory::GlobalSettings => match idx {
-                0 => self.config.global_settings.watchdog_interval.to_string(),
-                1 => self.config.global_settings.transfer_timeout.to_string(),
-                2 => self.config.global_settings.meshing_timeout.to_string(),
-                3 => self
-                    .config
-                    .global_settings
-                    .meshing_processor_count
-                    .to_string(),
-                4 => self.config.global_settings.solver_timeout.to_string(),
-                5 => self
-                    .config
-                    .global_settings
-                    .solver_processor_count
-                    .to_string(),
-                6 => self.config.global_settings.max_retries.to_string(),
-                7 => self
-                    .config
-                    .global_settings
-                    .state_refresh_interval
-                    .to_string(),
-                8 => self.config.global_settings.ssh_connection.to_string(),
-                9 => self.config.global_settings.dir_recursion_limit.to_string(),
-                10 => self
-                    .config
-                    .global_settings
-                    .ssh_upload_max_retries
-                    .to_string(),
+                0 => field_val!(self.config.global_settings, watchdog_interval),
+                1 => field_val!(self.config.global_settings, transfer_timeout),
+                2 => field_val!(self.config.global_settings, meshing_timeout),
+                3 => field_val!(self.config.global_settings, meshing_processor_count),
+                4 => field_val!(self.config.global_settings, solver_timeout),
+                5 => field_val!(self.config.global_settings, solver_processor_count),
+                6 => field_val!(self.config.global_settings, max_retries),
+                7 => field_val!(self.config.global_settings, state_refresh_interval),
+                8 => field_val!(self.config.global_settings, ssh_connection),
+                9 => field_val!(self.config.global_settings, dir_recursion_limit),
+                10 => field_val!(self.config.global_settings, ssh_upload_max_retries),
                 _ => String::new(),
             },
         }

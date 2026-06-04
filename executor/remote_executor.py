@@ -14,7 +14,7 @@ import json
 import os
 import time
 import threading
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
@@ -403,8 +403,8 @@ class RemoteExecutor:
 
     def wait_meshing_completion(
         self, config_name: int,
-        paused_event: Optional[threading.Event] = None,
-        stopped_event: Optional[threading.Event] = None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """轮询等待网格划分完成（逐次短暂持 SSH 锁，不在整个等待期间持锁）。
 
@@ -561,8 +561,8 @@ class RemoteExecutor:
 
     def wait_solver_completion(
         self, config_name: int,
-        paused_event: Optional[threading.Event] = None,
-        stopped_event: Optional[threading.Event] = None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """轮询等待仿真求解完成（逐次短暂持 SSH 锁）。
 
@@ -581,7 +581,7 @@ class RemoteExecutor:
         poll_interval = 30
         start_time = time.time()
         file_grace_period = 60
-        first_file_seen_time: Optional[float] = None
+        first_file_seen_time: float | None = None
 
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
@@ -772,7 +772,7 @@ class RemoteExecutor:
         return True
 
     @staticmethod
-    def _compute_combined_hash(file_hashes: dict[str, Optional[str]]) -> str:
+    def _compute_combined_hash(file_hashes: dict[str, str | None]) -> str:
         """计算文件哈希字典的组合 MD5 哈希值。
 
         将各文件按名称排序后拼接为 "name:hash|..." 格式，
@@ -905,7 +905,7 @@ class RemoteExecutor:
         logger.info(f"[Sync] {label}同步完成")
         return True
 
-    def _calculate_local_hashes(self, local_dir: str, filenames: list) -> Optional[dict[str, Optional[str]]]:
+    def _calculate_local_hashes(self, local_dir: str, filenames: list) -> dict[str, str | None] | None:
         """计算本地目录中指定文件的 MD5 哈希值。
 
         对于包含占位符的文件（.jou/.set/.wft/.pdf），
@@ -919,7 +919,7 @@ class RemoteExecutor:
             字典，键为文件名，值为 MD5 哈希值；失败返回 None
         """
         path_aware_exts = {'.jou', '.set', '.wft', '.pdf'}
-        result: dict[str, Optional[str]] = {}
+        result: dict[str, str | None] = {}
         try:
             for filename in filenames:
                 filepath = os.path.join(local_dir, filename)

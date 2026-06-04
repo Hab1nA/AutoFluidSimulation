@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Optional, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
@@ -42,12 +42,12 @@ logger = setup_logger(__name__)
 class PersistentSlot:
     """常驻模式的持久进程槽位。"""
     slot_id: int
-    process: Optional[subprocess.Popen] = field(default=None, repr=False)
-    pid: Optional[int] = None
+    process: subprocess.Popen | None = field(default=None, repr=False)
+    pid: int | None = None
     cmd_dir: str = ""
     status: str = "idle"  # idle | starting | ready | busy
-    current_config: Optional[int] = None
-    started_at: Optional[float] = None
+    current_config: int | None = None
+    started_at: float | None = None
     configs_processed: int = 0  # 已处理的构型计数（仅用于诊断/监控）
 
 
@@ -70,7 +70,7 @@ class SCProcessPool:
         self._bridge_path = LOCAL_PATHS.get("sc_bridge", "")
         self._sc_script = LOCAL_PATHS.get("sc_script", "")
 
-        self._persistent_slots: Dict[int, PersistentSlot] = {}
+        self._persistent_slots: dict[int, PersistentSlot] = {}
         self._persistent_cmd_dir = os.path.join(self._data_dir, "sc_ipc")
         os.makedirs(self._persistent_cmd_dir, exist_ok=True)
         self._next_slot_id = 1  # 自增槽位 ID 计数器
@@ -80,9 +80,9 @@ class SCProcessPool:
     # ==================================================================
 
     def run_config(self, config_name: int,
-                   paused_event: Optional[threading.Event] = None,
-                   stopped_event: Optional[threading.Event] = None,
-                   pipeline_control: Optional[PipelineControl] = None) -> bool:
+                   paused_event: threading.Event | None = None,
+                   stopped_event: threading.Event | None = None,
+                   pipeline_control: PipelineControl | None = None) -> bool:
         """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
@@ -197,7 +197,7 @@ class SCProcessPool:
     # 常驻槽位管理
     # ==================================================================
 
-    def _get_or_create_persistent_slot(self) -> Optional[PersistentSlot]:
+    def _get_or_create_persistent_slot(self) -> PersistentSlot | None:
         """获取空闲的常驻槽位，若无则创建新槽位。调用方须持有 _lock。
 
         常驻进程会一直运行直到被 quit 命令关闭或进程异常退出。
@@ -359,9 +359,9 @@ class SCProcessPool:
     @contextmanager
     def _external_start(
         self,
-        pipeline_control: Optional[PipelineControl],
-        paused_event: Optional[threading.Event],
-        stopped_event: Optional[threading.Event],
+        pipeline_control: PipelineControl | None,
+        paused_event: threading.Event | None,
+        stopped_event: threading.Event | None,
     ) -> Iterator[bool]:
         """锁定一个 SC 槽位或命令启动窗口。"""
         if pipeline_control is not None:
@@ -373,9 +373,9 @@ class SCProcessPool:
         yield not paused and not stopped
 
     def _send_persistent_command(self, slot: PersistentSlot, config_name: int,
-                                  paused_event: Optional[threading.Event],
-                                  stopped_event: Optional[threading.Event],
-                                  pipeline_control: Optional[PipelineControl] = None) -> bool:
+                                  paused_event: threading.Event | None,
+                                  stopped_event: threading.Event | None,
+                                  pipeline_control: PipelineControl | None = None) -> bool:
         """向常驻进程发送命令，通过 SCDOC 文件检测判定完成。
 
         ★ 核心设计：与 SW 步骤的 FileStableDetector 统一，直接轮询

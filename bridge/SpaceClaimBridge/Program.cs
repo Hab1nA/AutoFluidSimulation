@@ -389,6 +389,12 @@ namespace AutoFluidSimulation.Bridge
                         return (int)ExitCode.LaunchFailed;
                     }
                 }
+                catch (InvalidOperationException)
+                {
+                    // 进程对象已释放 → 确认退出
+                    Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程对象已释放，脚本未就绪");
+                    return (int)ExitCode.LaunchFailed;
+                }
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine($"[BRIDGE] Warning: 进程状态检查异常: {ex.Message}");

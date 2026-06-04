@@ -19,9 +19,11 @@ IPC 通信协议 (Inter-Process Communication Protocol)
 }
 ===============================================================================
 """
+from __future__ import annotations
+
 import json
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from utils.logger import setup_logger
 
@@ -60,7 +62,7 @@ CMD_RELOAD_CONFIG = "reload_config"      # 重新加载 TOML 配置文件
 # 消息构造与解析
 # ============================================================================
 
-def create_request(command: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def create_request(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     创建一个标准请求消息。
 
@@ -79,7 +81,7 @@ def create_request(command: str, params: Dict[str, Any] | None = None) -> Dict[s
 
 
 def create_response(status: str, request_id: str, data: Any = None,
-                    message: str = "") -> Dict[str, Any]:
+                    message: str = "") -> dict[str, Any]:
     """
     创建一个标准响应消息。
 
@@ -100,12 +102,12 @@ def create_response(status: str, request_id: str, data: Any = None,
     }
 
 
-def serialize(msg: Dict[str, Any]) -> bytes:
+def serialize(msg: dict[str, Any]) -> bytes:
     """将消息字典序列化为 JSON 字节串（末尾加换行符）。"""
     return (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def deserialize(data: bytes) -> Optional[Dict[str, Any]]:
+def deserialize(data: bytes) -> dict[str, Any] | None:
     """
     从字节串反序列化为消息字典。
 

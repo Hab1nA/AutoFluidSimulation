@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
@@ -129,7 +129,7 @@ class FileCleaner:
         else:
             self._clean_single_step(step_name, config_name)
 
-    def _clean_single_step(self, step_name: str, config_name: Optional[int] = None):
+    def _clean_single_step(self, step_name: str, config_name: int | None = None):
         """清理单个步骤的文件（内部方法）。"""
         local_patterns = {
             "sw":       ("step_dir",  [STEP_FILE_PATTERNS["sw"]]),

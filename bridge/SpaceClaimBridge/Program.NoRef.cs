@@ -20,15 +20,26 @@ namespace AutoFluidSimulation.Bridge
     }
 
     /// <summary>
-    /// SpaceClaim Bridge — C# 5 兼容版本，纯进程检测模式
+    /// SpaceClaim Bridge — 纯进程检测模式（无外部引用版本，用于编译验证）
     ///
     /// SpaceClaim 不向外部暴露 out-of-process COM 自动化接口（与 AutoCAD/SolidWorks 不同），
     /// 因此采用命令行 /RunScript + 进程检测的纯进程模式。
     ///
     /// 用法:
-    ///   SpaceClaimBridge.exe --script &lt;transit.py&gt; --config &lt;N&gt; --stepdir &lt;dir&gt; --scdocdir &lt;dir&gt; [--timeout &lt;s&gt;]
+    ///   SpaceClaimBridge.exe
+    ///     --script   &lt;transit脚本路径&gt;
+    ///     --config   &lt;构型编号&gt;
+    ///     --stepdir  &lt;STEP文件目录&gt;
+    ///     --scdocdir &lt;SCDOC输出目录&gt;
+    ///     [--timeout &lt;秒数, 默认300&gt;]
     ///
-    /// 返回值: 0=成功 1=脚本失败 2=启动失败 3=输出验证失败 4=参数错误 5=超时
+    /// 返回值:
+    ///   0 = 成功
+    ///   1 = 脚本执行失败
+    ///   2 = SpaceClaim 启动失败
+    ///   3 = 输出文件验证失败
+    ///   4 = 参数错误
+    ///   5 = 超时
     /// </summary>
     class Program
     {
@@ -217,66 +228,75 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
-                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程在 120s 内未出现");
+                Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] SpaceClaim 进程在 {0}s 内未出现", processAppearTimeout));
                 return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine(string.Format("[BRIDGE] SpaceClaim 进程已出现 (PID={0}), 等待 GUI 就绪...", workingProcess.Id));
-            WaitForGuiReady(workingProcess, 30);
+            int guiReadyTimeout = GetEnvInt("AUTOFLUID_SC_GUI_READY_TIMEOUT", 30);
+            WaitForGuiReady(workingProcess, guiReadyTimeout);
 
-            Console.WriteLine("[BRIDGE] SpaceClaim 正在运行, 监控脚本执行完成...");
-
-            int totalTimeout = o.Timeout;
-            int pollIntervalMs = 2000;
-            DateTime deadline = DateTime.UtcNow.AddSeconds(totalTimeout);
-            string scdocFile = Path.Combine(o.ScdocDir, "model_gen4_" + o.Config + ".scdoc");
-
-            while (DateTime.UtcNow < deadline)
+            try
             {
-                if (File.Exists(scdocFile))
-                {
-                    FileInfo fi = new FileInfo(scdocFile);
-                    Console.WriteLine(string.Format("[BRIDGE] ✓ SCDOC 已生成: {0} ({1} B)", scdocFile, fi.Length));
-                    return (int)ExitCode.Success;
-                }
+                Console.WriteLine("[BRIDGE] SpaceClaim 正在运行, 监控脚本执行完成...");
 
-                bool processAlive = false;
-                try
-                {
-                    if (workingProcess != null)
-                    {
-                        workingProcess.Refresh();
-                        processAlive = !workingProcess.HasExited;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine("[BRIDGE] Warning: 进程状态检查失败: " + ex.Message);
-                    processAlive = false;
-                }
+                int totalTimeout = o.Timeout;
+                int pollIntervalMs = 2000;
+                DateTime deadline = DateTime.UtcNow.AddSeconds(totalTimeout);
+                string scdocFile = Path.Combine(o.ScdocDir, "model_gen4_" + o.Config + ".scdoc");
 
-                if (!processAlive)
+                while (DateTime.UtcNow < deadline)
                 {
-                    Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出, 最终检查...");
-                    Thread.Sleep(2000);
                     if (File.Exists(scdocFile))
                     {
                         FileInfo fi = new FileInfo(scdocFile);
                         Console.WriteLine(string.Format("[BRIDGE] ✓ SCDOC 已生成: {0} ({1} B)", scdocFile, fi.Length));
                         return (int)ExitCode.Success;
                     }
-                    Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成 SCDOC 文件");
-                    return (int)ExitCode.OutputValidationFailed;
+
+                    bool processAlive = false;
+                    try
+                    {
+                        if (workingProcess != null)
+                        {
+                            workingProcess.Refresh();
+                            processAlive = !workingProcess.HasExited;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine("[BRIDGE] Warning: 进程状态检查失败: " + ex.Message);
+                        processAlive = false;
+                    }
+
+                    if (!processAlive)
+                    {
+                        Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出, 最终检查...");
+                        Thread.Sleep(2000);
+                        if (File.Exists(scdocFile))
+                        {
+                            FileInfo fi = new FileInfo(scdocFile);
+                            Console.WriteLine(string.Format("[BRIDGE] ✓ SCDOC 已生成: {0} ({1} B)", scdocFile, fi.Length));
+                            return (int)ExitCode.Success;
+                        }
+                        Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成 SCDOC 文件");
+                        return (int)ExitCode.OutputValidationFailed;
+                    }
+
+                    Thread.Sleep(pollIntervalMs);
                 }
 
-                Thread.Sleep(pollIntervalMs);
+                Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] 超时 ({0}s)", totalTimeout));
+                return (int)ExitCode.Timeout;
             }
-
-            Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] 超时 ({0}s)", totalTimeout));
-            return (int)ExitCode.Timeout;
+            finally
+            {
+                workingProcess?.Dispose();
+            }
         }
 
         static int ExecutePersistent(BridgeOptions o)
@@ -336,15 +356,17 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            Process workingProcess = WaitForProcessAppear(launchBaseline, 120);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
-                Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程在 120s 内未出现");
+                Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] SpaceClaim 进程在 {0}s 内未出现", processAppearTimeout));
                 return (int)ExitCode.LaunchFailed;
             }
 
             Console.WriteLine(string.Format("[BRIDGE] SpaceClaim 进程已出现 (PID={0}), 等待 GUI 就绪...", workingProcess.Id));
-            WaitForGuiReady(workingProcess, 30);
+            int guiReadyTimeout = GetEnvInt("AUTOFLUID_SC_GUI_READY_TIMEOUT", 30);
+            WaitForGuiReady(workingProcess, guiReadyTimeout);
 
             // 等待脚本就绪标志
             string readyFile = Path.Combine(o.CmdDir, string.Format("sc_ready_{0}.json", o.SlotId));
@@ -363,7 +385,7 @@ namespace AutoFluidSimulation.Bridge
                     if (workingProcess.HasExited)
                     {
                         Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 进程已退出，脚本未就绪");
-                        break;
+                        return (int)ExitCode.LaunchFailed;
                     }
                 }
                 catch (InvalidOperationException)
@@ -375,7 +397,6 @@ namespace AutoFluidSimulation.Bridge
                 catch (Exception ex)
                 {
                     Console.Error.WriteLine("[BRIDGE] Warning: 进程状态检查异常: " + ex.Message);
-                    return (int)ExitCode.LaunchFailed;
                 }
                 Thread.Sleep(2000);
             }
@@ -495,6 +516,16 @@ namespace AutoFluidSimulation.Bridge
                 }
             }
             return null;
+        }
+
+        static int GetEnvInt(string name, int defaultValue)
+        {
+            string value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value) && int.TryParse(value, out int parsed) && parsed > 0)
+            {
+                return parsed;
+            }
+            return defaultValue;
         }
 
         static Process WaitForProcessAppear(DateTime after, int timeoutSec)
@@ -624,17 +655,8 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine("[BRIDGE] Warning: Phase 2 WaitForInputIdle 异常: " + ex.Message);
             }
 
-            // Phase 3 等待时间可通过环境变量 AUTOFLUID_SC_GUI_STABLE_DELAY 配置（默认 15 秒）
-            int guiWaitSeconds = 15;
-            string envWait = Environment.GetEnvironmentVariable("AUTOFLUID_SC_GUI_STABLE_DELAY");
-            if (!string.IsNullOrEmpty(envWait))
-            {
-                int parsed;
-                if (int.TryParse(envWait, out parsed) && parsed > 0)
-                {
-                    guiWaitSeconds = parsed;
-                }
-            }
+            // Phase 3 等待时间可通过环境变量配置（默认 15 秒）
+            int guiWaitSeconds = GetEnvInt("AUTOFLUID_SC_GUI_STABLE_DELAY", 15);
             Console.WriteLine(string.Format("[BRIDGE] Phase 3: 等待加载稳定 (延时 {0}s)...", guiWaitSeconds));
             Thread.Sleep(guiWaitSeconds * 1000);
             Console.WriteLine("[BRIDGE] SpaceClaim GUI 加载完成");

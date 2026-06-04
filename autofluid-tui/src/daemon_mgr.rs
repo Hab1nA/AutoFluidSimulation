@@ -101,6 +101,9 @@ impl DaemonManager {
     }
 
     /// 等待子进程自行退出。
+    ///
+    /// 注意：此方法在同步上下文中调用（`run_app` 主循环退出阶段），
+    /// 不在 tokio 异步上下文中，因此使用 `std::thread::sleep` 是安全的。
     fn wait_for_exit(child: &mut Child) {
         let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
         while Instant::now() < deadline {
@@ -122,6 +125,9 @@ impl DaemonManager {
     }
 
     /// 等待外部 daemon 进程自行退出（通过 PID 文件检测）。
+    ///
+    /// 注意：此方法在同步上下文中调用，不在 tokio 异步上下文中，
+    /// 因此使用 `std::thread::sleep` 是安全的。
     fn wait_for_pid_exit(project_dir: &str) {
         let pid_file = Self::pid_file_path(project_dir);
         let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);

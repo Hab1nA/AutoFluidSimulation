@@ -23,15 +23,16 @@ pub struct DetailPanelParams<'a> {
 }
 
 fn info_message_color(msg: &str, theme: &crate::theme::AppTheme) -> Color {
-    if msg.contains('\u{2705}') {
+    // ✅ 成功、❌ 错误、⚠ 警告、💡 提示、📌 标记、⏳ 等待中、⏸ 暂停
+    if msg.contains('✅') {
         theme.success
-    } else if msg.contains('\u{274C}') {
+    } else if msg.contains('❌') {
         theme.error
-    } else if msg.contains('\u{26A0}') {
+    } else if msg.contains('⚠') {
         theme.warning
-    } else if msg.contains('\u{1F4A1}') || msg.contains('\u{1F4CC}') {
+    } else if msg.contains('💡') || msg.contains('📌') {
         theme.info
-    } else if msg.contains('\u{23F3}') || msg.contains('\u{23F8}') {
+    } else if msg.contains('⏳') || msg.contains('⏸') {
         theme.warning
     } else {
         theme.success
