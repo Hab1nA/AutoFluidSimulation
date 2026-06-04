@@ -147,6 +147,7 @@ pub struct AppState {
     pub last_log_generation: u64,
     pub terminal_size: ratatui::layout::Rect,
     pub pending_command: Option<String>,
+    pub pending_command_source: Option<&'static str>,
     pub hovered_table_row: Option<u16>,
     pub hovered_detail_row: Option<u16>,
     pub hovered_button: Option<u8>,

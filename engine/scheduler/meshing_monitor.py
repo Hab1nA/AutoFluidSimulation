@@ -61,15 +61,16 @@ class MeshingMonitor:
     # 队列操作
     # ------------------------------------------------------------------
 
-    def submit(self, config_name: int) -> None:
+    def submit(self, config_name: int) -> bool:
         """将构型提交到 Meshing 队列。由 Worker 线程调用。"""
         if not self._meshing_queue.submit(config_name):
             logger.debug(f"[MeshingMonitor] 构型{config_name} 已存在，跳过重复提交")
-            return
+            return False
         logger.info(
             f"[MeshingMonitor] 构型{config_name} 已入队 "
             f"(队列深度: {self._meshing_queue.qsize()})"
         )
+        return True
 
     def qsize(self) -> int:
         """返回当前队列深度。"""
@@ -280,10 +281,6 @@ class MeshingMonitor:
         if pending:
             for cn in sorted(pending):
                 self.submit(cn)
-            logger.info(
-                f"[MeshingMonitor] 断点续传: {len(pending)} 个构型补充入队 "
-                f"{sorted(pending)}"
-            )
         else:
             logger.info("[MeshingMonitor] 断点续传: 无需补充的构型")
 

@@ -17,6 +17,7 @@ import collections
 import itertools
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -266,6 +267,11 @@ POLLING_COMMANDS = frozenset({
     "get_engine_status",
 })
 
+_CONFIG_SCOPED_LOG_PATTERNS = (
+    re.compile(r"构型\s*\d+"),
+    re.compile(r"\bconfig(?:_name)?\s*[=:]\s*\d+\b", re.IGNORECASE),
+)
+
 
 def _classify_source(logger_name: str, message: str) -> str:
     """根据 logger 名称和日志消息内容分类日志来源。"""
@@ -349,25 +355,39 @@ class LogBroadcastHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            if getattr(record, "broadcast", True) is False:
+                return
             if self._is_polling_log(record):
                 return
-            msg = self._formatter.format(record)
-            raw_msg = f"[{record.name}] {record.getMessage()}"
-            entry = LogEntry(
-                id=next(self._id_counter),
-                timestamp=datetime.fromtimestamp(
-                    record.created, tz=timezone.utc
-                ).strftime("%Y-%m-%d %H:%M:%S"),
-                level=record.levelname,
-                source=_classify_source(record.name, record.getMessage()),
-                logger_name=record.name,
-                message=msg,
-                raw_message=raw_msg,
-            )
+            if self._is_config_scoped_log(record):
+                return
+            entry = self._entry_from_record(record)
             with self._lock:
                 self._buffer.append(entry)
         except Exception:
             self.handleError(record)
+
+    def _entry_from_record(self, record: logging.LogRecord) -> LogEntry:
+        """Build a structured entry from a log record."""
+        msg = self._formatter.format(record)
+        raw_msg = f"[{record.name}] {record.getMessage()}"
+        return LogEntry(
+            id=next(self._id_counter),
+            timestamp=datetime.fromtimestamp(
+                record.created, tz=timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            level=record.levelname,
+            source=_classify_source(record.name, record.getMessage()),
+            logger_name=record.name,
+            message=msg,
+            raw_message=raw_msg,
+        )
+
+    @staticmethod
+    def _is_config_scoped_log(record: logging.LogRecord) -> bool:
+        """Return True for log messages tied to a single configuration."""
+        message = record.getMessage()
+        return any(pattern.search(message) for pattern in _CONFIG_SCOPED_LOG_PATTERNS)
 
     @staticmethod
     def _is_polling_log(record: logging.LogRecord) -> bool:

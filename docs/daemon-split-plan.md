@@ -1,7 +1,8 @@
 # Daemon 系统代码拆分计划
 
-> 文档版本：v1.0  
+> 文档版本：v2.0  
 > 创建日期：2026-05-29  
+> 最后更新：2026-06-04  
 > 基于：`docs/roadmap.md` 远期计划  
 > 目标：将单机 Daemon 拆分为"本地 PC + 服务器 A"分布式架构
 
@@ -32,8 +33,9 @@
 | `PipelineDaemon`（主控） | ✅ | |
 | `StateManager`（SQLite） | ✅ | |
 | `PipelineScheduler` | ✅ | |
+| `PipelineControl` | ✅ | |
 | `IPCServer` | ✅ | |
-| `TaskRunner`（远程部分：Transfer/Meshing/Solver） | ✅ | |
+| `TaskRunner`（协调器，远程部分） | ✅ | |
 | `TaskRunner`（本地部分：SW/SC） | | ✅ |
 | `StepFileMonitor` | | ✅（改造为远程上报模式） |
 | `TUI Client` | | ✅ |
@@ -53,31 +55,37 @@
 ### 2.1 当前单机架构
 
 ```
-┌───────────────────────────────────────────────────────────────────┐
-│                     本地 Windows PC                                │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────────┐  │
-│  │                    PipelineDaemon (单一进程)                 │  │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │  │
-│  │  │ IPCServer   │  │ StateManager │  │ PipelineScheduler │  │  │
-│  │  │ (TCP:9527)  │  │ (SQLite WAL) │  │  ├─ WorkerPool   │  │  │
-│  │  └─────────────┘  └──────────────┘  │  ├─ BarrierCoord │  │  │
-│  │                                      │  └─ MeshingMon   │  │  │
-│  │                                      └───────────────────┘  │  │
-│  │  ┌─────────────────────────────────────────────────────┐    │  │
-│  │  │ TaskRunner (统一执行器)                              │    │  │
-│  │  │  ├─ execute_sw_step()      ← 本地 (win32com)        │    │  │
-│  │  │  ├─ execute_sc_step()      ← 本地 (SCProcessPool)   │    │  │
-│  │  │  ├─ execute_transfer()     ← 远程 (paramiko SFTP)   │    │  │
-│  │  │  ├─ execute_meshing()      ← 远程 (SSH)             │    │  │
-│  │  │  └─ execute_solver()       ← 远程 (SSH)             │    │  │
-│  │  └─────────────────────────────────────────────────────┘    │  │
-│  │  ┌────────────────────┐                                     │  │
-│  │  │ StepFileMonitor    │                                     │  │
-│  │  │ (轮询本地 step_dir)│                                     │  │
-│  │  └────────────────────┘                                     │  │
-│  └─────────────────────────────────────────────────────────────┘  │
-└───────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                     本地 Windows PC                                    │
+│                                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐  │
+│  │                    PipelineDaemon (单一进程)                     │  │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐  │  │
+│  │  │ IPCServer   │  │ StateManager │  │ PipelineScheduler      │  │  │
+│  │  │ (TCP:9527)  │  │ (SQLite WAL) │  │  ├─ PipelineControl   │  │  │
+│  │  │ 11 个命令    │  │ DB 分片      │  │  ├─ SWPhaseHandler    │  │  │
+│  │  └─────────────┘  └──────────────┘  │  ├─ WorkerPoolManager │  │  │
+│  │                                      │  │  ├─ SC 队列        │  │  │
+│  │  ┌─────────────────────────────┐     │  │  └─ Transfer 队列  │  │  │
+│  │  │ TaskRunner (协调器)          │     │  ├─ BarrierCoordinator│  │  │
+│  │  │  ├─ SWExecutor (sw_executor)│     │  ├─ MeshingMonitor   │  │  │
+│  │  │  ├─ RemoteExecutor          │     │  ├─ RetryManager     │  │  │
+│  │  │  └─ FileCleaner             │     │  └─ UniqueWorkQueue  │  │  │
+│  │  └─────────────────────────────┘     └────────────────────────┘  │  │
+│  │  ┌────────────────────┐                                         │  │
+│  │  │ StepFileMonitor    │  ← FileStableDetector 文件稳定性判定     │  │
+│  │  │ (轮询本地 step_dir)│                                         │  │
+│  │  └────────────────────┘                                         │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────────────────┘
+                           │ SSH (paramiko)
+                           ▼
+                ┌───────────────────────┐
+                │  工作站 (Windows 22H2) │
+                │  ├─ batch_meshing      │
+                │  ├─ batch_solver       │
+                │  └─ 标志文件轮询        │
+                └───────────────────────┘
 ```
 
 ### 2.2 目标分布式架构
@@ -91,20 +99,22 @@
 │  │                              │      │                              │ │
 │  │  ┌────────────────────────┐  │ RPC  │  ┌────────────────────────┐ │ │
 │  │  │ LocalWorker (新增)      │◄├──────►│  │ PipelineDaemon (主控)   │ │ │
-│  │  │  ├─ execute_sw_step()  │  │      │  │  ├─ IPCServer (0.0.0.0) │ │ │
-│  │  │  ├─ execute_sc_step()  │  │      │  │  ├─ StateManager        │ │ │
+│  │  │  ├─ SWExecutor         │  │      │  │  ├─ IPCServer (0.0.0.0) │ │ │
+│  │  │  ├─ SCProcessPool      │  │      │  │  ├─ StateManager        │ │ │
 │  │  │  └─ StepFileMonitor    │  │      │  │  └─ PipelineScheduler   │ │ │
-│  │  └────────────────────────┘  │      │  │     ├─ WorkerPool       │ │ │
-│  │                              │      │  │     ├─ BarrierCoord    │ │ │
-│  │  ┌────────────────────────┐  │      │  │     └─ MeshingMonitor  │ │ │
-│  │  │ TUI Client (Rust)      │◄├──────┤  ├────────────────────────┤ │ │
-│  │  └────────────────────────┘  │      │  │ TaskRunner (远程部分)   │ │ │
-│  │                              │      │  │  ├─ execute_transfer()  │ │ │
-│  │  ┌────────────────────────┐  │      │  │  ├─ execute_meshing()   │ │ │
-│  │  │ ResultFetcher (新增)    │◄├──────┤  │  └─ execute_solver()    │ │ │
-│  │  │ (结果拉取)              │  │      │  ├────────────────────────┤ │ │
-│  │  └────────────────────────┘  │      │  │ ResultCollector (新增)  │ │ │
-│  └──────────────────────────────┘      │  │ StagingManager (新增)   │ │ │
+│  │  └────────────────────────┘  │      │  │     ├─ PipelineControl │ │ │
+│  │                              │      │  │     ├─ WorkerPoolMgr   │ │ │
+│  │  ┌────────────────────────┐  │      │  │     │  ├─ SC 队列      │ │ │
+│  │  │ TUI Client (Rust)      │◄├──────┤  │     │  └─ Transfer 队列│ │ │
+│  │  └────────────────────────┘  │      │  │     ├─ BarrierCoord   │ │ │
+│  │                              │      │  │     └─ MeshingMonitor  │ │ │
+│  │  ┌────────────────────────┐  │      │  ├────────────────────────┤ │ │
+│  │  │ ResultFetcher (新增)    │◄├──────┤  │ TaskRunner (远程部分)   │ │ │
+│  │  │ (结果拉取)              │  │      │  │  ├─ RemoteExecutor    │ │ │
+│  │  └────────────────────────┘  │      │  │  └─ FileCleaner       │ │ │
+│  └──────────────────────────────┘      │  ├────────────────────────┤ │ │
+│                                        │  │ ResultCollector (新增)  │ │ │
+│                                        │  │ StagingManager (新增)   │ │ │
 │                                        │  └────────────────────────┘ │ │
 │                                        └───────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -118,86 +128,109 @@
 
 | 模块 | 文件路径 | 职责说明 | 改动类型 |
 |------|---------|---------|:-------:|
-| `TaskRunner` 本地部分 | `engine/task_runner.py` | 保留 `execute_sw_step()` 和 `execute_sc_step()` | 拆分 |
-| `SWExecutor` | `executor/sw_executor.py` | SolidWorks COM 自动化 | 无变更 |
-| `SCProcessPool` | `engine/sc_process_pool.py` | SpaceClaim 进程池 | 无变更 |
-| `SCScript` | `executor/spaceclaim_transit.py` | SpaceClaim 脚本 | 无变更 |
-| `StepFileMonitor` | `engine/file_monitor.py` | 改造为远程上报模式 | 重构 |
+| `TaskRunner` 本地部分 | `engine/task_runner.py` | 协调器，保留 `SWExecutor` 委托调用 | 拆分 |
+| `SWExecutor` | `executor/sw_executor.py` | SolidWorks COM 自动化（~1734 行） | 无变更 |
+| `SCProcessPool` | `engine/sc_process_pool.py` | SpaceClaim 3 槽位常驻进程池（文件协议 IPC） | 无变更 |
+| `SCScript` | `executor/spaceclaim_transit.py` | SpaceClaim Python API 转换脚本（~985 行） | 无变更 |
+| `StepFileMonitor` | `engine/file_monitor.py` | FileStableDetector 改造为远程上报模式 | 重构 |
 | `ExcelReader` | `utils/excel_reader.py` | Excel 参数读取 | 无变更 |
 
 ### 3.2 迁移到服务器 A 的模块
 
+| 模块 | 文件路径 | 当前行数 | 职责说明 | 改动类型 |
+|------|---------|:-------:|---------|:-------:|
+| `PipelineDaemon` | `engine/daemon.py` | ~551 | 主控协调器，新增 LocalWorkerAdapter | 重构 |
+| `StateManager` | `engine/state_manager.py` | ~579 | SQLite WAL + DB 分片（config fingerprint），新增 workstation_id 字段 | 扩展 |
+| `ConfigFingerprint` | `engine/config_fingerprint.py` | ~31 | 构型组合指纹 MD5，数据库分片依据 | 无变更 |
+| `PipelineScheduler` | `engine/scheduler/main.py` | ~691 | 调度核心：SW→SC/Transfer/Meshing 流水线 + 全局屏障 + Solver 分发 | 重构 |
+| `PipelineControl` | `engine/scheduler/control.py` | ~70 | 统一 pause/resume/stop 并发控制（transition_lock 防竞态） | 轻微调整 |
+| `SWPhaseHandler` | `engine/scheduler/sw_phase.py` | ~459 | SW 阶段执行、断点续传递归、下游状态同步 | 无变更 |
+| `WorkerPoolManager` | `engine/scheduler/worker_pool.py` | ~515 | SC/Transfer 解耦双队列工作线程池 | 轻微调整 |
+| `BarrierCoordinator` | `engine/scheduler/barrier.py` | ~316 | 全局屏障监控 + Solver 线程调度（串行执行） | 重构 |
+| `MeshingMonitor` | `engine/scheduler/meshing_monitor.py` | ~295 | 串行 Meshing 执行器（UniqueWorkQueue 去重） | 轻微调整 |
+| `RetryManager` | `engine/scheduler/retry.py` | ~148 | 统一重试逻辑（Running→Retrying→Error 状态机） | 无变更 |
+| `UniqueWorkQueue` | `engine/scheduler/work_queue.py` | ~68 | 去重工作队列（线程安全） | 无变更 |
+| `IPCServer` | `ipc/server.py` | ~264 | 监听地址改为 0.0.0.0，新增 Worker 命令处理器 | 扩展 |
+| `IPCProtocol` | `ipc/protocol.py` | ~129 | JSON-over-TCP 协议（当前 11 个命令），新增 Worker 相关命令 | 扩展 |
+| `RemoteExecutor` | `executor/remote_executor.py` | ~1028 | SFTP 传输 + 远程 Meshing/Solver 执行 | 扩展 |
+| `RemoteWorkstation` | `utils/ssh_client.py` | ~1092 | paramiko SSH/SFTP 封装，新增多工作站支持 | 轻微调整 |
+| `FileCleaner` | `executor/cleaner.py` | ~174 | 系统健康检查 + 中间文件清理 | 无变更 |
+| `Logger` | `utils/logger.py` | ~493 | 会话级日志 + 广播处理器（TUI 增量拉取） | 无变更 |
+| `Config` | `engine/config.py` | ~516 | TOML 配置加载 + 环境变量覆盖 + TypedDict 定义 | 扩展 |
+
+### 3.3 Rust TUI 侧需要适配的模块
+
 | 模块 | 文件路径 | 职责说明 | 改动类型 |
 |------|---------|---------|:-------:|
-| `PipelineDaemon` | `engine/daemon.py` | 主控协调器，新增 LocalWorkerAdapter | 重构 |
-| `StateManager` | `engine/state_manager.py` | SQLite 状态持久化，新增 workstation_id 字段 | 扩展 |
-| `PipelineScheduler` | `engine/scheduler/main.py` | 调度核心，适配多工作站 | 重构 |
-| `WorkerPool` | `engine/scheduler/worker_pool.py` | 工作线程池 | 轻微调整 |
-| `BarrierCoordinator` | `engine/scheduler/barrier.py` | 改为工作站级屏障 | 重构 |
-| `MeshingMonitor` | `engine/scheduler/meshing_monitor.py` | 网格监控 | 轻微调整 |
-| `IPCServer` | `ipc/server.py` | 监听地址改为 0.0.0.0，新增 Worker 命令 | 扩展 |
-| `IPCProtocol` | `ipc/protocol.py` | 新增 Worker 相关命令 | 扩展 |
-| `RemoteExecutor` | `executor/remote_executor.py` | 远程执行 | 无变更 |
-| `RemoteWorkstation` | `utils/ssh_client.py` | SSH 客户端 | 无变更 |
-| `Logger` | `utils/logger.py` | 日志系统 | 无变更 |
+| `IpcProtocol` | `autofluid-tui/src/ipc/protocol.rs` | 新增 Worker 相关命令常量 | 扩展 |
+| `Settings` | `autofluid-tui/src/settings/mod.rs` | 新增多工作站配置分类（7 分类 → 8+） | 扩展 |
+| `SettingsIO` | `autofluid-tui/src/settings/config_io.rs` | TOML 读写支持新配置段 | 扩展 |
+| `AppState` | `autofluid-tui/src/state/app_state.rs` | 新增 Worker 状态显示 | 扩展 |
+| `CommandBar` | `autofluid-tui/src/ui/command_bar.rs` | 新增 Worker 管理按钮 | 扩展 |
 
-### 3.3 新增模块
+### 3.4 新增模块
 
 | 模块 | 文件路径 | 预估行数 | 职责说明 |
 |------|---------|:-------:|---------|
-| `LocalWorker` | `engine/local_worker.py` | ~400 | 本地 PC 侧 Worker 进程 |
-| `LocalWorkerAdapter` | `engine/local_worker_adapter.py` | ~200 | Daemon 侧适配器 |
-| `ConfigAssigner` | `engine/config_assigner.py` | ~80 | 构型分配器 |
-| `MeshingAssigner` | `engine/scheduler/meshing_assigner.py` | ~150 | 动态任务分配 |
-| `WorkstationMesher` | `engine/scheduler/workstation_mesher.py` | ~200 | 工作站状态管理 |
-| `ResultCollector` | `engine/result_collector.py` | ~250 | 服务器 A 侧结果收集 |
-| `StagingManager` | `engine/staging_manager.py` | ~150 | 暂存区管理 |
-| `WorkerProtocol` | `ipc/worker_protocol.py` | ~100 | Worker RPC 协议 |
+| `LocalWorker` | `engine/local_worker.py` | ~400 | 本地 PC 侧 Worker 进程（asyncio 事件循环） |
+| `LocalWorkerAdapter` | `engine/local_worker_adapter.py` | ~200 | Daemon 侧适配器（RPC 下发替代直接调用） |
+| `ConfigAssigner` | `engine/config_assigner.py` | ~80 | 构型分配器（轮询取模策略） |
+| `MeshingAssigner` | `engine/scheduler/meshing_assigner.py` | ~150 | 动态任务分配（槽位池模型） |
+| `WorkstationMesher` | `engine/scheduler/workstation_mesher.py` | ~200 | 工作站 Meshing 状态管理 + 自感知屏障 |
+| `ResultCollector` | `engine/result_collector.py` | ~250 | 服务器 A 侧结果收集（SFTP 拉取） |
+| `StagingManager` | `engine/staging_manager.py` | ~150 | 暂存区管理（磁盘 + DB 记录） |
+| `WorkerProtocol` | `ipc/worker_protocol.py` | ~100 | Worker RPC 协议定义 |
 | `ResultFetcher` | `client/result_fetcher.py` | ~150 | 本地 PC 侧结果拉取 |
 
 ---
 
 ## 4. 核心拆分点详解
 
-### 4.1 TaskRunner 分离
+### 4.1 TaskRunner 协调器分离
 
-**当前代码** (`engine/task_runner.py`):
+**当前代码** (`engine/task_runner.py`) 采用**协调器 + 子执行器**模式：
 
 ```python
 class TaskRunner:
-    def __init__(self, ...):
-        self._ssh: Optional[RemoteWorkstation] = None  # 单实例 SSH
+    """任务执行器（协调者）。保持 SSH 连接和 SCProcessPool，将具体执行逻辑委托给子模块。"""
+    def __init__(self, state_manager: StateManager):
+        self._ssh: Optional[RemoteWorkstation] = None
         self._ssh_lock = threading.RLock()
-    
-    def execute_sw_step(self) -> bool: ...      # 本地执行
-    def execute_sc_step(self, ...) -> bool: ...  # 本地执行
-    def execute_transfer(self) -> bool: ...      # 远程执行
-    def execute_meshing(self) -> bool: ...       # 远程执行
-    def execute_solver(self) -> bool: ...        # 远程执行
+        self._sc_pool = SCProcessPool()
+
+        # ---- 子执行器 ----
+        self._sw_executor = SWExecutor(self.state)
+        self._remote_executor = RemoteExecutor(
+            self.state,
+            ssh_getter=self.get_ssh,
+            ssh_lock=self._ssh_lock,
+        )
+        self._cleaner = FileCleaner(self.state, ssh_getter=self.get_ssh)
 ```
 
-**拆分后**:
+**拆分后**：
 
-- **服务器端** `TaskRunner`: 只保留 `execute_transfer()`, `execute_meshing()`, `execute_solver()`
-- **本地端** `LocalWorker`: 包含 `execute_sw_step()`, `execute_sc_step()`
+- **服务器端** `TaskRunner`：移除 `SWExecutor` 和 `SCProcessPool`，仅保留 `RemoteExecutor`（Transfer/Meshing/Solver）
+- **本地端** `LocalWorker`：包含 `SWExecutor`、`SCProcessPool`、`StepFileMonitor`
+- `RemoteExecutor` 中的 SSH 连接获取改为支持多工作站：`ssh_getter` 需增加 `workstation_id` 参数
 
 ### 4.2 StepFileMonitor 远程化
 
-**当前**: Daemon 侧轮询本地 `step_dir`
+**当前**: `StepFileMonitor` 使用 `FileStableDetector` 轮询本地 `step_dir`，检测文件大小稳定后推入 SC 队列。由 `SWPhaseHandler` 注入并管理生命周期。
 
 **改造后**:
-1. 本地 `LocalWorker` 运行 `StepFileMonitor`
+1. 本地 `LocalWorker` 运行 `StepFileMonitor`（保持现有逻辑不变）
 2. 检测到文件就绪后，通过 RPC 命令 `worker_file_ready` 上报给 Daemon
-3. Daemon 侧不再需要 `StepFileMonitor` 实例
+3. Daemon 侧 `SWPhaseHandler` 不再需要 `StepFileMonitor` 实例，改为接收上报事件推入 SC 队列
 
 ### 4.3 SSH 连接池化
 
-**当前**: `self._ssh: Optional[RemoteWorkstation]` (单实例)
+**当前**: `self._ssh: Optional[RemoteWorkstation]` (单实例)，通过 `TaskRunner.get_ssh()` 懒加载。
 
 **改造后**: `self._ssh_pool: dict[str, RemoteWorkstation]` (按工作站 ID 索引)
 
 ```python
-# 当前
+# 当前 (engine/task_runner.py)
 self._ssh: Optional[RemoteWorkstation] = None
 self._ssh_lock = threading.RLock()
 
@@ -208,15 +241,16 @@ self._ssh_locks: dict[str, threading.RLock] = {}
 
 ### 4.4 屏障机制改造
 
-**当前**: 全局屏障
+**当前**: `BarrierCoordinator` 使用全局 `threading.Event` (`_barrier_passed`)。当 `state.all_configs_completed_at_step("meshing")` 返回 True 时，设置屏障事件并启动 Solver 线程（串行执行：同一时刻仅一个构型求解）。
 
 ```python
+# 当前 (engine/scheduler/barrier.py)
 if self.state.all_configs_completed_at_step("meshing"):
     self._barrier_passed.set()
     self._dispatch_solver_tasks()
 ```
 
-**改造后**: 工作站级屏障
+**改造后**: 工作站级屏障，每台工作站独立判断
 
 ```python
 # 每台工作站独立判断
@@ -225,11 +259,45 @@ if self.state.all_configs_completed_at_step("meshing", workstation_id=ws_id):
     self._dispatch_solver_tasks(workstation_id=ws_id)
 ```
 
+### 4.5 PipelineControl 适配
+
+**当前**: `PipelineControl`（`engine/scheduler/control.py`）通过 `transition_lock` 序列化 pause/resume/stop 状态变更，防止 TOCTOU 竞态。所有子模块通过 `paused_event` / `stopped_event` 响应控制信号。
+
+**改造后**: `PipelineControl` 需扩展支持多工作站维度的状态管理，但核心 pause/resume/stop 语义不变。`LocalWorker` 侧需独立的控制事件（通过 RPC 下发 pause/stop 命令）。
+
+### 4.6 PauseGuard / RetryManager 跨语言复用
+
+**当前**: `PauseGuard`（`engine/scheduler/utils.py`）封装了分散在各子模块中的暂停检查逻辑。`RetryManager` 统一管理重试状态机（Running → Retrying → Error）。
+
+**改造后**: `LocalWorker` 侧需要实现等价的暂停检查和重试逻辑。建议将重试策略通过 RPC 下发，LocalWorker 执行时遵循相同的重试语义。
+
 ---
 
 ## 5. IPC 协议扩展
 
-### 5.1 新增命令
+### 5.1 当前协议字段名
+
+**重要**：当前 IPC 协议使用以下字段名（非 `cmd`/`payload`）：
+
+```json
+{
+    "command": "命令名",
+    "params": { ... },
+    "request_id": "唯一请求ID"
+}
+```
+
+响应格式：
+```json
+{
+    "status": "ok" | "error",
+    "data": { ... },
+    "message": "描述信息",
+    "request_id": "与请求相同的ID"
+}
+```
+
+### 5.2 新增命令
 
 | 命令常量 | 值 | 方向 | 用途 |
 |---------|---|------|------|
@@ -243,108 +311,152 @@ if self.state.all_configs_completed_at_step("meshing", workstation_id=ws_id):
 | `CMD_COLLECT_RESULTS` | `"collect_results"` | LocalWorker → Daemon | 请求拉取暂存结果 |
 | `CMD_COLLECT_ACK` | `"collect_ack"` | LocalWorker → Daemon | 确认结果已接收 |
 
-### 5.2 协议消息格式
+### 5.3 协议消息格式（使用实际字段名）
 
 ```json
 // Worker 注册
 {
-    "cmd": "worker_register",
-    "payload": {
+    "command": "worker_register",
+    "params": {
         "worker_id": "local-pc-01",
         "capabilities": ["sw", "sc"],
         "hostname": "DESKTOP-XYZ"
-    }
+    },
+    "request_id": "a1b2c3d4"
 }
 
 // 执行指令下发
 {
-    "cmd": "worker_execute",
-    "payload": {
+    "command": "worker_execute",
+    "params": {
         "step": "sw",
         "config_names": [1, 2, 3],
-        "params": {...}
-    }
+        "params": {}
+    },
+    "request_id": "e5f6g7h8"
 }
 
 // 步骤完成上报
 {
-    "cmd": "worker_step_complete",
-    "payload": {
+    "command": "worker_step_complete",
+    "params": {
         "step": "sc",
         "config_name": 5,
         "output_files": ["D:\\scdoc\\5.scdoc"]
-    }
+    },
+    "request_id": "i9j0k1l2"
 }
 ```
+
+### 5.4 双端同步要求
+
+新增命令常量必须同时更新：
+- Python 侧：`ipc/protocol.py`（`CMD_*` 常量）
+- Rust 侧：`autofluid-tui/src/ipc/protocol.rs`（`CMD_*` 常量）
+- 验证测试：`tests/test_ipc_protocol.py`
 
 ---
 
 ## 6. 配置层改造
 
-### 6.1 工作站配置
+### 6.1 当前配置系统
 
-**当前** (`engine/config.py`):
+当前配置采用**三层叠加**机制（优先级从高到低）：
+1. **环境变量**（`AUTOFLUID_*`）— 最高优先级
+2. **TOML 配置文件**（`autofluid_config.toml`）— 通过 `reload_config_from_toml()` 加载
+3. **Python 硬编码默认值**（`engine/config.py` 中的 `LOCAL_PATHS`、`REMOTE_CONFIG`、`ENGINE_CONFIG` 等）
 
-```python
-REMOTE_CONFIG = {
-    "host": "172.17.135.240",
-    "port": 22,
-    "username": "ps",
-    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
-    "scdoc_dir": r"D:\xkz_1020\scdoc",
-    ...
-}
+TOML 支持 `${VAR}` 语法引用环境变量（如 `password = "${AUTOFLUID_SSH_PASSWORD}"`）。
+
+**关键共享字段**：`autofluid_config.toml` 同时被 Python 配置加载和 Rust TUI 设置页面读取，共享字段名必须保持一致的 `snake_case`。
+
+### 6.2 工作站配置改造
+
+**当前** (`autofluid_config.toml` 中的 `[remote_config]` 段):
+
+```toml
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+scdoc_dir = 'D:\xkz_1020\scdoc'
+# ... 其他路径
 ```
 
-**改造后**:
+**改造后** — 新增 `[[workstations]]` 数组段：
 
-```python
-WORKSTATIONS = [
-    {
-        "id": "WS-A",
-        "host": "172.17.135.240",
-        "port": 22,
-        "username": "ps",
-        "password": os.environ.get("AUTOFLUID_WS_A_PASSWORD", ""),
-        "scdoc_dir": r"D:\xkz_1020\scdoc",
-        "msh_dir": r"D:\xkz_1020\msh",
-        "result_dir": r"D:\xkz_1020\case",
-        "postprocess_script": r"D:\xkz_1020\batch_postprocess_gen4.py",
-        "postprocess_output_dir": r"D:\xkz_1020\results",
-        "notes": "现有工作站，已配置好环境",
-    },
-    {
-        "id": "WS-B",
-        "host": "172.17.135.89",
-        "port": 22,
-        "username": "ps",
-        "password": None,  # 无需密码
-        ...
-    },
-    {
-        "id": "WS-C",
-        "host": "172.17.135.254",
-        "port": 22,
-        "username": "ps",
-        "password": None,  # 无需密码
-        ...
-    },
-]
+```toml
+# 向后兼容：默认工作站（等价于 workstations[0]）
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "${AUTOFLUID_SSH_PASSWORD}"
+scdoc_dir = 'D:\xkz_1020\scdoc'
+msh_dir = 'D:\xkz_1020\msh'
+result_dir = 'D:\xkz_1020\case'
+flag_dir = 'D:\xkz_1020\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
 
-# 向后兼容：默认工作站
-REMOTE_CONFIG = WORKSTATIONS[0]
+# 多工作站配置（新增）
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "${AUTOFLUID_WS_A_PASSWORD}"
+scdoc_dir = 'D:\xkz_1020\scdoc'
+msh_dir = 'D:\xkz_1020\msh'
+result_dir = 'D:\xkz_1020\case'
+flag_dir = 'D:\xkz_1020\flags'
+postprocess_script = 'D:\xkz_1020\batch_postprocess_gen4.py'
+postprocess_output_dir = 'D:\xkz_1020\results'
+notes = "现有工作站，已配置好环境"
 
-# IPC 配置
-IPC_CONFIG = {
-    "host": "0.0.0.0",  # 从 127.0.0.1 改为 0.0.0.0
-    "port": 9527,
-}
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+password = "${AUTOFLUID_WS_B_PASSWORD}"
+# ... 同上路径结构
 
-# 步骤定义扩展
-STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver", "postprocess", "collect"]
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.254"
+port = 22
+username = "ps"
+password = "${AUTOFLUID_WS_C_PASSWORD}"
+# ... 同上路径结构
 ```
 
-### 6.2 环境变量
+### 6.3 Python 侧 TypedDict 扩展
+
+在 `engine/config.py` 中新增：
+
+```python
+class WorkstationConfig(TypedDict):
+    id: str
+    host: str
+    port: int
+    username: str
+    password: str
+    scdoc_dir: str
+    msh_dir: str
+    result_dir: str
+    flag_dir: str
+    postprocess_script: str
+    postprocess_output_dir: str
+    notes: str
+
+WORKSTATIONS: list[WorkstationConfig] = []
+```
+
+`reload_config_from_toml()` 需新增对 `[[workstations]]` 数组段的解析。
+
+### 6.4 环境变量
 
 ```bash
 # 服务器 A
@@ -357,11 +469,23 @@ AUTOFLUID_SERVER_HOST=192.168.1.100  # 服务器 A 地址
 AUTOFLUID_SERVER_HOST=192.168.1.100  # 服务器 A 地址
 ```
 
+### 6.5 Rust TUI 设置适配
+
+当前 Rust TUI 设置系统（`autofluid-tui/src/settings/mod.rs`）有 7 分类 48 字段。新增多工作站配置后：
+
+- 新增 `workstations` 分类（每个工作站一组字段）
+- `config_io.rs` 需支持 TOML 数组段 `[[workstations]]` 的读写
+- `settings_ui.rs` 需新增工作站列表页面
+
 ---
 
 ## 7. 数据库 Schema 变更
 
-### 7.1 steps 表扩展
+### 7.1 现有分片机制
+
+**重要**：当前数据库已按构型组合指纹自动分片（`config_fingerprint.py`）。不同构型组合使用不同的 `.db` 文件，修改设计表后自动切换数据库，互不干扰。新增的 Schema 变更需要在每个分片数据库中生效。
+
+### 7.2 steps 表扩展
 
 ```sql
 -- 新增字段
@@ -369,7 +493,7 @@ ALTER TABLE steps ADD COLUMN workstation_id TEXT DEFAULT NULL;
 ALTER TABLE steps ADD COLUMN slot_id INTEGER DEFAULT NULL;
 ```
 
-### 7.2 result_delivery 表（新建）
+### 7.3 result_delivery 表（新建）
 
 ```sql
 CREATE TABLE IF NOT EXISTS result_delivery (
@@ -393,9 +517,9 @@ CREATE TABLE IF NOT EXISTS result_delivery (
 
 本地 PC 侧独立进程，负责：
 
-1. 执行 SW 阶段（win32com COM API）
-2. 执行 SC 阶段（SCProcessPool 管理）
-3. 运行 StepFileMonitor，检测 STEP 文件写入完成
+1. 执行 SW 阶段（通过 `SWExecutor`，win32com COM API）
+2. 执行 SC 阶段（通过 `SCProcessPool` 管理，3 槽位常驻进程池）
+3. 运行 `StepFileMonitor`（`FileStableDetector` 文件稳定性判定），检测 STEP 文件写入完成
 4. 上传 SCDOC 文件到服务器 A
 5. 上线后拉取后处理结果
 
@@ -406,7 +530,8 @@ class LocalWorker:
     def __init__(self, server_host: str, server_port: int):
         self._server_host = server_host
         self._server_port = server_port
-        self._task_runner = TaskRunner()  # 仅本地部分
+        self._sw_executor = SWExecutor(...)  # 复用现有 SWExecutor
+        self._sc_pool = SCProcessPool()      # 复用现有进程池
         self._file_monitor = StepFileMonitor(...)
         self._running = False
     
@@ -421,8 +546,8 @@ class LocalWorker:
     async def _register(self):
         """向 Daemon 注册"""
         await self._send({
-            "cmd": "worker_register",
-            "payload": {
+            "command": "worker_register",
+            "params": {
                 "worker_id": self._worker_id,
                 "capabilities": ["sw", "sc"],
             }
@@ -431,8 +556,8 @@ class LocalWorker:
     async def _on_file_ready(self, config_name: int, file_path: str):
         """文件就绪回调"""
         await self._send({
-            "cmd": "worker_file_ready",
-            "payload": {
+            "command": "worker_file_ready",
+            "params": {
                 "config_name": config_name,
                 "file_path": file_path,
             }
@@ -459,8 +584,8 @@ class LocalWorkerAdapter:
         self._pending_tasks[task_id] = future
         
         await self._send_to_worker({
-            "cmd": "worker_execute",
-            "payload": {
+            "command": "worker_execute",
+            "params": {
                 "task_id": task_id,
                 "step": "sw",
                 "config_names": configs,
@@ -504,7 +629,7 @@ class ConfigAssigner:
 
 ### 8.4 MeshingAssigner (`engine/scheduler/meshing_assigner.py`)
 
-动态任务分配核心逻辑：
+动态任务分配核心逻辑，采用槽位池模型（类似 SCProcessPool 的 3 槽位设计）：
 
 ```python
 class MeshingAssigner:
@@ -582,18 +707,18 @@ class ResultFetcher:
         """拉取所有未交付的结果"""
         # 请求结果列表
         response = await self._send({
-            "cmd": "collect_results",
-            "payload": {}
+            "command": "collect_results",
+            "params": {}
         })
         
-        for result in response["results"]:
+        for result in response["data"]["results"]:
             # 下载文件
             await self._download_file(result["staging_path"], local_dir)
             
             # 确认交付
             await self._send({
-                "cmd": "collect_ack",
-                "payload": {
+                "command": "collect_ack",
+                "params": {
                     "workstation_id": result["workstation_id"],
                     "config_name": result["config_name"],
                     "filename": result["filename"],
@@ -609,7 +734,7 @@ class ResultFetcher:
 
 | 阶段 | 内容 | 预估工期 | 前置依赖 | 验证标准 |
 |------|------|:-------:|---------|---------|
-| **P0** | 多工作站配置 | 1-2 周 | 无 | `WORKSTATIONS` 列表可配置；SSH 连接池可建立多连接；`ConfigAssigner` 正确分配构型 |
+| **P0** | 多工作站配置 | 1-2 周 | 无 | `[[workstations]]` TOML 配置可加载；SSH 连接池可建立多连接；`ConfigAssigner` 正确分配构型 |
 | **P1** | 工作站级屏障 | 1-2 周 | P0 | 每工作站独立 Meshing 屏障；屏障通过后仅启动该站 Solver；reset 正确清理对应屏障 |
 | **P2** | PostProcess 阶段 | 1 周 | P1 | 完成检测逻辑基于结果文件（.cas/.dat）轮询；TUI 正确显示 PostProcess 状态 |
 | **P3** | Daemon 拆分迁移 | 3-4 周 | P0, P1 | LocalWorker 可独立运行 SW/SC；Daemon 在 Ubuntu 上稳定运行；RPC 通信可靠 |
@@ -620,7 +745,7 @@ class ResultFetcher:
 
 ```
 P0: 多工作站配置 ──────────────────────────────────────────┐
-(WORKSTATIONS 列表 + SSH 连接池 + ConfigAssigner)           │
+([[workstations]] TOML + SSH 连接池 + ConfigAssigner)       │
     │                                                      │
     ▼                                                      │
 P1: 工作站级屏障 ◄─────────────────────────────────────────┤
@@ -654,13 +779,26 @@ P1: 工作站级屏障 ◄──────────────────
 
 每个阶段应保持可回滚：
 
-- **P0/P1**：`REMOTE_CONFIG` 保留为单工作站模式的快捷入口，通过配置开关切换
+- **P0/P1**：`[remote_config]` 保留为单工作站模式的快捷入口，通过配置开关切换
 - **P3**：LocalWorker 可降级为本地 Daemon 模式（即回退到当前架构）
 - **P4/P5**：Collect 阶段为可选功能，不影响核心流水线运行
 
 ---
 
-## 附录：风险清单
+## 附录 A：与 roadmap.md 的关系
+
+本文档（daemon-split-plan.md）聚焦于**代码级拆分方案**，包含模块清单、IPC 协议扩展、配置层改造等实施细节。
+
+`roadmap.md` 包含更广泛的架构设计内容：
+- 多工作站环境配置指引（WS-B/WS-C 的软件环境部署步骤）
+- 屏障机制的动态分配方案详细设计（`WorkstationMesher` 自感知屏障）
+- PostProcess 阶段的实际运行方式分析（内嵌在仿真脚本中自动执行）
+- 文件流转路径设计（服务器 A 中转而非工作站直传）
+- 资源评估（服务器 A 2 核 4GB 足够）
+
+建议实施时两份文档配合阅读。
+
+## 附录 B：风险清单
 
 | # | 风险 | 严重度 | 缓解措施 |
 |---|------|:------:|---------|
@@ -674,3 +812,34 @@ P1: 工作站级屏障 ◄──────────────────
 | R8 | 工作站故障导致分配到该站的构型全部卡死 | 🔴 高 | 实现工作站健康检查；故障后支持构型重新分配 |
 | R9 | 动态分配状态丢失 | 🔴 高 | 分配状态持久化到数据库；断点续传时重建分配队列 |
 | R10 | 暂存区磁盘空间耗尽 | 🔴 高 | 设置磁盘使用阈值告警；自动清理已交付且超期的文件 |
+| R11 | TOML 配置与 Rust TUI 设置页面字段名不一致 | 🟡 中 | 共享字段名必须保持 snake_case 一致；CI 测试验证 |
+| R12 | DB 分片机制下 Schema 迁移遗漏 | 🟡 中 | `StateManager` 初始化时自动检查并执行 ALTER TABLE |
+
+## 附录 C：关键代码文件行数参考
+
+| 文件 | 当前行数 | 说明 |
+|------|:-------:|------|
+| `engine/daemon.py` | ~551 | PipelineDaemon 主进程 |
+| `engine/scheduler/main.py` | ~691 | PipelineScheduler 调度核心 |
+| `engine/scheduler/worker_pool.py` | ~515 | SC/Transfer 解耦双队列 |
+| `engine/scheduler/barrier.py` | ~316 | 全局屏障 + Solver 调度 |
+| `engine/scheduler/meshing_monitor.py` | ~295 | 串行 Meshing 执行器 |
+| `engine/scheduler/sw_phase.py` | ~459 | SW 阶段处理 |
+| `engine/scheduler/retry.py` | ~148 | 重试管理器 |
+| `engine/scheduler/work_queue.py` | ~68 | 去重工作队列 |
+| `engine/scheduler/control.py` | ~70 | PipelineControl 并发控制 |
+| `engine/scheduler/utils.py` | ~330 | PauseGuard + 工具函数 |
+| `engine/state_manager.py` | ~579 | SQLite WAL 状态管理 |
+| `engine/task_runner.py` | ~269 | 任务执行协调器 |
+| `engine/sc_process_pool.py` | ~636 | SC 3 槽位进程池 |
+| `engine/file_monitor.py` | ~382 | FileStableDetector |
+| `engine/config.py` | ~516 | TOML + 环境变量 + TypedDict |
+| `engine/config_fingerprint.py` | ~31 | 配置指纹 MD5 |
+| `ipc/server.py` | ~264 | TCP IPC 服务器 |
+| `ipc/protocol.py` | ~129 | JSON 协议（11 命令） |
+| `executor/sw_executor.py` | ~1734 | SolidWorks COM 自动化 |
+| `executor/remote_executor.py` | ~1028 | 远程执行器 |
+| `executor/cleaner.py` | ~174 | 文件清理器 |
+| `executor/spaceclaim_transit.py` | ~985 | SC 转换脚本 |
+| `utils/ssh_client.py` | ~1092 | SSH/SFTP 封装 |
+| `utils/logger.py` | ~493 | 日志系统 |

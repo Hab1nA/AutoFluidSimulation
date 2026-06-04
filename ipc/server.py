@@ -237,7 +237,10 @@ class IPCServer:
             else:
                 # 连接未发送任何有效 IPC 消息即断开——可能是端口探测、
                 # 客户端 connect() 超时后丢弃、或连接泄漏产生的孤儿连接。
-                logger.debug(f"[IPC] IPC 客户端断开 (未完成握手): {addr}")
+                logger.debug(
+                    f"[IPC] IPC 客户端断开 (未完成握手): {addr}",
+                    extra={"broadcast": False},
+                )
 
     def _process_message(self, data: bytes) -> dict | None:
         """

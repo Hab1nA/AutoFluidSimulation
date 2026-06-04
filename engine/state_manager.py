@@ -189,10 +189,7 @@ class StateManager:
                             "DELETE FROM configs WHERE config_name = ?",
                             (cn,)
                         )
-                    logger.info(
-                        f"已从数据库移除 {len(removed_configs)} 个已不存在的构型: "
-                        f"{sorted(removed_configs)}"
-                    )
+                        logger.info(f"已从数据库移除已不存在的构型{cn}")
 
                 # 3) 插入或更新构型参数；仅为新构型创建步骤记录
                 #    使用 executemany 批量操作提升性能

@@ -39,20 +39,29 @@ impl IpcClient {
         // 先关闭已有连接，防止连接泄漏导致服务端出现重复连接
         self.disconnect().await;
         let addr = format!("{}:{}", self.host, self.port);
+        log::info!("[IPC] 正在连接后台引擎: {}", addr);
         match tokio::time::timeout(DEFAULT_TIMEOUT, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 self.stream = Some(stream);
                 self.last_reconnect = None; // 连接成功，清除冷却
+                log::info!("[IPC] 已连接后台引擎: {}", addr);
                 Ok(())
             }
-            Ok(Err(e)) => Err(format!("连接失败: {}", e)),
-            Err(_) => Err("连接超时".to_string()),
+            Ok(Err(e)) => {
+                log::warn!("[IPC] 连接失败: {}, error={}", addr, e);
+                Err(format!("连接失败: {}", e))
+            }
+            Err(_) => {
+                log::warn!("[IPC] 连接超时: {}", addr);
+                Err("连接超时".to_string())
+            }
         }
     }
 
     pub async fn disconnect(&mut self) {
         if let Some(mut stream) = self.stream.take() {
             let _ = stream.shutdown().await;
+            log::info!("[IPC] 已断开后台引擎连接");
         }
     }
 
@@ -72,15 +81,31 @@ impl IpcClient {
         request: &IpcRequest,
         timeout: Duration,
     ) -> Result<IpcResponse, String> {
+        let started_at = Instant::now();
+        log_request_start(request, timeout);
         let mut stream = match self.stream.take() {
             Some(s) => s,
-            None => return Err("未连接".to_string()),
+            None => {
+                log::warn!(
+                    "[IPC] 请求未发送: command={}, request_id={}, reason=未连接",
+                    request.command,
+                    request.request_id
+                );
+                return Err("未连接".to_string());
+            }
         };
 
         let data = request.serialize();
         if let Err(e) = stream.write_all(&data).await {
             // 发送失败：stream 可能已损坏，丢弃连接后自动重连
             self.auto_reconnect("发送失败").await;
+            log::warn!(
+                "[IPC] 请求发送失败: command={}, request_id={}, elapsed_ms={}, error={}",
+                request.command,
+                request.request_id,
+                started_at.elapsed().as_millis(),
+                e
+            );
             return Err(format!("发送失败: {}", e));
         }
 
@@ -117,9 +142,18 @@ impl IpcClient {
                 let stream = reader.into_inner();
                 self.stream = Some(stream);
                 match IpcResponse::deserialize(&buffer) {
-                    Some(resp) => Ok(resp),
+                    Some(resp) => {
+                        log_request_finish(request, &resp, started_at.elapsed());
+                        Ok(resp)
+                    }
                     None => {
                         self.auto_reconnect("响应解析失败").await;
+                        log::warn!(
+                            "[IPC] 响应解析失败: command={}, request_id={}, elapsed_ms={}",
+                            request.command,
+                            request.request_id,
+                            started_at.elapsed().as_millis()
+                        );
                         Err("无效响应格式".to_string())
                     }
                 }
@@ -127,6 +161,12 @@ impl IpcClient {
             Ok(Ok(false)) => {
                 // 对端关闭连接 → stream 已不可用，自动重连
                 self.auto_reconnect("对端关闭").await;
+                log::warn!(
+                    "[IPC] 请求失败: command={}, request_id={}, elapsed_ms={}, reason=连接已断开",
+                    request.command,
+                    request.request_id,
+                    started_at.elapsed().as_millis()
+                );
                 Err("连接已断开".to_string())
             }
             Ok(Err(e)) => {
@@ -136,6 +176,13 @@ impl IpcClient {
                 // 而内核缓冲区中可能残留后续字节 → 下次读取脱序。
                 // 直接丢弃 reader（含其内部缓冲区和底层 stream）最安全。
                 self.auto_reconnect("读取失败").await;
+                log::warn!(
+                    "[IPC] 请求读取失败: command={}, request_id={}, elapsed_ms={}, error={}",
+                    request.command,
+                    request.request_id,
+                    started_at.elapsed().as_millis(),
+                    e
+                );
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
@@ -143,6 +190,13 @@ impl IpcClient {
                 // 服务端可能仍在处理旧请求（旧连接线程完成后自行清理），
                 // 新连接获得干净的字节流，不会与旧请求混淆。
                 self.auto_reconnect("请求超时").await;
+                log::warn!(
+                    "[IPC] 请求超时: command={}, request_id={}, timeout_ms={}, elapsed_ms={}",
+                    request.command,
+                    request.request_id,
+                    timeout.as_millis(),
+                    started_at.elapsed().as_millis()
+                );
                 Err("请求超时".to_string())
             }
         }
@@ -286,4 +340,60 @@ impl IpcClient {
         ))
         .await
     }
+}
+
+fn log_request_start(request: &IpcRequest, timeout: Duration) {
+    if is_polling_command(&request.command) {
+        log::debug!(
+            "[IPC] 发送轮询请求: command={}, request_id={}, timeout_ms={}",
+            request.command,
+            request.request_id,
+            timeout.as_millis()
+        );
+    } else {
+        log::info!(
+            "[IPC] 发送请求: command={}, request_id={}, timeout_ms={}",
+            request.command,
+            request.request_id,
+            timeout.as_millis()
+        );
+    }
+}
+
+fn log_request_finish(request: &IpcRequest, response: &IpcResponse, elapsed: Duration) {
+    if is_polling_command(&request.command) {
+        log::debug!(
+            "[IPC] 收到轮询响应: command={}, request_id={}, status={}, elapsed_ms={}",
+            request.command,
+            request.request_id,
+            response.status,
+            elapsed.as_millis()
+        );
+    } else if response.is_ok() {
+        log::info!(
+            "[IPC] 收到响应: command={}, request_id={}, status={}, elapsed_ms={}",
+            request.command,
+            request.request_id,
+            response.status,
+            elapsed.as_millis()
+        );
+    } else {
+        log::warn!(
+            "[IPC] 收到失败响应: command={}, request_id={}, status={}, elapsed_ms={}, message={}",
+            request.command,
+            request.request_id,
+            response.status,
+            elapsed.as_millis(),
+            response.message
+        );
+    }
+}
+
+fn is_polling_command(command: &str) -> bool {
+    matches!(
+        command,
+        super::protocol::CMD_GET_ALL_STATUS
+            | super::protocol::CMD_GET_ENGINE_STATUS
+            | super::protocol::CMD_GET_LOG_ENTRIES
+    )
 }

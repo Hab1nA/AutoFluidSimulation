@@ -342,8 +342,15 @@ fn cmd_filter(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
 }
 
 fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
-    let filename = if parts.len() > 1 {
-        let mut f = parts[1].to_string();
+    let (scope, filename_arg) = match parts.get(1).map(|s| s.to_lowercase()) {
+        Some(scope) if matches!(scope.as_str(), "all" | "info" | "detail") => {
+            (scope, parts.get(2).copied())
+        }
+        _ => ("all".to_string(), parts.get(1).copied()),
+    };
+
+    let filename = if let Some(name) = filename_arg {
+        let mut f = name.to_string();
         if !f.ends_with(".log") {
             f.push_str(".log");
         }
@@ -357,19 +364,35 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     let _ = fs::create_dir_all(&log_dir);
     let filepath = log_dir.join(&filename);
 
-    let lines = log_buffer.export_lines(&state.log_filter_level, &state.log_filter_source);
+    let lines = match scope.as_str() {
+        "info" => log_buffer.export_info_lines(),
+        "detail" => log_buffer.export_lines(&state.log_filter_level, &state.log_filter_source),
+        _ => log_buffer.export_all_lines(&state.log_filter_level, &state.log_filter_source),
+    };
     if lines.is_empty() {
         log_buffer.push_info("当前无日志可导出".to_string());
     } else {
         match fs::write(&filepath, lines.join("\n")) {
             Ok(_) => {
-                log_buffer.push_info(format!(
-                    "✅ 日志已导出: {} ({} 条)",
+                log::info!(
+                    "[TUI] 日志导出完成: scope={}, path={}, lines={}",
+                    scope,
                     filepath.display(),
                     lines.len()
+                );
+                log_buffer.push_info(format!(
+                    "✅ 日志已导出: {} ({} 条, scope={})",
+                    filepath.display(),
+                    lines.len(),
+                    scope
                 ));
             }
             Err(e) => {
+                log::error!(
+                    "[TUI] 日志导出失败: path={}, error={}",
+                    filepath.display(),
+                    e
+                );
                 log_buffer.push_info(format!("❌ 日志导出失败: {}", e));
             }
         }
@@ -387,6 +410,11 @@ pub async fn execute_confirm_action(
             config_name,
             step_name,
         } => {
+            log::info!(
+                "[TUI] 确认重置步骤: config={}, step={}",
+                config_name,
+                step_name.as_deref().unwrap_or("all")
+            );
             let config_value = if config_name.eq_ignore_ascii_case("all") {
                 serde_json::Value::String("all".to_string())
             } else {
@@ -412,6 +440,13 @@ pub async fn execute_confirm_action(
             step_name,
             config_name,
         } => {
+            log::info!(
+                "[TUI] 确认清理步骤文件: step={}, config={}",
+                step_name,
+                config_name
+                    .as_ref()
+                    .map_or_else(|| "all".to_string(), serde_json::Value::to_string)
+            );
             match ipc.clean_step(step_name, config_name.clone()).await {
                 Ok(resp) if resp.is_ok() => {
                     log_buffer.push_info(format!("✅ {}", resp.message));
@@ -426,12 +461,16 @@ pub async fn execute_confirm_action(
             CommandResult::None
         }
         ConfirmAction::FullQuit => {
+            log::info!("[TUI] 确认完全退出后台引擎和界面");
             if ipc.is_connected() {
                 let _ = ipc.full_quit().await;
             }
             CommandResult::FullQuit
         }
-        ConfirmAction::StopDaemon => CommandResult::StopDaemon,
+        ConfirmAction::StopDaemon => {
+            log::info!("[TUI] 确认停止后台引擎");
+            CommandResult::StopDaemon
+        }
     }
 }
 
@@ -467,6 +506,7 @@ const HELP_LINES: &[&str] = &[
     "  filter status              - 查看当前过滤状态",
     "  export                     - 导出当前日志到文件",
     "  export <filename>          - 导出日志为指定文件名",
+    "  export all|info|detail     - 导出全部/高级信息/详细日志",
 ];
 
 fn show_help(log_buffer: &mut LogBuffer) {

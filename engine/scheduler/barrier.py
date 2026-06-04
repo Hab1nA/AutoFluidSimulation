@@ -162,10 +162,8 @@ class BarrierCoordinator:
             meshing_error_configs = {c for c, s, _ in error_configs if s == "meshing"}
             new_errors = meshing_error_configs - _last_error_report
             if new_errors:
-                logger.warning(
-                    f"[BarrierMonitor] 检测到 {len(new_errors)} 个新的网格划分失败: "
-                    f"{sorted(new_errors)}"
-                )
+                for cn in sorted(new_errors):
+                    logger.warning(f"[BarrierMonitor] 构型{cn} 网格划分失败")
                 _last_error_report = meshing_error_configs
 
             # 轮询间隔：网格划分通常耗时较长，不需要高频检查

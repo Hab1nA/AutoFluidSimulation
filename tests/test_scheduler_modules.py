@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import shutil
+import logging
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
@@ -245,8 +246,21 @@ class _MockTaskRunner:
         self._solver_dispatched = []
         self._solver_wait_result = True
 
+    def set_control_events(self, paused_event, stopped_event):
+        self._paused_event = paused_event
+        self._stopped_event = stopped_event
+
     def do_sc_final_cleanup(self):
         self._sc_cleanup_called = True
+
+    def shutdown_sc_pool(self):
+        return None
+
+    def disconnect_ssh(self):
+        return None
+
+    def reset_sc_pool(self):
+        return None
 
     def execute_solver(self, config_name: int) -> bool:
         self._solver_dispatched.append(config_name)
@@ -280,6 +294,154 @@ class _MockRemoteExecutor:
 
     def get_ssh_connection(self):
         return None
+
+
+class _SpyFileMonitor:
+    """记录调度器是否启动了 STEP 文件监控。"""
+
+    def __init__(self):
+        self.start_count = 0
+        self.reset_only_count = 0
+        self.resume_and_reset_count = 0
+        self._running = False
+
+    @property
+    def is_running(self):
+        return self._running
+
+    def start(self):
+        self.start_count += 1
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def pause(self):
+        return None
+
+    def resume_only(self):
+        return None
+
+    def resume_and_reset(self):
+        self.resume_and_reset_count += 1
+        return None
+
+    def reset_only(self):
+        self.reset_only_count += 1
+        return None
+
+
+class TestPipelineSchedulerStartRecovery:
+    """验证 start 对非全新数据库状态的轻量恢复。"""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="scheduler_start_")
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        self._orig_db_path = IPC_CONFIG["db_path"]
+        IPC_CONFIG["db_path"] = self.db_path
+
+        self.state = StateManager(db_path=self.db_path)
+        self.runner = _MockTaskRunner(self.state)
+
+        from engine.scheduler import PipelineScheduler
+        self.scheduler = PipelineScheduler(self.state, self.runner)
+        self.file_monitor = _SpyFileMonitor()
+        self.scheduler._file_monitor = self.file_monitor
+
+        self.scheduler.meshing_monitor.start_if_needed = lambda: None
+        self.scheduler.worker_pool.start_if_needed = lambda: None
+        self.scheduler.barrier_coordinator.dispatch_solver_if_ready = lambda: True
+
+    def teardown_method(self):
+        self.scheduler.stop()
+        IPC_CONFIG["db_path"] = self._orig_db_path
+        if os.path.exists(self.tmpdir):
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_start_skips_step_monitor_when_only_meshing_pending(self, caplog):
+        """SC/Transfer 已完成时，start 直接恢复 Meshing，不扫描旧 STEP。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_sw_macro_started(True)
+        for cn in (1, 2):
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "transfer", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "meshing", STATUS_WAITING)
+
+        with caplog.at_level(logging.INFO):
+            self.scheduler.start_pipeline()
+
+        assert self.file_monitor.start_count == 0
+        assert self.scheduler.meshing_monitor.qsize() == 2
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("[MeshingMonitor] 构型1 已入队" in msg for msg in messages)
+        assert any("[MeshingMonitor] 构型2 已入队" in msg for msg in messages)
+        assert not any("个 Meshing 提交" in msg for msg in messages)
+
+    def test_start_restores_transfer_without_step_monitor(self, caplog):
+        """SC 已完成但 Transfer 未完成时，start 直接恢复 Transfer 队列。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_sw_macro_started(True)
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_COMPLETED)
+        self.state.set_step_status(1, "transfer", STATUS_WAITING)
+
+        with caplog.at_level(logging.INFO):
+            self.scheduler.start_pipeline()
+
+        assert self.file_monitor.start_count == 0
+        assert self.scheduler.worker_pool._transfer_queue.qsize() == 1
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("构型1 已推入 Transfer 队列" in msg for msg in messages)
+        assert not any("个 Transfer 入队" in msg for msg in messages)
+
+    def test_request_file_monitor_reset_preserves_scheduler_pause(self):
+        """clean SW 后只重置监控器追踪状态，不解除调度器暂停。"""
+        self.scheduler._paused.set()
+
+        self.scheduler.request_file_monitor_reset()
+
+        assert self.file_monitor.reset_only_count == 1
+        assert self.file_monitor.resume_and_reset_count == 0
+        assert self.scheduler._paused.is_set()
+
+
+class _CleanStepRunner:
+    def __init__(self):
+        self.clean_calls = []
+
+    def clean_step_files(self, step_name, config_name):
+        self.clean_calls.append((step_name, config_name))
+
+
+class _CleanStepScheduler:
+    def __init__(self):
+        self.file_monitor_reset_count = 0
+
+    def request_file_monitor_reset(self):
+        self.file_monitor_reset_count += 1
+
+
+class TestPipelineDaemonCleanStep:
+    """验证 clean_step IPC handler 与调度器文件监控接口兼容。"""
+
+    def test_clean_sw_requests_scheduler_file_monitor_reset(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": 1,
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已清理 sw 步骤的文件" in message
+        assert daemon.runner.clean_calls == [("sw", 1)]
+        assert daemon.scheduler.file_monitor_reset_count == 1
 
 
 # ====================================================================
@@ -489,7 +651,7 @@ class TestMeshingMonitor:
         # 第二次调用时线程已死亡（stopped），会创建新线程
         # 但不会崩溃
 
-    def test_scan_db_for_pending_restores_queue(self):
+    def test_scan_db_for_pending_restores_queue(self, caplog):
         """断点续传：Transfer Completed + Meshing Waiting → 入队。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
         self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
@@ -497,8 +659,13 @@ class TestMeshingMonitor:
         self.state.set_step_status(2, "transfer", STATUS_COMPLETED)
         self.state.set_step_status(2, "meshing", STATUS_ERROR, "超时")
 
-        self.monitor._scan_db_for_pending()
+        with caplog.at_level(logging.INFO):
+            self.monitor._scan_db_for_pending()
         assert self.monitor.qsize() == 2
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("[MeshingMonitor] 构型1 已入队" in msg for msg in messages)
+        assert any("[MeshingMonitor] 构型2 已入队" in msg for msg in messages)
+        assert not any("断点续传: 构型补充入队" in msg for msg in messages)
 
     def test_scan_db_for_pending_skips_non_completed_transfer(self):
         """Transfer 未完成的构型不入队。"""

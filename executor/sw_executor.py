@@ -217,7 +217,6 @@ class SWExecutor:
                 logger.info(
                     f"[SW] 逐构型重建+导出完成: {success_cnt} 成功, "
                     f"{fail_cnt} 失败"
-                    f"{f' (失败构型: {failed_cfgs})' if failed_cfgs else ''}"
                 )
                 if success_cnt == 0 and fail_cnt > 0:
                     logger.error(
@@ -233,9 +232,11 @@ class SWExecutor:
                 #   已成功的构型保持 COMPLETED 状态，重试时会被跳过；
                 #   仅失败构型（STATUS_ERROR）会被 _prepare_sw_retry 重置并重新导出。
                 if fail_cnt > 0:
+                    for failed_cfg in failed_cfgs:
+                        logger.warning(f"[SW] 构型{failed_cfg} 导出失败，将触发重试")
                     logger.warning(
                         f"[SW] 部分构型导出失败 ({fail_cnt}/{success_cnt + fail_cnt})，"
-                        f"返回 False 触发重试（失败构型: {failed_cfgs}）"
+                        "返回 False 触发重试"
                     )
                     try:
                         sw_app.CloseDoc(os.path.basename(sw_model))
@@ -1479,7 +1480,10 @@ class SWExecutor:
                     f"STEP 导出完毕但文件缺失: {filename}"
                 )
                 missing_configs.append(cn)
-                logger.warning(f"[SW-Export] 构型{cn} STEP 缺失")
+                logger.warning(
+                    f"[SW-Export] 构型{cn} STEP 缺失 "
+                    "— 可能原因: 构型重建失败 / 设计表参数错误"
+                )
 
         total_found = len(already_completed) + len(found_configs)
         logger.info(
@@ -1487,11 +1491,6 @@ class SWExecutor:
             f"{total_found}/{len(all_configs)} 成功"
             f"（文件监控器实时: {len(already_completed)}，安全网: {len(found_configs)}）"
         )
-        if missing_configs:
-            logger.warning(
-                f"[SW-Export] 缺失构型: {sorted(missing_configs)} "
-                f"— 可能原因: 构型重建失败 / 设计表参数错误"
-            )
         return total_found
 
     # ------------------------------------------------------------------

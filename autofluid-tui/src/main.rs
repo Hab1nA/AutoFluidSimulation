@@ -214,69 +214,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         ctx.state.tick();
 
         if let Some(cmd) = ctx.state.pending_command.take() {
-            let result = ctx.rt.block_on(command::dispatch_command(
-                &cmd,
-                ctx.ipc,
-                ctx.state,
-                ctx.log_buffer,
-            ));
-            match result {
-                command::CommandResult::Quit => {
-                    ctx.state.should_quit = true;
-                }
-                command::CommandResult::FullQuit => {
-                    *ctx.full_quit = true;
-                    if ctx.ipc.is_connected() {
-                        let _ = ctx.rt.block_on(ctx.ipc.full_quit());
-                    }
-                    ctx.rt.block_on(ctx.ipc.disconnect());
-                    ctx.state.should_quit = true;
-                }
-                command::CommandResult::StartDaemon => {
-                    if ctx.ipc.is_connected() {
-                        ctx.log_buffer
-                            .push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
-                    } else {
-                        match ctx.daemon.launch(ctx.project_dir) {
-                            Ok(pid) => {
-                                ctx.log_buffer.push_info(format!(
-                                    "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
-                                    pid
-                                ));
-                                DaemonManager::reconnect_ipc_after_launch(
-                                    ctx.rt,
-                                    ctx.ipc,
-                                    ctx.state,
-                                    ctx.log_buffer,
-                                );
-                            }
-                            Err(e) => {
-                                ctx.log_buffer
-                                    .push_info(format!("❌ 启动后台引擎失败: {}", e));
-                            }
-                        }
-                    }
-                }
-                command::CommandResult::RestartDaemon => {
-                    ctx.daemon.restart_with_ipc(
-                        ctx.ipc,
-                        ctx.rt,
-                        ctx.state,
-                        ctx.log_buffer,
-                        ctx.project_dir,
-                    );
-                }
-                command::CommandResult::StopDaemon => {
-                    ctx.daemon.stop_with_ipc(
-                        ctx.ipc,
-                        ctx.rt,
-                        ctx.state,
-                        ctx.log_buffer,
-                        ctx.project_dir,
-                    );
-                }
-                _ => {}
-            }
+            let source = ctx.state.pending_command_source.take().unwrap_or("program");
+            let result = submit_command(&cmd, source, ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
+            handle_command_result(result, &mut ctx);
         }
 
         let first_poll_timeout = Duration::from_millis(50);
@@ -358,6 +298,84 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     Ok(())
 }
 
+fn submit_command(
+    cmd: &str,
+    source: &str,
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> command::CommandResult {
+    log::info!("[TUI] 用户命令: source={source}, command={cmd:?}");
+    log_buffer.push_info(format!("> {}", cmd));
+    rt.block_on(command::dispatch_command(cmd, ipc, state, log_buffer))
+}
+
+fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext) {
+    handle_command_result_refs(
+        result,
+        ctx.rt,
+        ctx.ipc,
+        ctx.state,
+        ctx.log_buffer,
+        ctx.daemon,
+        ctx.project_dir,
+        ctx.full_quit,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_command_result_refs(
+    result: command::CommandResult,
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    daemon: &mut daemon_mgr::DaemonManager,
+    project_dir: &str,
+    full_quit: &mut bool,
+) {
+    match result {
+        command::CommandResult::Quit => {
+            state.should_quit = true;
+        }
+        command::CommandResult::FullQuit => {
+            log::info!("[TUI] 收到完全退出请求，准备停止后台引擎并关闭界面");
+            *full_quit = true;
+            if ipc.is_connected() {
+                let _ = rt.block_on(ipc.full_quit());
+            }
+            rt.block_on(ipc.disconnect());
+            state.should_quit = true;
+        }
+        command::CommandResult::StartDaemon => {
+            if ipc.is_connected() {
+                log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+            } else {
+                match daemon.launch(project_dir) {
+                    Ok(pid) => {
+                        log_buffer.push_info(format!(
+                            "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
+                            pid
+                        ));
+                        DaemonManager::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+                    }
+                }
+            }
+        }
+        command::CommandResult::RestartDaemon => {
+            daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);
+        }
+        command::CommandResult::StopDaemon => {
+            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
+        }
+        command::CommandResult::None => {}
+    }
+}
+
 fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
     let EventContext {
         state,
@@ -376,50 +394,17 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     state.should_quit = true;
                 }
                 key_handler::AppAction::SubmitCommand(cmd) => {
-                    log_buffer.push_info(format!("> {}", cmd));
-                    let result =
-                        rt.block_on(command::dispatch_command(&cmd, ipc, state, log_buffer));
-                    match result {
-                        command::CommandResult::Quit => {
-                            state.should_quit = true;
-                        }
-                        command::CommandResult::FullQuit => {
-                            **full_quit = true;
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                            }
-                            rt.block_on(ipc.disconnect());
-                            state.should_quit = true;
-                        }
-                        command::CommandResult::StartDaemon => {
-                            if ipc.is_connected() {
-                                log_buffer
-                                    .push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
-                            } else {
-                                match daemon.launch(project_dir) {
-                                    Ok(pid) => {
-                                        log_buffer.push_info(format!(
-                                            "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
-                                            pid
-                                        ));
-                                        DaemonManager::reconnect_ipc_after_launch(
-                                            rt, ipc, state, log_buffer,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
-                                    }
-                                }
-                            }
-                        }
-                        command::CommandResult::RestartDaemon => {
-                            daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);
-                        }
-                        command::CommandResult::StopDaemon => {
-                            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
-                        }
-                        _ => {}
-                    }
+                    let result = submit_command(&cmd, "keyboard", rt, ipc, state, log_buffer);
+                    handle_command_result_refs(
+                        result,
+                        rt,
+                        ipc,
+                        state,
+                        log_buffer,
+                        daemon,
+                        project_dir,
+                        full_quit,
+                    );
                 }
                 key_handler::AppAction::Confirm => {
                     if let Some(callback) = state.confirm_callback.take() {
@@ -458,13 +443,37 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                                 ss.saved = true;
                                 // Notify daemon via IPC
                                 if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.reload_config());
+                                    match rt.block_on(ipc.reload_config()) {
+                                        Ok(resp) if resp.is_ok() => {
+                                            log_buffer
+                                                .push_info("✅ 后台引擎配置已重新加载".to_string());
+                                        }
+                                        Ok(resp) => {
+                                            log_buffer.push_info(format!(
+                                                "⚠️ 后台引擎配置重载失败: {}",
+                                                resp.message
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            log_buffer.push_info(format!(
+                                                "⚠️ 后台引擎配置重载通信失败: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                } else {
+                                    log_buffer.push_info(
+                                        "⚠️ 后台引擎未连接，配置将在下次启动时生效".to_string(),
+                                    );
                                 }
                                 log_buffer
-                                    .push_info(" 设置已保存到 autofluid_config.toml".to_string());
-                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                                    .push_info("✅ 设置已保存到 autofluid_config.toml".to_string());
                             }
                             Err(errors) => {
+                                log_buffer.push_info(format!(
+                                    "❌ 设置保存失败，请修正错误后重试 ({} 项)",
+                                    errors.len()
+                                ));
                                 ss.validation_errors = errors;
                                 ss.save_error = Some("保存失败，请修正错误后重试".to_string());
                                 state.needs_redraw = true;

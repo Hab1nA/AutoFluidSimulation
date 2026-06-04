@@ -217,10 +217,8 @@ class SWPhaseHandler:
             self._prepare_sw_retry()
 
             if sw_errors:
-                logger.warning(
-                    f"[SW] SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败"
-                )
                 for cn in sw_errors:
+                    logger.warning(f"[SW] 构型{cn} STEP 导出失败")
                     for s in ["sc", "transfer", "meshing", "solver"]:
                         if self.state.get_step_status(cn, s) == STATUS_WAITING:
                             self.state.set_step_status(
@@ -228,10 +226,8 @@ class SWPhaseHandler:
                                 f"上游 SW 导出失败，{s} 已阻断"
                             )
             if sw_running:
-                logger.warning(
-                    f"[SW] {len(sw_running)} 个构型仍为 Running 状态 "
-                    f"(可能导出中断): {sorted(sw_running)}"
-                )
+                for cn in sw_running:
+                    logger.warning(f"[SW] 构型{cn} 仍为 Running 状态 (可能导出中断)")
 
             if not sw_errors:
                 # 无 ERROR 但有 RUNNING → 全部构型均未完成，引擎停止

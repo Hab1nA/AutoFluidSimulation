@@ -89,6 +89,9 @@ class WorkerPoolManager:
         # 使用标志位防止多个 SC Worker 线程重复触发。
         self._sc_cleanup_triggered = False
         self._sc_cleanup_lock = threading.Lock()
+        self._queue_report_lock = threading.Lock()
+        self._last_queue_report = time.time()
+        self._queue_report_interval = 30.0
 
         logger.info("工作线程池管理器初始化完成（SC/Transfer 解耦架构）")
 
@@ -131,6 +134,8 @@ class WorkerPoolManager:
         """
         # ★ 每次流水线启动/恢复时重置 SC 清理标志
         self._sc_cleanup_triggered = False
+        with self._queue_report_lock:
+            self._last_queue_report = time.time()
 
         alive_sc = [t for t in self._sc_worker_threads if t.is_alive()]
         alive_tf = [t for t in self._transfer_worker_threads if t.is_alive()]
@@ -210,6 +215,48 @@ class WorkerPoolManager:
 
         return True
 
+    def _report_queue_health_if_due(self, now: float) -> None:
+        """由任一 SC Worker 触发队列健康检查，但每个周期只输出一次。"""
+        with self._queue_report_lock:
+            if now - self._last_queue_report < self._queue_report_interval:
+                return
+            self._last_queue_report = now
+
+        qsize = self._sc_queue.qsize()
+        tf_qsize = self._transfer_queue.qsize()
+        active_sc = sum(1 for t in self._sc_worker_threads if t.is_alive())
+        active_tf = sum(1 for t in self._transfer_worker_threads if t.is_alive())
+        logger.debug(
+            f"[队列健康] SC深度={qsize}, Transfer深度={tf_qsize}, "
+            f"活跃SC={active_sc}, 活跃Transfer={active_tf}, "
+            f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}"
+        )
+        if qsize == 0:
+            waiting_configs = [
+                cn for cn in self.state.get_all_configs()
+                if self.state.get_step_status(cn, "sc") == STATUS_WAITING
+                and self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
+            ]
+            if waiting_configs:
+                for cn in waiting_configs:
+                    logger.warning(f"[队列异常] 构型{cn} SW 已完成但未入队")
+
+        # SC 全部完成检测：当 SC 队列为空且所有构型 SC/SW 均已终结时，
+        # 触发 SC 进程清理（不再等待 Meshing 全局屏障）。
+        if qsize == 0 and not self._sc_cleanup_triggered:
+            if self._check_sc_all_done():
+                with self._sc_cleanup_lock:
+                    if not self._sc_cleanup_triggered:
+                        self._sc_cleanup_triggered = True
+                        logger.info(
+                            "[WorkerPool] 检测到所有构型 SC 步骤已完成，"
+                            "触发 SC 进程清理"
+                        )
+                        try:
+                            self.runner.do_sc_final_cleanup()
+                        except Exception as e:
+                            logger.warning(f"[WorkerPool] SC 进程清理异常: {e}")
+
     def _sc_worker_loop(self):
         """SC 工作线程主循环。
 
@@ -218,8 +265,6 @@ class WorkerPoolManager:
         """
         logger.info(f"[{threading.current_thread().name}] SC 工作线程启动")
 
-        _last_queue_report = time.time()
-        _queue_report_interval = 30.0
         _consecutive_fatal_count = 0
 
         while not self._stopped.is_set():
@@ -230,48 +275,7 @@ class WorkerPoolManager:
             try:
                 config_name, _step_file = self._sc_queue.get(timeout=1)
             except queue.Empty:
-                now = time.time()
-                if now - _last_queue_report >= _queue_report_interval:
-                    qsize = self._sc_queue.qsize()
-                    tf_qsize = self._transfer_queue.qsize()
-                    active_sc = sum(1 for t in self._sc_worker_threads if t.is_alive())
-                    active_tf = sum(1 for t in self._transfer_worker_threads if t.is_alive())
-                    logger.debug(
-                        f"[队列健康] SC深度={qsize}, Transfer深度={tf_qsize}, "
-                        f"活跃SC={active_sc}, 活跃Transfer={active_tf}, "
-                        f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}"
-                    )
-                    _last_queue_report = now
-                    if qsize == 0:
-                        waiting_configs = [
-                            cn for cn in self.state.get_all_configs()
-                            if self.state.get_step_status(cn, "sc") == STATUS_WAITING
-                            and self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
-                        ]
-                        if waiting_configs:
-                            logger.warning(
-                                f"[队列异常] {len(waiting_configs)} 个构型 SW 已完成但未入队: "
-                                f"{waiting_configs[:5]}{'...' if len(waiting_configs)>5 else ''}"
-                            )
-
-                    # ★ SC 全部完成检测：当 SC 队列为空且所有构型 SC/SW 均已终结时，
-                    #   触发 SC 进程清理（不再等待 Meshing 全局屏障）。
-                    #   使用独立锁防止多个 SC Worker 线程重复触发。
-                    if qsize == 0 and not self._sc_cleanup_triggered:
-                        if self._check_sc_all_done():
-                            with self._sc_cleanup_lock:
-                                if not self._sc_cleanup_triggered:
-                                    self._sc_cleanup_triggered = True
-                                    logger.info(
-                                        "[WorkerPool] 检测到所有构型 SC 步骤已完成，"
-                                        "触发 SC 进程清理"
-                                    )
-                                    try:
-                                        self.runner.do_sc_final_cleanup()
-                                    except Exception as e:
-                                        logger.warning(
-                                            f"[WorkerPool] SC 进程清理异常: {e}"
-                                        )
+                self._report_queue_health_if_due(time.time())
                 continue
 
             logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name} SC 步骤")

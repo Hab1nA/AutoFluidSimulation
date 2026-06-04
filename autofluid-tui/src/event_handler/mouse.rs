@@ -847,6 +847,7 @@ fn handle_mouse_up(
                 if hover_idx == menu_idx {
                     if let Some(cmd) = command_bar::daemon_menu_command(menu_idx) {
                         state.pending_command = Some(cmd.to_string());
+                        state.pending_command_source = Some("mouse");
                         state.focus_zone = FocusZone::CommandInput;
                     }
                 }
@@ -874,6 +875,7 @@ fn handle_mouse_up(
                         }
                     } else {
                         state.pending_command = Some(cmd.to_string());
+                        state.pending_command_source = Some("mouse");
                         state.focus_zone = FocusZone::CommandInput;
                     }
                 }
@@ -1114,13 +1116,37 @@ pub fn handle_dialog_button_click(
                             Ok(()) => {
                                 ss.saved = true;
                                 if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.reload_config());
+                                    match rt.block_on(ipc.reload_config()) {
+                                        Ok(resp) if resp.is_ok() => {
+                                            log_buffer
+                                                .push_info("✅ 后台引擎配置已重新加载".to_string());
+                                        }
+                                        Ok(resp) => {
+                                            log_buffer.push_info(format!(
+                                                "⚠️ 后台引擎配置重载失败: {}",
+                                                resp.message
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            log_buffer.push_info(format!(
+                                                "⚠️ 后台引擎配置重载通信失败: {}",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                } else {
+                                    log_buffer.push_info(
+                                        "⚠️ 后台引擎未连接，配置将在下次启动时生效".to_string(),
+                                    );
                                 }
                                 log_buffer
-                                    .push_info(" 设置已保存到 autofluid_config.toml".to_string());
-                                log_buffer.push_info(" 后台引擎配置已重新加载".to_string());
+                                    .push_info("✅ 设置已保存到 autofluid_config.toml".to_string());
                             }
                             Err(errors) => {
+                                log_buffer.push_info(format!(
+                                    "❌ 设置保存失败，请修正错误后重试 ({} 项)",
+                                    errors.len()
+                                ));
                                 ss.validation_errors = errors;
                                 ss.save_error = Some("保存失败，请修正错误后重试".to_string());
                                 state.needs_redraw = true;

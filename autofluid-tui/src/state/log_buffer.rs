@@ -83,6 +83,7 @@ impl LogBuffer {
     }
 
     pub fn push_info(&mut self, message: String) {
+        log_info_message(&message);
         if self.info_messages.len() >= MAX_INFO_BUFFER {
             self.info_messages.pop_front();
         }
@@ -118,5 +119,43 @@ impl LogBuffer {
         self.filtered_entries(level_filter, source_filter)
             .map(|e| e.message.clone())
             .collect()
+    }
+
+    pub fn export_info_lines(&self) -> Vec<String> {
+        self.info_messages.iter().cloned().collect()
+    }
+
+    pub fn export_all_lines(
+        &self,
+        level_filter: &Option<String>,
+        source_filter: &Option<String>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        if !self.info_messages.is_empty() {
+            lines.push("=== TUI 高级信息 ===".to_string());
+            lines.extend(self.export_info_lines());
+        }
+
+        let detail_lines = self.export_lines(level_filter, source_filter);
+        if !detail_lines.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("=== Daemon 详细日志 ===".to_string());
+            lines.extend(detail_lines);
+        }
+        lines
+    }
+}
+
+fn log_info_message(message: &str) {
+    let trimmed = message.trim_start();
+    if trimmed.starts_with('❌') || trimmed.contains("失败") || trimmed.contains("错误") {
+        log::error!("[TUI] 高级信息: {message}");
+    } else if trimmed.starts_with('⚠') || trimmed.contains("警告") || trimmed.contains("超时")
+    {
+        log::warn!("[TUI] 高级信息: {message}");
+    } else {
+        log::info!("[TUI] 高级信息: {message}");
     }
 }

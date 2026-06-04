@@ -740,8 +740,124 @@ def test_is_polling_log_static_method():
     print("  ✅ _is_polling_log 静态方法判断正确")
 
 
+def test_broadcast_false_record_is_suppressed():
+    """测试带 broadcast=False 的日志不会进入详细日志广播。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("ipc.server")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug(
+        "[IPC] IPC 客户端断开 (未完成握手): ('127.0.0.1', 53318)",
+        extra={"broadcast": False},
+    )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ broadcast=False 日志不会进入详细日志")
+
+
 # ============================================================================
-# 测试 10: raw_message 字段与 TUI 显示格式
+# 测试 10: 逐构型日志广播过滤
+# ============================================================================
+
+def test_config_scoped_logs_are_suppressed():
+    """测试详细日志不会显示逐构型日志或广播层摘要。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.state_manager")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for config_name in range(1, 51):
+        test_logger.info(f"状态更新: 构型{config_name} [sc] -> Completed")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 逐构型中文日志不会进入详细日志")
+
+
+def test_config_scoped_log_suppression_matches_config_equals():
+    """测试 config=123 形式的单构型日志也不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.main")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for config_name in range(1, 4):
+        test_logger.info(f"已重置 config={config_name} step=all")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ config=N 形式日志不会进入详细日志")
+
+
+def test_config_scoped_log_suppression_matches_operation_context():
+    """测试带队列、槽位和 run id 的逐构型日志不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.sc_process_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for config_name in range(1, 6):
+        test_logger.info(
+            f"[SC-Pool] 构型{config_name} 命令已发送 "
+            f"(槽位{config_name % 3 + 1}, run={config_name})"
+        )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 带操作上下文的逐构型日志不会进入详细日志")
+
+
+def test_single_config_scoped_log_is_suppressed():
+    """测试单条逐构型日志也不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("utils.excel_reader")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug("[Excel] 读取构型1: 参数 = [7.0, 16.0, 14.0, 23.0]")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 单条逐构型日志不会进入详细日志")
+
+
+def test_config_scoped_excel_logs_do_not_emit_aggregate_summary():
+    """测试 Excel 逐构型日志不会生成详细日志摘要。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("utils.excel_reader")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug("[Excel] 读取构型1: 参数 = [7.0, 16.0, 14.0, 23.0]")
+    test_logger.debug("[Excel] 读取构型2: 参数 = [8.0, 17.0, 15.0, 24.0]")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ Excel 逐构型日志不生成详细日志摘要")
+
+
+# ============================================================================
+# 测试 11: raw_message 字段与 TUI 显示格式
 # ============================================================================
 
 def test_raw_message_contains_logger_name_and_msg():
@@ -974,6 +1090,12 @@ def main():
         ("轮询过滤: 高频场景", test_polling_filter_high_frequency),
         ("轮询过滤: 常量完整性", test_polling_commands_constant),
         ("轮询过滤: _is_polling_log", test_is_polling_log_static_method),
+        ("广播过滤: broadcast=False", test_broadcast_false_record_is_suppressed),
+        ("逐构型过滤: 构型N", test_config_scoped_logs_are_suppressed),
+        ("逐构型过滤: config=N", test_config_scoped_log_suppression_matches_config_equals),
+        ("逐构型过滤: 操作上下文", test_config_scoped_log_suppression_matches_operation_context),
+        ("逐构型过滤: 单条日志", test_single_config_scoped_log_is_suppressed),
+        ("逐构型过滤: Excel摘要", test_config_scoped_excel_logs_do_not_emit_aggregate_summary),
         ("raw_message: 不含时间戳和级别", test_raw_message_contains_logger_name_and_msg),
         ("raw_message: message保留完整格式", test_message_still_has_full_format),
         ("raw_message: 比message更短", test_raw_message_vs_message_difference),
