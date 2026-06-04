@@ -211,7 +211,7 @@ self._ssh_locks: dict[str, threading.RLock] = {}
 **当前**: 全局屏障
 
 ```python
-if self.state.all_configs_completed_at_step("Meshing"):
+if self.state.all_configs_completed_at_step("meshing"):
     self._barrier_passed.set()
     self._dispatch_solver_tasks()
 ```
@@ -220,7 +220,7 @@ if self.state.all_configs_completed_at_step("Meshing"):
 
 ```python
 # 每台工作站独立判断
-if self.state.all_configs_completed_at_step("Meshing", workstation_id=ws_id):
+if self.state.all_configs_completed_at_step("meshing", workstation_id=ws_id):
     self._barrier_passed[ws_id].set()
     self._dispatch_solver_tasks(workstation_id=ws_id)
 ```
@@ -251,7 +251,7 @@ if self.state.all_configs_completed_at_step("Meshing", workstation_id=ws_id):
     "cmd": "worker_register",
     "payload": {
         "worker_id": "local-pc-01",
-        "capabilities": ["SW", "SC"],
+        "capabilities": ["sw", "sc"],
         "hostname": "DESKTOP-XYZ"
     }
 }
@@ -260,7 +260,7 @@ if self.state.all_configs_completed_at_step("Meshing", workstation_id=ws_id):
 {
     "cmd": "worker_execute",
     "payload": {
-        "step": "SW",
+        "step": "sw",
         "config_names": [1, 2, 3],
         "params": {...}
     }
@@ -270,7 +270,7 @@ if self.state.all_configs_completed_at_step("Meshing", workstation_id=ws_id):
 {
     "cmd": "worker_step_complete",
     "payload": {
-        "step": "SC",
+        "step": "sc",
         "config_name": 5,
         "output_files": ["D:\\scdoc\\5.scdoc"]
     }
@@ -341,7 +341,7 @@ IPC_CONFIG = {
 }
 
 # 步骤定义扩展
-STEP_NAMES = ["SW", "SC", "Transfer", "Meshing", "Solver", "PostProcess", "Collect"]
+STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver", "postprocess", "collect"]
 ```
 
 ### 6.2 环境变量
@@ -424,7 +424,7 @@ class LocalWorker:
             "cmd": "worker_register",
             "payload": {
                 "worker_id": self._worker_id,
-                "capabilities": ["SW", "SC"],
+                "capabilities": ["sw", "sc"],
             }
         })
     
@@ -462,7 +462,7 @@ class LocalWorkerAdapter:
             "cmd": "worker_execute",
             "payload": {
                 "task_id": task_id,
-                "step": "SW",
+                "step": "sw",
                 "config_names": configs,
             }
         })

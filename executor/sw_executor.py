@@ -165,10 +165,10 @@ class SWExecutor:
         if all_configs:
             all_done = True
             for cn in all_configs:
-                if self.state.get_step_status(cn, "SW") != STATUS_COMPLETED:
+                if self.state.get_step_status(cn, "sw") != STATUS_COMPLETED:
                     all_done = False
                     break
-                fn = get_step_filename("SW", cn)
+                fn = get_step_filename("sw", cn)
                 if fn and not os.path.exists(os.path.join(step_dir, fn)):
                     all_done = False
                     break
@@ -383,7 +383,7 @@ class SWExecutor:
             return False
 
         # ---- 检查文件是否已存在（断点续传 / 之前批次已成功） ----
-        filename = get_step_filename("SW", config_name)
+        filename = get_step_filename("sw", config_name)
         if not filename:
             logger.error(f"[SW] 构型{config_name}: 无法生成 STEP 文件名")
             return False
@@ -1292,7 +1292,7 @@ class SWExecutor:
             except ValueError:
                 cn_int = None
 
-            filename = get_step_filename("SW", cn_int) if cn_int is not None else None
+            filename = get_step_filename("sw", cn_int) if cn_int is not None else None
             if not filename:
                 logger.warning(f"[SW-Export] 构型{cn_str}: 无法生成 STEP 文件名，跳过")
                 fail_configs.append(cn_int if cn_int is not None else cn_str)
@@ -1301,7 +1301,7 @@ class SWExecutor:
             filepath = os.path.join(step_dir, filename)
 
             if cn_int is not None:
-                _sw_st = self.state.get_step_status(cn_int, "SW")
+                _sw_st = self.state.get_step_status(cn_int, "sw")
                 if _sw_st == STATUS_COMPLETED and os.path.exists(filepath):
                     logger.info(
                         f"[SW-Export] 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
@@ -1318,7 +1318,7 @@ class SWExecutor:
                 )
                 if cn_int is not None:
                     self.state.set_step_status(
-                        cn_int, "SW", STATUS_ERROR,
+                        cn_int, "sw", STATUS_ERROR,
                         f"ShowConfiguration2 失败: {type(e).__name__}: {e}"
                     )
                     fail_configs.append(cn_int)
@@ -1357,12 +1357,12 @@ class SWExecutor:
                             f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
                         )
                         if cn_int is not None:
-                            self.state.set_step_status(cn_int, "SW", STATUS_COMPLETED)
+                            self.state.set_step_status(cn_int, "sw", STATUS_COMPLETED)
                             success_configs.append(cn_int)
                     else:
                         if cn_int is not None:
                             self.state.set_step_status(
-                                cn_int, "SW", STATUS_ERROR,
+                                cn_int, "sw", STATUS_ERROR,
                                 "SaveAs 返回 True 但 STEP 文件未写入磁盘"
                             )
                             fail_configs.append(cn_int)
@@ -1373,7 +1373,7 @@ class SWExecutor:
                     )
                     if cn_int is not None:
                         self.state.set_step_status(
-                            cn_int, "SW", STATUS_ERROR,
+                            cn_int, "sw", STATUS_ERROR,
                             f"SaveAs 返回 False (Errors={save_errors.value})"
                         )
                         fail_configs.append(cn_int)
@@ -1383,7 +1383,7 @@ class SWExecutor:
                 )
                 if cn_int is not None:
                     self.state.set_step_status(
-                        cn_int, "SW", STATUS_ERROR,
+                        cn_int, "sw", STATUS_ERROR,
                         f"SaveAs 异常: {type(e).__name__}: {e}"
                     )
                     fail_configs.append(cn_int)
@@ -1459,23 +1459,23 @@ class SWExecutor:
         logger.info(f"[SW-Export] 输出目录: {step_dir}")
 
         for cn in all_configs:
-            filename = get_step_filename("SW", cn)
+            filename = get_step_filename("sw", cn)
             if not filename:
                 logger.warning(f"[SW-Export] 构型{cn}: 无法生成 STEP 文件名，跳过校验")
                 continue
             expected_file = os.path.join(step_dir, filename)
-            current_status = self.state.get_step_status(cn, "SW")
+            current_status = self.state.get_step_status(cn, "sw")
             if os.path.exists(expected_file):
                 if current_status == STATUS_COMPLETED:
                     already_completed.append(cn)
                     logger.debug(f"[SW-Export] 构型{cn} (文件监控器已标记)")
                 else:
-                    self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                    self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
                     found_configs.append(cn)
                     logger.debug(f"[SW-Export] 构型{cn} (安全网补标记)")
             else:
                 self.state.set_step_status(
-                    cn, "SW", STATUS_ERROR,
+                    cn, "sw", STATUS_ERROR,
                     f"STEP 导出完毕但文件缺失: {filename}"
                 )
                 missing_configs.append(cn)
@@ -1576,7 +1576,7 @@ class SWExecutor:
                 cn_int = None
 
             filename = (
-                get_step_filename("SW", cn_int) if cn_int is not None else None
+                get_step_filename("sw", cn_int) if cn_int is not None else None
             )
             if not filename:
                 logger.warning(f"[SW-Export] 构型{cn_str}: 无法生成 STEP 文件名，跳过")
@@ -1587,7 +1587,7 @@ class SWExecutor:
 
             # ---- 跳过已完成构型 ----
             if cn_int is not None:
-                sw_st = self.state.get_step_status(cn_int, "SW")
+                sw_st = self.state.get_step_status(cn_int, "sw")
                 if sw_st == STATUS_COMPLETED and os.path.exists(filepath):
                     logger.info(
                         f"[SW-Export] 构型{cn_str}: 已完成且 STEP 存在，跳过"
@@ -1605,7 +1605,7 @@ class SWExecutor:
                 )
                 if cn_int is not None:
                     self.state.set_step_status(
-                        cn_int, "SW", STATUS_ERROR,
+                        cn_int, "sw", STATUS_ERROR,
                         f"ShowConfiguration2 失败: {type(e).__name__}: {e}"
                     )
                     fail_configs.append(cn_int)
@@ -1680,13 +1680,13 @@ class SWExecutor:
                         )
                         if cn_int is not None:
                             self.state.set_step_status(
-                                cn_int, "SW", STATUS_COMPLETED
+                                cn_int, "sw", STATUS_COMPLETED
                             )
                             success_configs.append(cn_int)
                     else:
                         if cn_int is not None:
                             self.state.set_step_status(
-                                cn_int, "SW", STATUS_ERROR,
+                                cn_int, "sw", STATUS_ERROR,
                                 "SaveAs 返回 True 但 STEP 文件未写入磁盘"
                             )
                             fail_configs.append(cn_int)
@@ -1698,7 +1698,7 @@ class SWExecutor:
                     )
                     if cn_int is not None:
                         self.state.set_step_status(
-                            cn_int, "SW", STATUS_ERROR,
+                            cn_int, "sw", STATUS_ERROR,
                             f"SaveAs 返回 False "
                             f"(Errors={save_errors.value})"
                         )
@@ -1710,7 +1710,7 @@ class SWExecutor:
                 )
                 if cn_int is not None:
                     self.state.set_step_status(
-                        cn_int, "SW", STATUS_ERROR,
+                        cn_int, "sw", STATUS_ERROR,
                         f"SaveAs 异常: {type(e).__name__}: {e}"
                     )
                     fail_configs.append(cn_int)
@@ -1720,7 +1720,7 @@ class SWExecutor:
             try:
                 cn_int = int(cn_str)
                 self.state.set_step_status(
-                    cn_int, "SW", STATUS_PAUSED,
+                    cn_int, "sw", STATUS_PAUSED,
                     "暂停中——恢复后将重新执行重建+导出"
                 )
             except ValueError:

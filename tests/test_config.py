@@ -88,23 +88,23 @@ class TestGetStepFilename:
 
     def test_sw_filename(self):
         from engine.config import get_step_filename
-        assert get_step_filename("SW", 5) == "model_gen4.SLDPRT_5.step"
+        assert get_step_filename("sw", 5) == "model_gen4.SLDPRT_5.step"
 
     def test_sc_filename(self):
         from engine.config import get_step_filename
-        assert get_step_filename("SC", 12) == "model_gen4_12.scdoc"
+        assert get_step_filename("sc", 12) == "model_gen4_12.scdoc"
 
     def test_transfer_returns_none(self):
         from engine.config import get_step_filename
-        assert get_step_filename("Transfer", 1) is None
+        assert get_step_filename("transfer", 1) is None
 
     def test_meshing_filename(self):
         from engine.config import get_step_filename
-        assert get_step_filename("Meshing", 3) == "model_gen4_3.msh.h5"
+        assert get_step_filename("meshing", 3) == "model_gen4_3.msh.h5"
 
     def test_solver_filename(self):
         from engine.config import get_step_filename
-        assert get_step_filename("Solver", 7) == "model_gen4_7.cas.h5"
+        assert get_step_filename("solver", 7) == "model_gen4_7.cas.h5"
 
     def test_unknown_step_returns_none(self):
         from engine.config import get_step_filename
@@ -112,11 +112,11 @@ class TestGetStepFilename:
 
     def test_zero_config_name(self):
         from engine.config import get_step_filename
-        assert get_step_filename("SW", 0) == "model_gen4.SLDPRT_0.step"
+        assert get_step_filename("sw", 0) == "model_gen4.SLDPRT_0.step"
 
     def test_large_config_name(self):
         from engine.config import get_step_filename
-        assert get_step_filename("SC", 9999) == "model_gen4_9999.scdoc"
+        assert get_step_filename("sc", 9999) == "model_gen4_9999.scdoc"
 
 
 # ====================================================================
@@ -128,39 +128,39 @@ class TestStepFilePatterns:
 
     def test_sw_pattern_match(self):
         from engine.config import STEP_FILE_PATTERNS
-        pattern = STEP_FILE_PATTERNS["SW"]
+        pattern = STEP_FILE_PATTERNS["sw"]
         assert pattern is not None
         filename = pattern.format(config=5)
         assert filename == "model_gen4.SLDPRT_5.step"
 
     def test_sc_pattern_match(self):
         from engine.config import STEP_FILE_PATTERNS
-        pattern = STEP_FILE_PATTERNS["SC"]
+        pattern = STEP_FILE_PATTERNS["sc"]
         assert pattern is not None
         filename = pattern.format(config=12)
         assert filename == "model_gen4_12.scdoc"
 
     def test_transfer_pattern_is_none(self):
         from engine.config import STEP_FILE_PATTERNS
-        assert STEP_FILE_PATTERNS["Transfer"] is None
+        assert STEP_FILE_PATTERNS["transfer"] is None
 
     def test_meshing_pattern(self):
         from engine.config import STEP_FILE_PATTERNS
-        pattern = STEP_FILE_PATTERNS["Meshing"]
+        pattern = STEP_FILE_PATTERNS["meshing"]
         assert pattern is not None
         filename = pattern.format(config=3)
         assert filename == "model_gen4_3.msh.h5"
 
     def test_solver_pattern(self):
         from engine.config import STEP_FILE_PATTERNS
-        pattern = STEP_FILE_PATTERNS["Solver"]
+        pattern = STEP_FILE_PATTERNS["solver"]
         assert pattern is not None
         filename = pattern.format(config=7)
         assert filename == "model_gen4_7.cas.h5"
 
     def test_solver_data_pattern(self):
         from engine.config import STEP_FILE_PATTERNS
-        pattern = STEP_FILE_PATTERNS["SolverData"]
+        pattern = STEP_FILE_PATTERNS["solverdata"]
         assert pattern is not None
         filename = pattern.format(config=7)
         assert filename == "model_gen4_7.dat.h5"
@@ -175,7 +175,7 @@ class TestConstants:
 
     def test_step_names_complete(self):
         from engine.config import STEP_NAMES
-        expected = ["SW", "SC", "Transfer", "Meshing", "Solver"]
+        expected = ["sw", "sc", "transfer", "meshing", "solver"]
         assert STEP_NAMES == expected
 
     def test_all_statuses_complete(self):
@@ -585,17 +585,17 @@ class TestReloadConfigFromToml:
         import engine.config as cfg
         from engine.config import STEP_FILE_PATTERNS
 
-        original = STEP_FILE_PATTERNS.get("SW", "")
+        original = STEP_FILE_PATTERNS.get("sw", "")
 
         def _mock_load(*args, **kwargs):
-            return {"step_file_patterns": {"SW": "custom_{config}.stp"}}
+            return {"step_file_patterns": {"sw": "custom_{config}.stp"}}
 
         monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
         try:
             assert cfg.reload_config_from_toml() is True
-            assert STEP_FILE_PATTERNS["SW"] == "custom_{config}.stp"
+            assert STEP_FILE_PATTERNS["sw"] == "custom_{config}.stp"
         finally:
-            STEP_FILE_PATTERNS["SW"] = original
+            STEP_FILE_PATTERNS["sw"] = original
 
     def test_merges_engine_config(self, monkeypatch):
         import engine.config as cfg

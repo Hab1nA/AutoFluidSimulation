@@ -467,7 +467,7 @@ class PipelineDaemon:
         # 判断是否需要后台线程（远程步骤 + 清理范围大）
         needs_background = (
             config_name in (None, "all")
-            and (step_name == "all" or step_name in {"Meshing", "Solver"})
+            and (step_name == "all" or step_name in {"meshing", "solver"})
         )
 
         if self.runner is None:
@@ -493,7 +493,7 @@ class PipelineDaemon:
 
         # 如果清理范围涉及 SW 步骤，请求文件监控器重置追踪状态。
         # 监控器不会修改调度器拥有的共享 pause。
-        if step_name == "all" or step_name == "SW":
+        if step_name == "all" or step_name == "sw":
             if self.scheduler:
                 self.scheduler.request_file_monitor_reset()
 

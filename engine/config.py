@@ -206,15 +206,15 @@ REMOTE_CONFIG: RemoteConfig = {
 # ============================================================================
 # 步骤名称枚举（与状态表和命令系统对应）
 # ============================================================================
-STEP_NAMES = ["SW", "SC", "Transfer", "Meshing", "Solver"]
+STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver"]
 
 # 步骤对应的中文显示名称
 STEP_DISPLAY = {
-    "SW": "SolidWorks导出",
-    "SC": "SpaceClaim转换",
-    "Transfer": "文件传输",
-    "Meshing": "网格划分",
-    "Solver": "仿真求解",
+    "sw": "SolidWorks导出",
+    "sc": "SpaceClaim转换",
+    "transfer": "文件传输",
+    "meshing": "网格划分",
+    "solver": "仿真求解",
 }
 
 # 步骤顺序索引（用于判断"后续步骤"）
@@ -236,12 +236,12 @@ ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, 
 # 步骤对应的文件扩展名（用于 clean 命令）
 # ============================================================================
 STEP_FILE_PATTERNS = {
-    "SW": "model_gen4.SLDPRT_{config}.step",
-    "SC": "model_gen4_{config}.scdoc",
-    "Transfer": None,  # 传输不产生本地文件
-    "Meshing": "model_gen4_{config}.msh.h5",
-    "Solver": "model_gen4_{config}.cas.h5",
-    "SolverData": "model_gen4_{config}.dat.h5",
+    "sw": "model_gen4.SLDPRT_{config}.step",
+    "sc": "model_gen4_{config}.scdoc",
+    "transfer": None,  # 传输不产生本地文件
+    "meshing": "model_gen4_{config}.msh.h5",
+    "solver": "model_gen4_{config}.cas.h5",
+    "solverdata": "model_gen4_{config}.dat.h5",
 }
 
 # ============================================================================

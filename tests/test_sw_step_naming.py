@@ -6,8 +6,8 @@ class TestSwStepNaming(unittest.TestCase):
     def test_get_step_filename(self):
         from engine.config import get_step_filename
 
-        self.assertEqual(get_step_filename("SW", 5), "model_gen4.SLDPRT_5.step")
-        self.assertEqual(get_step_filename("SC", 12), "model_gen4_12.scdoc")
+        self.assertEqual(get_step_filename("sw", 5), "model_gen4.SLDPRT_5.step")
+        self.assertEqual(get_step_filename("sc", 12), "model_gen4_12.scdoc")
 
     def test_step_file_monitor_parse_config(self):
         from engine.file_monitor import StepFileMonitor

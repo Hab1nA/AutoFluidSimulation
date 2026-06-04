@@ -389,3 +389,73 @@ class TestExecuteSolver:
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         assert executor.execute_solver("1") is False
         assert executor.execute_solver(1.5) is False
+
+    def test_execute_solver_uses_interactive_scheduled_task(self, monkeypatch):
+        """Solver 与 Meshing 使用同类交互式计划任务启动 Fluent。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 8)
+        captured: dict[str, str | None] = {}
+
+        class _SSH:
+            def exec_background(
+                self,
+                command: str,
+                flag_file: str,
+                *,
+                working_dir: str | None = None,
+                interactive: bool = False,
+            ) -> tuple[bool, str]:
+                captured["command"] = command
+                captured["flag_file"] = flag_file
+                captured["working_dir"] = working_dir
+                captured["interactive"] = str(interactive)
+                return (True, "AutoFluid_solver")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+
+        assert executor.execute_solver(2) is True
+        assert captured["working_dir"] == r"D:\working"
+        assert captured["interactive"] == "True"
+        assert "batch_solver_gen4.py" in str(captured["command"])
+        assert '--working-dir "D:\\working"' in str(captured["command"])
+
+    def test_wait_solver_completion_cleans_remote_task(self, monkeypatch):
+        """Solver 完成后清理计划任务条目，避免 Fluent 任务堆积。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 30)
+
+        deleted: list[str] = []
+        killed: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                return path in {
+                    "D:/flags/solver_done_6.txt",
+                    "D:/result/model_gen4_6.cas.h5",
+                    "D:/result/model_gen4_6.dat.h5",
+                }
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def kill_remote_task(self, task_name: str) -> bool:
+                killed.append(task_name)
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        executor._remote_tasks[6] = "AutoFluid_solver_done_task"
+
+        assert executor.wait_solver_completion(6) is True
+        assert deleted == ["D:/flags/solver_done_6.txt"]
+        assert killed == ["AutoFluid_solver_done_task"]
+        assert 6 not in executor._remote_tasks

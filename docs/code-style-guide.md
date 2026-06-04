@@ -126,8 +126,8 @@ tmp1, tmp2, x, y  # 无意义
 
 ```python
 for cn in all_configs:           # cn = config_name, 合理
-    st = self.state.get_step_status(cn, "SW")  # st = status, 合理
-for s in ["SC", "Transfer"]:     # s = step_name, 合理
+    st = self.state.get_step_status(cn, "sw")  # st = status, 合理
+for s in ["sc", "transfer"]:     # s = step_name, 合理
 ```
 
 ### 2.5 布尔变量命名
@@ -351,7 +351,7 @@ if self._stopped.is_set():
 
 - **SW 步骤**：检查 STEP 文件 → 存在则 Completed，缺失则 Error + 清除 `sw_macro_started`
 - **SC 步骤**：检查 SCDOC 文件 → 存在则 Completed，缺失+STEP存在则重新入队
-- **其他步骤**：通过 `set_all_paused_to_running(exclude_steps=["SW", "SC"])` 统一恢复
+- **其他步骤**：通过 `set_all_paused_to_running(exclude_steps=["sw", "sc"])` 统一恢复
 
 ---
 

@@ -39,7 +39,7 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
-    STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
     ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
@@ -84,7 +84,7 @@ class _MockSWExecutor:
         from engine.config import STATUS_COMPLETED
         count = 0
         for cn in self.state.get_all_configs():
-            if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED:
+            if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED:
                 count += 1
         return count
 
@@ -99,6 +99,11 @@ class MockTaskRunner:
         self._sw_should_fail = False
         self._sw_delay = 0.0
         self._sw_call_count = 0
+        self._solver_dispatched: list[int] = []
+        self._solver_delay = 0.05
+        self._solver_active_count = 0
+        self._solver_max_active_count = 0
+        self._solver_lock = threading.Lock()
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
         self._remote_executor = _MockRemoteExecutor(self.state)
@@ -113,12 +118,12 @@ class MockTaskRunner:
         if self._sw_should_fail:
             all_configs = self.state.get_all_configs()
             for cn in all_configs:
-                self.state.set_step_status(cn, "SW", STATUS_ERROR, "模拟 SW 失败")
+                self.state.set_step_status(cn, "sw", STATUS_ERROR, "模拟 SW 失败")
             return False
 
         all_configs = self.state.get_all_configs()
         for cn in all_configs:
-            self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
         return True
 
     def execute_sw_per_config(self, config_name: int) -> bool:
@@ -141,18 +146,18 @@ class MockTaskRunner:
             print(f"  [MockTaskRunner] 构型{config_name} SW 模拟失败!")
             return False
 
-        self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
         print(f"  [MockTaskRunner] 构型{config_name} SW 模拟成功")
         return True
 
     def execute_sc_step(self, config_name: int) -> bool:
         time.sleep(0.1)
-        self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
+        self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
         return True
 
     def execute_transfer(self, config_name: int) -> bool:
         time.sleep(0.05)
-        self.state.set_step_status(config_name, "Transfer", STATUS_COMPLETED)
+        self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
         return True
 
     def execute_meshing(self, config_name: int) -> bool:
@@ -160,8 +165,19 @@ class MockTaskRunner:
         return True
 
     def execute_solver(self, config_name: int) -> bool:
-        time.sleep(0.05)
-        return True
+        with self._solver_lock:
+            self._solver_dispatched.append(config_name)
+            self._solver_active_count += 1
+            self._solver_max_active_count = max(
+                self._solver_max_active_count,
+                self._solver_active_count,
+            )
+        try:
+            time.sleep(self._solver_delay)
+            return True
+        finally:
+            with self._solver_lock:
+                self._solver_active_count -= 1
 
     def wait_meshing_completion(self, config_name: int,
                                  paused_event=None, stopped_event=None) -> bool:
@@ -378,7 +394,7 @@ class TestContext:
 
     def assert_all_sw(self, expected: str, msg: str = ""):
         for cn in self.state.get_all_configs():
-            self.assert_step_status(cn, "SW", expected,
+            self.assert_step_status(cn, "sw", expected,
                                     f"{msg} (构型{cn})")
 
     def run_pipeline_async(self):
@@ -459,7 +475,7 @@ def test_pause_during_sw_then_success():
 
         paused_count = 0
         for cn in ctx.state.get_all_configs():
-            if ctx.state.get_step_status(cn, "SW") == STATUS_PAUSED:
+            if ctx.state.get_step_status(cn, "sw") == STATUS_PAUSED:
                 paused_count += 1
         print(f"  [Test] Paused 数量: {paused_count}/3")
 
@@ -778,6 +794,60 @@ def test_resume_triggers_immediate_scan():
         ctx.cleanup()
 
 
+def test_start_dispatches_solver_serially_when_barrier_already_met():
+    print("\n" + "=" * 60)
+    print("测试 10.1: 屏障已通过时 start 串行分发 Solver")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._solver_delay = 0.3
+        for cn in ctx.state.get_all_configs():
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                ctx.state.set_step_status(cn, step, STATUS_COMPLETED)
+            ctx.state.set_step_status(cn, "solver", STATUS_WAITING)
+
+        ctx.state.set_global_barrier_met(True)
+        ctx.scheduler._barrier_passed.set()
+
+        t = ctx.run_pipeline_async()
+        t.join(timeout=5)
+
+        first_started = ctx.wait_for_condition(
+            lambda: len(ctx.runner._solver_dispatched) == 1,
+            timeout=5,
+        )
+        assert first_started, "start 后应先启动第一个 Solver"
+        running = [
+            cn for cn in ctx.state.get_all_configs()
+            if ctx.state.get_step_status(cn, "solver") == STATUS_RUNNING
+        ]
+        assert running == [1], f"Solver 应串行执行，当前 Running={running}"
+
+        ok = ctx.wait_for_condition(
+            lambda: sorted(ctx.runner._solver_dispatched) == [1, 2, 3]
+            and all(
+                ctx.state.get_step_status(cn, "solver") == STATUS_COMPLETED
+                for cn in ctx.state.get_all_configs()
+            ),
+            timeout=5,
+        )
+        assert ok, (
+            "屏障已通过且 Solver=Waiting 时，start 后应串行完成所有 Solver "
+            f"(实际: {ctx.runner._solver_dispatched})"
+        )
+        assert ctx.runner._solver_max_active_count == 1, (
+            "Solver 不允许并行执行，"
+            f"实际最大并发={ctx.runner._solver_max_active_count}"
+        )
+
+        print("[PASS] 测试 10.1 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
 def test_multiple_pause_start_cycles():
     print("\n" + "=" * 60)
     print("测试 11: 多次pause-start状态切换稳定性")
@@ -834,6 +904,7 @@ def main():
         ("暂停后文件监控停止扫描", test_file_monitor_paused_on_pause),
         ("暂停期间STEP文件不被捕捉", test_pause_blocks_step_file_callback),
         ("恢复后立即触发完整轮询", test_resume_triggers_immediate_scan),
+        ("屏障已通过时start串行分发Solver", test_start_dispatches_solver_serially_when_barrier_already_met),
         ("多次pause-start状态切换", test_multiple_pause_start_cycles),
     ]
 

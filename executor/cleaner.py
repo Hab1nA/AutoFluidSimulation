@@ -132,19 +132,19 @@ class FileCleaner:
     def _clean_single_step(self, step_name: str, config_name: Optional[int] = None):
         """清理单个步骤的文件（内部方法）。"""
         local_patterns = {
-            "SW":       ("step_dir",  [STEP_FILE_PATTERNS["SW"]]),
-            "SC":       ("scdoc_dir", [STEP_FILE_PATTERNS["SC"]]),
-            "Transfer": None,
-            "Meshing":  None,
-            "Solver":   None,
+            "sw":       ("step_dir",  [STEP_FILE_PATTERNS["sw"]]),
+            "sc":       ("scdoc_dir", [STEP_FILE_PATTERNS["sc"]]),
+            "transfer": None,
+            "meshing":  None,
+            "solver":   None,
         }
 
         remote_patterns = {
-            "SW":       None,
-            "SC":       ("scdoc_dir",  [STEP_FILE_PATTERNS["SC"]]),
-            "Transfer": None,
-            "Meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["Meshing"]]),
-            "Solver":   ("result_dir", [STEP_FILE_PATTERNS["Solver"], STEP_FILE_PATTERNS["SolverData"]]),
+            "sw":       None,
+            "sc":       ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]]),
+            "transfer": None,
+            "meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["meshing"]]),
+            "solver":   ("result_dir", [STEP_FILE_PATTERNS["solver"], STEP_FILE_PATTERNS["solverdata"]]),
         }
 
         configs = [config_name] if config_name is not None else self.state.get_all_configs()

@@ -12,14 +12,14 @@ pub const STATUS_RETRYING: &str = "Retrying";
 pub const STATUS_COMPLETED: &str = "Completed";
 pub const STATUS_ERROR: &str = "Error";
 
-pub const STEP_NAMES: [&str; 5] = ["SW", "SC", "Transfer", "Meshing", "Solver"];
+pub const STEP_NAMES: [&str; 5] = ["sw", "sc", "transfer", "meshing", "solver"];
 
 pub const STEP_DISPLAY: [(&str, &str); 5] = [
-    ("SW", "SolidWorks导出"),
-    ("SC", "SpaceClaim转换"),
-    ("Transfer", "文件传输"),
-    ("Meshing", "网格划分"),
-    ("Solver", "仿真求解"),
+    ("sw", "SolidWorks导出"),
+    ("sc", "SpaceClaim转换"),
+    ("transfer", "文件传输"),
+    ("meshing", "网格划分"),
+    ("solver", "仿真求解"),
 ];
 
 pub fn step_display_name(step: &str) -> &str {

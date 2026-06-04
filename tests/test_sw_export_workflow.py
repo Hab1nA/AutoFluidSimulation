@@ -692,19 +692,19 @@ class TestConfigTransition(unittest.TestCase):
 
     def test_initial_sw_status_waiting(self):
         from engine.config import STATUS_WAITING
-        status = self.state.get_step_status(0, "SW")
+        status = self.state.get_step_status(0, "sw")
         self.assertEqual(status, STATUS_WAITING)
 
     def test_set_sw_completed(self):
         from engine.config import STATUS_COMPLETED
-        self.state.set_step_status(0, "SW", STATUS_COMPLETED)
-        self.assertEqual(self.state.get_step_status(0, "SW"), STATUS_COMPLETED)
+        self.state.set_step_status(0, "sw", STATUS_COMPLETED)
+        self.assertEqual(self.state.get_step_status(0, "sw"), STATUS_COMPLETED)
 
     def test_set_sw_error(self):
         from engine.config import STATUS_ERROR
-        self.state.set_step_status(0, "SW", STATUS_ERROR, "SaveAs failed")
-        self.assertEqual(self.state.get_step_status(0, "SW"), STATUS_ERROR)
-        self.assertEqual(self.state.get_step_status(1, "SW"), "Waiting")
+        self.state.set_step_status(0, "sw", STATUS_ERROR, "SaveAs failed")
+        self.assertEqual(self.state.get_step_status(0, "sw"), STATUS_ERROR)
+        self.assertEqual(self.state.get_step_status(1, "sw"), "Waiting")
 
     def test_sw_macro_started_flag(self):
         self.assertFalse(self.state.is_sw_macro_started())
@@ -719,28 +719,28 @@ class TestConfigTransition(unittest.TestCase):
 
     def test_get_configs_at_step(self):
         from engine.config import STATUS_COMPLETED
-        self.state.set_step_status(0, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(0, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
 
-        completed = self.state.get_configs_at_step("SW", STATUS_COMPLETED)
+        completed = self.state.get_configs_at_step("sw", STATUS_COMPLETED)
         self.assertEqual(completed, [0, 1])
 
     def test_all_configs_completed_at_step(self):
         from engine.config import STATUS_COMPLETED
-        self.state.set_step_status(0, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
-        self.assertTrue(self.state.all_configs_completed_at_step("SW"))
+        self.state.set_step_status(0, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.assertTrue(self.state.all_configs_completed_at_step("sw"))
 
     def test_reset_config_steps(self):
         from engine.config import STATUS_COMPLETED, STATUS_WAITING
-        self.state.set_step_status(0, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(0, "SC", STATUS_COMPLETED)
-        self.state.set_step_status(0, "Transfer", STATUS_COMPLETED)
+        self.state.set_step_status(0, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(0, "sc", STATUS_COMPLETED)
+        self.state.set_step_status(0, "transfer", STATUS_COMPLETED)
 
-        self.state.reset_config_steps(0, "SC")
-        self.assertEqual(self.state.get_step_status(0, "SW"), STATUS_COMPLETED)
-        self.assertEqual(self.state.get_step_status(0, "SC"), STATUS_WAITING)
-        self.assertEqual(self.state.get_step_status(0, "Transfer"), STATUS_WAITING)
+        self.state.reset_config_steps(0, "sc")
+        self.assertEqual(self.state.get_step_status(0, "sw"), STATUS_COMPLETED)
+        self.assertEqual(self.state.get_step_status(0, "sc"), STATUS_WAITING)
+        self.assertEqual(self.state.get_step_status(0, "transfer"), STATUS_WAITING)
 
 
 # ============================================================================
@@ -929,35 +929,35 @@ class TestStepFilenameGeneration(unittest.TestCase):
     def test_get_step_filename_sw(self):
         from engine.config import get_step_filename
         self.assertEqual(
-            get_step_filename("SW", 5), "model_gen4.SLDPRT_5.step"
+            get_step_filename("sw", 5), "model_gen4.SLDPRT_5.step"
         )
 
     def test_get_step_filename_sc(self):
         from engine.config import get_step_filename
         self.assertEqual(
-            get_step_filename("SC", 12), "model_gen4_12.scdoc"
+            get_step_filename("sc", 12), "model_gen4_12.scdoc"
         )
 
     def test_get_step_filename_meshing(self):
         from engine.config import get_step_filename
         self.assertEqual(
-            get_step_filename("Meshing", 3), "model_gen4_3.msh.h5"
+            get_step_filename("meshing", 3), "model_gen4_3.msh.h5"
         )
 
     def test_get_step_filename_solver(self):
         from engine.config import get_step_filename
         self.assertEqual(
-            get_step_filename("Solver", 7), "model_gen4_7.cas.h5"
+            get_step_filename("solver", 7), "model_gen4_7.cas.h5"
         )
 
     def test_get_step_filename_invalid_step(self):
         from engine.config import get_step_filename
         self.assertIsNone(get_step_filename("InvalidStep", 5))
-        self.assertIsNone(get_step_filename("Transfer", 5))
+        self.assertIsNone(get_step_filename("transfer", 5))
 
     def test_get_step_filename_negative_config(self):
         from engine.config import get_step_filename
-        result = get_step_filename("SW", -1)
+        result = get_step_filename("sw", -1)
         self.assertEqual(result, "model_gen4.SLDPRT_-1.step")
 
 

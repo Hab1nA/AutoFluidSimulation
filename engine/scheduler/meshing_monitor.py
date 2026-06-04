@@ -129,7 +129,7 @@ class MeshingMonitor:
                     f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
                     exc_info=True,
                 )
-                self.state.set_step_status(config_name, "Meshing", STATUS_ERROR, str(e))
+                self.state.set_step_status(config_name, "meshing", STATUS_ERROR, str(e))
             except Exception as e:
                 logger.critical(
                     f"[MeshingMonitor] 处理构型{config_name} 致命异常: "
@@ -137,7 +137,7 @@ class MeshingMonitor:
                     exc_info=True,
                 )
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_ERROR,
+                    config_name, "meshing", STATUS_ERROR,
                     f"致命异常: {type(e).__name__}: {e}",
                 )
             finally:
@@ -161,21 +161,21 @@ class MeshingMonitor:
 
         # ---- 断点续传：检查远程输出是否已存在（复用共享工具函数） ----
         if self._check_remote_outputs_exist(config_name):
-            self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
+            self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 远程输出已存在，标记完成")
             return False
 
         # ---- 检查是否为重启后仍在运行的 Meshing ----
-        meshing_status = self.state.get_step_status(config_name, "Meshing")
+        meshing_status = self.state.get_step_status(config_name, "meshing")
         if meshing_status == STATUS_RUNNING:
             # Daemon 重启后发现 Meshing=Running，无法确定远程是否仍在运行
             # 先检查标志文件，若不存在则重置为 Waiting 后重新启动
             if self._remote_executor.check_meshing_done(config_name):
-                self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
+                self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
                 logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 重启后检测到完成标志")
                 return False
             # ★ 重置为 Waiting：清除孤儿 Running 状态，避免原子防护误判
-            self.state.set_step_status(config_name, "Meshing", STATUS_WAITING)
+            self.state.set_step_status(config_name, "meshing", STATUS_WAITING)
             logger.warning(
                 f"[MeshingMonitor] 构型{config_name} Meshing 重启后状态为 Running，"
                 f"无法确定远程状态，重置为 Waiting 后重新启动"
@@ -207,9 +207,9 @@ class MeshingMonitor:
 
             # 启动失败
             if attempt < max_retries:
-                retry_count = self.state.increment_retry(config_name, "Meshing")
+                retry_count = self.state.increment_retry(config_name, "meshing")
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_RETRYING,
+                    config_name, "meshing", STATUS_RETRYING,
                     f"启动重试 {attempt + 1}/{max_retries}（已重试 {retry_count} 次）",
                 )
                 logger.warning(
@@ -220,7 +220,7 @@ class MeshingMonitor:
                     return False
             else:
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_ERROR,
+                    config_name, "meshing", STATUS_ERROR,
                     f"Meshing 启动重试 {max_retries} 次后仍然失败",
                 )
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
@@ -233,22 +233,22 @@ class MeshingMonitor:
             paused_event=self._paused,
             stopped_event=self._stopped,
         ):
-            self.state.set_step_status(config_name, "Meshing", STATUS_COMPLETED)
+            self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成 ✓")
         else:
             if self._paused.is_set():
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_PAUSED,
+                    config_name, "meshing", STATUS_PAUSED,
                     "等待网格划分期间暂停",
                 )
             elif self._stopped.is_set():
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_PAUSED,
+                    config_name, "meshing", STATUS_PAUSED,
                     "引擎已停止",
                 )
             else:
                 self.state.set_step_status(
-                    config_name, "Meshing", STATUS_ERROR, "网格划分超时",
+                    config_name, "meshing", STATUS_ERROR, "网格划分超时",
                 )
         return False
 
@@ -263,8 +263,8 @@ class MeshingMonitor:
         """
         pending = []
         for cn in self.state.get_all_configs():
-            transfer_st = self.state.get_step_status(cn, "Transfer")
-            meshing_st = self.state.get_step_status(cn, "Meshing")
+            transfer_st = self.state.get_step_status(cn, "transfer")
+            meshing_st = self.state.get_step_status(cn, "meshing")
             if transfer_st == STATUS_COMPLETED and meshing_st in (
                 STATUS_WAITING, STATUS_ERROR, STATUS_RETRYING,
             ):
@@ -292,7 +292,7 @@ class MeshingMonitor:
         try:
             ssh = self._remote_executor.get_ssh_connection()
             return check_step_output_exists(
-                config_name, "Meshing", "", "", REMOTE_CONFIG, ssh,
+                config_name, "meshing", "", "", REMOTE_CONFIG, ssh,
             )
         except Exception:
             return False

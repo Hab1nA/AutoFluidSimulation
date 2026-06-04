@@ -47,6 +47,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
     msh_dir = tmp_path / "msh"
     output_dir = tmp_path / "result"
     anim_dir = tmp_path / "animation"
+    working_dir = tmp_path / "working"
     working_dir_t = tmp_path / "working" / "animation-t"
     working_dir_v = tmp_path / "working" / "animation-v"
     mpi_bin_dir = tmp_path / "mpi" / "bin"
@@ -66,6 +67,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
         msh_dir=str(msh_dir),
         output_dir=str(output_dir),
         anim_dir=str(anim_dir),
+        working_dir=str(working_dir),
         working_dir_t=str(working_dir_t),
         working_dir_v=str(working_dir_v),
         processor_count=64,
@@ -81,6 +83,7 @@ class _SuccessfulSolverSession:
         self.read_journal_calls: list[str] = []
         self.iterate_calls: list[int] = []
         self.write_case_data_calls: list[str] = []
+        self.force_exit_calls = 0
         self.tui = types.SimpleNamespace(
             file=types.SimpleNamespace(
                 read_mesh=self._read_mesh,
@@ -113,6 +116,15 @@ class _SuccessfulSolverSession:
 
     def exit(self) -> None:
         self.exit_calls += 1
+
+    def force_exit(self) -> None:
+        self.force_exit_calls += 1
+
+
+class _ExitFailureSolverSession(_SuccessfulSolverSession):
+    def exit(self) -> None:
+        self.exit_calls += 1
+        raise RuntimeError("exit failed")
 
 
 def test_missing_mesh_is_rejected_before_fluent_launch(tmp_path, monkeypatch):
@@ -195,6 +207,9 @@ def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeyp
     module.main()
 
     assert launch_kwargs["processor_count"] == 96
+    assert launch_kwargs["ui_mode"] == "gui"
+    assert launch_kwargs["start_watchdog"] is False
+    assert launch_kwargs["cwd"] == args.working_dir
     assert os.environ["I_MPI_PIN_PROCESSOR_LIST"] == "32-127"
     assert session.read_mesh_calls == [
         str(Path(args.msh_dir, f"model_gen4_{args.config_id}.msh.h5"))
@@ -202,6 +217,20 @@ def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeyp
     assert session.read_case_calls == []
     assert session.iterate_calls == [10]
     assert session.exit_calls == 1
+
+
+def test_exit_failure_tries_force_exit(tmp_path, monkeypatch):
+    session = _ExitFailureSolverSession()
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
+    args = _make_args(tmp_path)
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert session.exit_calls == 1
+    assert session.force_exit_calls == 1
 
 
 def test_mesh_read_falls_back_to_read_case_when_needed(tmp_path, monkeypatch):

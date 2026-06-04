@@ -581,7 +581,7 @@ ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"F
 
 ```python
 # engine/scheduler/main.py
-if self.state.all_configs_completed_at_step("Meshing"):
+if self.state.all_configs_completed_at_step("meshing"):
     self._barrier_passed.set()
     self._dispatch_solver_tasks()
 ```
@@ -822,19 +822,19 @@ PostProcess 是流水线中紧接在 Solver 之后的阶段。**关键理解**�
 **config.py** 扩展：
 
 ```python
-STEP_NAMES = ["SW", "SC", "Transfer", "Meshing", "Solver", "PostProcess", "Collect"]
+STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver", "postprocess", "collect"]
 
 STEP_DISPLAY = {
     ...
-    "PostProcess": "后处理",
-    "Collect": "结果回收",
+    "postprocess": "后处理",
+    "collect": "结果回收",
 }
 
 # 各阶段完成的文件判断依据
 STEP_COMPLETION_FILES = {
-    "Meshing": {"pattern": "meshing_done_{config}.txt"},   # 标志文件
-    "Solver": {"pattern": "{config}.cas"},                  # cas+dat 文件对
-    "PostProcess": {"pattern": "待定"},                     # 后处理输出文件格式待定
+    "meshing": {"pattern": "meshing_done_{config}.txt"},   # 标志文件
+    "solver": {"pattern": "{config}.cas"},                  # cas+dat 文件对
+    "postprocess": {"pattern": "待定"},                     # 后处理输出文件格式待定
 }
 ```
 
@@ -858,14 +858,14 @@ def _execute_solver_for_config(self, config_name: int, workstation_id: str):
     # Solver 在远程启动后，不再等待 Python 进程结束
     # 改为等待 .cas/.dat 文件出现
     if self.runner.execute_solver(config_name, workstation_id):
-        self.state.set_step_status(config_name, "Solver", STATUS_RUNNING)
+        self.state.set_step_status(config_name, "solver", STATUS_RUNNING)
         if self.runner.wait_solver_completion(config_name, workstation_id):
-            self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
             # Solver 完成后 PostProcess 由仿真脚本自动触发
             # 转入等待后处理输出文件
-            self.state.set_step_status(config_name, "PostProcess", STATUS_RUNNING)
+            self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
             if self.runner.wait_postprocess_completion(config_name, workstation_id):
-                self.state.set_step_status(config_name, "PostProcess", STATUS_COMPLETED)
+                self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
 ```
 
 ---
@@ -1160,7 +1160,7 @@ P1: 工作站级屏障 ◄──────────────────
 | SSH 全局锁 | `engine/task_runner.py` | `self._ssh_lock` | `threading.RLock()` |
 | 单工作站配置 | `engine/config.py` | `REMOTE_CONFIG` | 单字典 SSH 连接信息 |
 | IPC 本地监听 | `engine/config.py` | `IPC_CONFIG` | `"host": "127.0.0.1"` |
-| 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["SW", "SC", "Transfer", "Meshing", "Solver"]` |
+| 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["sw", "sc", "transfer", "meshing", "solver"]` |
 | 全局屏障检查 | `engine/scheduler/main.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成 |
 | 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `dict[str, threading.Event]`（每工作站一个） |
 | Worker 线程数 | `engine/scheduler/worker_pool.py` | `_num_workers` | `= 3` |

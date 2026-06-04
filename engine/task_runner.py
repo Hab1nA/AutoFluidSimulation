@@ -156,15 +156,15 @@ class TaskRunner:
 
     def execute_sc_step(self, config_name: int) -> bool:
         """执行 SC 步骤（SCProcessPool）。"""
-        sw_step_name = get_step_filename("SW", config_name)
+        sw_step_name = get_step_filename("sw", config_name)
         if not sw_step_name:
-            logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['SW'] 未配置或格式错误")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件名配置错误")
+            logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['sw'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "STEP 文件名配置错误")
             return False
-        scdoc_name = get_step_filename("SC", config_name)
+        scdoc_name = get_step_filename("sc", config_name)
         if not scdoc_name:
-            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SCDOC 文件名配置错误")
+            logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['sc'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
 
         step_dir = LOCAL_PATHS["step_dir"]
@@ -175,18 +175,18 @@ class TaskRunner:
 
         if not os.path.exists(step_file):
             logger.error(f"STEP 文件不存在: {step_file}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "STEP 文件不存在")
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "STEP 文件不存在")
             return False
 
         sc_exe = LOCAL_PATHS["sc_exe"]
         sc_script = LOCAL_PATHS["sc_script"]
         if not os.path.exists(sc_exe):
             logger.error(f"SpaceClaim 可执行文件不存在: {sc_exe}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 程序不存在")
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SC 程序不存在")
             return False
         if not os.path.exists(sc_script):
             logger.error(f"SC 脚本文件不存在: {sc_script}")
-            self.state.set_step_status(config_name, "SC", STATUS_ERROR, "SC 脚本不存在")
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SC 脚本不存在")
             return False
 
         return self._sc_pool.run_config(

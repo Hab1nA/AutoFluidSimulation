@@ -129,7 +129,7 @@ def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path
     assert deleted == ["D:/remote scdoc/model_gen4_2.scdoc"]
     assert state.status_updates[-1] == (
         2,
-        "Transfer",
+        "transfer",
         STATUS_ERROR,
         "SFTP 上传失败",
     )
@@ -153,7 +153,7 @@ def test_execute_transfer_rejects_empty_local_scdoc(tmp_path, monkeypatch):
     assert executor.execute_transfer(4) is False
     assert state.status_updates[-1] == (
         4,
-        "Transfer",
+        "transfer",
         STATUS_ERROR,
         "本地 SCDOC 文件为空",
     )

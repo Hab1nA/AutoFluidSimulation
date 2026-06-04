@@ -68,28 +68,28 @@ class _E2ETaskRunner:
 
     def execute_sw_step(self) -> bool:
         self._call_log.append(("SW_bulk", 0))
-        return self._step_results.get("SW", True)
+        return self._step_results.get("sw", True)
 
     def execute_sw_per_config(self, config_name: int) -> bool:
-        return self._execute_step("SW", config_name)
+        return self._execute_step("sw", config_name)
 
     def execute_sc_step(self, config_name: int) -> bool:
-        return self._execute_step("SC", config_name)
+        return self._execute_step("sc", config_name)
 
     def execute_transfer(self, config_name: int) -> bool:
-        return self._execute_step("Transfer", config_name)
+        return self._execute_step("transfer", config_name)
 
     def execute_meshing(self, config_name: int) -> bool:
-        return self._execute_step("Meshing", config_name)
+        return self._execute_step("meshing", config_name)
 
     def execute_solver(self, config_name: int) -> bool:
-        return self._execute_step("Solver", config_name)
+        return self._execute_step("solver", config_name)
 
     def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
-        return self._step_results.get("Meshing", True)
+        return self._step_results.get("meshing", True)
 
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
-        return self._step_results.get("Solver", True)
+        return self._step_results.get("solver", True)
 
     def get_remote_executor(self):
         return self
@@ -128,13 +128,13 @@ class TestPipelineStateTransitions:
 
         # 模拟 SW 阶段
         for cn in [1, 2]:
-            state.set_step_status(cn, "SW", STATUS_RUNNING)
+            state.set_step_status(cn, "sw", STATUS_RUNNING)
             result = runner.execute_sw_per_config(cn)
-            state.set_step_status(cn, "SW", STATUS_COMPLETED if result else STATUS_ERROR)
+            state.set_step_status(cn, "sw", STATUS_COMPLETED if result else STATUS_ERROR)
 
         # 模拟 SC→Transfer→Meshing→Solver
         for cn in [1, 2]:
-            for step in ["SC", "Transfer", "Meshing", "Solver"]:
+            for step in ["sc", "transfer", "meshing", "solver"]:
                 state.set_step_status(cn, step, STATUS_RUNNING)
                 result = runner._execute_step(step, cn)
                 state.set_step_status(cn, step, STATUS_COMPLETED if result else STATUS_ERROR)
@@ -152,17 +152,17 @@ class TestPipelineStateTransitions:
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
 
         runner = _E2ETaskRunner(state)
-        runner.set_step_result("SC", False)
+        runner.set_step_result("sc", False)
 
         # SW 成功
-        state.set_step_status(1, "SW", STATUS_COMPLETED)
+        state.set_step_status(1, "sw", STATUS_COMPLETED)
 
         # SC 失败
-        state.set_step_status(1, "SC", STATUS_RUNNING)
-        result = runner._execute_step("SC", 1)
-        state.set_step_status(1, "SC", STATUS_ERROR if not result else STATUS_COMPLETED)
+        state.set_step_status(1, "sc", STATUS_RUNNING)
+        result = runner._execute_step("sc", 1)
+        state.set_step_status(1, "sc", STATUS_ERROR if not result else STATUS_COMPLETED)
 
-        assert state.get_step_status(1, "SC") == STATUS_ERROR
+        assert state.get_step_status(1, "sc") == STATUS_ERROR
 
     def test_pause_and_resume_state(self):
         """暂停后状态变为 Paused，恢复后可继续。"""
@@ -175,16 +175,16 @@ class TestPipelineStateTransitions:
         runner.set_control_events(paused, stopped)
 
         # 设置 Running 状态
-        state.set_step_status(1, "SC", STATUS_RUNNING)
-        state.set_step_status(1, "Transfer", STATUS_RUNNING)
+        state.set_step_status(1, "sc", STATUS_RUNNING)
+        state.set_step_status(1, "transfer", STATUS_RUNNING)
 
         # 暂停
         paused.set()
         state.set_all_running_to_paused()
         state.set_engine_status("paused")
 
-        assert state.get_step_status(1, "SC") == STATUS_PAUSED
-        assert state.get_step_status(1, "Transfer") == STATUS_PAUSED
+        assert state.get_step_status(1, "sc") == STATUS_PAUSED
+        assert state.get_step_status(1, "transfer") == STATUS_PAUSED
         assert state.get_engine_status() == "paused"
 
         # 恢复
@@ -199,9 +199,9 @@ class TestPipelineStateTransitions:
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         # 模拟部分完成
-        state.set_step_status(1, "SW", STATUS_COMPLETED)
-        state.set_step_status(1, "SC", STATUS_COMPLETED)
-        state.set_step_status(2, "SW", STATUS_COMPLETED)
+        state.set_step_status(1, "sw", STATUS_COMPLETED)
+        state.set_step_status(1, "sc", STATUS_COMPLETED)
+        state.set_step_status(2, "sw", STATUS_COMPLETED)
 
         # 模拟停止
         state.set_engine_status("stopped")
@@ -210,18 +210,18 @@ class TestPipelineStateTransitions:
         all_configs = state.get_all_configs()
         completed_configs = [
             cn for cn in all_configs
-            if state.get_step_status(cn, "SC") == STATUS_COMPLETED
+            if state.get_step_status(cn, "sc") == STATUS_COMPLETED
         ]
         pending_configs = [
             cn for cn in all_configs
-            if state.get_step_status(cn, "SC") != STATUS_COMPLETED
+            if state.get_step_status(cn, "sc") != STATUS_COMPLETED
         ]
 
         assert completed_configs == [1]
         assert pending_configs == [2]
 
         # 已完成步骤不受影响
-        assert state.get_step_status(1, "SC") == STATUS_COMPLETED
+        assert state.get_step_status(1, "sc") == STATUS_COMPLETED
 
 
 # ====================================================================
@@ -250,43 +250,43 @@ class TestConfigToStatePipeline:
 
         stats = state.get_statistics()
         assert stats["total_configs"] == 5
-        assert stats["steps"]["SW"][STATUS_WAITING] == 5
+        assert stats["steps"]["sw"][STATUS_WAITING] == 5
 
     def test_partial_progress_statistics(self):
         """部分进度的统计正确。"""
         state = StateManager(db_path=self.db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
-        state.set_step_status(1, "SW", STATUS_COMPLETED)
-        state.set_step_status(2, "SW", STATUS_RUNNING)
+        state.set_step_status(1, "sw", STATUS_COMPLETED)
+        state.set_step_status(2, "sw", STATUS_RUNNING)
 
         stats = state.get_statistics()
-        assert stats["steps"]["SW"][STATUS_COMPLETED] == 1
-        assert stats["steps"]["SW"][STATUS_RUNNING] == 1
-        assert stats["steps"]["SW"][STATUS_WAITING] == 0
+        assert stats["steps"]["sw"][STATUS_COMPLETED] == 1
+        assert stats["steps"]["sw"][STATUS_RUNNING] == 1
+        assert stats["steps"]["sw"][STATUS_WAITING] == 0
 
     def test_error_configs_query(self):
         """查询错误构型。"""
         state = StateManager(db_path=self.db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
-        state.set_step_status(1, "SC", STATUS_ERROR, "连接超时")
-        state.set_step_status(2, "Meshing", STATUS_ERROR, "发散")
+        state.set_step_status(1, "sc", STATUS_ERROR, "连接超时")
+        state.set_step_status(2, "meshing", STATUS_ERROR, "发散")
 
         errors = state.get_error_configs()
         error_dict = {(e[0], e[1]): e[2] for e in errors}
-        assert error_dict[(1, "SC")] == "连接超时"
-        assert error_dict[(2, "Meshing")] == "发散"
+        assert error_dict[(1, "sc")] == "连接超时"
+        assert error_dict[(2, "meshing")] == "发散"
 
     def test_barrier_check_after_all_meshing_completed(self):
         """所有 Meshing 完成后屏障判断正确。"""
         state = StateManager(db_path=self.db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
-        assert state.all_configs_completed_at_step("Meshing") is False
+        assert state.all_configs_completed_at_step("meshing") is False
 
-        state.set_step_status(1, "Meshing", STATUS_COMPLETED)
-        assert state.all_configs_completed_at_step("Meshing") is False
+        state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        assert state.all_configs_completed_at_step("meshing") is False
 
-        state.set_step_status(2, "Meshing", STATUS_COMPLETED)
-        assert state.all_configs_completed_at_step("Meshing") is True
+        state.set_step_status(2, "meshing", STATUS_COMPLETED)
+        assert state.all_configs_completed_at_step("meshing") is True

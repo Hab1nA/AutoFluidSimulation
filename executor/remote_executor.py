@@ -167,10 +167,10 @@ class RemoteExecutor:
         （断点续传场景），避免重复上传。
         所有 SSH/SFTP 操作均在 _ssh_lock 保护下执行，保证线程安全。
         """
-        _scdoc_name = get_step_filename("SC", config_name)
+        _scdoc_name = get_step_filename("sc", config_name)
         if not _scdoc_name:
-            logger.error("[Transfer] 无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['SC'] 未配置或格式错误")
-            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
+            logger.error("[Transfer] 无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['sc'] 未配置或格式错误")
+            self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
         local_file = os.path.join(
             str(LOCAL_PATHS["scdoc_dir"]),
@@ -183,11 +183,11 @@ class RemoteExecutor:
 
         if not os.path.exists(local_file):
             logger.error(f"[Transfer] 本地 SCDOC 文件不存在: {local_file}")
-            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "本地文件不存在")
+            self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "本地文件不存在")
             return False
         if os.path.getsize(local_file) <= 0:
             logger.error(f"[Transfer] 本地 SCDOC 文件为空: {local_file}")
-            self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "本地 SCDOC 文件为空")
+            self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "本地 SCDOC 文件为空")
             return False
 
         if self._stopped_event is not None and self._stopped_event.is_set():
@@ -240,11 +240,11 @@ class RemoteExecutor:
                     if self._paused_event is not None and self._paused_event.is_set():
                         logger.info(f"[Transfer] 构型{config_name} 上传因暂停中断")
                         return False
-                    self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, "SFTP 上传失败")
+                    self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "SFTP 上传失败")
                     return False
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Transfer] 文件传输异常: {e}")
-                self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
+                self.state.set_step_status(config_name, "transfer", STATUS_ERROR, str(e))
                 return False
 
     # ------------------------------------------------------------------
@@ -394,7 +394,7 @@ class RemoteExecutor:
                 if ssh.check_remote_file(flag_file):
                     logger.info(f"[Meshing] 构型{config_name} 网格划分完成（检测到标志文件）")
                     ssh.delete_remote_file(flag_file)
-                    self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
+                    self._cleanup_completed_remote_task(config_name, "meshing", ssh)
                     return True
             return False
         except (OSError, ConnectionError) as e:
@@ -441,12 +441,12 @@ class RemoteExecutor:
                             f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
+                        self._cleanup_completed_remote_task(config_name, "meshing", ssh)
                         return False
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
-                        self._cleanup_completed_remote_task(config_name, "Meshing", ssh)
+                        self._cleanup_completed_remote_task(config_name, "meshing", ssh)
                         return True
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
@@ -455,7 +455,7 @@ class RemoteExecutor:
 
         logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
         # 超时后终止远程进程，防止资源泄漏和重试冲突
-        self._kill_remote_task_for_config(config_name, "Meshing")
+        self._kill_remote_task_for_config(config_name, "meshing")
         return False
 
     # ------------------------------------------------------------------
@@ -512,6 +512,7 @@ class RemoteExecutor:
             f' --msh-dir "{REMOTE_CONFIG["msh_dir"]}"'
             f' --output-dir "{REMOTE_CONFIG["result_dir"]}"'
             f' --anim-dir "{anim_dir}"'
+            f' --working-dir "{REMOTE_CONFIG["working_dir"]}"'
             f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
             f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
             f' --processor-count {processor_count}'
@@ -544,7 +545,8 @@ class RemoteExecutor:
                 ssh = self._get_ssh()
                 success, task_name = ssh.exec_background(
                     command, flag_file,
-                    working_dir=str(REMOTE_CONFIG["scripts_dir"]),
+                    working_dir=str(REMOTE_CONFIG["working_dir"]),
+                    interactive=True,
                 )
                 if success:
                     self._remote_tasks[config_name] = task_name
@@ -570,8 +572,8 @@ class RemoteExecutor:
         flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
         error_flag = f"{flag_file}.error"
         result_dir = str(REMOTE_CONFIG["result_dir"]).replace(chr(92), "/")
-        cas_name = get_step_filename("Solver", config_name)
-        dat_name = get_step_filename("SolverData", config_name)
+        cas_name = get_step_filename("solver", config_name)
+        dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
 
@@ -606,7 +608,7 @@ class RemoteExecutor:
                             f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._cleanup_completed_remote_task(config_name, "Solver", ssh)
+                        self._cleanup_completed_remote_task(config_name, "solver", ssh)
                         return False
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
@@ -615,7 +617,7 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            self._cleanup_completed_remote_task(config_name, "Solver", ssh)
+                            self._cleanup_completed_remote_task(config_name, "solver", ssh)
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -651,7 +653,7 @@ class RemoteExecutor:
                                 ssh.delete_remote_file(dat_file)
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
-                            self._cleanup_completed_remote_task(config_name, "Solver", ssh)
+                            self._cleanup_completed_remote_task(config_name, "solver", ssh)
                             return False
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
@@ -660,7 +662,7 @@ class RemoteExecutor:
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
         # 超时后终止远程进程，防止资源泄漏和重试冲突
-        self._kill_remote_task_for_config(config_name, "Solver")
+        self._kill_remote_task_for_config(config_name, "solver")
         return False
 
     # ------------------------------------------------------------------
@@ -960,7 +962,7 @@ class RemoteExecutor:
         content = content.replace('{{REMOTE_REF_FILES_DIR}}', fluent_path(REMOTE_CONFIG["ref_files_dir"]))
         content = content.replace('{{REMOTE_MSH_DIR}}', fluent_path(REMOTE_CONFIG["msh_dir"]))
         content = content.replace('{{REMOTE_RESULT_DIR}}', fluent_path(REMOTE_CONFIG["result_dir"]))
-        sc_pattern = STEP_FILE_PATTERNS.get("SC", "")
+        sc_pattern = STEP_FILE_PATTERNS.get("sc", "")
         if sc_pattern:
             content = content.replace('{{SC_FILENAME}}', sc_pattern)
         return content

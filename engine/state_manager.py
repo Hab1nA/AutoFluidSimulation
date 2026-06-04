@@ -264,7 +264,7 @@ class StateManager:
 
         Args:
             config_name: 构型名称
-            step_name: 步骤名 (SW/SC/Transfer/Meshing/Solver)
+            step_name: 步骤名 (sw/sc/transfer/meshing/solver)
             status: 状态值
             error_message: 错误信息（仅在 Error 状态时使用）
         """
@@ -357,7 +357,7 @@ class StateManager:
             with self._get_connection() as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) as cnt FROM steps "
-                    "WHERE step_name = 'Meshing' AND status = ?",
+                    "WHERE step_name = 'meshing' AND status = ?",
                     (STATUS_RUNNING,),
                 ).fetchone()
                 if (row["cnt"] or 0) > 0:
@@ -370,7 +370,7 @@ class StateManager:
                     "UPDATE steps SET status = ?, error_message = '', "
                     "updated_at = strftime('%s','now') "
                     "WHERE config_name = ? AND step_name = ?",
-                    (STATUS_RUNNING, config_name, "Meshing"),
+                    (STATUS_RUNNING, config_name, "meshing"),
                 )
                 logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
                 return True
@@ -409,10 +409,10 @@ class StateManager:
                 # 如果重置了 SW，需谨慎处理 sw_macro_started 标志：
                 # 仅当数据库中不再有任何 SW=Completed 的构型时才清除该标志。
                 # 这样可以避免部分重置（仅重置单个构型）时意外允许全部重跑 SW。
-                if from_step == "SW" or from_step is None:
+                if from_step == "sw" or from_step is None:
                     remaining = conn.execute(
                         "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'SW' AND status = ?",
+                        "WHERE step_name = 'sw' AND status = ?",
                         (STATUS_COMPLETED,)
                     ).fetchone()
                     if not remaining or remaining["cnt"] == 0:
@@ -425,7 +425,7 @@ class StateManager:
                             f"仍有 {remaining['cnt'] if remaining else 0} 个构型的 SW=Completed，保持 sw_macro_started=true"
                         )
 
-        logger.info(f"已重置构型 {config_name} 从 {from_step or 'SW'} 起的所有步骤")
+        logger.info(f"已重置构型 {config_name} 从 {from_step or 'sw'} 起的所有步骤")
 
     def reset_all(self):
         """重置所有构型的所有步骤（含引擎全局状态）。"""

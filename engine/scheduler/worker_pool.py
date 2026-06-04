@@ -199,8 +199,8 @@ class WorkerPoolManager:
         terminal_states = {STATUS_COMPLETED, STATUS_ERROR}
 
         for cn in all_configs:
-            sw_status = self.state.get_step_status(cn, "SW")
-            sc_status = self.state.get_step_status(cn, "SC")
+            sw_status = self.state.get_step_status(cn, "sw")
+            sc_status = self.state.get_step_status(cn, "sc")
             # SW 必须已终结（确保不会再有新 STEP 文件产生）
             if sw_status not in terminal_states:
                 return False
@@ -245,8 +245,8 @@ class WorkerPoolManager:
                     if qsize == 0:
                         waiting_configs = [
                             cn for cn in self.state.get_all_configs()
-                            if self.state.get_step_status(cn, "SC") == STATUS_WAITING
-                            and self.state.get_step_status(cn, "SW") == STATUS_COMPLETED
+                            if self.state.get_step_status(cn, "sc") == STATUS_WAITING
+                            and self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
                         ]
                         if waiting_configs:
                             logger.warning(
@@ -281,7 +281,7 @@ class WorkerPoolManager:
                 _consecutive_fatal_count = 0
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"SC 步骤处理构型{config_name} 异常: {e}", exc_info=True)
-                for step in ["SC", "Transfer"]:
+                for step in ["sc", "transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)
                         if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
@@ -303,7 +303,7 @@ class WorkerPoolManager:
                         f"SC 步骤处理构型{config_name} 致命异常: {type(e).__name__}: {e}",
                         exc_info=True
                     )
-                for step in ["SC", "Transfer"]:
+                for step in ["sc", "transfer"]:
                     try:
                         s = self.state.get_step_status(config_name, step)
                         if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
@@ -327,7 +327,7 @@ class WorkerPoolManager:
         Args:
             config_name: 构型名称
         """
-        sc_status = self.state.get_step_status(config_name, "SC")
+        sc_status = self.state.get_step_status(config_name, "sc")
 
         # ★ 重复入队检测：若 SC 已处于 Running 或 Completed，说明该构型
         #   被重复推入了队列（如 resume + 文件监控器同时触发），直接跳过。
@@ -344,21 +344,21 @@ class WorkerPoolManager:
             if not wait_unless_paused_or_stopped(self._paused, self._stopped):
                 return
 
-            scdoc_name = get_step_filename("SC", config_name)
+            scdoc_name = get_step_filename("sc", config_name)
             if scdoc_name:
                 scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
                 if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
                     logger.info(
                         f"构型{config_name} SC: SCDOC 文件已存在，跳过执行"
                     )
-                    self.state.set_step_status(config_name, "SC", STATUS_COMPLETED)
-                elif not self._retry_manager.execute_with_retry(config_name, "SC",
+                    self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
+                elif not self._retry_manager.execute_with_retry(config_name, "sc",
                                                    self.runner.execute_sc_step):
                     self._mark_meshing_error_if_transfer_failed(
                         config_name, "SC 步骤失败"
                     )
                     return
-            elif not self._retry_manager.execute_with_retry(config_name, "SC",
+            elif not self._retry_manager.execute_with_retry(config_name, "sc",
                                                self.runner.execute_sc_step):
                 self._mark_meshing_error_if_transfer_failed(
                     config_name, "SC 步骤失败"
@@ -366,7 +366,7 @@ class WorkerPoolManager:
                 return
 
             # ★ 执行完成后再次确认状态，仅在 SC 确实 Completed 时推入 Transfer
-            sc_status = self.state.get_step_status(config_name, "SC")
+            sc_status = self.state.get_step_status(config_name, "sc")
 
         # ★ SC 成功（或已 Completed），推入 Transfer 队列
         if sc_status == STATUS_COMPLETED:
@@ -409,9 +409,9 @@ class WorkerPoolManager:
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"Transfer 步骤处理构型{config_name} 异常: {e}", exc_info=True)
                 try:
-                    s = self.state.get_step_status(config_name, "Transfer")
+                    s = self.state.get_step_status(config_name, "transfer")
                     if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                        self.state.set_step_status(config_name, "Transfer", STATUS_ERROR, str(e))
+                        self.state.set_step_status(config_name, "transfer", STATUS_ERROR, str(e))
                 except Exception as mark_err:
                     logger.debug(f"标记构型{config_name} Transfer 为 Error 时异常: {mark_err}")
                 self._mark_meshing_error_if_transfer_failed(config_name, str(e))
@@ -430,9 +430,9 @@ class WorkerPoolManager:
                         exc_info=True
                     )
                 try:
-                    s = self.state.get_step_status(config_name, "Transfer")
+                    s = self.state.get_step_status(config_name, "transfer")
                     if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                        self.state.set_step_status(config_name, "Transfer", STATUS_ERROR,
+                        self.state.set_step_status(config_name, "transfer", STATUS_ERROR,
                                                     f"致命异常: {type(e).__name__}: {e}")
                 except Exception:
                     pass
@@ -456,7 +456,7 @@ class WorkerPoolManager:
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return
 
-        transfer_status = self.state.get_step_status(config_name, "Transfer")
+        transfer_status = self.state.get_step_status(config_name, "transfer")
 
         # ★ 重复入队检测：若 Transfer 已处于 Running 或 Completed，说明该构型
         #   被重复推入了队列，直接跳过。
@@ -472,7 +472,7 @@ class WorkerPoolManager:
             # ★ 远程文件存在性检查已移入 remote_executor.execute_transfer() 内部，
             #    在 _ssh_lock 保护下执行，避免与 upload_file() 并发操作 SFTP 通道
             #    导致死锁。此处不再单独检查，直接委托 execute_transfer 处理。
-            if not self._retry_manager.execute_with_retry(config_name, "Transfer",
+            if not self._retry_manager.execute_with_retry(config_name, "transfer",
                                              self.runner.execute_transfer):
                 self._mark_meshing_error_if_transfer_failed(
                     config_name, "Transfer 步骤失败"
@@ -480,7 +480,7 @@ class WorkerPoolManager:
                 return
 
             # ★ 执行完成后再次确认状态
-            transfer_status = self.state.get_step_status(config_name, "Transfer")
+            transfer_status = self.state.get_step_status(config_name, "transfer")
 
         # ★ Transfer 成功（或已 Completed），提交 MeshingMonitor
         if transfer_status == STATUS_COMPLETED:
@@ -500,10 +500,10 @@ class WorkerPoolManager:
 
     def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:
         """上游步骤（SC 或 Transfer）失败时，将 Meshing 标记为 Error（若尚未完成）。"""
-        meshing_st = self.state.get_step_status(config_name, "Meshing")
+        meshing_st = self.state.get_step_status(config_name, "meshing")
         if meshing_st not in (STATUS_COMPLETED, STATUS_ERROR):
             self.state.set_step_status(
-                config_name, "Meshing", STATUS_ERROR,
+                config_name, "meshing", STATUS_ERROR,
                 f"上游步骤失败: {reason}",
             )
             logger.info(

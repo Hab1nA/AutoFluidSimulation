@@ -57,10 +57,10 @@ class TestRetryManager:
             call_count += 1
             return True
 
-        result = self.retry_mgr.execute_with_retry(1, "SC", success_func)
+        result = self.retry_mgr.execute_with_retry(1, "sc", success_func)
         assert result is True
         assert call_count == 1
-        assert self.state.get_step_status(1, "SC") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "sc") == STATUS_COMPLETED
 
     def test_execute_success_after_retry(self):
         """首次失败、第二次成功应返回 True。"""
@@ -71,19 +71,19 @@ class TestRetryManager:
             return call_count > 1
 
         # 使用较短的重试延迟
-        result = self.retry_mgr.execute_with_retry(1, "SC", fail_then_success)
+        result = self.retry_mgr.execute_with_retry(1, "sc", fail_then_success)
         assert result is True
         assert call_count == 2
-        assert self.state.get_step_status(1, "SC") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "sc") == STATUS_COMPLETED
 
     def test_execute_all_retries_exhausted(self):
         """所有重试均失败应返回 False 并标记 Error。"""
         def always_fail(cn):
             return False
 
-        result = self.retry_mgr.execute_with_retry(1, "SC", always_fail)
+        result = self.retry_mgr.execute_with_retry(1, "sc", always_fail)
         assert result is False
-        assert self.state.get_step_status(1, "SC") == STATUS_ERROR
+        assert self.state.get_step_status(1, "sc") == STATUS_ERROR
 
     def test_execute_stopped_immediately(self):
         """stopped 标志应立即中止执行。"""
@@ -94,7 +94,7 @@ class TestRetryManager:
             call_count += 1
             return True
 
-        result = self.retry_mgr.execute_with_retry(1, "SC", should_not_be_called)
+        result = self.retry_mgr.execute_with_retry(1, "sc", should_not_be_called)
         assert result is False
         assert call_count == 0
 
@@ -108,9 +108,9 @@ class TestRetryManager:
             # 第一次调用时暂停标志仍置位
             return False
 
-        _ = self.retry_mgr.execute_with_retry(1, "SC", fail_on_first)
+        _ = self.retry_mgr.execute_with_retry(1, "sc", fail_on_first)
         # 因暂停导致的失败应标记 Paused（或因线程调度竞态可能走正常重试路径）
-        status = self.state.get_step_status(1, "SC")
+        status = self.state.get_step_status(1, "sc")
         assert status in (STATUS_PAUSED, STATUS_RETRYING, STATUS_ERROR)
 
     def test_pause_aware_sleep_completes(self):
@@ -243,17 +243,18 @@ class _MockTaskRunner:
         self.state = state_manager
         self._sc_cleanup_called = False
         self._solver_dispatched = []
+        self._solver_wait_result = True
 
     def do_sc_final_cleanup(self):
         self._sc_cleanup_called = True
 
     def execute_solver(self, config_name: int) -> bool:
         self._solver_dispatched.append(config_name)
-        self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
+        self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
         return True
 
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
-        return True
+        return self._solver_wait_result
 
     def get_remote_executor(self):
         return _MockRemoteExecutor(self.state)
@@ -319,10 +320,10 @@ class TestBarrierCoordinator:
     def test_barrier_passes_when_all_meshing_completed(self):
         """所有构型 Meshing Completed → 屏障通过。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(2, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(1, "Meshing", STATUS_COMPLETED)
-        self.state.set_step_status(2, "Meshing", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_COMPLETED)
 
         t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
         t.start()
@@ -335,10 +336,10 @@ class TestBarrierCoordinator:
     def test_barrier_fails_when_all_meshing_error(self):
         """所有构型 Meshing Error → 屏障失败，引擎停止。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(2, "SW", STATUS_COMPLETED)
-        self.state.set_step_status(1, "Meshing", STATUS_ERROR, "超时")
-        self.state.set_step_status(2, "Meshing", STATUS_ERROR, "发散")
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_ERROR, "超时")
+        self.state.set_step_status(2, "meshing", STATUS_ERROR, "发散")
 
         t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
         t.start()
@@ -347,13 +348,13 @@ class TestBarrierCoordinator:
         assert not self.barrier_passed.is_set()
         assert self.stopped.is_set()
         # Solver 也被标记为 Error
-        assert self.state.get_step_status(1, "Solver") == STATUS_ERROR
-        assert self.state.get_step_status(2, "Solver") == STATUS_ERROR
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
 
     def test_barrier_waits_when_paused(self):
         """暂停期间屏障监控等待，恢复后继续。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-        self.state.set_step_status(1, "SW", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
         self.paused.set()
 
         t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
@@ -365,7 +366,7 @@ class TestBarrierCoordinator:
         assert not self.stopped.is_set()
 
         # 设置完成条件后恢复（恢复在设置状态之后，确保监控线程看到正确状态）
-        self.state.set_step_status(1, "Meshing", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
         self.paused.clear()
 
         t.join(timeout=10)
@@ -385,8 +386,8 @@ class TestBarrierCoordinator:
     def test_sw_all_failed_aborts_pipeline(self):
         """所有构型 SW 失败 → 流水线中止。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-        self.state.set_step_status(1, "SW", STATUS_ERROR, "连接失败")
-        self.state.set_step_status(2, "SW", STATUS_ERROR, "宏错误")
+        self.state.set_step_status(1, "sw", STATUS_ERROR, "连接失败")
+        self.state.set_step_status(2, "sw", STATUS_ERROR, "宏错误")
 
         t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
         t.start()
@@ -394,8 +395,8 @@ class TestBarrierCoordinator:
 
         assert self.stopped.is_set()
         # 后续步骤被标记为 Error
-        assert self.state.get_step_status(1, "SC") == STATUS_ERROR
-        assert self.state.get_step_status(2, "Solver") == STATUS_ERROR
+        assert self.state.get_step_status(1, "sc") == STATUS_ERROR
+        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
 
     def test_join_solver_threads(self):
         """join_solver_threads 等待线程退出。"""
@@ -405,6 +406,20 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=2)
         assert not dummy.is_alive()
         assert self.coordinator._solver_threads == []
+
+    def test_solver_wait_failure_is_not_redispatched(self):
+        """Solver 等待失败后停在 Error，不在同一调度循环里反复重启。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
 
 
 # ====================================================================
@@ -477,10 +492,10 @@ class TestMeshingMonitor:
     def test_scan_db_for_pending_restores_queue(self):
         """断点续传：Transfer Completed + Meshing Waiting → 入队。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-        self.state.set_step_status(1, "Transfer", STATUS_COMPLETED)
-        self.state.set_step_status(1, "Meshing", STATUS_WAITING)
-        self.state.set_step_status(2, "Transfer", STATUS_COMPLETED)
-        self.state.set_step_status(2, "Meshing", STATUS_ERROR, "超时")
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
+        self.state.set_step_status(2, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_ERROR, "超时")
 
         self.monitor._scan_db_for_pending()
         assert self.monitor.qsize() == 2
@@ -488,7 +503,7 @@ class TestMeshingMonitor:
     def test_scan_db_for_pending_skips_non_completed_transfer(self):
         """Transfer 未完成的构型不入队。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-        self.state.set_step_status(1, "Transfer", STATUS_RUNNING)
+        self.state.set_step_status(1, "transfer", STATUS_RUNNING)
 
         self.monitor._scan_db_for_pending()
         assert self.monitor.qsize() == 0
@@ -497,7 +512,7 @@ class TestMeshingMonitor:
         """监控循环处理队列中的构型。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_meshing_running_if_idle(1)
-        self.state.set_step_status(1, "Meshing", STATUS_WAITING)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
 
         self.monitor.submit(1)
         self.monitor.start_if_needed()
@@ -508,7 +523,7 @@ class TestMeshingMonitor:
         time.sleep(0.5)
 
         # 构型应已被处理（Completed），Mock wait_meshing_completion 返回 True
-        status = self.state.get_step_status(1, "Meshing")
+        status = self.state.get_step_status(1, "meshing")
         assert status == STATUS_COMPLETED, (
             f"队列中的构型应已被处理为 Completed，实际状态: {status}"
         )

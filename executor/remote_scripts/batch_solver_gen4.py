@@ -4,7 +4,8 @@ Fluent Solver 批处理脚本 - 参数化版本
 用法:
     python batch_solver_gen4.py <config_id> --mpi-bin-dir <path> --journal-path <path>
         --post-journal-path <path> --msh-dir <path> --output-dir <path>
-        --anim-dir <path> --working-dir-t <path> --working-dir-v <path>
+        --anim-dir <path> --working-dir <path> --working-dir-t <path>
+        --working-dir-v <path>
 """
 
 from __future__ import annotations
@@ -53,6 +54,8 @@ def parse_args() -> argparse.Namespace:
                         help='算例输出目录')
     parser.add_argument('--anim-dir', type=str, required=True,
                         help='动画输出目录')
+    parser.add_argument('--working-dir', type=str, required=True,
+                        help='Fluent 启动工作目录')
     parser.add_argument('--working-dir-t', type=str, required=True,
                         help='温度动画工作目录')
     parser.add_argument('--working-dir-v', type=str, required=True,
@@ -206,6 +209,23 @@ def cleanup_log_files(config_id: int, log_dir: str) -> None:
             print(f"[{config_id}] 未找到日志: {f}")
 
 
+def close_solver_session(config_id: int, solver_session: Any) -> None:
+    """关闭 Fluent Solver 会话；常规退出失败时尝试强制退出。"""
+    try:
+        solver_session.exit()
+        return
+    except Exception as cleanup_err:
+        print(f"[{config_id}] Fluent 退出失败: {cleanup_err}")
+
+    force_exit = getattr(solver_session, "force_exit", None)
+    if callable(force_exit):
+        try:
+            force_exit()
+            print(f"[{config_id}] 已强制退出 Fluent")
+        except Exception as force_err:
+            print(f"[{config_id}] Fluent 强制退出失败: {force_err}")
+
+
 def main() -> None:
     """主函数。"""
     args = parse_args()
@@ -235,13 +255,20 @@ def main() -> None:
     print(f"[配置] 网格目录: {args.msh_dir}")
     print(f"[配置] 输出目录: {args.output_dir}")
     print(f"[配置] 动画目录: {args.anim_dir}")
+    print(f"[配置] Fluent 工作目录: {args.working_dir}")
     print(f"[配置] 工作目录 T: {args.working_dir_t}")
     print(f"[配置] 工作目录 V: {args.working_dir_v}")
     print(f"[配置] 处理器核心数: {args.processor_count}")
     print(f"[配置] 迭代次数: {args.iterate_count}")
 
     # 确保输出目录存在
-    for dir_path in (args.output_dir, args.anim_dir, args.working_dir_t, args.working_dir_v):
+    for dir_path in (
+        args.output_dir,
+        args.anim_dir,
+        args.working_dir,
+        args.working_dir_t,
+        args.working_dir_v,
+    ):
         os.makedirs(dir_path, exist_ok=True)
 
     # 启动 Fluent Solver 模式
@@ -252,14 +279,10 @@ def main() -> None:
         processor_count=args.processor_count,
         product_version=pyfluent.FluentVersion.v241,
         cleanup_on_exit=True,
+        ui_mode="gui",
+        cwd=args.working_dir,
+        start_watchdog=False,
     )
-
-    # ★ scripts_dir：report 文件的实际写入目录（Fluent CWD 为 schtasks 默认的
-    #   System32，但 cmd 脚本中命令为绝对路径，Fluent 以启动目录为 CWD）。
-    #   .set 文件中 report 路径为 ".\\report-def-*.out"（相对路径），
-    #   实际写入位置取决于 Fluent 启动时的 CWD。
-    #   通过 os.getcwd() 捕获启动目录（即 cmd 脚本所在目录 = scripts_dir）。
-    scripts_dir = os.getcwd()
 
     try:
         _ensure_session_healthy(solver_session, "启动后")
@@ -302,16 +325,13 @@ def main() -> None:
         # ★ finally 确保无论成功/异常都执行清理和 Fluent 退出
         # --- 7. 最后的清理工作 (日志 + 工作目录缓存) ---
         print(f"[{config_id}] 正在清理日志文件...")
-        cleanup_log_files(config_id, scripts_dir)
+        cleanup_log_files(config_id, args.working_dir)
 
         print(f"[{config_id}] 正在清空工作目录...")
         cleanup_working_dirs(config_id, [args.working_dir_t, args.working_dir_v])
 
         # --- 8. 退出 Fluent ---
-        try:
-            solver_session.exit()
-        except Exception as cleanup_err:
-            print(f"[{config_id}] Fluent 退出失败: {cleanup_err}")
+        close_solver_session(config_id, solver_session)
 
     print(f"模型 {config_id} 的仿真计算完成！")
 

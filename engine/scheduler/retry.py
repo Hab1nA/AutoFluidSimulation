@@ -100,7 +100,7 @@ class RetryManager:
                     if self._guard.mark_paused_on_success(config_name, step_name):
                         return False
                     # 对于 Meshing 和 Solver，状态由调用者设置（因为需要等待远程完成）
-                    if step_name not in ("Meshing", "Solver"):
+                    if step_name not in ("meshing", "solver"):
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
                     return True
                 else:

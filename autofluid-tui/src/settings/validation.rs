@@ -139,25 +139,25 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
 
 fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     let patterns: [(&str, &str, bool); 6] = [
-        ("step_file_patterns.SW", &config.step_file_patterns.sw, true),
-        ("step_file_patterns.SC", &config.step_file_patterns.sc, true),
+        ("step_file_patterns.sw", &config.step_file_patterns.sw, true),
+        ("step_file_patterns.sc", &config.step_file_patterns.sc, true),
         (
-            "step_file_patterns.Transfer",
+            "step_file_patterns.transfer",
             config.step_file_patterns.transfer.as_deref().unwrap_or(""),
             false,
         ),
         (
-            "step_file_patterns.Meshing",
+            "step_file_patterns.meshing",
             &config.step_file_patterns.meshing,
             true,
         ),
         (
-            "step_file_patterns.Solver",
+            "step_file_patterns.solver",
             &config.step_file_patterns.solver,
             true,
         ),
         (
-            "step_file_patterns.SolverData",
+            "step_file_patterns.solverdata",
             &config.step_file_patterns.solver_dat,
             true,
         ),
@@ -405,7 +405,7 @@ mod tests {
         let errors = validate_config(&config);
         assert!(errors
             .iter()
-            .any(|e| e.field_name == "step_file_patterns.SW"
+            .any(|e| e.field_name == "step_file_patterns.sw"
                 && matches!(e.severity, Severity::Error)));
     }
 

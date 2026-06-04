@@ -88,7 +88,7 @@ class TestFileCleanerCleanStepFiles:
         monkeypatch.setitem(LOCAL_PATHS, "step_dir", str(step_dir))
 
         # 创建 STEP 文件
-        step_file = step_dir / STEP_FILE_PATTERNS["SW"].format(config=1)
+        step_file = step_dir / STEP_FILE_PATTERNS["sw"].format(config=1)
         step_file.write_bytes(b"step data")
 
         from executor.cleaner import FileCleaner
@@ -102,7 +102,7 @@ class TestFileCleanerCleanStepFiles:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             cleaner = FileCleaner(state, lambda: None)
-            cleaner.clean_step_files("SW", config_name=1)
+            cleaner.clean_step_files("sw", config_name=1)
 
             assert not step_file.exists()
         finally:
@@ -114,7 +114,7 @@ class TestFileCleanerCleanStepFiles:
         scdoc_dir.mkdir()
         monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
 
-        scdoc_name = STEP_FILE_PATTERNS["SC"].format(config=2)
+        scdoc_name = STEP_FILE_PATTERNS["sc"].format(config=2)
         scdoc_file = scdoc_dir / scdoc_name
         scdoc_file.write_bytes(b"scdoc data")
 
@@ -134,7 +134,7 @@ class TestFileCleanerCleanStepFiles:
                     return False
 
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
-            cleaner.clean_step_files("SC", config_name=2)
+            cleaner.clean_step_files("sc", config_name=2)
 
             assert not scdoc_file.exists()
         finally:
@@ -155,7 +155,7 @@ class TestFileCleanerCleanStepFiles:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             cleaner = FileCleaner(state, lambda: None)
-            cleaner.clean_step_files("SW", config_name=1)  # 不应抛异常
+            cleaner.clean_step_files("sw", config_name=1)  # 不应抛异常
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

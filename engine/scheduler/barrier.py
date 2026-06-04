@@ -55,8 +55,10 @@ class BarrierCoordinator:
         self._retry_manager = retry_manager
         self._guard = PauseGuard(paused_event, stopped_event)
 
-        # ---- Solver 线程 ----
+        # ---- Solver 线程（串行执行：同一时刻仅一个构型求解）----
         self._solver_threads: list[threading.Thread] = []
+        self._solver_dispatch_lock = threading.Lock()
+        self._solver_active_config: int | None = None
 
         logger.info("全局屏障协调器初始化完成")
 
@@ -105,7 +107,7 @@ class BarrierCoordinator:
             sw_all_terminal = True
             sw_has_completed = False
             for cn in all_configs:
-                s = self.state.get_step_status(cn, "SW")
+                s = self.state.get_step_status(cn, "sw")
                 if s not in (STATUS_COMPLETED, STATUS_ERROR):
                     sw_all_terminal = False
                     break
@@ -118,7 +120,7 @@ class BarrierCoordinator:
                 logger.error("宏已执行但未产出任何有效 STEP 文件，无法继续。")
                 logger.error("请检查：SW 宏逻辑 / 设计表参数 / STEP 输出路径。")
                 for cn in all_configs:
-                    for step in ["SC", "Transfer", "Meshing", "Solver"]:
+                    for step in ["sc", "transfer", "meshing", "solver"]:
                         if self.state.get_step_status(cn, step) == STATUS_WAITING:
                             self.state.set_step_status(cn, step, STATUS_ERROR,
                                                        "SW 步骤失败，后续步骤无法执行")
@@ -127,18 +129,8 @@ class BarrierCoordinator:
                 break
 
             # 检查是否所有构型的 Meshing 都已完成
-            if self.state.all_configs_completed_at_step("Meshing"):
-                logger.info("=" * 60)
-                logger.info(">>> 全局屏障通过！所有构型网格划分已完成 <<<")
-                logger.info("=" * 60)
-                self._barrier_passed.set()
-                self.state.set_global_barrier_met(True)
-
-                # ★ 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理
-                self.runner.do_sc_final_cleanup()
-
-                # 启动 Solver 调度
-                self._dispatch_solver_tasks()
+            if self.state.all_configs_completed_at_step("meshing"):
+                self.dispatch_solver_if_ready()
                 break
 
             # 检查是否所有 Meshing 均已终结（Completed 或 Error）
@@ -146,7 +138,7 @@ class BarrierCoordinator:
             all_terminal = True
             has_error = False
             for cn in all_configs:
-                s = self.state.get_step_status(cn, "Meshing")
+                s = self.state.get_step_status(cn, "meshing")
                 if s not in (STATUS_COMPLETED, STATUS_ERROR):
                     all_terminal = False
                     break
@@ -159,15 +151,15 @@ class BarrierCoordinator:
                 logger.error("=" * 60)
                 # 将所有 Meshing=Error 的构型的 Solver 也标记为 Error（屏障未通过）
                 for cn in all_configs:
-                    if self.state.get_step_status(cn, "Meshing") == STATUS_ERROR:
-                        self.state.set_step_status(cn, "Solver", STATUS_ERROR, "网格划分失败，屏障未通过")
+                    if self.state.get_step_status(cn, "meshing") == STATUS_ERROR:
+                        self.state.set_step_status(cn, "solver", STATUS_ERROR, "网格划分失败，屏障未通过")
                 self._stopped.set()
                 self.state.set_engine_status("stopped")
                 break
 
             # 检查是否有 Meshing 失败的（仅报告新增的失败，按构型去重）
             error_configs = self.state.get_error_configs()
-            meshing_error_configs = {c for c, s, _ in error_configs if s == "Meshing"}
+            meshing_error_configs = {c for c, s, _ in error_configs if s == "meshing"}
             new_errors = meshing_error_configs - _last_error_report
             if new_errors:
                 logger.warning(
@@ -187,40 +179,98 @@ class BarrierCoordinator:
     # Solver 调度（屏障通过后）
     # ------------------------------------------------------------------
 
-    def _dispatch_solver_tasks(self):
+    def dispatch_solver_if_ready(self) -> bool:
+        """当 Meshing 屏障已满足时，幂等地触发 Solver 分发。
+
+        该入口用于正常屏障通过，也用于 Daemon 重启/仅重置 Solver 后的
+        断点续传场景：此时持久化的 global_barrier_met 可能已为 true，
+        barrier monitor 不会进入轮询循环，但 Solver 仍需要重新分发。
+        """
+        if self._stopped.is_set():
+            return False
+
+        if not self.state.all_configs_completed_at_step("meshing"):
+            return False
+
+        if not self._barrier_passed.is_set():
+            logger.info("=" * 60)
+            logger.info(">>> 全局屏障通过！所有构型网格划分已完成 <<<")
+            logger.info("=" * 60)
+            self._barrier_passed.set()
+            self.state.set_global_barrier_met(True)
+
+            # 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理。
+            self.runner.do_sc_final_cleanup()
+        else:
+            logger.info("[BarrierMonitor] 全局屏障已通过，检查待分发 Solver 任务")
+
+        self._dispatch_solver_tasks()
+        return True
+
+    def _dispatch_solver_tasks(self) -> bool:
         """
         全局屏障通过后，统一启动所有构型的仿真求解。
 
-        所有构型的 Solver 在屏障通过后并行启动。
+        Solver 使用单个调度线程串行执行，确保同一时刻只有一个构型
+        处于求解阶段。
         若暂停标志已置位，则等待恢复后再分发。
         """
         # ★ 分发前检查暂停标志（统一使用 PauseGuard）
         if self._guard.check_should_abort():
             logger.warning("Solver 分发前检测到停止标志，取消分发")
-            return
+            return False
 
         logger.info("=" * 60)
-        logger.info("开始统一调度仿真求解任务...")
+        logger.info("开始串行调度仿真求解任务...")
         logger.info("=" * 60)
 
-        all_configs = self.state.get_all_configs()
+        with self._solver_dispatch_lock:
+            self._solver_threads = [t for t in self._solver_threads if t.is_alive()]
+            if self._solver_threads:
+                logger.info("[Solver] 串行调度线程已在运行，跳过重复启动")
+                return True
 
-        # 使用线程池并行启动所有 Solver 任务（不阻塞，求解耗时可能数小时）
-        dispatched_count = 0
-        for cn in all_configs:
-            solver_status = self.state.get_step_status(cn, "Solver")
-            if solver_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-                t = threading.Thread(
-                    target=self._execute_solver_for_config,
-                    args=(cn,),
-                    name=f"Solver-{cn}",
-                    daemon=True,
-                )
-                t.start()
-                self._solver_threads.append(t)
-                dispatched_count += 1
+            if self._next_solver_config() is None:
+                logger.info("[Solver] 当前没有待执行的求解任务")
+                return False
 
-        logger.info(f"所有 Solver 任务已分发 ({dispatched_count} 个构型)")
+            t = threading.Thread(
+                target=self._solver_dispatch_loop,
+                name="SolverDispatcher",
+                daemon=True,
+            )
+            t.start()
+            self._solver_threads.append(t)
+
+        logger.info("[Solver] 串行调度线程已启动")
+        return True
+
+    def _next_solver_config(self) -> int | None:
+        """返回下一个可执行 Solver 的构型；没有则返回 None。"""
+        for cn in self.state.get_all_configs():
+            solver_status = self.state.get_step_status(cn, "solver")
+            if solver_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_RETRYING):
+                return cn
+        return None
+
+    def _solver_dispatch_loop(self) -> None:
+        """串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
+        logger.info("[Solver] 串行调度循环启动")
+        try:
+            while not self._stopped.is_set():
+                config_name = self._next_solver_config()
+                if config_name is None:
+                    break
+
+                with self._solver_dispatch_lock:
+                    self._solver_active_config = config_name
+                try:
+                    self._execute_solver_for_config(config_name)
+                finally:
+                    with self._solver_dispatch_lock:
+                        self._solver_active_config = None
+        finally:
+            logger.info("[Solver] 串行调度循环退出")
 
     def _execute_solver_for_config(self, config_name: int):
         """
@@ -236,7 +286,7 @@ class BarrierCoordinator:
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
 
         # 启动远程求解后台任务
-        if self._retry_manager.execute_with_retry(config_name, "Solver",
+        if self._retry_manager.execute_with_retry(config_name, "solver",
                                      self.runner.execute_solver):
             # ★ 启动远程求解后检查暂停标志（统一使用 PauseGuard）
             if self._guard.check_should_abort():
@@ -248,21 +298,21 @@ class BarrierCoordinator:
                 paused_event=self._paused,
                 stopped_event=self._stopped,
             ):
-                self.state.set_step_status(config_name, "Solver", STATUS_COMPLETED)
+                self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
                 logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
             else:
                 # ★ 区分暂停和真正的超时
                 if self._paused.is_set():
                     self.state.set_step_status(
-                        config_name, "Solver", STATUS_PAUSED,
+                        config_name, "solver", STATUS_PAUSED,
                         "等待求解期间暂停"
                     )
                 elif self._stopped.is_set():
                     self.state.set_step_status(
-                        config_name, "Solver", STATUS_PAUSED,
+                        config_name, "solver", STATUS_PAUSED,
                         "引擎已停止"
                     )
                 else:
                     self.state.set_step_status(
-                        config_name, "Solver", STATUS_ERROR, "求解超时"
+                        config_name, "solver", STATUS_ERROR, "求解超时"
                     )

@@ -92,7 +92,7 @@ logger.info(f"构型{config_name} {step} 完成，已推入 {next_step} 队列")
 **模式 D：错误级联阻断**（出现 3+ 次）
 ```python
 # worker_pool / sw_phase / barrier
-for downstream_step in ["SC", "Transfer", "Meshing", "Solver"]:
+for downstream_step in ["sc", "transfer", "meshing", "solver"]:
     if self.state.get_step_status(cn, downstream_step) == STATUS_WAITING:
         self.state.set_step_status(cn, downstream_step, STATUS_ERROR, reason)
 ```
@@ -387,9 +387,9 @@ class StepExecutor(ABC):
 
 ```python
 # SW → SC → Transfer → Meshing → Solver → None
-SW.step_name      = "SW"        SW.downstream_step = "SC"
-SC.step_name      = "SC"        SC.downstream_step = "Transfer"
-Transfer.step_name = "Transfer"  Transfer.downstream_step = "Meshing"
+SW.step_name      = "sw"        SW.downstream_step = "sc"
+SC.step_name      = "sc"        SC.downstream_step = "transfer"
+Transfer.step_name = "transfer"  Transfer.downstream_step = "meshing"
 # Meshing/Solver 暂不纳入本次重构范围
 ```
 
@@ -483,8 +483,8 @@ class SwStepExecutor(StepExecutor[ComContext]):
 
     max_slots = 1
     slot_strategy = SlotStrategy.SESSION
-    step_name = "SW"
-    downstream_step = "SC"
+    step_name = "sw"
+    downstream_step = "sc"
 
     # --- 上下文 ---
     # ComContext = namedtuple("ComContext", ["sw_app", "doc", "com_initialized"])
@@ -526,8 +526,8 @@ class ScStepExecutor(StepExecutor[SubprocessContext]):
 
     max_slots = 3
     slot_strategy = SlotStrategy.PERSISTENT
-    step_name = "SC"
-    downstream_step = "Transfer"
+    step_name = "sc"
+    downstream_step = "transfer"
 
     # --- 上下文 ---
     # SubprocessContext = namedtuple("SubprocessContext",
@@ -565,8 +565,8 @@ class TransferStepExecutor(StepExecutor[None]):
 
     max_slots = 2
     slot_strategy = SlotStrategy.STATELESS
-    step_name = "Transfer"
-    downstream_step = "Meshing"
+    step_name = "transfer"
+    downstream_step = "meshing"
 
     def _create_slot_context(self, slot_id: int) -> None:
         return None  # STATELESS 策略不需要上下文
@@ -722,7 +722,7 @@ class Checkpoint(Enum):
     BEFORE_COMMIT = auto()
 
 # === 步骤链 ===
-STEP_CHAIN = ["SW", "SC", "Transfer", "Meshing", "Solver"]
+STEP_CHAIN = ["sw", "sc", "transfer", "meshing", "solver"]
 ```
 
 ### 7.2 现有代码到新框架的映射

@@ -249,15 +249,15 @@ def check_step_output_exists(
     """
 
     # ---- 本地文件检查（SW/SC）----
-    if step_name == "SW":
-        filename = get_step_filename("SW", config_name)
+    if step_name == "sw":
+        filename = get_step_filename("sw", config_name)
         if not filename:
             return False
         path = os.path.join(step_dir, filename)
         return os.path.exists(path) and os.path.getsize(path) > 0
 
-    if step_name == "SC":
-        filename = get_step_filename("SC", config_name)
+    if step_name == "sc":
+        filename = get_step_filename("sc", config_name)
         if not filename:
             return False
         path = os.path.join(scdoc_dir, filename)
@@ -273,8 +273,8 @@ def check_step_output_exists(
     except Exception:
         return False
 
-    if step_name == "Transfer":
-        filename = get_step_filename("SC", config_name)
+    if step_name == "transfer":
+        filename = get_step_filename("sc", config_name)
         if not filename:
             return False
         remote_scdoc = (
@@ -289,12 +289,12 @@ def check_step_output_exists(
         except Exception:
             return False
 
-    if step_name == "Meshing":
+    if step_name == "meshing":
         flag_file = (
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/meshing_done_{config_name}.txt"
         )
-        mesh_name = get_step_filename("Meshing", config_name)
+        mesh_name = get_step_filename("meshing", config_name)
         mesh_file = None
         if mesh_name:
             mesh_file = (
@@ -308,14 +308,14 @@ def check_step_output_exists(
         except Exception:
             return False
 
-    if step_name == "Solver":
+    if step_name == "solver":
         flag_file = (
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/solver_done_{config_name}.txt"
         )
         result_dir = remote_config['result_dir'].replace(chr(92), '/')
-        cas_name = get_step_filename("Solver", config_name)
-        dat_name = get_step_filename("SolverData", config_name)
+        cas_name = get_step_filename("solver", config_name)
+        dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:

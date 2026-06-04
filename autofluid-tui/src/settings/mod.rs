@@ -59,17 +59,17 @@ impl Default for RemoteConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepFilePatterns {
-    #[serde(rename = "SW")]
+    #[serde(rename = "sw")]
     pub sw: String,
-    #[serde(rename = "SC")]
+    #[serde(rename = "sc")]
     pub sc: String,
-    #[serde(rename = "Transfer")]
+    #[serde(rename = "transfer")]
     pub transfer: Option<String>,
-    #[serde(rename = "Meshing")]
+    #[serde(rename = "meshing")]
     pub meshing: String,
-    #[serde(rename = "Solver")]
+    #[serde(rename = "solver")]
     pub solver: String,
-    #[serde(rename = "SolverData")]
+    #[serde(rename = "solverdata")]
     pub solver_dat: String,
 }
 
@@ -269,11 +269,11 @@ impl SettingCategory {
                 _ => "",
             },
             SettingCategory::StepPatterns => match idx {
-                0 => "SW",
-                1 => "SC",
-                2 => "Meshing",
-                3 => "Solver",
-                4 => "SolverData",
+                0 => "sw",
+                1 => "sc",
+                2 => "meshing",
+                3 => "solver",
+                4 => "solverdata",
                 _ => "",
             },
             SettingCategory::SolidWorks => match idx {

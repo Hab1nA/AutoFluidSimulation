@@ -573,8 +573,8 @@ python main.py --all           # 同时启动
 | `pause`                       | 暂停流水线                               | `pause`                              |
 | `check`                       | 系统自检（本地路径 + 远程连通性）        | `check`                              |
 | `status`                      | 显示引擎状态和各步骤统计摘要             | `status`                             |
-| `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（弹出确认对话框）       | `reset 5 SW`、`reset all all`      |
-| `clean <构型\|all> <步骤\|all>` | 清理步骤产生的中间文件（弹出确认对话框） | `clean 5 all`、`clean all Meshing` |
+| `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（弹出确认对话框）       | `reset 5 sw`、`reset all all`      |
+| `clean <构型\|all> <步骤\|all>` | 清理步骤产生的中间文件（弹出确认对话框） | `clean 5 all`、`clean all meshing` |
 | `settings`                    | 打开可视化设置页面                       | `settings`                           |
 
 #### Daemon 生命周期

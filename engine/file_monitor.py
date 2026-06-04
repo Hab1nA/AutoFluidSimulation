@@ -126,12 +126,12 @@ class StepFileMonitor:
     同时也支持 watchdog 事件驱动的混合模式。
     """
 
-    _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+    _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
 
     @staticmethod
     def _compile_config_regex(pattern: str) -> re.Pattern | None:
         """
-        将 STEP_FILE_PATTERNS["SW"] 形式的模板编译成正则表达式。
+        将 STEP_FILE_PATTERNS["sw"] 形式的模板编译成正则表达式。
 
         约束：模板中必须包含 `{config}` 占位符，否则无法解析构型号。
         """
@@ -147,7 +147,7 @@ class StepFileMonitor:
     def _get_filename_regex(cls) -> re.Pattern | None:
         """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
         if cls._FILENAME_REGEX is None:
-            sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+            sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
             cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
         return cls._FILENAME_REGEX
 
@@ -172,7 +172,7 @@ class StepFileMonitor:
 
         # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
         if StepFileMonitor._FILENAME_REGEX is None:
-            sw_pattern = STEP_FILE_PATTERNS.get("SW", "model_gen4.SLDPRT_{config}.step")
+            sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
             StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
 
     @property

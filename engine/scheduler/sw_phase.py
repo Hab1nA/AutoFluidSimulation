@@ -90,7 +90,7 @@ class SWPhaseHandler:
         all_configs = self.state.get_all_configs()
         sw_status_dist: dict[str, list[int]] = {}
         for cn in all_configs:
-            st = self.state.get_step_status(cn, "SW")
+            st = self.state.get_step_status(cn, "sw")
             sw_status_dist.setdefault(st, []).append(cn)
         logger.info(
             f"[SW] 步骤状态分布: { {k: len(v) for k, v in sw_status_dist.items()} }；"
@@ -134,9 +134,9 @@ class SWPhaseHandler:
 
         # 将所有构型的 SW 状态设为 Running（仅限 Waiting/Paused/Error/Retrying 状态）
         for cn in all_configs:
-            current_status = self.state.get_step_status(cn, "SW")
+            current_status = self.state.get_step_status(cn, "sw")
             if current_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
-                self.state.set_step_status(cn, "SW", STATUS_RUNNING)
+                self.state.set_step_status(cn, "sw", STATUS_RUNNING)
 
         # ---- SW 步骤前暂停检查（统一使用 PauseGuard） ----
         if self._paused.is_set():
@@ -146,8 +146,8 @@ class SWPhaseHandler:
                 return False
             # 恢复后重新标记 SW 为 Running
             for cn in all_configs:
-                if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
-                    self.state.set_step_status(cn, "SW", STATUS_RUNNING)
+                if self.state.get_step_status(cn, "sw") == STATUS_PAUSED:
+                    self.state.set_step_status(cn, "sw", STATUS_RUNNING)
 
         self._call_runner_cleanup("do_sw_first_cleanup")
 
@@ -172,11 +172,11 @@ class SWPhaseHandler:
                 return False
 
             # 跳过已完成的构型（断点续传 / 之前批次已成功）
-            if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED:
+            if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED:
                 continue
 
             ok = self._retry_manager.execute_with_retry(
-                cn, "SW", self.runner.execute_sw_per_config,
+                cn, "sw", self.runner.execute_sw_per_config,
             )
             if not ok and not self._paused.is_set() and not self._stopped.is_set():
                 # 构型所有重试均失败（非暂停/停止导致）→ 断开缓存连接，
@@ -200,17 +200,17 @@ class SWPhaseHandler:
         if self._paused.is_set():
             logger.warning("[SW] SW 步骤在暂停期间中断，保留 Paused 状态以供恢复后重试")
             for cn in all_configs:
-                if self.state.get_step_status(cn, "SW") == STATUS_RUNNING:
-                    self.state.set_step_status(cn, "SW", STATUS_PAUSED)
+                if self.state.get_step_status(cn, "sw") == STATUS_RUNNING:
+                    self.state.set_step_status(cn, "sw", STATUS_PAUSED)
             self.state.set_engine_status("paused")
             return False
 
         # ★ 通过最终状态判断成功与否（而非中间标志）
         #   RetryManager 已将成功构型设为 COMPLETED、失败构型设为 ERROR
         sw_errors = [cn for cn in all_configs
-                     if self.state.get_step_status(cn, "SW") == STATUS_ERROR]
+                     if self.state.get_step_status(cn, "sw") == STATUS_ERROR]
         sw_running = [cn for cn in all_configs
-                      if self.state.get_step_status(cn, "SW") == STATUS_RUNNING]
+                      if self.state.get_step_status(cn, "sw") == STATUS_RUNNING]
 
         if sw_errors or sw_running:
             # 有构型失败 → 清理 SW 进程并阻断下游
@@ -221,7 +221,7 @@ class SWPhaseHandler:
                     f"[SW] SW 阶段部分失败: 构型 {sorted(sw_errors)} STEP 导出失败"
                 )
                 for cn in sw_errors:
-                    for s in ["SC", "Transfer", "Meshing", "Solver"]:
+                    for s in ["sc", "transfer", "meshing", "solver"]:
                         if self.state.get_step_status(cn, s) == STATUS_WAITING:
                             self.state.set_step_status(
                                 cn, s, STATUS_ERROR,
@@ -252,7 +252,7 @@ class SWPhaseHandler:
             )
 
         sw_completed = [cn for cn in all_configs
-                        if self.state.get_step_status(cn, "SW") == STATUS_COMPLETED]
+                        if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
         if sw_completed:
             logger.info(
                 f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
@@ -277,7 +277,7 @@ class SWPhaseHandler:
         has_paused_sw = False
         has_error_sw = False
         for cn in all_configs:
-            sw_status = self.state.get_step_status(cn, "SW")
+            sw_status = self.state.get_step_status(cn, "sw")
             if sw_status == STATUS_PAUSED:
                 has_paused_sw = True
             elif sw_status == STATUS_ERROR:
@@ -288,19 +288,19 @@ class SWPhaseHandler:
             logger.info("[SW] 检测到 SW Paused 构型，重新校验 STEP 文件...")
             step_dir = LOCAL_PATHS.get("step_dir", "")
             for cn in all_configs:
-                if self.state.get_step_status(cn, "SW") == STATUS_PAUSED:
-                    filename = get_step_filename("SW", cn)
+                if self.state.get_step_status(cn, "sw") == STATUS_PAUSED:
+                    filename = get_step_filename("sw", cn)
                     if not filename:
-                        self.state.set_step_status(cn, "SW", STATUS_ERROR,
+                        self.state.set_step_status(cn, "sw", STATUS_ERROR,
                                                    "无法生成 STEP 文件名")
                         has_error_sw = True
                         continue
                     expected_file = os.path.join(step_dir, filename)
                     if os.path.exists(expected_file):
-                        self.state.set_step_status(cn, "SW", STATUS_COMPLETED)
+                        self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
                         logger.info(f"[SW]   构型{cn} ✓ STEP 文件已存在，标记为完成")
                     else:
-                        self.state.set_step_status(cn, "SW", STATUS_ERROR,
+                        self.state.set_step_status(cn, "sw", STATUS_ERROR,
                                                    "暂停恢复后 STEP 文件仍缺失")
                         has_error_sw = True
                         logger.warning(f"[SW]   构型{cn} ✗ STEP 文件缺失")
@@ -338,13 +338,13 @@ class SWPhaseHandler:
             def _fallback_on_file_ready(config_name: int, filepath: str) -> None:
                 if self._paused.is_set():
                     return
-                if self.state.get_step_status(config_name, "SW") != STATUS_COMPLETED:
-                    self.state.set_step_status(config_name, "SW", STATUS_COMPLETED)
+                if self.state.get_step_status(config_name, "sw") != STATUS_COMPLETED:
+                    self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
                 # ★ 去重：防止重复入队
                 if config_name in _fallback_enqueued:
                     return
                 # ★ 断点续传防护：若 SC 已在执行或已完成，跳过
-                sc_status = self.state.get_step_status(config_name, "SC")
+                sc_status = self.state.get_step_status(config_name, "sc")
                 if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
                     return
                 _fallback_enqueued.add(config_name)
@@ -398,15 +398,15 @@ class SWPhaseHandler:
                     continue
 
                 # ---- 依赖链检查：仅在上游步骤已完成时才检查下游 ----
-                if step == "Transfer" and self.state.get_step_status(cn, "SC") != STATUS_COMPLETED:
+                if step == "transfer" and self.state.get_step_status(cn, "sc") != STATUS_COMPLETED:
                     continue
-                if step == "Meshing" and self.state.get_step_status(cn, "Transfer") != STATUS_COMPLETED:
+                if step == "meshing" and self.state.get_step_status(cn, "transfer") != STATUS_COMPLETED:
                     continue
-                if step == "Solver" and self.state.get_step_status(cn, "Meshing") != STATUS_COMPLETED:
+                if step == "solver" and self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
                     continue
 
                 # ---- 远程步骤需要 SSH ----
-                if step in ("Transfer", "Meshing", "Solver") and ssh is None:
+                if step in ("transfer", "meshing", "solver") and ssh is None:
                     continue
 
                 if check_step_output_exists(cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh):

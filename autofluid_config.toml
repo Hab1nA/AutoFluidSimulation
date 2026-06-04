@@ -22,11 +22,11 @@ conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
 
 [step_file_patterns]
-SW = "model_gen4.SLDPRT_{config}.step"
-SC = "model_gen4_{config}.scdoc"
-Meshing = "model_gen4_{config}.msh.h5"
-Solver = "model_gen4_{config}.cas.h5"
-SolverData = "model_gen4_{config}.dat.h5"
+sw = "model_gen4.SLDPRT_{config}.step"
+sc = "model_gen4_{config}.scdoc"
+meshing = "model_gen4_{config}.msh.h5"
+solver = "model_gen4_{config}.cas.h5"
+solverdata = "model_gen4_{config}.dat.h5"
 
 [solidworks]
 sw_macro_timeout = 3600

@@ -108,7 +108,6 @@ class TestInit:
             assert "idx_steps_config" in indexes
             assert "idx_steps_status" in indexes
 
-
 # ====================================================================
 # load_configs 测试
 # ====================================================================
@@ -130,22 +129,22 @@ class TestLoadConfigs:
     def test_incremental_update_preserves_status(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
             # 重新加载相同构型
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            assert sm.get_step_status(1, "SW") == STATUS_COMPLETED
+            assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
 
     def test_new_config_added_incrementally(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.get_all_configs() == [1, 2]
-            assert sm.get_step_status(2, "SW") == STATUS_WAITING
+            assert sm.get_step_status(2, "sw") == STATUS_WAITING
 
     def test_removed_config_deleted(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
             # 移除构型 1
             sm.load_configs({2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.get_all_configs() == [2]
@@ -191,22 +190,22 @@ class TestStepStatus:
     def test_set_and_get(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_RUNNING)
-            assert sm.get_step_status(1, "SW") == STATUS_RUNNING
+            sm.set_step_status(1, "sw", STATUS_RUNNING)
+            assert sm.get_step_status(1, "sw") == STATUS_RUNNING
 
     def test_error_message_persisted(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SC", STATUS_ERROR, "连接失败")
+            sm.set_step_status(1, "sc", STATUS_ERROR, "连接失败")
             # 通过 get_all_steps_for_config 验证错误消息
             steps = sm.get_all_steps_for_config(1)
-            assert steps["SC"]["error_message"] == "连接失败"
+            assert steps["sc"]["error_message"] == "连接失败"
 
     def test_invalid_status_raises(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             with pytest.raises(ValueError):
-                sm.set_step_status(1, "SW", "InvalidStatus")
+                sm.set_step_status(1, "sw", "InvalidStatus")
 
     def test_nonexistent_step_name_does_not_crash(self):
         """不存在的步骤名不会导致崩溃（UPDATE 影响 0 行，查询返回默认值）。"""
@@ -220,7 +219,7 @@ class TestStepStatus:
     def test_nonexistent_step_returns_waiting(self):
         with _TmpDB() as sm:
             # 未 load_configs，步骤记录不存在
-            assert sm.get_step_status(999, "SW") == STATUS_WAITING
+            assert sm.get_step_status(999, "sw") == STATUS_WAITING
 
 
 # ====================================================================
@@ -264,11 +263,11 @@ class TestGetAllStatuses:
     def test_status_values_correct(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(1, "SC", STATUS_RUNNING)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(1, "sc", STATUS_RUNNING)
             statuses = sm.get_all_statuses()
-            assert statuses[1]["SW"] == STATUS_COMPLETED
-            assert statuses[1]["SC"] == STATUS_RUNNING
+            assert statuses[1]["sw"] == STATUS_COMPLETED
+            assert statuses[1]["sc"] == STATUS_RUNNING
 
 
 # ====================================================================
@@ -281,22 +280,22 @@ class TestRetryCount:
     def test_increment_from_zero(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            assert sm.get_step_retry_count(1, "SC") == 0
-            count = sm.increment_retry(1, "SC")
+            assert sm.get_step_retry_count(1, "sc") == 0
+            count = sm.increment_retry(1, "sc")
             assert count == 1
 
     def test_increment_multiple(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.increment_retry(1, "SC")
-            sm.increment_retry(1, "SC")
-            count = sm.increment_retry(1, "SC")
+            sm.increment_retry(1, "sc")
+            sm.increment_retry(1, "sc")
+            count = sm.increment_retry(1, "sc")
             assert count == 3
-            assert sm.get_step_retry_count(1, "SC") == 3
+            assert sm.get_step_retry_count(1, "sc") == 3
 
     def test_nonexistent_step_returns_zero(self):
         with _TmpDB() as sm:
-            assert sm.get_step_retry_count(999, "SW") == 0
+            assert sm.get_step_retry_count(999, "sw") == 0
 
 
 # ====================================================================
@@ -310,7 +309,7 @@ class TestSetMeshingRunningIfIdle:
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.set_meshing_running_if_idle(1) is True
-            assert sm.get_step_status(1, "Meshing") == STATUS_RUNNING
+            assert sm.get_step_status(1, "meshing") == STATUS_RUNNING
 
     def test_second_set_fails(self):
         with _TmpDB() as sm:
@@ -322,7 +321,7 @@ class TestSetMeshingRunningIfIdle:
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_meshing_running_if_idle(1)
-            sm.set_step_status(1, "Meshing", STATUS_COMPLETED)
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
             assert sm.set_meshing_running_if_idle(2) is True
 
 
@@ -336,66 +335,66 @@ class TestResetConfigSteps:
     def test_reset_single_config_all_steps(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(1, "SC", STATUS_ERROR, "失败")
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(1, "sc", STATUS_ERROR, "失败")
             sm.reset_config_steps(1)
-            assert sm.get_step_status(1, "SW") == STATUS_WAITING
-            assert sm.get_step_status(1, "SC") == STATUS_WAITING
+            assert sm.get_step_status(1, "sw") == STATUS_WAITING
+            assert sm.get_step_status(1, "sc") == STATUS_WAITING
 
     def test_reset_from_step(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(1, "SC", STATUS_COMPLETED)
-            sm.set_step_status(1, "Transfer", STATUS_RUNNING)
-            sm.set_step_status(1, "Meshing", STATUS_RUNNING)
-            sm.set_step_status(1, "Solver", STATUS_WAITING)
-            sm.reset_config_steps(1, from_step="SC")
-            assert sm.get_step_status(1, "SW") == STATUS_COMPLETED
-            assert sm.get_step_status(1, "SC") == STATUS_WAITING
-            assert sm.get_step_status(1, "Transfer") == STATUS_WAITING
-            assert sm.get_step_status(1, "Meshing") == STATUS_WAITING
-            assert sm.get_step_status(1, "Solver") == STATUS_WAITING
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(1, "sc", STATUS_COMPLETED)
+            sm.set_step_status(1, "transfer", STATUS_RUNNING)
+            sm.set_step_status(1, "meshing", STATUS_RUNNING)
+            sm.set_step_status(1, "solver", STATUS_WAITING)
+            sm.reset_config_steps(1, from_step="sc")
+            assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
+            assert sm.get_step_status(1, "sc") == STATUS_WAITING
+            assert sm.get_step_status(1, "transfer") == STATUS_WAITING
+            assert sm.get_step_status(1, "meshing") == STATUS_WAITING
+            assert sm.get_step_status(1, "solver") == STATUS_WAITING
 
     def test_reset_all_configs(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(2, "SW", STATUS_ERROR, "err")
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(2, "sw", STATUS_ERROR, "err")
             sm.reset_config_steps("all")
-            assert sm.get_step_status(1, "SW") == STATUS_WAITING
-            assert sm.get_step_status(2, "SW") == STATUS_WAITING
+            assert sm.get_step_status(1, "sw") == STATUS_WAITING
+            assert sm.get_step_status(2, "sw") == STATUS_WAITING
 
     def test_reset_sw_clears_sw_macro_started_when_no_completed(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_sw_macro_started(True)
-            sm.set_step_status(1, "SW", STATUS_ERROR)
-            sm.reset_config_steps(1, from_step="SW")
+            sm.set_step_status(1, "sw", STATUS_ERROR)
+            sm.reset_config_steps(1, from_step="sw")
             assert sm.is_sw_macro_started() is False
 
     def test_reset_sw_keeps_sw_macro_started_when_other_completed(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_sw_macro_started(True)
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(2, "SW", STATUS_ERROR, "err")
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(2, "sw", STATUS_ERROR, "err")
             # 仅重置构型 2
-            sm.reset_config_steps(2, from_step="SW")
+            sm.reset_config_steps(2, from_step="sw")
             # 构型 1 仍有 SW=Completed，标志应保持
             assert sm.is_sw_macro_started() is True
 
     def test_retry_count_reset_to_zero(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.increment_retry(1, "SC")
-            sm.increment_retry(1, "SC")
-            sm.set_step_status(1, "SC", STATUS_ERROR, "连接失败")
+            sm.increment_retry(1, "sc")
+            sm.increment_retry(1, "sc")
+            sm.set_step_status(1, "sc", STATUS_ERROR, "连接失败")
             sm.reset_config_steps(1)
-            assert sm.get_step_retry_count(1, "SC") == 0
+            assert sm.get_step_retry_count(1, "sc") == 0
             # error_message 也应被清除
             steps = sm.get_all_steps_for_config(1)
-            assert steps["SC"]["error_message"] == ""
+            assert steps["sc"]["error_message"] == ""
 
 
 # ====================================================================
@@ -408,13 +407,13 @@ class TestResetAll:
     def test_resets_all_steps_and_flags(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(2, "Solver", STATUS_RUNNING)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(2, "solver", STATUS_RUNNING)
             sm.set_sw_macro_started(True)
             sm.set_global_barrier_met(True)
             sm.reset_all()
-            assert sm.get_step_status(1, "SW") == STATUS_WAITING
-            assert sm.get_step_status(2, "Solver") == STATUS_WAITING
+            assert sm.get_step_status(1, "sw") == STATUS_WAITING
+            assert sm.get_step_status(2, "solver") == STATUS_WAITING
             assert sm.is_sw_macro_started() is False
             assert sm.is_global_barrier_met() is False
 
@@ -456,29 +455,29 @@ class TestSetAllRunningToPaused:
     def test_running_to_paused(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_RUNNING)
+            sm.set_step_status(1, "sw", STATUS_RUNNING)
             sm.set_all_running_to_paused()
-            assert sm.get_step_status(1, "SW") == STATUS_PAUSED
+            assert sm.get_step_status(1, "sw") == STATUS_PAUSED
 
     def test_retrying_to_paused(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SC", STATUS_RETRYING)
+            sm.set_step_status(1, "sc", STATUS_RETRYING)
             sm.set_all_running_to_paused()
-            assert sm.get_step_status(1, "SC") == STATUS_PAUSED
+            assert sm.get_step_status(1, "sc") == STATUS_PAUSED
 
     def test_completed_not_affected(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_all_running_to_paused()
-            assert sm.get_step_status(1, "SW") == STATUS_COMPLETED
+            assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
 
     def test_waiting_not_affected(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_all_running_to_paused()
-            assert sm.get_step_status(1, "SW") == STATUS_WAITING
+            assert sm.get_step_status(1, "sw") == STATUS_WAITING
 
 
 # ====================================================================
@@ -537,21 +536,21 @@ class TestGetConfigsAtStep:
     def test_with_status_filter(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(2, "SW", STATUS_RUNNING)
-            completed = sm.get_configs_at_step("SW", STATUS_COMPLETED)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(2, "sw", STATUS_RUNNING)
+            completed = sm.get_configs_at_step("sw", STATUS_COMPLETED)
             assert completed == [1]
 
     def test_without_status_filter(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            all_at_sw = sm.get_configs_at_step("SW")
+            all_at_sw = sm.get_configs_at_step("sw")
             assert sorted(all_at_sw) == [1, 2]
 
     def test_empty_result(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            assert sm.get_configs_at_step("Solver", STATUS_COMPLETED) == []
+            assert sm.get_configs_at_step("solver", STATUS_COMPLETED) == []
 
 
 # ====================================================================
@@ -564,19 +563,19 @@ class TestAllConfigsCompletedAtStep:
     def test_all_completed(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "Meshing", STATUS_COMPLETED)
-            sm.set_step_status(2, "Meshing", STATUS_COMPLETED)
-            assert sm.all_configs_completed_at_step("Meshing") is True
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(2, "meshing", STATUS_COMPLETED)
+            assert sm.all_configs_completed_at_step("meshing") is True
 
     def test_not_all_completed(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "Meshing", STATUS_COMPLETED)
-            assert sm.all_configs_completed_at_step("Meshing") is False
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+            assert sm.all_configs_completed_at_step("meshing") is False
 
     def test_empty_configs_returns_true(self):
         with _TmpDB() as sm:
-            assert sm.all_configs_completed_at_step("Meshing") is True
+            assert sm.all_configs_completed_at_step("meshing") is True
 
 
 # ====================================================================
@@ -589,13 +588,13 @@ class TestGetErrorConfigs:
     def test_returns_errors(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SC", STATUS_ERROR, "超时")
-            sm.set_step_status(2, "Solver", STATUS_ERROR, "发散")
+            sm.set_step_status(1, "sc", STATUS_ERROR, "超时")
+            sm.set_step_status(2, "solver", STATUS_ERROR, "发散")
             errors = sm.get_error_configs()
             assert len(errors) == 2
             error_tuples = {(e[0], e[1], e[2]) for e in errors}
-            assert (1, "SC", "超时") in error_tuples
-            assert (2, "Solver", "发散") in error_tuples
+            assert (1, "sc", "超时") in error_tuples
+            assert (2, "solver", "发散") in error_tuples
 
     def test_no_errors_returns_empty(self):
         with _TmpDB() as sm:
@@ -619,18 +618,18 @@ class TestGetStatistics:
     def test_step_counts(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SW", STATUS_COMPLETED)
-            sm.set_step_status(2, "SW", STATUS_RUNNING)
+            sm.set_step_status(1, "sw", STATUS_COMPLETED)
+            sm.set_step_status(2, "sw", STATUS_RUNNING)
             stats = sm.get_statistics()
-            assert stats["steps"]["SW"][STATUS_COMPLETED] == 1
-            assert stats["steps"]["SW"][STATUS_RUNNING] == 1
-            assert stats["steps"]["SW"][STATUS_WAITING] == 0
+            assert stats["steps"]["sw"][STATUS_COMPLETED] == 1
+            assert stats["steps"]["sw"][STATUS_RUNNING] == 1
+            assert stats["steps"]["sw"][STATUS_WAITING] == 0
 
     def test_error_count(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
-            sm.set_step_status(1, "SC", STATUS_ERROR, "err1")
-            sm.set_step_status(2, "Solver", STATUS_ERROR, "err2")
+            sm.set_step_status(1, "sc", STATUS_ERROR, "err1")
+            sm.set_step_status(2, "solver", STATUS_ERROR, "err2")
             stats = sm.get_statistics()
             assert stats["error_count"] == 2
 
@@ -660,8 +659,8 @@ class TestConcurrency:
             def writer(cn: int):
                 try:
                     for _ in range(20):
-                        sm.set_step_status(cn, "SW", STATUS_RUNNING)
-                        sm.set_step_status(cn, "SW", STATUS_COMPLETED)
+                        sm.set_step_status(cn, "sw", STATUS_RUNNING)
+                        sm.set_step_status(cn, "sw", STATUS_COMPLETED)
                 except Exception as e:
                     errors.append(e)
 
@@ -691,8 +690,8 @@ class TestConcurrency:
             def writer():
                 try:
                     for cn in range(1, 6):
-                        sm.set_step_status(cn, "SC", STATUS_RUNNING)
-                        sm.set_step_status(cn, "SC", STATUS_COMPLETED)
+                        sm.set_step_status(cn, "sc", STATUS_RUNNING)
+                        sm.set_step_status(cn, "sc", STATUS_COMPLETED)
                 except Exception as e:
                     errors.append(e)
 
@@ -715,7 +714,7 @@ class TestConcurrency:
             def increment():
                 try:
                     for _ in range(50):
-                        sm.increment_retry(1, "SC")
+                        sm.increment_retry(1, "sc")
                 except Exception as e:
                     errors.append(e)
 
@@ -725,4 +724,4 @@ class TestConcurrency:
             for t in threads:
                 t.join(timeout=10)
             assert not errors, f"并发重试计数出错: {errors}"
-            assert sm.get_step_retry_count(1, "SC") == 200
+            assert sm.get_step_retry_count(1, "sc") == 200

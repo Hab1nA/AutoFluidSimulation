@@ -141,6 +141,43 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
     assert "Start-Process" not in written[0][1]
 
 
+def test_solver_background_task_is_disabled_after_run():
+    """Solver 计划任务启动后立即禁用，避免跨 23:59 二次触发。"""
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+    written: list[tuple[str, str]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with patch.object(host, "_ensure_remote_dir"):
+                    with patch.object(
+                        host,
+                        "_write_remote_text_file",
+                        side_effect=lambda path, content: written.append((path, content)),
+                    ):
+                        result, _ = host.exec_background(
+                            r"conda run -n pyfluent python batch_solver_gen4.py 7",
+                            r"D:/flags/solver_done_7.txt",
+                            working_dir=r"D:\xkz_1020\workingdir",
+                            interactive=True,
+                        )
+
+    assert result is True
+    assert calls[0][0].startswith('schtasks /Create /TN "AutoFluid_')
+    assert calls[0][0].endswith(" /IT")
+    assert calls[1][0].startswith('schtasks /Run /TN "AutoFluid_')
+    assert calls[2][0].startswith('schtasks /Change /TN "AutoFluid_')
+    assert calls[2][0].endswith('" /DISABLE')
+    assert "call conda run -n pyfluent python batch_solver_gen4.py 7" in written[0][1]
+    assert r'cd /d "D:\xkz_1020\workingdir"' in written[0][1]
+    assert 'schtasks /Delete /TN "AutoFluid_' in written[0][1]
+
+
 def test_wait_for_flag_returns_false_immediately_when_error_flag_exists():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     flag_file = r"D:/flags/job.done"

@@ -388,7 +388,7 @@ class SCProcessPool:
         """
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
-        scdoc_name = get_step_filename("SC", config_name)
+        scdoc_name = get_step_filename("sc", config_name)
 
         if not scdoc_name:
             logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
