@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::event_handler::{SCROLL_LINE_STEP, SCROLL_PAGE_STEP};
 use crate::state::app_state::{AppState, FocusZone, UiMode};
 
 pub enum AppAction {
@@ -141,22 +142,22 @@ trait ScrollArea {
 fn handle_scroll_keys(key: KeyCode, area: &mut dyn ScrollArea) -> bool {
     match key {
         KeyCode::Up if area.offset() > 0 => {
-            area.set_offset(area.offset() - 1);
+            area.set_offset(area.offset().saturating_sub(SCROLL_LINE_STEP));
             area.disable_auto_scroll();
             return true;
         }
         KeyCode::Down => {
-            area.set_offset(area.offset().saturating_add(1));
+            area.set_offset(area.offset().saturating_add(SCROLL_LINE_STEP));
             return true;
         }
         KeyCode::PageUp => {
-            let new = area.offset().saturating_sub(10);
+            let new = area.offset().saturating_sub(SCROLL_PAGE_STEP);
             area.set_offset(new);
             area.disable_auto_scroll();
             return true;
         }
         KeyCode::PageDown => {
-            area.set_offset(area.offset().saturating_add(10));
+            area.set_offset(area.offset().saturating_add(SCROLL_PAGE_STEP));
             return true;
         }
         KeyCode::Home => {
@@ -282,24 +283,20 @@ fn handle_dialog_scroll_keys(key: KeyCode, state: &mut AppState) -> bool {
     match key {
         KeyCode::Up => {
             if state.dialog_scroll > 0 {
-                state.dialog_scroll -= 1;
+                state.dialog_scroll = state.dialog_scroll.saturating_sub(SCROLL_LINE_STEP);
                 state.needs_redraw = true;
             }
         }
         KeyCode::Down => {
-            state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+            state.dialog_scroll = state.dialog_scroll.saturating_add(SCROLL_LINE_STEP);
             state.needs_redraw = true;
         }
         KeyCode::PageUp => {
-            if state.dialog_scroll >= 10 {
-                state.dialog_scroll -= 10;
-            } else {
-                state.dialog_scroll = 0;
-            }
+            state.dialog_scroll = state.dialog_scroll.saturating_sub(SCROLL_PAGE_STEP);
             state.needs_redraw = true;
         }
         KeyCode::PageDown => {
-            state.dialog_scroll = state.dialog_scroll.saturating_add(10);
+            state.dialog_scroll = state.dialog_scroll.saturating_add(SCROLL_PAGE_STEP);
             state.needs_redraw = true;
         }
         KeyCode::Home => {
@@ -459,14 +456,14 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
         }
         KeyCode::PageUp => {
             if let Some(ref mut ss) = state.settings_state {
-                ss.scroll = ss.scroll.saturating_sub(10);
+                ss.scroll = ss.scroll.saturating_sub(SCROLL_PAGE_STEP);
                 state.needs_redraw = true;
             }
             AppAction::None
         }
         KeyCode::PageDown => {
             if let Some(ref mut ss) = state.settings_state {
-                ss.scroll = ss.scroll.saturating_add(10);
+                ss.scroll = ss.scroll.saturating_add(SCROLL_PAGE_STEP);
                 state.needs_redraw = true;
             }
             AppAction::None

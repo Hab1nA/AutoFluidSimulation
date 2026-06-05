@@ -23,7 +23,7 @@ use daemon_mgr::DaemonManager;
 use event_handler::command;
 use event_handler::key_handler;
 use ipc::client::IpcClient;
-use state::app_state::UiMode;
+use state::app_state::{ScrollbarInfo, UiMode};
 use state::log_buffer::LogEntry;
 use state::{AppState, LogBuffer};
 use ui::layout::AppLayout;
@@ -54,7 +54,8 @@ fn init_file_logger() {
                         .filter_level(LevelFilter::Info)
                         .target(env_logger::Target::Pipe(Box::new(file)))
                         .format_timestamp_millis()
-                        .init();
+                        .try_init()
+                        .ok();
                     log::info!(
                         "AutoFluid TUI v{} 启动，日志文件: {:?}",
                         env!("CARGO_PKG_VERSION"),
@@ -76,7 +77,8 @@ fn init_stderr_logger() {
         .filter_level(log::LevelFilter::Info)
         .target(env_logger::Target::Stderr)
         .format_timestamp_millis()
-        .init();
+        .try_init()
+        .ok();
     log::info!(
         "AutoFluid TUI v{} 启动 (stderr-only 日志)",
         env!("CARGO_PKG_VERSION")
@@ -99,20 +101,39 @@ fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static REQUEST_PREFIX: OnceLock<u64> = OnceLock::new();
 
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
+    let prefix = *REQUEST_PREFIX.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    });
     let count = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let t = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    // 结合时间戳低位和原子计数器，确保唯一性
-    let time_part = ((t as u64) ^ ((t >> 32) as u64)) & 0xFFFF_FFFF;
-    let combined = time_part.wrapping_add(count);
-    format!("{:08x}", combined)
+    format!("{:016x}", prefix.wrapping_add(count))
+}
+
+pub(crate) fn apply_auto_scroll(
+    auto_scroll: &mut bool,
+    scroll: &mut u16,
+    visual_count: usize,
+    content_height: usize,
+    new_logs_arrived: bool,
+) {
+    if *auto_scroll && visual_count > content_height {
+        *scroll = (visual_count - content_height) as u16;
+    }
+    if new_logs_arrived && visual_count > content_height {
+        let max_scroll = (visual_count - content_height) as u16;
+        if *scroll >= max_scroll {
+            *auto_scroll = true;
+        }
+    }
 }
 
 // ====================================================================
@@ -410,20 +431,16 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     if let Some(callback) = state.confirm_callback.take() {
                         let result = rt
                             .block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
-                        match result {
-                            command::CommandResult::FullQuit => {
-                                **full_quit = true;
-                                if ipc.is_connected() {
-                                    let _ = rt.block_on(ipc.full_quit());
-                                }
-                                rt.block_on(ipc.disconnect());
-                                state.should_quit = true;
-                            }
-                            command::CommandResult::StopDaemon => {
-                                daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
-                            }
-                            _ => {}
-                        }
+                        event_handler::actions::handle_confirm_result(
+                            result,
+                            rt,
+                            ipc,
+                            state,
+                            log_buffer,
+                            daemon,
+                            project_dir,
+                            full_quit,
+                        );
                     }
                 }
                 key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
@@ -431,61 +448,24 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     state.close_settings();
                 }
                 key_handler::AppAction::SaveSettings => {
-                    if let Some(ref mut ss) = state.settings_state {
-                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
-                        if ss.is_editing_field() {
-                            ss.commit_edit_current_field();
-                        }
-                        ss.validation_errors.clear();
-                        ss.save_error = None;
-                        match ss.save() {
-                            Ok(()) => {
-                                ss.saved = true;
-                                // Notify daemon via IPC
-                                if ipc.is_connected() {
-                                    match rt.block_on(ipc.reload_config()) {
-                                        Ok(resp) if resp.is_ok() => {
-                                            log_buffer
-                                                .push_info("✅ 后台引擎配置已重新加载".to_string());
-                                        }
-                                        Ok(resp) => {
-                                            log_buffer.push_info(format!(
-                                                "⚠️ 后台引擎配置重载失败: {}",
-                                                resp.message
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            log_buffer.push_info(format!(
-                                                "⚠️ 后台引擎配置重载通信失败: {}",
-                                                e
-                                            ));
-                                        }
-                                    }
-                                } else {
-                                    log_buffer.push_info(
-                                        "⚠️ 后台引擎未连接，配置将在下次启动时生效".to_string(),
-                                    );
-                                }
-                                log_buffer
-                                    .push_info("✅ 设置已保存到 autofluid_config.toml".to_string());
-                            }
-                            Err(errors) => {
-                                log_buffer.push_info(format!(
-                                    "❌ 设置保存失败，请修正错误后重试 ({} 项)",
-                                    errors.len()
-                                ));
-                                ss.validation_errors = errors;
-                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
-                                state.needs_redraw = true;
-                            }
-                        }
-                    }
+                    event_handler::actions::save_settings(state, ipc, rt, log_buffer);
                 }
                 key_handler::AppAction::None => {}
             }
         }
         CrosstermEvent::Mouse(mouse) => {
-            event_handler::mouse::handle_mouse(mouse, state, log_buffer, ipc, rt, full_quit);
+            event_handler::mouse::handle_mouse(
+                mouse,
+                state,
+                log_buffer,
+                event_handler::mouse::MouseRuntime {
+                    ipc,
+                    rt,
+                    daemon,
+                    project_dir,
+                    full_quit,
+                },
+            );
         }
         CrosstermEvent::Resize(w, h) => {
             state.update_terminal_size(w, h);
@@ -535,25 +515,8 @@ fn do_redraw(
                 detail_inner_height
             };
 
-            fn apply_auto_scroll(
-                auto_scroll: &mut bool,
-                scroll: &mut u16,
-                visual_count: usize,
-                content_height: usize,
-            ) {
-                if *auto_scroll && visual_count > content_height {
-                    *scroll = (visual_count - content_height) as u16;
-                }
-                if visual_count > content_height {
-                    let max_scroll = (visual_count - content_height) as u16;
-                    if *scroll >= max_scroll {
-                        *auto_scroll = true;
-                    }
-                }
-            }
-
-            if log_buffer.log_generation != state.last_log_generation {
-                state.info_log_auto_scroll = true;
+            let new_logs_arrived = log_buffer.log_generation != state.last_log_generation;
+            if new_logs_arrived {
                 state.last_log_generation = log_buffer.log_generation;
             }
 
@@ -562,12 +525,14 @@ fn do_redraw(
                 &mut state.info_log_scroll,
                 info_visual_count,
                 info_content_height,
+                new_logs_arrived,
             );
             apply_auto_scroll(
                 &mut state.detail_log_auto_scroll,
                 &mut state.detail_log_scroll,
                 detail_visual_count,
                 detail_content_height,
+                new_logs_arrived,
             );
             state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
             state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
@@ -605,7 +570,7 @@ fn do_redraw(
                         width: 1,
                         height: table_inner.height.saturating_sub(1),
                     };
-                    Some((
+                    Some(ScrollbarInfo::new(
                         sb_area,
                         state.configs.len(),
                         visible_data_rows,
@@ -628,7 +593,7 @@ fn do_redraw(
                     width: 1,
                     height: info_content_height as u16,
                 };
-                Some((
+                Some(ScrollbarInfo::new(
                     sb_area,
                     info_visual_count,
                     info_content_height,
@@ -650,7 +615,7 @@ fn do_redraw(
                     width: info_content_width as u16,
                     height: 1,
                 };
-                Some((
+                Some(ScrollbarInfo::new(
                     sb_area,
                     info_max_width,
                     info_content_width,
@@ -672,7 +637,7 @@ fn do_redraw(
                     width: 1,
                     height: detail_content_height as u16,
                 };
-                Some((
+                Some(ScrollbarInfo::new(
                     sb_area,
                     detail_visual_count,
                     detail_content_height,
@@ -694,7 +659,7 @@ fn do_redraw(
                     width: detail_content_width as u16,
                     height: 1,
                 };
-                Some((
+                Some(ScrollbarInfo::new(
                     sb_area,
                     detail_max_width,
                     detail_content_width,
@@ -754,7 +719,7 @@ fn do_redraw(
                         );
                         state.scrollbar_info.dialog_v =
                             if info.content_total_lines > info.content_visible_lines {
-                                Some((
+                                Some(ScrollbarInfo::new(
                                     info.scrollbar_area,
                                     info.content_total_lines,
                                     info.content_visible_lines,
@@ -779,7 +744,7 @@ fn do_redraw(
                         );
                         state.scrollbar_info.dialog_v =
                             if info.content_total_lines > info.content_visible_lines {
-                                Some((
+                                Some(ScrollbarInfo::new(
                                     info.scrollbar_area,
                                     info.content_total_lines,
                                     info.content_visible_lines,
@@ -808,7 +773,7 @@ fn do_redraw(
                         ss.field_positions = info.field_positions;
                         state.scrollbar_info.dialog_v =
                             if info.content_total_lines > info.content_visible_lines {
-                                Some((
+                                Some(ScrollbarInfo::new(
                                     info.scrollbar_area,
                                     info.content_total_lines,
                                     info.content_visible_lines,
@@ -885,8 +850,8 @@ mod tests {
     fn test_generate_request_id() {
         let id1 = generate_request_id();
         let id2 = generate_request_id();
-        assert_eq!(id1.len(), 8, "请求ID应为8字符");
-        assert_eq!(id2.len(), 8, "请求ID应为8字符");
+        assert_eq!(id1.len(), 16, "请求ID应为16字符");
+        assert_eq!(id2.len(), 16, "请求ID应为16字符");
         assert!(
             id1.chars().all(|c| c.is_ascii_hexdigit()),
             "请求ID应为十六进制"
@@ -895,6 +860,28 @@ mod tests {
             id2.chars().all(|c| c.is_ascii_hexdigit()),
             "请求ID应为十六进制"
         );
+        assert_ne!(id1, id2, "连续请求ID不应重复");
+    }
+
+    #[test]
+    fn test_apply_auto_scroll_does_not_reenable_without_new_logs() {
+        let mut auto_scroll = false;
+        let mut scroll = 90;
+
+        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, false);
+
+        assert!(!auto_scroll, "无新日志时手动滚动到底部不应重启自动滚动");
+        assert_eq!(scroll, 90);
+    }
+
+    #[test]
+    fn test_apply_auto_scroll_reenables_when_new_logs_arrive_at_bottom() {
+        let mut auto_scroll = false;
+        let mut scroll = 90;
+
+        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, true);
+
+        assert!(auto_scroll, "有新日志且停在底部时应恢复自动滚动");
     }
 
     #[test]

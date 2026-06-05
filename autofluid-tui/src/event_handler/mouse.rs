@@ -4,6 +4,8 @@
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 
+use crate::daemon_mgr::DaemonManager;
+use crate::event_handler::{actions, HORIZONTAL_SCROLL_STEP, SCROLL_LINE_STEP, SCROLL_WHEEL_STEP};
 use crate::ipc::client::IpcClient;
 use crate::settings::SettingsState;
 use crate::state::app_state::{FocusZone, ScrollbarDragZone, UiMode};
@@ -15,8 +17,15 @@ use crate::ui::command_bar::BUTTON_DEFS;
 use crate::ui::layout::AppLayout;
 use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
 
-use crate::event_handler::command;
 use crate::point_in_rect;
+
+pub struct MouseRuntime<'a> {
+    pub ipc: &'a mut IpcClient,
+    pub rt: &'a tokio::runtime::Runtime,
+    pub daemon: &'a mut DaemonManager,
+    pub project_dir: &'a str,
+    pub full_quit: &'a mut bool,
+}
 
 // ====================================================================
 // 公共入口
@@ -26,9 +35,7 @@ pub fn handle_mouse(
     mouse: MouseEvent,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
-    ipc: &mut IpcClient,
-    rt: &tokio::runtime::Runtime,
-    full_quit: &mut bool,
+    mut runtime: MouseRuntime<'_>,
 ) {
     let area = state.terminal_size;
     if area.width == 0 || area.height == 0 {
@@ -75,7 +82,13 @@ pub fn handle_mouse(
         }
         MouseEventKind::Up(_button) => {
             handle_mouse_up(
-                state, log_buffer, ipc, rt, full_quit, col, row, &layout, in_buttons,
+                state,
+                log_buffer,
+                &mut runtime,
+                col,
+                row,
+                &layout,
+                in_buttons,
             );
         }
         _ => {}
@@ -217,37 +230,41 @@ fn handle_scroll_up(
         if state.ui_mode == UiMode::Settings {
             if let Some(ref mut ss) = state.settings_state {
                 if ss.scroll > 0 {
-                    ss.scroll = ss.scroll.saturating_sub(1);
+                    ss.scroll = ss.scroll.saturating_sub(SCROLL_LINE_STEP);
                     state.needs_redraw = true;
                 }
             }
         } else if state.dialog_scroll > 0 {
-            state.dialog_scroll = state.dialog_scroll.saturating_sub(1);
+            state.dialog_scroll = state.dialog_scroll.saturating_sub(SCROLL_LINE_STEP);
             state.needs_redraw = true;
         }
     } else if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
         if in_info {
-            state.info_log_hscroll = state.info_log_hscroll.saturating_sub(5);
+            state.info_log_hscroll = state
+                .info_log_hscroll
+                .saturating_sub(HORIZONTAL_SCROLL_STEP);
             state.needs_redraw = true;
         } else if in_detail {
-            state.detail_log_hscroll = state.detail_log_hscroll.saturating_sub(5);
+            state.detail_log_hscroll = state
+                .detail_log_hscroll
+                .saturating_sub(HORIZONTAL_SCROLL_STEP);
             state.needs_redraw = true;
         }
     } else if in_table {
         if state.table_scroll_offset > 0 {
-            state.table_scroll_offset -= 1;
+            state.table_scroll_offset = state.table_scroll_offset.saturating_sub(SCROLL_LINE_STEP);
             state.focus_zone = FocusZone::Table;
             state.needs_redraw = true;
         }
     } else if in_info {
         if state.info_log_scroll > 0 {
-            state.info_log_scroll = state.info_log_scroll.saturating_sub(3);
+            state.info_log_scroll = state.info_log_scroll.saturating_sub(SCROLL_WHEEL_STEP);
             state.info_log_auto_scroll = false;
             state.focus_zone = FocusZone::InfoLog;
             state.needs_redraw = true;
         }
     } else if in_detail && state.detail_log_scroll > 0 {
-        state.detail_log_scroll = state.detail_log_scroll.saturating_sub(3);
+        state.detail_log_scroll = state.detail_log_scroll.saturating_sub(SCROLL_WHEEL_STEP);
         state.detail_log_auto_scroll = false;
         state.focus_zone = FocusZone::DetailLog;
         state.needs_redraw = true;
@@ -267,31 +284,37 @@ fn handle_scroll_down(
     {
         if state.ui_mode == UiMode::Settings {
             if let Some(ref mut ss) = state.settings_state {
-                ss.scroll = ss.scroll.saturating_add(1);
+                ss.scroll = ss.scroll.saturating_add(SCROLL_LINE_STEP);
                 state.needs_redraw = true;
             }
         } else {
-            state.dialog_scroll = state.dialog_scroll.saturating_add(1);
+            state.dialog_scroll = state.dialog_scroll.saturating_add(SCROLL_LINE_STEP);
             state.needs_redraw = true;
         }
     } else if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
         if in_info {
-            state.info_log_hscroll = state.info_log_hscroll.saturating_add(5);
+            state.info_log_hscroll = state
+                .info_log_hscroll
+                .saturating_add(HORIZONTAL_SCROLL_STEP);
             state.needs_redraw = true;
         } else if in_detail {
-            state.detail_log_hscroll = state.detail_log_hscroll.saturating_add(5);
+            state.detail_log_hscroll = state
+                .detail_log_hscroll
+                .saturating_add(HORIZONTAL_SCROLL_STEP);
             state.needs_redraw = true;
         }
     } else if in_table {
-        state.table_scroll_offset = state.table_scroll_offset.saturating_add(1);
+        state.table_scroll_offset = state.table_scroll_offset.saturating_add(SCROLL_LINE_STEP);
         state.focus_zone = FocusZone::Table;
         state.needs_redraw = true;
     } else if in_info {
-        state.info_log_scroll = state.info_log_scroll.saturating_add(3);
+        state.info_log_scroll = state.info_log_scroll.saturating_add(SCROLL_WHEEL_STEP);
+        state.info_log_auto_scroll = false;
         state.focus_zone = FocusZone::InfoLog;
         state.needs_redraw = true;
     } else if in_detail {
-        state.detail_log_scroll = state.detail_log_scroll.saturating_add(3);
+        state.detail_log_scroll = state.detail_log_scroll.saturating_add(SCROLL_WHEEL_STEP);
+        state.detail_log_auto_scroll = false;
         state.focus_zone = FocusZone::DetailLog;
         state.needs_redraw = true;
     }
@@ -305,120 +328,84 @@ fn handle_drag(state: &mut AppState, col: u16, row: u16) {
     if let Some((zone, start_pos, start_scroll)) = state.scrollbar_drag {
         use ScrollbarDragZone::*;
         let result: Option<(u16, FocusZone)> = match zone {
-            TableVertical => {
-                state
-                    .scrollbar_info
-                    .table_v
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_vertical_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                row.saturating_sub(area.y),
-                            ),
-                            FocusZone::Table,
-                        )
-                    })
-            }
-            InfoVertical => {
-                state
-                    .scrollbar_info
-                    .info_v
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_vertical_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                row.saturating_sub(area.y),
-                            ),
-                            FocusZone::InfoLog,
-                        )
-                    })
-            }
-            InfoHorizontal => {
-                state
-                    .scrollbar_info
-                    .info_h
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_horizontal_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                col.saturating_sub(area.x),
-                            ),
-                            FocusZone::InfoLog,
-                        )
-                    })
-            }
-            DetailVertical => {
-                state
-                    .scrollbar_info
-                    .detail_v
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_vertical_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                row.saturating_sub(area.y),
-                            ),
-                            FocusZone::DetailLog,
-                        )
-                    })
-            }
-            DetailHorizontal => {
-                state
-                    .scrollbar_info
-                    .detail_h
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_horizontal_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                col.saturating_sub(area.x),
-                            ),
-                            FocusZone::DetailLog,
-                        )
-                    })
-            }
-            DialogVertical => {
-                state
-                    .scrollbar_info
-                    .dialog_v
-                    .as_ref()
-                    .map(|(area, total, visible, _)| {
-                        (
-                            sb_vertical_scroll_from_drag(
-                                area,
-                                *total,
-                                *visible,
-                                start_scroll,
-                                start_pos,
-                                row.saturating_sub(area.y),
-                            ),
-                            state.focus_zone,
-                        )
-                    })
-            }
+            TableVertical => state.scrollbar_info.table_v.as_ref().map(|info| {
+                (
+                    sb_vertical_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        row.saturating_sub(info.area.y),
+                    ),
+                    FocusZone::Table,
+                )
+            }),
+            InfoVertical => state.scrollbar_info.info_v.as_ref().map(|info| {
+                (
+                    sb_vertical_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        row.saturating_sub(info.area.y),
+                    ),
+                    FocusZone::InfoLog,
+                )
+            }),
+            InfoHorizontal => state.scrollbar_info.info_h.as_ref().map(|info| {
+                (
+                    sb_horizontal_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        col.saturating_sub(info.area.x),
+                    ),
+                    FocusZone::InfoLog,
+                )
+            }),
+            DetailVertical => state.scrollbar_info.detail_v.as_ref().map(|info| {
+                (
+                    sb_vertical_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        row.saturating_sub(info.area.y),
+                    ),
+                    FocusZone::DetailLog,
+                )
+            }),
+            DetailHorizontal => state.scrollbar_info.detail_h.as_ref().map(|info| {
+                (
+                    sb_horizontal_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        col.saturating_sub(info.area.x),
+                    ),
+                    FocusZone::DetailLog,
+                )
+            }),
+            DialogVertical => state.scrollbar_info.dialog_v.as_ref().map(|info| {
+                (
+                    sb_vertical_scroll_from_drag(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        start_scroll,
+                        start_pos,
+                        row.saturating_sub(info.area.y),
+                    ),
+                    state.focus_zone,
+                )
+            }),
         };
         if let Some((new_scroll, focus)) = result {
             match zone {
@@ -481,20 +468,20 @@ fn handle_mouse_down(
 
     // 滚动条检测
     {
-        let sb_info = state.scrollbar_info.clone();
+        let sb_info = state.scrollbar_info;
         let mut sb_detected = false;
 
         // Settings 模式下仅检测对话框滚动条，跳过背景面板滚动条
         if state.ui_mode == UiMode::Settings {
-            if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
-                if sb_vertical_track_hit(area, col, row) {
+            if let Some(info) = sb_info.dialog_v {
+                if sb_vertical_track_hit(&info.area, col, row) {
                     let current_scroll = state
                         .settings_state
                         .as_ref()
                         .map(|ss| ss.scroll)
-                        .unwrap_or(*scroll as u16);
+                        .unwrap_or(info.scroll as u16);
                     if let Some(rel_pos) =
-                        sb_vertical_hit(area, *total, *visible, *scroll, col, row)
+                        sb_vertical_hit(&info.area, info.total, info.visible, info.scroll, col, row)
                     {
                         state.scrollbar_drag = Some((
                             ScrollbarDragZone::DialogVertical,
@@ -502,8 +489,13 @@ fn handle_mouse_down(
                             current_scroll,
                         ));
                     } else {
-                        let new_scroll =
-                            sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                        let new_scroll = sb_vertical_scroll_from_click(
+                            &info.area,
+                            info.total,
+                            info.visible,
+                            info.scroll,
+                            row,
+                        );
                         if let Some(ref mut ss) = state.settings_state {
                             ss.scroll = new_scroll;
                         }
@@ -623,17 +615,24 @@ fn detect_panel_scrollbars(
 ) -> bool {
     let mut sb_detected = false;
 
-    if let Some((area, total, visible, scroll)) = &sb_info.table_v {
-        if sb_vertical_track_hit(area, col, row) {
-            if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+    if let Some(info) = sb_info.table_v {
+        if sb_vertical_track_hit(&info.area, col, row) {
+            if let Some(rel_pos) =
+                sb_vertical_hit(&info.area, info.total, info.visible, info.scroll, col, row)
+            {
                 state.scrollbar_drag = Some((
                     ScrollbarDragZone::TableVertical,
                     rel_pos as u16,
                     state.table_scroll_offset,
                 ));
             } else {
-                state.table_scroll_offset =
-                    sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                state.table_scroll_offset = sb_vertical_scroll_from_click(
+                    &info.area,
+                    info.total,
+                    info.visible,
+                    info.scroll,
+                    row,
+                );
             }
             state.focus_zone = FocusZone::Table;
             state.needs_redraw = true;
@@ -641,17 +640,24 @@ fn detect_panel_scrollbars(
         }
     }
     if !sb_detected {
-        if let Some((area, total, visible, scroll)) = &sb_info.info_v {
-            if sb_vertical_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+        if let Some(info) = sb_info.info_v {
+            if sb_vertical_track_hit(&info.area, col, row) {
+                if let Some(rel_pos) =
+                    sb_vertical_hit(&info.area, info.total, info.visible, info.scroll, col, row)
+                {
                     state.scrollbar_drag = Some((
                         ScrollbarDragZone::InfoVertical,
                         rel_pos as u16,
                         state.info_log_scroll,
                     ));
                 } else {
-                    state.info_log_scroll =
-                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    state.info_log_scroll = sb_vertical_scroll_from_click(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        info.scroll,
+                        row,
+                    );
                 }
                 state.info_log_auto_scroll = false;
                 state.focus_zone = FocusZone::InfoLog;
@@ -661,9 +667,10 @@ fn detect_panel_scrollbars(
         }
     }
     if !sb_detected {
-        if let Some((area, total, visible, scroll)) = &sb_info.info_h {
-            if sb_horizontal_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row)
+        if let Some(info) = sb_info.info_h {
+            if sb_horizontal_track_hit(&info.area, col, row) {
+                if let Some(rel_pos) =
+                    sb_horizontal_hit(&info.area, info.total, info.visible, info.scroll, col, row)
                 {
                     state.scrollbar_drag = Some((
                         ScrollbarDragZone::InfoHorizontal,
@@ -671,8 +678,13 @@ fn detect_panel_scrollbars(
                         state.info_log_hscroll,
                     ));
                 } else {
-                    state.info_log_hscroll =
-                        sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                    state.info_log_hscroll = sb_horizontal_scroll_from_click(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        info.scroll,
+                        col,
+                    );
                 }
                 state.focus_zone = FocusZone::InfoLog;
                 state.needs_redraw = true;
@@ -681,17 +693,24 @@ fn detect_panel_scrollbars(
         }
     }
     if !sb_detected {
-        if let Some((area, total, visible, scroll)) = &sb_info.detail_v {
-            if sb_vertical_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+        if let Some(info) = sb_info.detail_v {
+            if sb_vertical_track_hit(&info.area, col, row) {
+                if let Some(rel_pos) =
+                    sb_vertical_hit(&info.area, info.total, info.visible, info.scroll, col, row)
+                {
                     state.scrollbar_drag = Some((
                         ScrollbarDragZone::DetailVertical,
                         rel_pos as u16,
                         state.detail_log_scroll,
                     ));
                 } else {
-                    state.detail_log_scroll =
-                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    state.detail_log_scroll = sb_vertical_scroll_from_click(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        info.scroll,
+                        row,
+                    );
                     state.detail_log_auto_scroll = false;
                 }
                 state.focus_zone = FocusZone::DetailLog;
@@ -701,9 +720,10 @@ fn detect_panel_scrollbars(
         }
     }
     if !sb_detected {
-        if let Some((area, total, visible, scroll)) = &sb_info.detail_h {
-            if sb_horizontal_track_hit(area, col, row) {
-                if let Some(rel_pos) = sb_horizontal_hit(area, *total, *visible, *scroll, col, row)
+        if let Some(info) = sb_info.detail_h {
+            if sb_horizontal_track_hit(&info.area, col, row) {
+                if let Some(rel_pos) =
+                    sb_horizontal_hit(&info.area, info.total, info.visible, info.scroll, col, row)
                 {
                     state.scrollbar_drag = Some((
                         ScrollbarDragZone::DetailHorizontal,
@@ -711,8 +731,13 @@ fn detect_panel_scrollbars(
                         state.detail_log_hscroll,
                     ));
                 } else {
-                    state.detail_log_hscroll =
-                        sb_horizontal_scroll_from_click(area, *total, *visible, *scroll, col);
+                    state.detail_log_hscroll = sb_horizontal_scroll_from_click(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        info.scroll,
+                        col,
+                    );
                 }
                 state.focus_zone = FocusZone::DetailLog;
                 state.needs_redraw = true;
@@ -721,26 +746,33 @@ fn detect_panel_scrollbars(
         }
     }
     if !sb_detected {
-        if let Some((area, total, visible, scroll)) = &sb_info.dialog_v {
-            if sb_vertical_track_hit(area, col, row) {
+        if let Some(info) = sb_info.dialog_v {
+            if sb_vertical_track_hit(&info.area, col, row) {
                 let current_scroll = if state.ui_mode == UiMode::Settings {
                     state
                         .settings_state
                         .as_ref()
                         .map(|ss| ss.scroll)
-                        .unwrap_or(*scroll as u16)
+                        .unwrap_or(info.scroll as u16)
                 } else {
                     state.dialog_scroll
                 };
-                if let Some(rel_pos) = sb_vertical_hit(area, *total, *visible, *scroll, col, row) {
+                if let Some(rel_pos) =
+                    sb_vertical_hit(&info.area, info.total, info.visible, info.scroll, col, row)
+                {
                     state.scrollbar_drag = Some((
                         ScrollbarDragZone::DialogVertical,
                         rel_pos as u16,
                         current_scroll,
                     ));
                 } else {
-                    let new_scroll =
-                        sb_vertical_scroll_from_click(area, *total, *visible, *scroll, row);
+                    let new_scroll = sb_vertical_scroll_from_click(
+                        &info.area,
+                        info.total,
+                        info.visible,
+                        info.scroll,
+                        row,
+                    );
                     if state.ui_mode == UiMode::Settings {
                         if let Some(ref mut ss) = state.settings_state {
                             ss.scroll = new_scroll;
@@ -815,9 +847,7 @@ fn handle_detail_click(
 fn handle_mouse_up(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
-    ipc: &mut IpcClient,
-    rt: &tokio::runtime::Runtime,
-    full_quit: &mut bool,
+    runtime: &mut MouseRuntime<'_>,
     col: u16,
     row: u16,
     layout: &AppLayout,
@@ -830,7 +860,7 @@ fn handle_mouse_up(
         let area = state.terminal_size;
         if let Some(hover_idx) = detect_dialog_button(col, row, area, state) {
             if hover_idx == btn_idx {
-                handle_dialog_button_click(btn_idx, state, log_buffer, ipc, rt, full_quit);
+                handle_dialog_button_click(btn_idx, state, log_buffer, runtime);
             }
         }
         state.clicked_dialog_button = None;
@@ -896,27 +926,15 @@ pub fn detect_button(col: u16, row: u16, layout: &AppLayout) -> Option<u8> {
         return None;
     }
 
-    let rel_row = row.saturating_sub(buttons_area.y);
-    if rel_row != 1 {
-        return None;
-    }
-
-    let rel_col = col.saturating_sub(buttons_area.x);
-    let total_width: u16 = BUTTON_DEFS
-        .iter()
-        .map(|(l, _)| ui::command_bar::button_total_width(l) + 1)
-        .sum();
-    let padding = buttons_area.width.saturating_sub(total_width) / 2;
-
-    let mut offset = padding;
-    for (i, (label, _cmd)) in BUTTON_DEFS.iter().enumerate() {
-        let bw = ui::command_bar::button_total_width(label) + 1;
-        if rel_col >= offset && rel_col < offset + bw {
-            return Some(i as u8);
-        }
-        offset += bw;
-    }
-    None
+    (0..BUTTON_DEFS.len()).find_map(|idx| {
+        command_bar::button_bounds(buttons_area, idx).and_then(|rect| {
+            if point_in_rect(col, row, rect) {
+                Some(idx as u8)
+            } else {
+                None
+            }
+        })
+    })
 }
 
 pub fn detect_dialog_button(
@@ -1056,31 +1074,30 @@ pub fn handle_dialog_button_click(
     btn_idx: u8,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
-    ipc: &mut IpcClient,
-    rt: &tokio::runtime::Runtime,
-    full_quit: &mut bool,
+    runtime: &mut MouseRuntime<'_>,
 ) {
     match state.ui_mode {
         UiMode::ConfirmDialog => match btn_idx {
             0 => {
                 if let Some(callback) = state.confirm_callback.take() {
                     let result =
-                        rt.block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
-                    match result {
-                        command::CommandResult::FullQuit => {
-                            *full_quit = true;
-                            state.should_quit = true;
-                        }
-                        command::CommandResult::StopDaemon => {
-                            if ipc.is_connected() {
-                                let _ = rt.block_on(ipc.full_quit());
-                                rt.block_on(ipc.disconnect());
-                            }
-                            state.connected = false;
-                            log_buffer.push_info("✅ 后台引擎已停止".to_string());
-                        }
-                        _ => {}
-                    }
+                        runtime
+                            .rt
+                            .block_on(crate::event_handler::command::execute_confirm_action(
+                                &callback,
+                                &mut *runtime.ipc,
+                                log_buffer,
+                            ));
+                    actions::handle_confirm_result(
+                        result,
+                        runtime.rt,
+                        &mut *runtime.ipc,
+                        state,
+                        log_buffer,
+                        &mut *runtime.daemon,
+                        runtime.project_dir,
+                        &mut *runtime.full_quit,
+                    );
                 }
                 state.ui_mode = UiMode::Normal;
                 state.confirm_message = None;
@@ -1104,55 +1121,7 @@ pub fn handle_dialog_button_click(
         UiMode::Settings => {
             match btn_idx {
                 0 => {
-                    // Save
-                    if let Some(ref mut ss) = state.settings_state {
-                        // 保存前先提交正在编辑的字段（避免缓冲区中新值丢失）
-                        if ss.is_editing_field() {
-                            ss.commit_edit_current_field();
-                        }
-                        ss.validation_errors.clear();
-                        ss.save_error = None;
-                        match ss.save() {
-                            Ok(()) => {
-                                ss.saved = true;
-                                if ipc.is_connected() {
-                                    match rt.block_on(ipc.reload_config()) {
-                                        Ok(resp) if resp.is_ok() => {
-                                            log_buffer
-                                                .push_info("✅ 后台引擎配置已重新加载".to_string());
-                                        }
-                                        Ok(resp) => {
-                                            log_buffer.push_info(format!(
-                                                "⚠️ 后台引擎配置重载失败: {}",
-                                                resp.message
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            log_buffer.push_info(format!(
-                                                "⚠️ 后台引擎配置重载通信失败: {}",
-                                                e
-                                            ));
-                                        }
-                                    }
-                                } else {
-                                    log_buffer.push_info(
-                                        "⚠️ 后台引擎未连接，配置将在下次启动时生效".to_string(),
-                                    );
-                                }
-                                log_buffer
-                                    .push_info("✅ 设置已保存到 autofluid_config.toml".to_string());
-                            }
-                            Err(errors) => {
-                                log_buffer.push_info(format!(
-                                    "❌ 设置保存失败，请修正错误后重试 ({} 项)",
-                                    errors.len()
-                                ));
-                                ss.validation_errors = errors;
-                                ss.save_error = Some("保存失败，请修正错误后重试".to_string());
-                                state.needs_redraw = true;
-                            }
-                        }
-                    }
+                    actions::save_settings(state, &mut *runtime.ipc, runtime.rt, log_buffer);
                 }
                 1 => {
                     // Cancel

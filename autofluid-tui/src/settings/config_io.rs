@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::SettingsConfig;
 
@@ -23,10 +23,47 @@ pub fn save_config(config: &SettingsConfig) -> Result<(), String> {
     let path = config_file_path();
     let toml_str = toml::to_string_pretty(config).map_err(|e| format!("序列化配置失败: {}", e))?;
 
-    let mut file = fs::File::create(&path).map_err(|e| format!("创建配置文件失败: {}", e))?;
+    let tmp_path = path.with_extension("toml.tmp");
+    let mut file =
+        fs::File::create(&tmp_path).map_err(|e| format!("创建临时配置文件失败: {}", e))?;
     file.write_all(toml_str.as_bytes())
         .map_err(|e| format!("写入配置文件失败: {}", e))?;
+    file.sync_all()
+        .map_err(|e| format!("同步配置文件失败: {}", e))?;
+    drop(file);
+    replace_file(&tmp_path, &path)?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(tmp_path: &Path, path: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let tmp_wide: Vec<u16> = tmp_path.as_os_str().encode_wide().chain([0]).collect();
+    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let result = unsafe {
+        MoveFileExW(
+            tmp_wide.as_ptr(),
+            path_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(format!(
+            "替换配置文件失败: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(tmp_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(tmp_path, path).map_err(|e| format!("替换配置文件失败: {}", e))
 }
 
 pub fn env_file_path() -> PathBuf {

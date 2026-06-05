@@ -36,17 +36,52 @@ pub fn parse_filter_arg(arg: &str) -> Option<FilterType> {
 
     let lower = arg.to_lowercase();
 
-    for (key, value) in &level_map {
-        if lower == *key {
-            return Some(FilterType::Level(value.to_string()));
-        }
+    if let Some((_, value)) = find_unique_prefix_match(&lower, &level_map) {
+        return Some(FilterType::Level((*value).to_string()));
     }
 
-    for (key, value) in &source_map {
-        if lower == *key {
-            return Some(FilterType::Source(value.to_string()));
-        }
+    if let Some((_, value)) = find_unique_prefix_match(&lower, &source_map) {
+        return Some(FilterType::Source((*value).to_string()));
     }
 
     None
+}
+
+fn find_unique_prefix_match<'a>(
+    input: &str,
+    candidates: &'a [(&str, &str)],
+) -> Option<&'a (&'a str, &'a str)> {
+    let mut matches = candidates.iter().filter(|(key, _)| key.starts_with(input));
+    let first = matches.next()?;
+    if matches.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_filter_arg_accepts_level_prefixes() {
+        match parse_filter_arg("warn") {
+            Some(FilterType::Level(level)) => assert_eq!(level, "WARNING"),
+            other => panic!("expected warning level, got {other:?}"),
+        }
+
+        match parse_filter_arg("err") {
+            Some(FilterType::Level(level)) => assert_eq!(level, "ERROR"),
+            other => panic!("expected error level, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_filter_arg_accepts_source_prefixes() {
+        match parse_filter_arg("sched") {
+            Some(FilterType::Source(source)) => assert_eq!(source, "scheduler"),
+            other => panic!("expected scheduler source, got {other:?}"),
+        }
+    }
 }

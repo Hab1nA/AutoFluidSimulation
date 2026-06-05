@@ -254,7 +254,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
-            SettingCategory::StepPatterns => 5,
+            SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
             SettingCategory::Meshing => 2,
@@ -306,9 +306,10 @@ impl SettingCategory {
             SettingCategory::StepPatterns => match idx {
                 0 => "sw",
                 1 => "sc",
-                2 => "meshing",
-                3 => "solver",
-                4 => "solverdata",
+                2 => "transfer",
+                3 => "meshing",
+                4 => "solver",
+                5 => "solverdata",
                 _ => {
                     debug_assert!(false, "StepPatterns: invalid field index {idx}");
                     ""
@@ -414,9 +415,10 @@ impl SettingCategory {
             SettingCategory::StepPatterns => match idx {
                 0 => "SW步骤模板",
                 1 => "SC步骤模板",
-                2 => "Meshing模板",
-                3 => "Solver模板",
-                4 => "Solver数据模板",
+                2 => "Transfer模板",
+                3 => "Meshing模板",
+                4 => "Solver模板",
+                5 => "Solver数据模板",
                 _ => {
                     debug_assert!(false, "StepPatterns: invalid field index {idx}");
                     ""
@@ -631,9 +633,15 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => field_val!(self.config.step_file_patterns, sw, string),
                 1 => field_val!(self.config.step_file_patterns, sc, string),
-                2 => field_val!(self.config.step_file_patterns, meshing, string),
-                3 => field_val!(self.config.step_file_patterns, solver, string),
-                4 => field_val!(self.config.step_file_patterns, solver_dat, string),
+                2 => self
+                    .config
+                    .step_file_patterns
+                    .transfer
+                    .clone()
+                    .unwrap_or_default(),
+                3 => field_val!(self.config.step_file_patterns, meshing, string),
+                4 => field_val!(self.config.step_file_patterns, solver, string),
+                5 => field_val!(self.config.step_file_patterns, solver_dat, string),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -716,9 +724,16 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => self.config.step_file_patterns.sw = value.to_string(),
                 1 => self.config.step_file_patterns.sc = value.to_string(),
-                2 => self.config.step_file_patterns.meshing = value.to_string(),
-                3 => self.config.step_file_patterns.solver = value.to_string(),
-                4 => self.config.step_file_patterns.solver_dat = value.to_string(),
+                2 => {
+                    self.config.step_file_patterns.transfer = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                3 => self.config.step_file_patterns.meshing = value.to_string(),
+                4 => self.config.step_file_patterns.solver = value.to_string(),
+                5 => self.config.step_file_patterns.solver_dat = value.to_string(),
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {
@@ -1032,5 +1047,37 @@ impl SettingsState {
 
     pub fn paste_from_clipboard(&mut self) -> bool {
         self.buffer.paste_from_clipboard()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn step_patterns_expose_transfer_field() {
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
+        assert_eq!(SettingCategory::StepPatterns.field_name(2), "transfer");
+        assert_eq!(
+            SettingCategory::StepPatterns.field_full_name(2),
+            "step_file_patterns.transfer"
+        );
+        assert_eq!(
+            SettingCategory::StepPatterns.display_label(2),
+            "Transfer模板"
+        );
+
+        let mut state = SettingsState::new();
+        state.config = SettingsConfig::default();
+        assert_eq!(state.get_field_value(SettingCategory::StepPatterns, 2), "");
+
+        state.set_field_value(SettingCategory::StepPatterns, 2, "transfer_{config}.zip");
+        assert_eq!(
+            state.config.step_file_patterns.transfer.as_deref(),
+            Some("transfer_{config}.zip")
+        );
+
+        state.set_field_value(SettingCategory::StepPatterns, 2, "");
+        assert_eq!(state.config.step_file_patterns.transfer, None);
     }
 }

@@ -395,7 +395,12 @@ fn build_edit_spans(
     cursor_style: Style,
     cursor_bar_style: Style,
 ) -> Vec<Span<'static>> {
-    if buffer.is_empty() {
+    let chars: Vec<char> = buffer.chars().collect();
+    debug_assert!(
+        cursor <= chars.len(),
+        "edit cursor must not exceed buffer character length"
+    );
+    if chars.is_empty() {
         return vec![Span::styled("▎".to_string(), cursor_bar_style)];
     }
 
@@ -410,7 +415,6 @@ fn build_edit_spans(
         }
     });
 
-    let chars: Vec<char> = buffer.chars().collect();
     let len = chars.len();
     let mut spans: Vec<Span<'static>> = Vec::new();
 

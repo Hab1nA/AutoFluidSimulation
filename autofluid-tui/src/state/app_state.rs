@@ -110,14 +110,33 @@ pub struct EngineInfo {
     pub pipeline_started: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollbarInfo {
+    pub area: ratatui::layout::Rect,
+    pub total: usize,
+    pub visible: usize,
+    pub scroll: usize,
+}
+
+impl ScrollbarInfo {
+    pub fn new(area: ratatui::layout::Rect, total: usize, visible: usize, scroll: usize) -> Self {
+        Self {
+            area,
+            total,
+            visible,
+            scroll,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ScrollbarRenderedInfo {
-    pub table_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
-    pub info_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
-    pub info_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
-    pub detail_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
-    pub detail_h: Option<(ratatui::layout::Rect, usize, usize, usize)>,
-    pub dialog_v: Option<(ratatui::layout::Rect, usize, usize, usize)>,
+    pub table_v: Option<ScrollbarInfo>,
+    pub info_v: Option<ScrollbarInfo>,
+    pub info_h: Option<ScrollbarInfo>,
+    pub detail_v: Option<ScrollbarInfo>,
+    pub detail_h: Option<ScrollbarInfo>,
+    pub dialog_v: Option<ScrollbarInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
