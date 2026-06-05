@@ -357,12 +357,12 @@ impl SettingCategory {
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "watchdog_interval",
-                1 => "transfer_timeout",
-                2 => "max_retries",
-                3 => "state_refresh_interval",
-                4 => "ssh_connection",
-                5 => "dir_recursion_limit",
-                6 => "ssh_upload_max_retries",
+                1 => "state_refresh_interval",
+                2 => "transfer_timeout",
+                3 => "ssh_connection",
+                4 => "max_retries",
+                5 => "ssh_upload_max_retries",
+                6 => "dir_recursion_limit",
                 _ => {
                     debug_assert!(false, "GlobalSettings: invalid field index {idx}");
                     ""
@@ -465,12 +465,12 @@ impl SettingCategory {
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "看门狗间隔(秒)",
-                1 => "传输超时(秒)",
-                2 => "最大重试",
-                3 => "状态刷新间隔(秒)",
-                4 => "SSH连接超时(秒)",
-                5 => "目录递归深度限制",
-                6 => "SSH上传最大重试",
+                1 => "状态刷新间隔(秒)",
+                2 => "传输超时(秒)",
+                3 => "SSH连接超时(秒)",
+                4 => "最大重试",
+                5 => "SSH上传最大重试",
+                6 => "目录递归深度限制",
                 _ => {
                     debug_assert!(false, "GlobalSettings: invalid field index {idx}");
                     ""
@@ -667,12 +667,12 @@ impl SettingsState {
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => field_val!(self.config.global_settings, watchdog_interval),
-                1 => field_val!(self.config.global_settings, transfer_timeout),
-                2 => field_val!(self.config.global_settings, max_retries),
-                3 => field_val!(self.config.global_settings, state_refresh_interval),
-                4 => field_val!(self.config.global_settings, ssh_connection),
-                5 => field_val!(self.config.global_settings, dir_recursion_limit),
-                6 => field_val!(self.config.global_settings, ssh_upload_max_retries),
+                1 => field_val!(self.config.global_settings, state_refresh_interval),
+                2 => field_val!(self.config.global_settings, transfer_timeout),
+                3 => field_val!(self.config.global_settings, ssh_connection),
+                4 => field_val!(self.config.global_settings, max_retries),
+                5 => field_val!(self.config.global_settings, ssh_upload_max_retries),
+                6 => field_val!(self.config.global_settings, dir_recursion_limit),
                 _ => String::new(),
             },
         }
@@ -815,33 +815,33 @@ impl SettingsState {
                     }
                 }
                 1 => {
-                    if let Ok(v) = value.parse::<u64>() {
-                        self.config.global_settings.transfer_timeout = v;
-                    }
-                }
-                2 => {
-                    if let Ok(v) = value.parse::<u32>() {
-                        self.config.global_settings.max_retries = v;
-                    }
-                }
-                3 => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.config.global_settings.state_refresh_interval = v;
                     }
                 }
-                4 => {
+                2 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.transfer_timeout = v;
+                    }
+                }
+                3 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.global_settings.ssh_connection = v;
                     }
                 }
+                4 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.max_retries = v;
+                    }
+                }
                 5 => {
                     if let Ok(v) = value.parse::<u32>() {
-                        self.config.global_settings.dir_recursion_limit = v;
+                        self.config.global_settings.ssh_upload_max_retries = v;
                     }
                 }
                 6 => {
                     if let Ok(v) = value.parse::<u32>() {
-                        self.config.global_settings.ssh_upload_max_retries = v;
+                        self.config.global_settings.dir_recursion_limit = v;
                     }
                 }
                 _ => {}
