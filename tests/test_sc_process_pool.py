@@ -20,6 +20,25 @@ from engine.config import LOCAL_PATHS
 
 
 # ====================================================================
+# Bridge 退出码诊断测试
+# ====================================================================
+
+def test_format_bridge_exit_adds_known_reason():
+    """Bridge 退出码应补充 C# 端语义，便于诊断。"""
+    from engine.sc_process_pool import _format_bridge_exit
+
+    assert _format_bridge_exit(5) == "exit=5 (Timeout)"
+
+
+def test_format_bridge_exit_handles_unknown_and_missing_code():
+    """未知或缺失退出码应保留可读诊断信息。"""
+    from engine.sc_process_pool import _format_bridge_exit
+
+    assert _format_bridge_exit(99) == "exit=99 (Unknown)"
+    assert _format_bridge_exit(None) == "exit=unknown"
+
+
+# ====================================================================
 # PersistentSlot 测试
 # ====================================================================
 

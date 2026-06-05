@@ -36,6 +36,23 @@ from utils.logger import get_session_log_dir, setup_logger
 
 logger = setup_logger(__name__)
 
+_BRIDGE_EXIT_CODE_REASONS: dict[int, str] = {
+    0: "Success",
+    1: "ScriptFailed",
+    2: "LaunchFailed",
+    3: "OutputValidationFailed",
+    4: "InvalidArgs",
+    5: "Timeout",
+}
+
+
+def _format_bridge_exit(returncode: int | None) -> str:
+    """格式化 Bridge 退出码，保留原始数值并补充 C# 端语义。"""
+    if returncode is None:
+        return "exit=unknown"
+    reason = _BRIDGE_EXIT_CODE_REASONS.get(returncode, "Unknown")
+    return f"exit={returncode} ({reason})"
+
 
 @dataclass
 class PersistentSlot:
@@ -355,7 +372,7 @@ class SCProcessPool:
             if slot.process is not None and slot.process.poll() is not None:
                 logger.error(
                     f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
-                    f"(exit={slot.process.returncode})"
+                    f"({_format_bridge_exit(slot.process.returncode)})"
                 )
                 with self._lock:
                     self._cleanup_persistent_slot(slot)
@@ -463,7 +480,7 @@ class SCProcessPool:
             # ---- 进程存活检查 ----
             if slot.process is not None and slot.process.poll() is not None:
                 logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 "
-                             f"(exit={slot.process.returncode})")
+                             f"({_format_bridge_exit(slot.process.returncode)})")
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
