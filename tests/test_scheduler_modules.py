@@ -463,6 +463,100 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_engine_status() == "stopped"
         assert any("调度器线程异常退出" in record.getMessage() for record in caplog.records)
 
+    def test_start_pipeline_starts_barrier_monitor_before_sw_phase(self):
+        """初始启动时屏障监控应早于 SW 宏，避免 SW 后尾部补启动。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        order: list[str] = []
+
+        def execute_sw_phase(_recursion_depth: int = 0) -> bool:
+            order.append("sw")
+            self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.sw_phase_handler.execute_sw_phase = execute_sw_phase
+        self.scheduler.sw_phase_handler.scan_completed_downstream = lambda: None
+        self.scheduler._resume_paused_steps = lambda *args, **kwargs: None
+        self.scheduler._ensure_barrier_monitor_running = lambda: order.append("barrier")
+        self.scheduler.barrier_coordinator.dispatch_solver_if_ready = lambda: True
+
+        self.scheduler.start_pipeline()
+
+        assert order[:2] == ["barrier", "sw"]
+
+    def test_start_pipeline_skips_worker_pool_start_when_already_running(self):
+        """SW 阶段已提前启动 worker pool 时，尾部不再重复 start_if_needed。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        start_calls = 0
+
+        def execute_sw_phase(_recursion_depth: int = 0) -> bool:
+            self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+            return True
+
+        class _RunningWorkerPool:
+            @staticmethod
+            def is_running() -> bool:
+                return True
+
+            def start_if_needed(self) -> None:
+                nonlocal start_calls
+                start_calls += 1
+
+        self.scheduler.sw_phase_handler.execute_sw_phase = execute_sw_phase
+        self.scheduler.sw_phase_handler.scan_completed_downstream = lambda: None
+        self.scheduler._resume_paused_steps = lambda *args, **kwargs: None
+        self.scheduler.worker_pool = _RunningWorkerPool()
+
+        self.scheduler.start_pipeline()
+
+        assert start_calls == 0
+
+    def test_start_pipeline_uses_named_barrier_finalizer_after_downstream_start(self):
+        """下游组件启动后，通过具名收口方法处理屏障和 Solver 分发。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        calls: list[str] = []
+
+        def execute_sw_phase(_recursion_depth: int = 0) -> bool:
+            self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.sw_phase_handler.execute_sw_phase = execute_sw_phase
+        self.scheduler.sw_phase_handler.scan_completed_downstream = lambda: None
+        self.scheduler._resume_paused_steps = lambda *args, **kwargs: None
+        self.scheduler.meshing_monitor.start_if_needed = lambda: calls.append("meshing")
+        self.scheduler.worker_pool.start_if_needed = lambda: calls.append("worker_pool")
+        self.scheduler.worker_pool.is_running = lambda: False
+        self.scheduler._finalize_barrier_after_downstream_start = (
+            lambda: calls.append("barrier_finalizer")
+        )
+
+        self.scheduler.start_pipeline()
+
+        assert calls == [
+            "meshing",
+            "worker_pool",
+            "barrier_finalizer",
+        ]
+
+    def test_scan_completed_downstream_suppresses_empty_summary_for_active_steps(
+        self,
+        caplog,
+    ):
+        """存在活跃下游步骤时，不输出“所有待执行步骤均无现成输出文件”。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_RUNNING)
+        self.scheduler.sw_phase_handler._is_step_in_flight = (
+            lambda config_name, step: step == "sc"
+        )
+
+        with caplog.at_level(logging.INFO):
+            self.scheduler.sw_phase_handler.scan_completed_downstream()
+
+        assert not any(
+            "所有待执行步骤均无现成输出文件" in record.getMessage()
+            for record in caplog.records
+        )
+
 
 class _CleanStepRunner:
     def __init__(self):

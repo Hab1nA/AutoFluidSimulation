@@ -85,6 +85,8 @@ class RemoteExecutor:
         self._stopped_event: threading.Event | None = None
         # 跟踪远程后台任务名称（用于超时后终止）
         self._remote_tasks: dict[int, str] = {}  # config_name → task_name
+        self._sync_cache_lock = threading.Lock()
+        self._last_successful_sync_signature: tuple[object, ...] | None = None
 
     def set_control_events(
         self,
@@ -811,15 +813,44 @@ class RemoteExecutor:
         Returns:
             同步成功返回 True，失败返回 False
         """
+        with self._sync_cache_lock:
+            return self._sync_scripts_locked()
+
+    def _sync_scripts_locked(self) -> bool:
+        """在缓存锁保护下同步脚本和引用文件。"""
         local_scripts_dir = LOCAL_PATHS.get("remote_scripts_dir")
         if not local_scripts_dir or not os.path.isdir(local_scripts_dir):
             logger.error(f"[Sync] 本地脚本目录不存在: {local_scripts_dir}")
             return False
 
-        # ---- 路径变更检测：清理旧远程文件 ----
-        last_paths = self._load_last_sync_paths()
         current_scripts_dir = str(REMOTE_CONFIG["scripts_dir"])
         current_ref_dir = str(REMOTE_CONFIG["ref_files_dir"])
+        ref_local_dir = os.path.join(local_scripts_dir, "fluent_chemkin_files")
+
+        script_hashes = self._calculate_local_hashes(
+            local_scripts_dir,
+            REMOTE_SCRIPT_FILES,
+        )
+        if script_hashes is None:
+            return False
+
+        ref_hashes: dict[str, str | None] | None = None
+        if os.path.isdir(ref_local_dir):
+            ref_hashes = self._calculate_local_hashes(ref_local_dir, REMOTE_REF_FILES)
+            if ref_hashes is None:
+                return False
+
+        sync_signature = self._build_sync_signature(
+            current_scripts_dir,
+            current_ref_dir,
+            script_hashes,
+            ref_hashes,
+        )
+        if sync_signature == self._last_successful_sync_signature:
+            return True
+
+        # ---- 路径变更检测：清理旧远程文件 ----
+        last_paths = self._load_last_sync_paths()
 
         last_scripts_dir = last_paths.get("scripts_dir")
         last_ref_dir = last_paths.get("ref_files_dir")
@@ -837,23 +868,50 @@ class RemoteExecutor:
             remote_dir=current_scripts_dir,
             filenames=REMOTE_SCRIPT_FILES,
             label="脚本",
+            local_hashes=script_hashes,
         ):
             return False
 
         # 同步引用文件 → ref_files_dir
-        ref_local_dir = os.path.join(local_scripts_dir, "fluent_chemkin_files")
-        if os.path.isdir(ref_local_dir):
+        if ref_hashes is not None:
             if not self._sync_file_group(
                 local_dir=ref_local_dir,
                 remote_dir=current_ref_dir,
                 filenames=REMOTE_REF_FILES,
                 label="引用文件",
+                local_hashes=ref_hashes,
             ):
                 return False
 
         # 同步成功 → 记录当前路径供下次比对
         self._save_last_sync_paths()
+        self._last_successful_sync_signature = sync_signature
         return True
+
+    def _build_sync_signature(
+        self,
+        scripts_dir: str,
+        ref_files_dir: str,
+        script_hashes: dict[str, str | None],
+        ref_hashes: dict[str, str | None] | None,
+    ) -> tuple[object, ...]:
+        """构建一次成功同步的本地内容和远程路径指纹。"""
+        placeholder_inputs = (
+            str(REMOTE_CONFIG["scripts_dir"]),
+            str(REMOTE_CONFIG["scdoc_dir"]),
+            str(REMOTE_CONFIG["working_dir"]),
+            str(REMOTE_CONFIG["ref_files_dir"]),
+            str(REMOTE_CONFIG["msh_dir"]),
+            str(REMOTE_CONFIG["result_dir"]),
+            STEP_FILE_PATTERNS.get("sc", ""),
+        )
+        return (
+            scripts_dir,
+            ref_files_dir,
+            placeholder_inputs,
+            tuple(sorted(script_hashes.items())),
+            tuple(sorted(ref_hashes.items())) if ref_hashes is not None else None,
+        )
 
     @staticmethod
     def _compute_combined_hash(file_hashes: dict[str, str | None]) -> str:
@@ -874,8 +932,14 @@ class RemoteExecutor:
         )
         return hashlib.md5(combined.encode('utf-8')).hexdigest()
 
-    def _sync_file_group(self, local_dir: str, remote_dir: str,
-                         filenames: list, label: str) -> bool:
+    def _sync_file_group(
+        self,
+        local_dir: str,
+        remote_dir: str,
+        filenames: list,
+        label: str,
+        local_hashes: dict[str, str | None] | None = None,
+    ) -> bool:
         """同步一组文件到远程目录。
 
         采用两级哈希校验策略：
@@ -895,9 +959,10 @@ class RemoteExecutor:
             同步成功返回 True，失败返回 False
         """
         # ---- 阶段 0: 计算本地文件哈希 ----
-        local_hashes = self._calculate_local_hashes(local_dir, filenames)
         if local_hashes is None:
-            return False
+            local_hashes = self._calculate_local_hashes(local_dir, filenames)
+            if local_hashes is None:
+                return False
 
         # ---- 阶段 1: 第一级校验 —— 组合哈希快速比对（1 次 SSH 调用） ----
         local_combined = self._compute_combined_hash(local_hashes)

@@ -372,6 +372,7 @@ class SWPhaseHandler:
             return
 
         skipped_count = 0
+        active_skip_count = 0
         ssh = None
 
         # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
@@ -393,6 +394,7 @@ class SWPhaseHandler:
                     continue
 
                 if self._is_step_in_flight(cn, step):
+                    active_skip_count += 1
                     logger.debug(
                         f"[下游扫描] 构型{cn} [{step}] 正在活跃处理中，"
                         "跳过文件状态同步"
@@ -419,7 +421,7 @@ class SWPhaseHandler:
             logger.info(
                 f"[下游扫描] 共跳过 {skipped_count} 个步骤（输出文件已存在）"
             )
-        else:
+        elif active_skip_count == 0:
             logger.info("[下游扫描] 所有待执行步骤均无现成输出文件")
 
     def _is_step_in_flight(self, cn: int, step: str) -> bool:

@@ -132,6 +132,12 @@ class WorkerPoolManager:
             if t.is_alive():
                 t.join(timeout=timeout)
 
+    def is_running(self) -> bool:
+        """返回是否存在活跃的 SC 或 Transfer 工作线程。"""
+        return any(t.is_alive() for t in self._sc_worker_threads) or any(
+            t.is_alive() for t in self._transfer_worker_threads
+        )
+
     # ------------------------------------------------------------------
     # 工作线程池管理
     # ------------------------------------------------------------------
@@ -152,11 +158,6 @@ class WorkerPoolManager:
         self._transfer_worker_threads = alive_tf
         if not alive_sc and not alive_tf:
             self._start_worker_pool()
-        else:
-            logger.debug(
-                f"工作线程池已存在 "
-                f"({len(alive_sc)} SC + {len(alive_tf)} Transfer 活跃线程)，跳过创建"
-            )
 
     def _start_worker_pool(self):
         """启动 SC 和 Transfer 分离的独立工作线程池。

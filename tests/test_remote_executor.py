@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import threading
 
 from engine.config import LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG, OPERATION_TIMEOUTS, STATUS_ERROR
+import executor.remote_executor as remote_executor_module
 from executor.remote_executor import RemoteExecutor
 
 
@@ -216,6 +218,64 @@ def test_sync_file_group_does_not_upload_when_remote_hash_lookup_fails(tmp_path)
         ["alpha.txt"],
         "测试",
     ) is False
+
+
+def test_sync_scripts_skips_remote_hash_after_successful_unchanged_sync(
+    tmp_path,
+    monkeypatch,
+):
+    scripts_dir = tmp_path / "remote_scripts"
+    ref_dir = scripts_dir / "fluent_chemkin_files"
+    data_dir = tmp_path / "data"
+    scripts_dir.mkdir()
+    ref_dir.mkdir()
+    data_dir.mkdir()
+    (scripts_dir / "alpha.txt").write_bytes(b"script")
+    (ref_dir / "beta.txt").write_bytes(b"ref")
+
+    monkeypatch.setitem(LOCAL_PATHS, "remote_scripts_dir", str(scripts_dir))
+    monkeypatch.setitem(LOCAL_PATHS, "data_dir", str(data_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+    monkeypatch.setitem(REMOTE_CONFIG, "ref_files_dir", r"D:\refs")
+    monkeypatch.setattr(remote_executor_module, "REMOTE_SCRIPT_FILES", ["alpha.txt"])
+    monkeypatch.setattr(remote_executor_module, "REMOTE_REF_FILES", ["beta.txt"])
+
+    script_hash = hashlib.md5(b"script").hexdigest()
+    ref_hash = hashlib.md5(b"ref").hexdigest()
+    expected_combined = {
+        ("D:\\scripts", ("alpha.txt",)): RemoteExecutor._compute_combined_hash(
+            {"alpha.txt": script_hash}
+        ),
+        ("D:\\refs", ("beta.txt",)): RemoteExecutor._compute_combined_hash(
+            {"beta.txt": ref_hash}
+        ),
+    }
+    combined_calls: list[tuple[str, tuple[str, ...]]] = []
+
+    class _SSH:
+        def get_remote_combined_file_hash(
+            self,
+            remote_dir: str,
+            filenames: list[str],
+        ) -> str:
+            key = (remote_dir, tuple(filenames))
+            combined_calls.append(key)
+            return expected_combined[key]
+
+        def get_remote_file_hashes(self, remote_dir: str, filenames: list[str]):
+            raise AssertionError("combined hash match should skip per-file hashes")
+
+        def upload_file(self, *args, **kwargs):
+            raise AssertionError("unchanged remote files should not be uploaded")
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.sync_scripts() is True
+    assert executor.sync_scripts() is True
+    assert combined_calls == [
+        ("D:\\scripts", ("alpha.txt",)),
+        ("D:\\refs", ("beta.txt",)),
+    ]
 
 
 def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeypatch):

@@ -194,6 +194,14 @@ class PipelineScheduler:
         # - resume() 已在调用 start_pipeline 之前清除 _paused
         # - 避免与 IPC 线程的 pause() 产生 TOCTOU 竞态
 
+        # 屏障监控可以早于 SW 完成启动：SW 边导出边触发下游流水线，
+        # Meshing 可能在 SW 尾部收尾前已经运行，避免后续补启动造成日志错位。
+        if (
+            not self._barrier_passed.is_set()
+            and not self._has_downstream_errors()
+        ):
+            self._ensure_barrier_monitor_running()
+
         # ---- 步骤 1: SW 阶段 ----
         sw_result = self.sw_phase_handler.execute_sw_phase(_recursion_depth)
         if not sw_result:
@@ -236,17 +244,18 @@ class PipelineScheduler:
         self.meshing_monitor.start_if_needed()
 
         # ---- 步骤 3.5: 启动工作线程池（仅在未启动时创建） ----
-        self.worker_pool.start_if_needed()
+        if not self.worker_pool.is_running():
+            self.worker_pool.start_if_needed()
 
         # 更新引擎状态：仅在未被暂停时设为 running（pause() 已将其设为 paused）
         if not self._paused.is_set():
-            self.state.set_engine_status("running")
+            if self.state.get_engine_status() != "running":
+                self.state.set_engine_status("running")
         else:
             logger.info("流水线组件已就绪，但暂停标志仍置位，等待继续指令...")
 
         # ---- 步骤 4: 屏障已满足时直接分发 Solver，否则启动全局屏障监控 ----
-        if not self.barrier_coordinator.dispatch_solver_if_ready():
-            self._ensure_barrier_monitor_running()
+        self._finalize_barrier_after_downstream_start()
 
         logger.info("流水线调度器已启动，等待 STEP 文件...")
 
@@ -344,6 +353,20 @@ class PipelineScheduler:
                 name="BarrierMonitor"
             )
             self._barrier_thread.start()
+
+    def _finalize_barrier_after_downstream_start(self) -> None:
+        """下游组件启动后，收口屏障监控和 Solver 分发。"""
+        if not self.barrier_coordinator.dispatch_solver_if_ready():
+            self._ensure_barrier_monitor_running()
+
+    def _has_downstream_errors(self) -> bool:
+        """检查是否存在需先由恢复扫描处理的下游 Error 状态。"""
+        downstream_steps = ("sc", "transfer", "meshing", "solver")
+        return any(
+            self.state.get_step_status(cn, step) == STATUS_ERROR
+            for cn in self.state.get_all_configs()
+            for step in downstream_steps
+        )
 
     # ------------------------------------------------------------------
     # 文件就绪回调（Producer 端）
@@ -590,8 +613,7 @@ class PipelineScheduler:
         if self._file_monitor is not None:
             self._file_monitor.resume_only()
 
-        if not self.barrier_coordinator.dispatch_solver_if_ready():
-            self._ensure_barrier_monitor_running()
+        self._finalize_barrier_after_downstream_start()
 
         # ★ 若 pipeline 线程已退出（如 SW 失败+暂停后 start_pipeline 返回），
         #   重启 pipeline 使 _resume_paused_steps 中已重置的 Error→Waiting 构型能被
