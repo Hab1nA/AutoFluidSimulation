@@ -269,6 +269,7 @@ POLLING_COMMANDS = frozenset({
 
 _CONFIG_SCOPED_LOG_PATTERNS = (
     re.compile(r"构型\s*\d+"),
+    re.compile(r"仍有\s*\d+\s*个构型"),
     re.compile(r"\bconfig(?:_name)?\s*[=:]\s*\d+\b", re.IGNORECASE),
 )
 

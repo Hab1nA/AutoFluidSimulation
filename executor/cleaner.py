@@ -154,17 +154,27 @@ class FileCleaner:
         if local_info is not None:
             dir_key, file_templates = local_info
             target_dir = str(LOCAL_PATHS.get(dir_key, ""))
+            deleted_count = 0
+            missing_count = 0
             for cn in configs:
                 for file_template in file_templates:
                     filename = str(file_template).format(config=cn)
                     filepath = os.path.join(target_dir, filename)
                     try:
                         os.remove(filepath)
-                        logger.info(f"[Cleaner] 已删除本地文件: {filepath}")
+                        deleted_count += 1
+                        logger.info(
+                            f"[Cleaner] 已删除本地文件: {filepath}",
+                            extra={"broadcast": False},
+                        )
                     except FileNotFoundError:
-                        pass
+                        missing_count += 1
                     except OSError as e:
                         logger.warning(f"[Cleaner] 删除本地文件失败: {filepath}: {e}")
+            logger.info(
+                f"[Cleaner] 步骤 {step_name} 本地文件清理完成："
+                f"已删除 {deleted_count} 个，未找到 {missing_count} 个"
+            )
 
         # ---- 清理远程文件 ----
         remote_info = remote_patterns.get(step_name)
@@ -174,13 +184,24 @@ class FileCleaner:
             try:
                 ssh = self._get_ssh()
                 if ssh.is_connected():
+                    processed_count = 0
+                    failed_count = 0
                     for cn in configs:
                         for file_template in file_templates:
                             filename = str(file_template).format(config=cn)
                             remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
-                            ssh.delete_remote_file(remote_path)
-                            logger.info(f"[Cleaner] 已删除远程文件: {remote_path}")
-                    logger.info(f"[Cleaner] 步骤 {step_name} 远程文件清理完成 ({target_dir})")
+                            if ssh.delete_remote_file(remote_path):
+                                processed_count += 1
+                                logger.info(
+                                    f"[Cleaner] 已处理远程文件清理: {remote_path}",
+                                    extra={"broadcast": False},
+                                )
+                            else:
+                                failed_count += 1
+                    logger.info(
+                        f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                        f"已处理 {processed_count} 个，失败 {failed_count} 个 ({target_dir})"
+                    )
                 else:
                     logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")
             except (OSError, ConnectionError) as e:

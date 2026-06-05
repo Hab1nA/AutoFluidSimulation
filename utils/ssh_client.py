@@ -312,11 +312,17 @@ class RemoteWorkstation:
         normalized = remote_path.replace("\\", "/")
         try:
             self._sftp.remove(normalized)
-            logger.info(f"[SSH] 远程文件已删除: {remote_path}")
+            logger.info(
+                f"[SSH] 远程文件已删除: {remote_path}",
+                extra={"broadcast": False},
+            )
             return True
         except FileNotFoundError:
             # 文件本就不存在，视为成功
-            logger.debug(f"[SSH] 远程文件不存在（跳过）: {remote_path}")
+            logger.debug(
+                f"[SSH] 远程文件不存在（跳过）: {remote_path}",
+                extra={"broadcast": False},
+            )
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] 远程文件删除失败: {remote_path}: {e}")

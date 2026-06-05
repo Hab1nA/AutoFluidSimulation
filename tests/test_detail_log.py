@@ -947,6 +947,41 @@ def test_config_scoped_excel_logs_do_not_emit_aggregate_summary():
     print("  ✅ Excel 逐构型日志不生成详细日志摘要")
 
 
+def test_reset_internal_remaining_config_debug_is_suppressed():
+    """测试 reset 内部 sw_macro_started 维护日志不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.state_manager")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug("仍有 9 个构型的 SW=Completed，保持 sw_macro_started=true")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ reset 内部剩余构型 DEBUG 日志不会进入详细日志")
+
+
+def test_config_count_summary_is_not_filtered_as_config_scoped_log():
+    """测试高层构型数量摘要不会被逐构型过滤误伤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("PipelineDaemon")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info("构型组合指纹: 9f4bf5e5（10 个构型）")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entries = result["entries"]
+    assert result["total"] == 1
+    assert "构型组合指纹" in entries[0]["raw_message"]
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 高层构型数量摘要不会被误过滤")
+
+
 def test_config_scoped_log_passes_through_warning_and_above():
     """WARNING/ERROR/CRITICAL 级别的构型日志应被放行（不被过滤）。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -978,6 +1013,55 @@ def test_config_scoped_log_passes_through_warning_and_above():
 
     test_logger.removeHandler(handler)
     print("  ✅ WARNING+ 级别的构型日志被放行，INFO 仍被过滤")
+
+
+def test_file_cleanup_item_logs_are_suppressed_but_summary_passes():
+    """测试单文件清理日志不进详细日志，但清理统计摘要保留。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("executor.cleaner")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for config_name in range(3):
+        test_logger.info(
+            f"[Cleaner] 已删除本地文件: C:/tmp/model_{config_name}.step",
+            extra={"broadcast": False},
+        )
+    test_logger.info("[Cleaner] 步骤 sw 本地文件清理完成：已删除 3 个，未找到 0 个")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entries = result["entries"]
+    assert result["total"] == 1
+    assert "本地文件清理完成" in entries[0]["raw_message"]
+    assert "已删除本地文件" not in entries[0]["raw_message"]
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 单文件清理日志被过滤，统计摘要保留")
+
+
+def test_ssh_single_file_delete_logs_are_suppressed():
+    """测试 SSH 单文件删除/跳过日志不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("utils.ssh_client")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info(
+        "[SSH] 远程文件已删除: D:/xkz_1020/scdoc/model_0.scdoc",
+        extra={"broadcast": False},
+    )
+    test_logger.debug(
+        "[SSH] 远程文件不存在（跳过）: D:/xkz_1020/case/model_0.cas.h5",
+        extra={"broadcast": False},
+    )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0
+    assert result["entries"] == []
+
+    test_logger.removeHandler(handler)
+    print("  ✅ SSH 单文件删除/跳过日志不会进入详细日志")
+
 
 def test_raw_message_contains_logger_name_and_msg():
     """测试 raw_message 仅包含 logger 名和消息内容，不含时间戳和级别。"""
@@ -1215,7 +1299,11 @@ def main():
         ("逐构型过滤: 操作上下文", test_config_scoped_log_suppression_matches_operation_context),
         ("逐构型过滤: 单条日志", test_single_config_scoped_log_is_suppressed),
         ("逐构型过滤: Excel摘要", test_config_scoped_excel_logs_do_not_emit_aggregate_summary),
+        ("逐构型过滤: reset内部DEBUG", test_reset_internal_remaining_config_debug_is_suppressed),
+        ("逐构型过滤: 数量摘要不误伤", test_config_count_summary_is_not_filtered_as_config_scoped_log),
         ("逐构型过滤: WARNING+放行", test_config_scoped_log_passes_through_warning_and_above),
+        ("清理过滤: 单文件过滤摘要保留", test_file_cleanup_item_logs_are_suppressed_but_summary_passes),
+        ("清理过滤: SSH单文件删除", test_ssh_single_file_delete_logs_are_suppressed),
         ("raw_message: 不含时间戳和级别", test_raw_message_contains_logger_name_and_msg),
         ("raw_message: message保留完整格式", test_message_still_has_full_format),
         ("raw_message: 比message更短", test_raw_message_vs_message_difference),
