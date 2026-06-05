@@ -212,15 +212,36 @@ class RemoteExecutor:
             logger.info(f"[Transfer] 构型{config_name} 因暂停暂缓（未开始上传）")
             return False
 
+        transfer_timeout = float(ENGINE_CONFIG["transfer_timeout"])
+        transfer_deadline = time.monotonic() + transfer_timeout
+
+        def _remaining_transfer_timeout() -> float:
+            return max(0.0, transfer_deadline - time.monotonic())
+
+        def _fail_transfer_timeout() -> bool:
+            logger.error(f"[Transfer] 构型{config_name} 文件传输超时 ({transfer_timeout:g}s)")
+            self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "文件传输超时")
+            return False
+
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
+
+                remote_check_timeout = _remaining_transfer_timeout()
+                if remote_check_timeout <= 0:
+                    return _fail_transfer_timeout()
 
                 # ★ 远程文件存在性检查（断点续传）：在锁内执行，保证线程安全。
                 #    原检查位于 worker_pool._process_transfer_step() 中且未持有
                 #    _ssh_lock，与 upload_file() 并发操作同一 SFTP 通道导致死锁。
                 try:
-                    remote_size = ssh.get_remote_file_size(remote_file)
+                    try:
+                        remote_size = ssh.get_remote_file_size(
+                            remote_file,
+                            timeout=remote_check_timeout,
+                        )
+                    except TypeError:
+                        remote_size = ssh.get_remote_file_size(remote_file)
                     if remote_size is not None and remote_size > 0:
                         logger.info(
                             f"[Transfer] 远程 SCDOC 已存在 ({remote_size} bytes)，"
@@ -234,8 +255,11 @@ class RemoteExecutor:
                         f"（将继续上传）: {e}"
                     )
 
+                upload_timeout = _remaining_transfer_timeout()
+                if upload_timeout <= 0:
+                    return _fail_transfer_timeout()
+
                 upload_max_retries = self._upload_max_retries()
-                upload_timeout = ENGINE_CONFIG["transfer_timeout"]
                 success = ssh.upload_file(
                     local_file,
                     remote_file,
@@ -451,6 +475,43 @@ class RemoteExecutor:
             return False
         except (OSError, ConnectionError) as e:
             logger.error(f"[Meshing] 检查网格划分状态异常: {e}")
+            return False
+
+    def check_meshing_outputs_exist(
+        self,
+        config_name: int,
+        *,
+        timeout: float | None = None,
+    ) -> bool:
+        """在 SSH 锁内检查 Meshing 完成标志或网格文件是否已存在。"""
+        try:
+            flag_file = self._meshing_flag_file(config_name)
+            mesh_name = get_step_filename("meshing", config_name)
+            mesh_file = (
+                f"{str(REMOTE_CONFIG['msh_dir']).replace(chr(92), '/')}/{mesh_name}"
+                if mesh_name
+                else None
+            )
+        except ValueError:
+            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        def _check_remote_file(ssh: "RemoteWorkstation", remote_path: str) -> bool:
+            if timeout is None:
+                return bool(ssh.check_remote_file(remote_path))
+            try:
+                return bool(ssh.check_remote_file(remote_path, timeout=timeout))
+            except TypeError:
+                return bool(ssh.check_remote_file(remote_path))
+
+        try:
+            with self._ssh_lock:
+                ssh = self._get_ssh()
+                return _check_remote_file(ssh, flag_file) or (
+                    mesh_file is not None and _check_remote_file(ssh, mesh_file)
+                )
+        except (OSError, ConnectionError) as e:
+            logger.warning(f"[Meshing] 检查远程输出文件异常: {e}")
             return False
 
     def wait_meshing_completion(

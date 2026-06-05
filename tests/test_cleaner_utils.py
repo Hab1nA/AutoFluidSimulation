@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import socket
+from types import TracebackType
 
 import pytest
 
@@ -24,6 +25,28 @@ from engine.config import LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS
 # ====================================================================
 # FileCleaner 测试
 # ====================================================================
+
+class _LockProbe:
+    """测试用上下文锁，记录远端 SSH 操作是否发生在锁内。"""
+
+    def __init__(self) -> None:
+        self.held = False
+        self.entries = 0
+
+    def __enter__(self) -> "_LockProbe":
+        self.held = True
+        self.entries += 1
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        self.held = False
+        return False
+
 
 class TestFileCleanerSystemCheck:
     """验证 FileCleaner.run_system_check 本地路径检查。"""
@@ -74,6 +97,40 @@ class TestFileCleanerSystemCheck:
                 assert info["exists"] is True, f"{name}: {info['path']} should exist"
             # SSH 未连接时应报告连接失败
             assert result["remote_checks"]["ssh"] == "连接失败"
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_remote_system_check_holds_ssh_lock(self, tmp_path):
+        """远端系统自检应在共享 SSH 锁内执行。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _ConnectedSSH:
+            def __init__(self, lock: _LockProbe) -> None:
+                self.lock = lock
+                self.check_system_saw_lock = False
+
+            def is_connected(self) -> bool:
+                return True
+
+            def check_system(self, **_kwargs: object) -> dict[str, object]:
+                self.check_system_saw_lock = self.lock.held
+                return {"ssh_connected": True}
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            lock = _LockProbe()
+            ssh = _ConnectedSSH(lock)
+            cleaner = FileCleaner(state, lambda: ssh, ssh_lock=lock)
+
+            cleaner.run_system_check()
+
+            assert ssh.check_system_saw_lock is True
+            assert lock.entries == 1
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
@@ -193,6 +250,82 @@ class TestFileCleanerCleanStepFiles:
                 "D:/xkz_1020/workingdir",
                 "D:/xkz_1020/flags",
             ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_cache_holds_ssh_lock(self, tmp_path, monkeypatch):
+        """远程缓存清理应在共享 SSH 锁内执行。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\xkz_1020\workingdir")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\xkz_1020\flags")
+
+        class _ConnectedSSH:
+            def __init__(self, lock: _LockProbe) -> None:
+                self.lock = lock
+                self.clear_calls_saw_lock: list[bool] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.clear_calls_saw_lock.append(self.lock.held)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            lock = _LockProbe()
+            ssh = _ConnectedSSH(lock)
+            cleaner = FileCleaner(state, lambda: ssh, ssh_lock=lock)
+
+            cleaner.clean_all_cache()
+
+            assert ssh.clear_calls_saw_lock == [True, True]
+            assert lock.entries == 1
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_remote_step_file_cleanup_holds_ssh_lock(self, tmp_path, monkeypatch):
+        """远程步骤文件清理应在共享 SSH 锁内执行。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\xkz_1020\scdoc")
+
+        class _ConnectedSSH:
+            def __init__(self, lock: _LockProbe) -> None:
+                self.lock = lock
+                self.delete_calls_saw_lock: list[bool] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.delete_calls_saw_lock.append(self.lock.held)
+                return True
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            lock = _LockProbe()
+            ssh = _ConnectedSSH(lock)
+            cleaner = FileCleaner(state, lambda: ssh, ssh_lock=lock)
+
+            cleaner.clean_step_files("sc", config_name=2)
+
+            assert ssh.delete_calls_saw_lock == [True]
+            assert lock.entries == 1
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

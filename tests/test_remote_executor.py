@@ -33,12 +33,23 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
     monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
     monkeypatch.setitem(ENGINE_CONFIG, "transfer_timeout", 17)
     monkeypatch.setitem(OPERATION_TIMEOUTS, "ssh_upload_max_retries", 2)
+    monotonic_values = iter([100.0, 100.0, 100.0])
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
 
     paused = threading.Event()
     stopped = threading.Event()
     calls: list[dict[str, object]] = []
+    size_checks: list[dict[str, object]] = []
 
     class _SSH:
+        def get_remote_file_size(self, remote_path: str, *, timeout: int | None = None):
+            size_checks.append({"remote_path": remote_path, "timeout": timeout})
+            return None
+
         def upload_file(
             self,
             local_path: str,
@@ -65,6 +76,12 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
     executor.set_control_events(paused, stopped)
 
     assert executor.execute_transfer(1) is True
+    assert size_checks == [
+        {
+            "remote_path": "D:/remote scdoc/model_gen4_1.scdoc",
+            "timeout": 17,
+        }
+    ]
     assert calls == [
         {
             "local_path": str(scdoc_file),
@@ -75,6 +92,78 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
             "stopped_event": stopped,
         }
     ]
+
+
+def test_execute_transfer_uses_one_timeout_budget(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    scdoc_file = scdoc_dir / "model_gen4_7.scdoc"
+    scdoc_file.write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+    monkeypatch.setitem(ENGINE_CONFIG, "transfer_timeout", 17)
+
+    monotonic_values = iter([100.0, 100.0, 105.0])
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    timeouts: list[float] = []
+
+    class _SSH:
+        def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None):
+            timeouts.append(float(timeout or 0))
+            return None
+
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            timeouts.append(float(kwargs["timeout"]))
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(7) is True
+    assert timeouts == [17.0, 12.0]
+
+
+def test_execute_transfer_fails_when_timeout_budget_is_exhausted_before_upload(
+    tmp_path,
+    monkeypatch,
+):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    (scdoc_dir / "model_gen4_8.scdoc").write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+    monkeypatch.setitem(ENGINE_CONFIG, "transfer_timeout", 17)
+
+    monotonic_values = iter([100.0, 100.0, 118.0])
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+
+    class _SSH:
+        def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None):
+            return None
+
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            raise AssertionError("timeout-exhausted transfer must not upload")
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(8) is False
+    assert state.status_updates[-1] == (
+        8,
+        "transfer",
+        STATUS_ERROR,
+        "文件传输超时",
+    )
 
 
 def test_execute_transfer_falls_back_when_upload_retries_invalid(tmp_path, monkeypatch):
@@ -101,6 +190,45 @@ def test_execute_transfer_falls_back_when_upload_retries_invalid(tmp_path, monke
 
     assert executor.execute_transfer(6) is True
     assert calls == [3]
+
+
+def test_check_meshing_outputs_exist_holds_ssh_lock_and_passes_timeout(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+
+    inside_lock = False
+    lock_entries: list[str] = []
+    calls: list[tuple[str, float | None, bool]] = []
+
+    class _Lock:
+        def __enter__(self):
+            nonlocal inside_lock
+            inside_lock = True
+            lock_entries.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            nonlocal inside_lock
+            inside_lock = False
+            lock_entries.append("exit")
+
+    class _SSH:
+        def check_remote_file(
+            self,
+            remote_path: str,
+            *,
+            timeout: float | None = None,
+        ) -> bool:
+            calls.append((remote_path, timeout, inside_lock))
+            return remote_path.endswith(".msh.h5")
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), _Lock())
+
+    assert executor.check_meshing_outputs_exist(4, timeout=13) is True
+    assert lock_entries == ["enter", "exit"]
+    assert calls == [
+        ("D:/flags/meshing_done_4.txt", 13, True),
+        ("D:/msh/model_gen4_4.msh.h5", 13, True),
+    ]
 
 
 def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path, monkeypatch):

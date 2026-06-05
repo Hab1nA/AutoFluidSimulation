@@ -231,6 +231,7 @@ def check_step_output_exists(
     scdoc_dir: str,
     remote_config: Any,
     ssh: Any | None = None,
+    remote_check_timeout: float | None = None,
 ) -> bool:
     """
     检查某构型某步骤的输出文件是否已存在。
@@ -246,6 +247,7 @@ def check_step_output_exists(
         scdoc_dir: 本地 SCDOC 文件目录
         remote_config: 远程配置字典（需含 scdoc_dir/flag_dir/msh_dir/result_dir）
         ssh: 可选的 SSH 连接对象（需有 check_remote_file 方法）
+        remote_check_timeout: 远程 SFTP stat 检查超时（秒）
 
     Returns:
         True 表示输出文件已存在且大小 > 0
@@ -276,6 +278,14 @@ def check_step_output_exists(
     except Exception:
         return False
 
+    def _check_remote_file(remote_path: str) -> bool:
+        if remote_check_timeout is None:
+            return bool(ssh.check_remote_file(remote_path))
+        try:
+            return bool(ssh.check_remote_file(remote_path, timeout=remote_check_timeout))
+        except TypeError:
+            return bool(ssh.check_remote_file(remote_path))
+
     if step_name == "transfer":
         filename = get_step_filename("sc", config_name)
         if not filename:
@@ -286,9 +296,18 @@ def check_step_output_exists(
         )
         try:
             if hasattr(ssh, "get_remote_file_size"):
-                size = ssh.get_remote_file_size(remote_scdoc)
+                if remote_check_timeout is None:
+                    size = ssh.get_remote_file_size(remote_scdoc)
+                else:
+                    try:
+                        size = ssh.get_remote_file_size(
+                            remote_scdoc,
+                            timeout=remote_check_timeout,
+                        )
+                    except TypeError:
+                        size = ssh.get_remote_file_size(remote_scdoc)
                 return size is not None and size > 0
-            return bool(ssh.check_remote_file(remote_scdoc))
+            return _check_remote_file(remote_scdoc)
         except Exception:
             return False
 
@@ -305,8 +324,8 @@ def check_step_output_exists(
                 f"/{mesh_name}"
             )
         try:
-            return bool(ssh.check_remote_file(flag_file)) or (
-                mesh_file is not None and bool(ssh.check_remote_file(mesh_file))
+            return _check_remote_file(flag_file) or (
+                mesh_file is not None and _check_remote_file(mesh_file)
             )
         except Exception:
             return False
@@ -322,10 +341,10 @@ def check_step_output_exists(
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            if ssh.check_remote_file(flag_file):
+            if _check_remote_file(flag_file):
                 return True
-            cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
-            dat_exists = dat_file is not None and ssh.check_remote_file(dat_file)
+            cas_exists = cas_file is not None and _check_remote_file(cas_file)
+            dat_exists = dat_file is not None and _check_remote_file(dat_file)
             return cas_exists and dat_exists
         except Exception:
             return False

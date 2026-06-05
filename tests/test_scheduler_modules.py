@@ -264,6 +264,42 @@ class TestTaskRunnerSWDelegates:
         assert fake_executor.verified_step_dir == "C:/steps"
         assert fake_executor.disconnected is True
 
+    def test_disconnect_ssh_holds_shared_ssh_lock(self):
+        """断开共享 SSH 客户端时应持有 TaskRunner 的 SSH 锁。"""
+        class _LockProbe:
+            def __init__(self) -> None:
+                self.held = False
+                self.entries = 0
+
+            def __enter__(self) -> "_LockProbe":
+                self.held = True
+                self.entries += 1
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                self.held = False
+                return False
+
+        class _SSH:
+            def __init__(self, lock: _LockProbe) -> None:
+                self.lock = lock
+                self.disconnect_saw_lock = False
+
+            def disconnect(self) -> None:
+                self.disconnect_saw_lock = self.lock.held
+
+        runner = TaskRunner.__new__(TaskRunner)
+        lock = _LockProbe()
+        ssh = _SSH(lock)
+        runner._ssh_lock = lock
+        runner._ssh = ssh
+
+        runner.disconnect_ssh()
+
+        assert ssh.disconnect_saw_lock is True
+        assert runner._ssh is None
+        assert lock.entries == 1
+
 
 # ====================================================================
 # Mock 辅助类
@@ -322,6 +358,8 @@ class _MockRemoteExecutor:
     def __init__(self, state_manager):
         self.state = state_manager
         self._meshing_started: list[int] = []
+        self._meshing_output_exists = False
+        self._meshing_output_checks: list[tuple[int, float | None]] = []
 
     def start_meshing(self, config_name: int) -> bool:
         self._meshing_started.append(config_name)
@@ -336,6 +374,15 @@ class _MockRemoteExecutor:
 
     def get_ssh_connection(self):
         return None
+
+    def check_meshing_outputs_exist(
+        self,
+        config_name: int,
+        *,
+        timeout: float | None = None,
+    ) -> bool:
+        self._meshing_output_checks.append((config_name, timeout))
+        return self._meshing_output_exists
 
 
 class _SpyFileMonitor:
@@ -942,6 +989,13 @@ class TestMeshingMonitor:
         assert self.monitor.qsize() == 1
         self.stopped.set()
 
+    def test_remote_output_check_uses_remote_executor_helper(self):
+        """MeshingMonitor 应委托 RemoteExecutor 在 SSH 锁内检查远程输出。"""
+        self.remote._meshing_output_exists = True
+
+        assert self.monitor._check_remote_outputs_exist(3) is True
+        assert self.remote._meshing_output_checks == [(3, 120.0)]
+
 
 # ====================================================================
 # utils 工具函数补充测试
@@ -1018,3 +1072,39 @@ class TestUtilsExtended:
         assert pause_aware_sleep(0.15, paused, stopped, check_interval=0.01) is True
         assert time.monotonic() - started_at < 0.5
         assert time.monotonic() - resumed_at[0] >= 0.12
+
+    def test_remote_output_check_passes_timeout_to_meshing_remote_checks(self):
+        """远程 Meshing 输出检查应向 SFTP stat 传递超时。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        calls: list[tuple[str, float | None]] = []
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            def check_remote_file(
+                self,
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+            ) -> bool:
+                calls.append((remote_path, timeout))
+                return False
+
+        assert check_step_output_exists(
+            3,
+            "meshing",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+        ) is False
+        assert all(timeout == 7 for _, timeout in calls)

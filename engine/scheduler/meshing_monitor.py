@@ -17,14 +17,13 @@ import time
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
-    STATUS_ERROR, STATUS_RETRYING, ENGINE_CONFIG, REMOTE_CONFIG,
+    STATUS_ERROR, STATUS_RETRYING, ENGINE_CONFIG,
 )
 from engine.state_manager import StateManager
 from executor.remote_executor import RemoteExecutor
 from utils.logger import setup_logger
 from engine.scheduler.utils import (
     pause_aware_sleep, wait_unless_paused_or_stopped,
-    check_step_output_exists,
 )
 from engine.scheduler.work_queue import UniqueWorkQueue
 
@@ -312,9 +311,9 @@ class MeshingMonitor:
     def _check_remote_outputs_exist(self, config_name: int) -> bool:
         """检查远程标志文件或网格文件是否已存在（复用共享工具函数）。"""
         try:
-            ssh = self._remote_executor.get_ssh_connection()
-            return check_step_output_exists(
-                config_name, "meshing", "", "", REMOTE_CONFIG, ssh,
+            return self._remote_executor.check_meshing_outputs_exist(
+                config_name,
+                timeout=float(ENGINE_CONFIG["transfer_timeout"]),
             )
         except Exception:
             return False

@@ -152,13 +152,20 @@ class RemoteWorkstation:
             local_path: 本地文件路径
             remote_path: 远程文件路径
             max_retries: 最大重试次数
-            timeout: SFTP 通道读写超时（秒）
+            timeout: SFTP 上传总超时（秒）；包含内部重试和重试等待
             paused_event: 暂停事件；上传前或上传中置位时中断本次上传
             stopped_event: 停止事件；上传前或上传中置位时中断本次上传
 
         Returns:
             上传成功返回 True，失败返回 False
         """
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
+        def _remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - time.monotonic())
+
         for attempt in range(max_retries):
             try:
                 if stopped_event is not None and stopped_event.is_set():
@@ -167,46 +174,55 @@ class RemoteWorkstation:
                 if paused_event is not None and paused_event.is_set():
                     logger.info("[SSH] 文件上传因暂停指令暂缓")
                     return False
+                remaining_timeout = _remaining_timeout()
+                if remaining_timeout is not None and remaining_timeout <= 0:
+                    logger.error(f"[SSH] 文件上传超时: {os.path.basename(local_path)}")
+                    return False
 
                 # 每次尝试前确保连接有效（解决竞态条件）
                 if not self.ensure_connected():
                     if attempt < max_retries - 1:
                         logger.warning(f"[SSH] 连接失败，{attempt + 1}/{max_retries} 重试...")
-                        time.sleep(0.5 * (2 ** attempt))  # 指数退避
+                        sleep_seconds = 0.5 * (2 ** attempt)  # 指数退避
+                        remaining_timeout = _remaining_timeout()
+                        if remaining_timeout is not None:
+                            if remaining_timeout <= 0:
+                                return False
+                            sleep_seconds = min(sleep_seconds, remaining_timeout)
+                        time.sleep(sleep_seconds)
                         continue
                     return False
 
-                remote_dir = os.path.dirname(remote_path)
-                self._ensure_remote_dir(remote_dir)
-
-                logger.info(f"[SSH] 正在上传: {local_path} -> {remote_path}")
-                # 再次确认 SFTP 连接有效
                 if self._sftp is None:
                     raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
-
                 channel = self._sftp.get_channel()
                 previous_timeout = None
-                if timeout is not None:
+                if remaining_timeout is not None:
                     try:
                         previous_timeout = channel.gettimeout()
                     except AttributeError:
                         previous_timeout = None
-                    channel.settimeout(timeout)
-
-                def _check_upload_control(transferred: int, total: int) -> None:
-                    if stopped_event is not None and stopped_event.is_set():
-                        raise _UploadInterrupted("收到停止指令")
-                    if paused_event is not None and paused_event.is_set():
-                        raise _UploadInterrupted("收到暂停指令")
+                    channel.settimeout(remaining_timeout)
 
                 try:
+                    remote_dir = os.path.dirname(remote_path)
+                    self._ensure_remote_dir(remote_dir)
+
+                    logger.info(f"[SSH] 正在上传: {local_path} -> {remote_path}")
+
+                    def _check_upload_control(transferred: int, total: int) -> None:
+                        if stopped_event is not None and stopped_event.is_set():
+                            raise _UploadInterrupted("收到停止指令")
+                        if paused_event is not None and paused_event.is_set():
+                            raise _UploadInterrupted("收到暂停指令")
+
                     self._sftp.put(
                         local_path,
                         remote_path,
                         callback=_check_upload_control,
                     )
                 finally:
-                    if timeout is not None:
+                    if remaining_timeout is not None:
                         channel.settimeout(previous_timeout)
                 logger.info(f"[SSH] 上传完成: {os.path.basename(local_path)}")
                 return True
@@ -218,22 +234,51 @@ class RemoteWorkstation:
                 logger.error(f"[SSH] 文件上传失败 (尝试 {attempt + 1}/{max_retries}): {e}")
                 self.disconnect()
                 if attempt < max_retries - 1:
-                    time.sleep(0.5 * (2 ** attempt))  # 指数退避
+                    sleep_seconds = 0.5 * (2 ** attempt)  # 指数退避
+                    remaining_timeout = _remaining_timeout()
+                    if remaining_timeout is not None:
+                        if remaining_timeout <= 0:
+                            return False
+                        sleep_seconds = min(sleep_seconds, remaining_timeout)
+                    time.sleep(sleep_seconds)
                 else:
                     return False
         return False
 
-    def get_remote_file_size(self, remote_path: str) -> int | None:
+    def _sftp_stat(self, remote_path: str, *, timeout: float | None = None):
+        """执行 SFTP stat，可选设置通道超时并在结束后恢复。"""
+        if self._sftp is None:
+            raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
+        channel = self._sftp.get_channel()
+        previous_timeout = None
+        if timeout is not None:
+            try:
+                previous_timeout = channel.gettimeout()
+            except AttributeError:
+                previous_timeout = None
+            channel.settimeout(timeout)
+        try:
+            return self._sftp.stat(remote_path)
+        finally:
+            if timeout is not None:
+                channel.settimeout(previous_timeout)
+
+    def get_remote_file_size(
+        self,
+        remote_path: str,
+        *,
+        timeout: float | None = None,
+    ) -> int | None:
         """返回远程文件大小；文件不存在或连接异常时返回 None。"""
         if not self.ensure_connected():
             return None
         if self._sftp is None:
             return None
         try:
-            return int(self._sftp.stat(remote_path).st_size)
+            return int(self._sftp_stat(remote_path, timeout=timeout).st_size)
         except FileNotFoundError:
             return None
-        except (paramiko.SSHException, OSError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
 
@@ -276,18 +321,23 @@ class RemoteWorkstation:
                     logger.error(f"[SSH] 无法创建远程目录 {remote_dir}: {e}")
                     raise
 
-    def check_remote_file(self, remote_path: str) -> bool:
+    def check_remote_file(
+        self,
+        remote_path: str,
+        *,
+        timeout: float | None = None,
+    ) -> bool:
         """检查远程文件是否存在。"""
         if not self.ensure_connected():
             return False
         try:
             if self._sftp is None:
                 return False
-            self._sftp.stat(remote_path)
+            self._sftp_stat(remote_path, timeout=timeout)
             return True
         except FileNotFoundError:
             return False
-        except (paramiko.SSHException, OSError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.warning(f"[SSH] 检查远程文件异常: {remote_path}: {e}")
             return False
 

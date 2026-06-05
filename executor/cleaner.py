@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 import os
 from typing import Callable, TYPE_CHECKING
 
@@ -31,15 +32,26 @@ logger = setup_logger(__name__)
 class FileCleaner:
     """文件清理与系统自检器。"""
 
-    def __init__(self, state_manager: StateManager, ssh_getter: Callable[[], "RemoteWorkstation"]):
+    def __init__(
+        self,
+        state_manager: StateManager,
+        ssh_getter: Callable[[], "RemoteWorkstation"],
+        ssh_lock: AbstractContextManager[object] | None = None,
+    ):
         """初始化清理器。
 
         Args:
             state_manager: StateManager 实例
             ssh_getter: 可调用对象，返回 RemoteWorkstation 实例
+            ssh_lock: 保护共享 SSH/SFTP 客户端的上下文锁
         """
         self.state = state_manager
         self._get_ssh = ssh_getter
+        self._ssh_lock = ssh_lock
+
+    def _ssh_guard(self) -> AbstractContextManager[object]:
+        """返回远端 SSH/SFTP 操作使用的锁上下文。"""
+        return self._ssh_lock if self._ssh_lock is not None else nullcontext()
 
     # ------------------------------------------------------------------
     # 系统自检
@@ -67,30 +79,31 @@ class FileCleaner:
 
         # ---- 远程检查 ----
         try:
-            ssh = self._get_ssh()
-            if ssh.is_connected():
-                results["remote_checks"]["ssh"] = "连接成功"
-                remote_info = ssh.check_system(
-                    conda_exe=REMOTE_CONFIG["conda_exe"],
-                    conda_env=REMOTE_CONFIG["conda_env"],
-                    remote_dirs={
-                        "仿真工作目录": REMOTE_CONFIG["working_dir"],
-                        "脚本部署目录": REMOTE_CONFIG["scripts_dir"],
-                        "引用文件目录": REMOTE_CONFIG["ref_files_dir"],
-                        "SCDOC接收目录": REMOTE_CONFIG["scdoc_dir"],
-                        "网格输出目录": REMOTE_CONFIG["msh_dir"],
-                        "仿真输出目录": REMOTE_CONFIG["result_dir"],
-                        "仿真标志目录": REMOTE_CONFIG["flag_dir"],
-                    },
-                    mpi_bin_dir=REMOTE_CONFIG["mpi_bin_dir"],
-                    scripts_dir=REMOTE_CONFIG["scripts_dir"],
-                    script_files=REMOTE_SCRIPT_FILES,
-                    ref_files_dir=REMOTE_CONFIG["ref_files_dir"],
-                    ref_files=REMOTE_REF_FILES,
-                )
-                results["remote_checks"].update(remote_info)
-            else:
-                results["remote_checks"]["ssh"] = "连接失败"
+            with self._ssh_guard():
+                ssh = self._get_ssh()
+                if ssh.is_connected():
+                    results["remote_checks"]["ssh"] = "连接成功"
+                    remote_info = ssh.check_system(
+                        conda_exe=REMOTE_CONFIG["conda_exe"],
+                        conda_env=REMOTE_CONFIG["conda_env"],
+                        remote_dirs={
+                            "仿真工作目录": REMOTE_CONFIG["working_dir"],
+                            "脚本部署目录": REMOTE_CONFIG["scripts_dir"],
+                            "引用文件目录": REMOTE_CONFIG["ref_files_dir"],
+                            "SCDOC接收目录": REMOTE_CONFIG["scdoc_dir"],
+                            "网格输出目录": REMOTE_CONFIG["msh_dir"],
+                            "仿真输出目录": REMOTE_CONFIG["result_dir"],
+                            "仿真标志目录": REMOTE_CONFIG["flag_dir"],
+                        },
+                        mpi_bin_dir=REMOTE_CONFIG["mpi_bin_dir"],
+                        scripts_dir=REMOTE_CONFIG["scripts_dir"],
+                        script_files=REMOTE_SCRIPT_FILES,
+                        ref_files_dir=REMOTE_CONFIG["ref_files_dir"],
+                        ref_files=REMOTE_REF_FILES,
+                    )
+                    results["remote_checks"].update(remote_info)
+                else:
+                    results["remote_checks"]["ssh"] = "连接失败"
         except (OSError, ConnectionError) as e:
             logger.error(f"[SSH] 远程自检异常: {e}")
             results["remote_checks"]["ssh"] = f"错误: {e}"
@@ -134,31 +147,32 @@ class FileCleaner:
     def clean_all_cache(self) -> None:
         """清空远程工作站上运行产生的临时缓存目录内容。"""
         try:
-            ssh = self._get_ssh()
-            if not ssh.is_connected():
-                logger.warning("[Cleaner] SSH 未连接，跳过远程缓存清理")
-                return
+            with self._ssh_guard():
+                ssh = self._get_ssh()
+                if not ssh.is_connected():
+                    logger.warning("[Cleaner] SSH 未连接，跳过远程缓存清理")
+                    return
 
-            total_deleted = 0
-            total_failed = 0
-            for label, remote_dir in self._remote_cache_dirs():
-                if not self._is_safe_remote_cache_dir(remote_dir):
-                    logger.error(f"[Cleaner] 拒绝清理不安全的远程目录 ({label}): {remote_dir}")
-                    total_failed += 1
-                    continue
+                total_deleted = 0
+                total_failed = 0
+                for label, remote_dir in self._remote_cache_dirs():
+                    if not self._is_safe_remote_cache_dir(remote_dir):
+                        logger.error(f"[Cleaner] 拒绝清理不安全的远程目录 ({label}): {remote_dir}")
+                        total_failed += 1
+                        continue
 
-                deleted_count, failed_count = ssh.clear_remote_directory(remote_dir)
-                total_deleted += deleted_count
-                total_failed += failed_count
+                    deleted_count, failed_count = ssh.clear_remote_directory(remote_dir)
+                    total_deleted += deleted_count
+                    total_failed += failed_count
+                    logger.info(
+                        f"[Cleaner] {label} 清理完成："
+                        f"已删除 {deleted_count} 项，失败 {failed_count} 项 ({remote_dir})"
+                    )
+
                 logger.info(
-                    f"[Cleaner] {label} 清理完成："
-                    f"已删除 {deleted_count} 项，失败 {failed_count} 项 ({remote_dir})"
+                    "[Cleaner] 远程缓存清理完成："
+                    f"已删除 {total_deleted} 项，失败 {total_failed} 项"
                 )
-
-            logger.info(
-                "[Cleaner] 远程缓存清理完成："
-                f"已删除 {total_deleted} 项，失败 {total_failed} 项"
-            )
         except (OSError, ConnectionError) as e:
             logger.error(f"[Cleaner] 远程缓存清理异常: {e}")
 
@@ -215,28 +229,29 @@ class FileCleaner:
             dir_key, file_templates = remote_info
             target_dir = str(REMOTE_CONFIG.get(dir_key, ""))
             try:
-                ssh = self._get_ssh()
-                if ssh.is_connected():
-                    processed_count = 0
-                    failed_count = 0
-                    for cn in configs:
-                        for file_template in file_templates:
-                            filename = str(file_template).format(config=cn)
-                            remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
-                            if ssh.delete_remote_file(remote_path):
-                                processed_count += 1
-                                logger.info(
-                                    f"[Cleaner] 已处理远程文件清理: {remote_path}",
-                                    extra={"broadcast": False},
-                                )
-                            else:
-                                failed_count += 1
-                    logger.info(
-                        f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
-                        f"已处理 {processed_count} 个，失败 {failed_count} 个 ({target_dir})"
-                    )
-                else:
-                    logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")
+                with self._ssh_guard():
+                    ssh = self._get_ssh()
+                    if ssh.is_connected():
+                        processed_count = 0
+                        failed_count = 0
+                        for cn in configs:
+                            for file_template in file_templates:
+                                filename = str(file_template).format(config=cn)
+                                remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
+                                if ssh.delete_remote_file(remote_path):
+                                    processed_count += 1
+                                    logger.info(
+                                        f"[Cleaner] 已处理远程文件清理: {remote_path}",
+                                        extra={"broadcast": False},
+                                    )
+                                else:
+                                    failed_count += 1
+                        logger.info(
+                            f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                            f"已处理 {processed_count} 个，失败 {failed_count} 个 ({target_dir})"
+                        )
+                    else:
+                        logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
 

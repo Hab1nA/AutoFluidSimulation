@@ -69,6 +69,7 @@ class TaskRunner:
         self._cleaner = FileCleaner(
             self.state,
             ssh_getter=self.get_ssh,
+            ssh_lock=self._ssh_lock,
         )
 
     def set_control_events(
@@ -116,11 +117,12 @@ class TaskRunner:
                     logger.error("SSH 重连失败")
             return self._ssh
 
-    def disconnect_ssh(self):
+    def disconnect_ssh(self) -> None:
         """断开 SSH 连接。"""
-        if self._ssh:
-            self._ssh.disconnect()
-            self._ssh = None
+        with self._ssh_lock:
+            if self._ssh:
+                self._ssh.disconnect()
+                self._ssh = None
 
     # ------------------------------------------------------------------
     # 阶段 1: SolidWorks STEP 导出（委托给 SWExecutor）

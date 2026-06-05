@@ -1,9 +1,11 @@
 import base64
 import hashlib
+import socket
 from unittest.mock import patch
 
 import pytest
 
+import utils.ssh_client as ssh_client_module
 from utils.ssh_client import RemoteWorkstation
 
 
@@ -265,7 +267,149 @@ def test_upload_file_applies_sftp_channel_timeout():
         assert host.upload_file("local.scdoc", "D:/remote/model.scdoc", timeout=9) is True
 
     assert sftp.uploads == [("local.scdoc", "D:/remote/model.scdoc")]
-    assert timeouts == [9, None]
+    assert timeouts[0] == pytest.approx(9, abs=1e-3)
+    assert timeouts[1] is None
+
+
+def test_upload_file_uses_timeout_as_total_retry_budget(monkeypatch):
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+            self.attempts = 0
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            return object()
+
+        def put(self, local_path: str, remote_path: str, callback=None):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise socket.timeout("first attempt timed out")
+
+    host._sftp = _SFTP()
+    monotonic_values = iter([100.0, 100.0, 105.0, 105.0])
+    monkeypatch.setattr(
+        ssh_client_module.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(ssh_client_module.time, "sleep", lambda seconds: None)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "disconnect", return_value=None):
+            assert host.upload_file(
+                "local.scdoc",
+                "D:/remote/model.scdoc",
+                max_retries=2,
+                timeout=9,
+            ) is True
+
+    assert timeouts == [9, None, 4, None]
+
+
+def test_upload_file_applies_timeout_to_remote_directory_check():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+            self.put_called = False
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            assert remote_path == "D:/remote"
+            raise socket.timeout("remote dir stat hung")
+
+        def put(self, local_path: str, remote_path: str, callback=None):
+            self.put_called = True
+
+    sftp = _SFTP()
+    host._sftp = sftp
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "disconnect", return_value=None):
+            assert host.upload_file(
+                "local.scdoc",
+                "D:/remote/model.scdoc",
+                max_retries=1,
+                timeout=9,
+            ) is False
+
+    assert sftp.put_called is False
+    assert timeouts[0] == pytest.approx(9, abs=1e-3)
+    assert timeouts[1] is None
+
+
+def test_get_remote_file_size_applies_sftp_channel_timeout():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+
+    class _StatResult:
+        st_size = 42
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            assert remote_path == "D:/remote/model.scdoc"
+            return _StatResult()
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        assert host.get_remote_file_size("D:/remote/model.scdoc", timeout=11) == 42
+
+    assert timeouts == [11, None]
+
+
+def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            raise socket.timeout("hung stat")
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        assert host.get_remote_file_size("D:/remote/model.scdoc", timeout=11) is None
+
+    assert timeouts == [11, None]
 
 
 def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
