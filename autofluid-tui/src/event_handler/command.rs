@@ -217,11 +217,31 @@ fn cmd_reset(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -
 
 fn cmd_clean(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
     if parts.len() < 3 {
-        log_buffer.push_info("用法: clean <构型名|all> <步骤名|all>".to_string());
+        log_buffer
+            .push_info("用法: clean <构型名|all> <步骤名|all> 或 clean all cache".to_string());
         return CommandResult::None;
     }
     let config_arg = parts[1];
     let step_arg = parts[2];
+
+    if config_arg.eq_ignore_ascii_case("all") && step_arg.eq_ignore_ascii_case("cache") {
+        state.confirm_message = Some(
+            "确定要清理远程工作站上的全部临时缓存文件吗？\n将清空仿真工作目录、仿真标志目录以及动画临时目录内容，此操作不可逆！"
+                .to_string(),
+        );
+        state.confirm_callback = Some(ConfirmAction::CleanStep {
+            step_name: "cache".to_string(),
+            config_name: None,
+        });
+        state.dialog_scroll = 0;
+        state.ui_mode = UiMode::ConfirmDialog;
+        return CommandResult::None;
+    }
+
+    if step_arg.eq_ignore_ascii_case("cache") {
+        log_buffer.push_info("❌ cache 清理仅支持用法: clean all cache".to_string());
+        return CommandResult::None;
+    }
 
     let step_name = if step_arg.eq_ignore_ascii_case("all") {
         "all".to_string()
@@ -484,6 +504,7 @@ const HELP_LINES: &[&str] = &[
     "  status                     - 显示状态摘要",
     "  reset <XX|all> <step|all>  - 重置构型步骤状态",
     "  clean <XX|all> <step|all>  - 清理构型步骤文件",
+    "  clean all cache            - 清理远程临时缓存文件",
     "  daemon start               - 启动后台引擎并自动连接",
     "  daemon stop                - 停止后台引擎（TUI 继续运行）",
     "  daemon restart             - 重启后台引擎（等同于 stop + start）",

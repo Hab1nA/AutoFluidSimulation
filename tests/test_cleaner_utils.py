@@ -18,7 +18,7 @@ import socket
 
 import pytest
 
-from engine.config import LOCAL_PATHS, STEP_FILE_PATTERNS
+from engine.config import LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS
 
 
 # ====================================================================
@@ -156,6 +156,77 @@ class TestFileCleanerCleanStepFiles:
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             cleaner = FileCleaner(state, lambda: None)
             cleaner.clean_step_files("sw", config_name=1)  # 不应抛异常
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_cache_clears_remote_work_and_flag_dirs(self, tmp_path, monkeypatch):
+        """clean all cache 应清空远程工作目录和标志目录内容。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\xkz_1020\workingdir")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\xkz_1020\flags")
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.cleared_dirs: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared_dirs.append(remote_dir)
+                return (2, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            ssh = _ConnectedSSH()
+            cleaner = FileCleaner(state, lambda: ssh)
+
+            cleaner.clean_all_cache()
+
+            assert ssh.cleared_dirs == [
+                "D:/xkz_1020/workingdir",
+                "D:/xkz_1020/flags",
+            ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_cache_rejects_remote_root_dirs(self, tmp_path, monkeypatch):
+        """clean all cache 不应清理远程根目录。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\\")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", "")
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.cleared_dirs: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared_dirs.append(remote_dir)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            ssh = _ConnectedSSH()
+            cleaner = FileCleaner(state, lambda: ssh)
+
+            cleaner.clean_all_cache()
+
+            assert ssh.cleared_dirs == []
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

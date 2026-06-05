@@ -460,6 +460,26 @@ class PipelineDaemon:
         step_name = params.get("step_name")
         config_name = params.get("config_name")
 
+        if step_name == "cache":
+            if config_name not in (None, "all"):
+                return False, None, 'clean cache 仅支持用法: clean all cache'
+            if self.runner is None:
+                raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
+
+            def _do_clean_cache():
+                try:
+                    self.runner.clean_all_cache()
+                    logger.info("clean all cache 后台任务完成")
+                except Exception as e:
+                    logger.error(f"clean all cache 后台任务异常: {e}", exc_info=True)
+
+            threading.Thread(
+                target=_do_clean_cache,
+                daemon=True,
+                name="Clean-Cache-Bg",
+            ).start()
+            return True, None, "已启动后台清理远程缓存文件"
+
         # 验证 step_name（"all" 是合法值，无需校验）
         if step_name != "all" and step_name not in STEP_NAMES:
             return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"

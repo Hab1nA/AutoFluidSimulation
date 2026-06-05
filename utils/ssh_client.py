@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import socket
+import stat
 import time
 import threading
 import uuid
@@ -327,6 +328,68 @@ class RemoteWorkstation:
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] 远程文件删除失败: {remote_path}: {e}")
             return False
+
+    def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+        """
+        清空远程目录内容但保留目录本身。
+
+        Args:
+            remote_dir: 远程目录路径
+
+        Returns:
+            (deleted_count, failed_count)
+        """
+        if not self.ensure_connected():
+            return (0, 1)
+        if self._sftp is None:
+            logger.error(f"[SSH] SFTP 未就绪，无法清空远程目录: {remote_dir}")
+            return (0, 1)
+
+        normalized = remote_dir.replace("\\", "/").rstrip("/")
+        try:
+            deleted_count, failed_count = self._clear_remote_directory_contents(normalized)
+        except FileNotFoundError:
+            logger.info(f"[SSH] 远程目录不存在（跳过）: {remote_dir}")
+            return (0, 0)
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.error(f"[SSH] 清空远程目录失败: {remote_dir}: {e}")
+            return (0, 1)
+
+        logger.info(
+            f"[SSH] 远程目录清空完成: {remote_dir}，"
+            f"已删除 {deleted_count} 项，失败 {failed_count} 项"
+        )
+        return (deleted_count, failed_count)
+
+    def _clear_remote_directory_contents(self, remote_dir: str) -> tuple[int, int]:
+        """递归删除远程目录内容。调用方必须确保 SFTP 已连接。"""
+        if self._sftp is None:
+            return (0, 1)
+
+        deleted_count = 0
+        failed_count = 0
+        for entry in self._sftp.listdir_attr(remote_dir):
+            if entry.filename in {".", ".."}:
+                continue
+            child_path = f"{remote_dir}/{entry.filename}"
+            if entry.st_mode is not None and stat.S_ISDIR(entry.st_mode):
+                child_deleted, child_failed = self._clear_remote_directory_contents(child_path)
+                deleted_count += child_deleted
+                failed_count += child_failed
+                try:
+                    self._sftp.rmdir(child_path)
+                    deleted_count += 1
+                except (paramiko.SSHException, OSError, EOFError) as e:
+                    logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
+                    failed_count += 1
+            else:
+                try:
+                    self._sftp.remove(child_path)
+                    deleted_count += 1
+                except (paramiko.SSHException, OSError, EOFError) as e:
+                    logger.warning(f"[SSH] 删除远程文件失败: {child_path}: {e}")
+                    failed_count += 1
+        return (deleted_count, failed_count)
 
     # ------------------------------------------------------------------
     # 远程命令执行

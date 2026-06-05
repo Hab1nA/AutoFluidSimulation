@@ -113,23 +113,56 @@ class FileCleaner:
     # 文件清理
     # ------------------------------------------------------------------
 
-    def clean_step_files(self, step_name, config_name=None):
+    def clean_step_files(self, step_name: str, config_name: int | str | None = None) -> None:
         """清理指定步骤产生的文件（包括本地和远程工作站上的文件）。
 
         Args:
             step_name: 步骤名，或 "all" 表示全部步骤
             config_name: 构型名称，若为 None 或 "all" 则清理所有构型
         """
-        if config_name == "all":
-            config_name = None
+        if config_name is None or config_name == "all":
+            target_config_name = None
+        else:
+            target_config_name = int(config_name)
 
         if step_name == "all":
             for s in STEP_NAMES:
-                self._clean_single_step(s, config_name)
+                self._clean_single_step(s, target_config_name)
         else:
-            self._clean_single_step(step_name, config_name)
+            self._clean_single_step(step_name, target_config_name)
 
-    def _clean_single_step(self, step_name: str, config_name: int | None = None):
+    def clean_all_cache(self) -> None:
+        """清空远程工作站上运行产生的临时缓存目录内容。"""
+        try:
+            ssh = self._get_ssh()
+            if not ssh.is_connected():
+                logger.warning("[Cleaner] SSH 未连接，跳过远程缓存清理")
+                return
+
+            total_deleted = 0
+            total_failed = 0
+            for label, remote_dir in self._remote_cache_dirs():
+                if not self._is_safe_remote_cache_dir(remote_dir):
+                    logger.error(f"[Cleaner] 拒绝清理不安全的远程目录 ({label}): {remote_dir}")
+                    total_failed += 1
+                    continue
+
+                deleted_count, failed_count = ssh.clear_remote_directory(remote_dir)
+                total_deleted += deleted_count
+                total_failed += failed_count
+                logger.info(
+                    f"[Cleaner] {label} 清理完成："
+                    f"已删除 {deleted_count} 项，失败 {failed_count} 项 ({remote_dir})"
+                )
+
+            logger.info(
+                "[Cleaner] 远程缓存清理完成："
+                f"已删除 {total_deleted} 项，失败 {total_failed} 项"
+            )
+        except (OSError, ConnectionError) as e:
+            logger.error(f"[Cleaner] 远程缓存清理异常: {e}")
+
+    def _clean_single_step(self, step_name: str, config_name: int | None = None) -> None:
         """清理单个步骤的文件（内部方法）。"""
         local_patterns = {
             "sw":       ("step_dir",  [STEP_FILE_PATTERNS["sw"]]),
@@ -208,3 +241,44 @@ class FileCleaner:
                 logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
 
         logger.info(f"[Cleaner] 步骤 {step_name} 文件清理完成")
+
+    def _remote_cache_dirs(self) -> list[tuple[str, str]]:
+        """返回 clean all cache 覆盖的远程缓存目录。"""
+        working_dir = self._normalize_remote_dir(str(REMOTE_CONFIG.get("working_dir", "")))
+        flag_dir = self._normalize_remote_dir(str(REMOTE_CONFIG.get("flag_dir", "")))
+        targets = [
+            ("仿真工作目录", working_dir),
+            ("仿真标志目录", flag_dir),
+        ]
+
+        animation_dirs = [
+            ("动画临时目录 T", f"{working_dir}/animation-t" if working_dir else ""),
+            ("动画临时目录 V", f"{working_dir}/animation-v" if working_dir else ""),
+        ]
+        for label, animation_dir in animation_dirs:
+            if animation_dir and working_dir and self._is_same_or_child_dir(animation_dir, working_dir):
+                logger.debug(f"[Cleaner] {label} 已包含在仿真工作目录清理范围内: {animation_dir}")
+                continue
+            targets.append((label, animation_dir))
+        return targets
+
+    @staticmethod
+    def _normalize_remote_dir(remote_dir: str) -> str:
+        return remote_dir.replace("\\", "/").rstrip("/")
+
+    @classmethod
+    def _is_safe_remote_cache_dir(cls, remote_dir: str) -> bool:
+        normalized = cls._normalize_remote_dir(remote_dir)
+        if not normalized or normalized in {".", "..", "/"}:
+            return False
+        if len(normalized) == 2 and normalized[1] == ":":
+            return False
+        if len(normalized) == 3 and normalized[1] == ":" and normalized[2] == "/":
+            return False
+        return True
+
+    @classmethod
+    def _is_same_or_child_dir(cls, child_dir: str, parent_dir: str) -> bool:
+        child = cls._normalize_remote_dir(child_dir).lower()
+        parent = cls._normalize_remote_dir(parent_dir).lower()
+        return child == parent or child.startswith(f"{parent}/")

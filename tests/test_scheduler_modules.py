@@ -409,9 +409,13 @@ class TestPipelineSchedulerStartRecovery:
 class _CleanStepRunner:
     def __init__(self):
         self.clean_calls = []
+        self.clean_all_cache_count = 0
 
     def clean_step_files(self, step_name, config_name):
         self.clean_calls.append((step_name, config_name))
+
+    def clean_all_cache(self):
+        self.clean_all_cache_count += 1
 
 
 class _CleanStepScheduler:
@@ -442,6 +446,54 @@ class TestPipelineDaemonCleanStep:
         assert "已清理 sw 步骤的文件" in message
         assert daemon.runner.clean_calls == [("sw", 1)]
         assert daemon.scheduler.file_monitor_reset_count == 1
+
+    def test_clean_all_cache_dispatches_background_cache_cleanup(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+                self.daemon = daemon
+                self.name = name
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "cache",
+            "config_name": None,
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理远程缓存文件" in message
+        assert daemon.runner.clean_all_cache_count == 1
+        assert daemon.runner.clean_calls == []
+        assert daemon.scheduler.file_monitor_reset_count == 0
+
+    def test_clean_cache_rejects_single_config(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "cache",
+            "config_name": 1,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "clean all cache" in message
+        assert daemon.runner.clean_all_cache_count == 0
 
 
 # ====================================================================
