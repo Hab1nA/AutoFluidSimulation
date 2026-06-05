@@ -4,10 +4,13 @@
 本模块提供跨子模块共享的辅助函数，避免代码重复。
 """
 
+from __future__ import annotations
+
 import os
 import time
 import threading
-from typing import Optional, Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from engine.config import get_step_filename, STATUS_PAUSED
 from utils.logger import setup_logger
@@ -227,7 +230,7 @@ def check_step_output_exists(
     step_dir: str,
     scdoc_dir: str,
     remote_config: Any,
-    ssh: Optional[Any] = None,
+    ssh: Any | None = None,
 ) -> bool:
     """
     检查某构型某步骤的输出文件是否已存在。

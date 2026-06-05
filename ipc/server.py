@@ -32,6 +32,8 @@ class IPCServer:
     收到命令后，调用注册的回调函数进行处理。
     """
 
+    MAX_BUFFER_BYTES = 1_000_000
+
     def __init__(self, host: str | None = None, port: int | None = None):
         """
         初始化 IPC 服务器。
@@ -204,6 +206,11 @@ class IPCServer:
                     if not data:
                         break  # 客户端断开
                     buffer += data
+                    if len(buffer) > self.MAX_BUFFER_BYTES:
+                        logger.warning(
+                            f"[IPC] 客户端 {addr} 消息过长（>{self.MAX_BUFFER_BYTES} bytes），断开连接"
+                        )
+                        break
 
                     # 按换行符分割消息
                     while b"\n" in buffer:

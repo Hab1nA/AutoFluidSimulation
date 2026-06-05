@@ -5,7 +5,6 @@
 """
 
 import threading
-import time
 
 from engine.config import (
     STATUS_WAITING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
@@ -97,7 +96,8 @@ class BarrierCoordinator:
 
         while not self._stopped.is_set() and not self._barrier_passed.is_set():
             if self._paused.is_set():
-                time.sleep(1)
+                if not pause_aware_sleep(1.0, self._paused, self._stopped):
+                    break
                 continue
 
             all_configs = self.state.get_all_configs()

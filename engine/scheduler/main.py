@@ -161,6 +161,12 @@ class PipelineScheduler:
         Args:
             _recursion_depth: 内部递归深度计数器（外部调用方不应指定）
         """
+        try:
+            self._start_pipeline_impl(_recursion_depth)
+        except Exception as e:
+            self._handle_scheduler_thread_exception(e)
+
+    def _start_pipeline_impl(self, _recursion_depth: int = 0) -> None:
         if _recursion_depth >= 3:
             logger.error(
                 f"start_pipeline 递归深度超过上限 ({_recursion_depth})，"
@@ -243,6 +249,15 @@ class PipelineScheduler:
             self._ensure_barrier_monitor_running()
 
         logger.info("流水线调度器已启动，等待 STEP 文件...")
+
+    def _handle_scheduler_thread_exception(self, exc: Exception) -> None:
+        """调度器主线程未捕获异常时回收运行态。"""
+        logger.critical(
+            f"[Scheduler] 调度器线程异常退出: {type(exc).__name__}: {exc}",
+            exc_info=True,
+        )
+        self._control.stop()
+        self.state.set_engine_status("stopped")
 
     def _handle_recursion_limit_exceeded(self, recursion_depth: int):
         """处理递归深度超限的情况。"""

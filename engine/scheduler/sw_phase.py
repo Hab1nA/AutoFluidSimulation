@@ -180,7 +180,7 @@ class SWPhaseHandler:
             if not ok and not self._paused.is_set() and not self._stopped.is_set():
                 # 构型所有重试均失败（非暂停/停止导致）→ 断开缓存连接，
                 # 使下一个构型重新建立连接（若 SW 进程已崩溃可快速失败）
-                self.runner._sw_executor.disconnect_sw_cached()
+                self.runner.disconnect_sw_cached()
 
             # ★ 暂停中断：立即退出循环，交给尾部暂停善后逻辑统一处理。
             #   不中断会导致循环继续到下一构型并阻塞在
@@ -190,7 +190,7 @@ class SWPhaseHandler:
                 break
 
         # ---- 清理缓存的 SW 连接（无论成功与否） ----
-        self.runner._sw_executor.disconnect_sw_cached()
+        self.runner.disconnect_sw_cached()
 
         # ---- 汇总与善后 ----
         if self._stopped.is_set():
@@ -238,7 +238,7 @@ class SWPhaseHandler:
 
         # 安全网校验 + 设置 sw_macro_started
         step_dir = LOCAL_PATHS.get("step_dir", "")
-        total_found = self.runner._sw_executor._verify_step_exports(step_dir)
+        total_found = self.runner.verify_step_exports(step_dir)
         if total_found > 0 and not sw_errors:
             self.state.set_sw_macro_started(True)
             logger.info(

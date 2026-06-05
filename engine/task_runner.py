@@ -150,6 +150,14 @@ class TaskRunner:
         """重置 SW 全量清理状态。"""
         self._sw_executor.reset_cleanup_state()
 
+    def disconnect_sw_cached(self) -> None:
+        """清理 SW 单构型导出缓存连接。"""
+        self._sw_executor.disconnect_sw_cached()
+
+    def verify_step_exports(self, step_dir: str) -> int:
+        """执行 SW STEP 导出安全网校验。"""
+        return self._sw_executor._verify_step_exports(step_dir)
+
     # ------------------------------------------------------------------
     # 阶段 2: SpaceClaim 脚本执行（本地 SCProcessPool）
     # ------------------------------------------------------------------

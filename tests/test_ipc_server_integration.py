@@ -345,3 +345,18 @@ class TestLargeMessage:
             assert resp["data"] == 50000
         finally:
             server.stop()
+
+    def test_unterminated_message_over_limit_disconnects(self):
+        """未包含换行符的异常大消息应被服务端主动断开。"""
+        port = _find_free_port()
+        server = IPCServer(host="127.0.0.1", port=port)
+        server.start()
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2)
+                sock.connect(("127.0.0.1", port))
+                sock.sendall(b"x" * (IPCServer.MAX_BUFFER_BYTES + 1))
+
+                assert sock.recv(1) == b""
+        finally:
+            server.stop()

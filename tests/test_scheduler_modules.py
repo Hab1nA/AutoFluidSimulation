@@ -22,6 +22,7 @@ from engine.config import (
 )
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
+from engine.task_runner import TaskRunner
 
 
 # ====================================================================
@@ -234,6 +235,37 @@ class TestSWPhaseHandlerFallback:
 
 
 # ====================================================================
+# TaskRunner 代理接口测试
+# ====================================================================
+
+class TestTaskRunnerSWDelegates:
+    """验证 SWPhaseHandler 使用的 SW 操作有 TaskRunner 公共代理。"""
+
+    def test_sw_cache_disconnect_and_export_verification_delegate_to_executor(self):
+        class _FakeSWExecutor:
+            def __init__(self):
+                self.disconnected = False
+                self.verified_step_dir = ""
+
+            def disconnect_sw_cached(self) -> None:
+                self.disconnected = True
+
+            def _verify_step_exports(self, step_dir: str) -> int:
+                self.verified_step_dir = step_dir
+                return 3
+
+        runner = TaskRunner.__new__(TaskRunner)
+        fake_executor = _FakeSWExecutor()
+        runner._sw_executor = fake_executor
+
+        assert runner.verify_step_exports("C:/steps") == 3
+        runner.disconnect_sw_cached()
+
+        assert fake_executor.verified_step_dir == "C:/steps"
+        assert fake_executor.disconnected is True
+
+
+# ====================================================================
 # Mock 辅助类
 # ====================================================================
 
@@ -261,6 +293,16 @@ class _MockTaskRunner:
 
     def reset_sc_pool(self):
         return None
+
+    def disconnect_sw_cached(self):
+        return None
+
+    def verify_step_exports(self, step_dir: str) -> int:
+        return sum(
+            1
+            for cn in self.state.get_all_configs()
+            if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
+        )
 
     def execute_solver(self, config_name: int) -> bool:
         self._solver_dispatched.append(config_name)
@@ -404,6 +446,22 @@ class TestPipelineSchedulerStartRecovery:
         assert self.file_monitor.reset_only_count == 1
         assert self.file_monitor.resume_and_reset_count == 0
         assert self.scheduler._paused.is_set()
+
+    def test_start_pipeline_unhandled_exception_marks_engine_stopped(self, caplog):
+        """调度器线程启动阶段异常时不能让 engine_status 残留 running。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_engine_status("running")
+
+        def fail_sw_phase(_recursion_depth: int = 0) -> bool:
+            raise RuntimeError("boom")
+
+        self.scheduler.sw_phase_handler.execute_sw_phase = fail_sw_phase
+
+        with caplog.at_level(logging.ERROR):
+            self.scheduler.start_pipeline()
+
+        assert self.state.get_engine_status() == "stopped"
+        assert any("调度器线程异常退出" in record.getMessage() for record in caplog.records)
 
 
 class _CleanStepRunner:
@@ -598,6 +656,19 @@ class TestBarrierCoordinator:
         t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
         t.start()
         t.join(timeout=5)
+
+        assert not t.is_alive()
+
+    def test_barrier_paused_wait_exits_promptly_when_stopped(self):
+        """暂停等待期间收到 stop 时应立即退出，不等完整 sleep 周期。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.paused.set()
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        self.stopped.set()
+        t.join(timeout=0.3)
 
         assert not t.is_alive()
 

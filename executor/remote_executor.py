@@ -305,6 +305,22 @@ class RemoteExecutor:
             return default_count
         return processor_count
 
+    @staticmethod
+    def _validate_config_name(config_name: int) -> None:
+        """校验构型编号，防止绕过 public API 后拼接进远程命令。"""
+        if type(config_name) is not int:
+            raise ValueError(f"构型名称必须是整数，当前为 {type(config_name).__name__}")
+
+    def _meshing_flag_file(self, config_name: int) -> str:
+        """返回 Meshing 完成标志文件路径。"""
+        self._validate_config_name(config_name)
+        return f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+
+    def _solver_flag_file(self, config_name: int) -> str:
+        """返回 Solver 完成标志文件路径。"""
+        self._validate_config_name(config_name)
+        return f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+
     def _build_meshing_command(self, config_name: int) -> tuple[str, str]:
         """构建远程网格划分命令和标志文件路径。
 
@@ -314,7 +330,7 @@ class RemoteExecutor:
         Returns:
             (command, flag_file) 元组
         """
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        flag_file = self._meshing_flag_file(config_name)
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
@@ -398,17 +414,16 @@ class RemoteExecutor:
         注意：本方法仅返回成功/失败，不设置步骤状态。
         状态由调用方（RetryManager / MeshingMonitor）统一管理。
         """
-        if not isinstance(config_name, int):
-            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
-            return False
-        return self._run_meshing_command(config_name)
+        return self.start_meshing(config_name)
 
     def start_meshing(self, config_name: int) -> bool:
         """启动远程网格划分后台任务（不设置状态错误，由调用方处理）。
 
         用于 MeshingMonitor，启动失败时返回 False 由调用方决定重试策略。
         """
-        if not isinstance(config_name, int):
+        try:
+            self._validate_config_name(config_name)
+        except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         return self._run_meshing_command(config_name)
@@ -418,7 +433,11 @@ class RemoteExecutor:
 
         若标志文件存在则清理并返回 True。使用短暂 SSH 锁。
         """
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        try:
+            flag_file = self._meshing_flag_file(config_name)
+        except ValueError:
+            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
         try:
             with self._ssh_lock:
                 ssh = self._get_ssh()
@@ -441,7 +460,11 @@ class RemoteExecutor:
 
         暂停期间冻结超时计时器，防止恢复运行后立即触发超时。
         """
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        try:
+            flag_file = self._meshing_flag_file(config_name)
+        except ValueError:
+            logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
         error_flag = f"{flag_file}.error"
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
@@ -522,7 +545,7 @@ class RemoteExecutor:
         Returns:
             (command, flag_file) 元组
         """
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+        flag_file = self._solver_flag_file(config_name)
         conda_env = REMOTE_CONFIG["conda_env"]
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
@@ -577,7 +600,9 @@ class RemoteExecutor:
         状态由调用方（RetryManager / BarrierCoordinator）统一管理。
         """
         # 安全校验：config_name 必须为整数（来自 Excel 构型号），防止命令注入
-        if not isinstance(config_name, int):
+        try:
+            self._validate_config_name(config_name)
+        except ValueError:
             logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
             return False
 
@@ -624,7 +649,11 @@ class RemoteExecutor:
         检测到标志文件后，额外验证 .cas.h5 和 .dat.h5 是否都存在。
         若仅存在一个文件，宽限 60s 等待另一个；超时则清理部分文件并返回错误。
         """
-        flag_file = f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+        try:
+            flag_file = self._solver_flag_file(config_name)
+        except ValueError:
+            logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
         error_flag = f"{flag_file}.error"
         result_dir = str(REMOTE_CONFIG["result_dir"]).replace(chr(92), "/")
         cas_name = get_step_filename("solver", config_name)

@@ -150,6 +150,12 @@ class MockTaskRunner:
         print(f"  [MockTaskRunner] 构型{config_name} SW 模拟成功")
         return True
 
+    def disconnect_sw_cached(self):
+        self._sw_executor.disconnect_sw_cached()
+
+    def verify_step_exports(self, step_dir: str) -> int:
+        return self._sw_executor._verify_step_exports(step_dir)
+
     def execute_sc_step(self, config_name: int) -> bool:
         time.sleep(0.1)
         self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
