@@ -32,6 +32,8 @@ class TestPersistentSlot:
         assert slot.slot_id == 1
         assert slot.process is None
         assert slot.pid is None
+        assert slot.spaceclaim_pid is None
+        assert slot.bridge_log_path is None
         assert slot.status == "idle"
         assert slot.current_config is None
         assert slot.configs_processed == 0
@@ -171,6 +173,46 @@ class TestMaxSlots:
             result = pool._get_or_create_persistent_slot()
         assert result is None
 
+    def test_get_slot_balances_ready_slots_and_cleans_dead_idle_slot(
+        self, tmp_path, monkeypatch
+    ):
+        """选择 ready 槽位前应扫描所有槽位，清理死亡空闲进程并均衡复用。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "sc_bridge", "")
+        monkeypatch.setitem(LOCAL_PATHS, "sc_script", "")
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        class _AlivePopen:
+            def poll(self):
+                return None
+
+        class _DeadPopen:
+            def poll(self):
+                return 1
+
+            def kill(self):
+                return None
+
+            def communicate(self, timeout=None):
+                return None
+
+        pool = SCProcessPool()
+        slot1 = PersistentSlot(slot_id=1, status="ready", configs_processed=3)
+        slot1.process = _AlivePopen()
+        slot2 = PersistentSlot(slot_id=2, status="ready", configs_processed=0)
+        slot2.process = _AlivePopen()
+        slot3 = PersistentSlot(slot_id=3, status="ready", configs_processed=0)
+        slot3.process = _DeadPopen()
+        pool._persistent_slots = {1: slot1, 2: slot2, 3: slot3}
+
+        with pool._lock:
+            result = pool._get_or_create_persistent_slot()
+
+        assert result is slot2
+        assert 3 not in pool._persistent_slots
+
 
 # ====================================================================
 # 清理与重置测试
@@ -246,7 +288,12 @@ class TestCleanupAndReset:
         monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
 
         # 创建 IPC 文件
-        for name in ["sc_cmd_1.json", "sc_ready_1.json", "sc_result_1_abc.json"]:
+        for name in [
+            "sc_cmd_1.json",
+            "sc_ready_1.json",
+            "sc_bridge_1.json",
+            "sc_result_1_abc.json",
+        ]:
             filepath = os.path.join(cmd_dir, name)
             with open(filepath, "w") as f:
                 f.write("{}")
@@ -259,4 +306,30 @@ class TestCleanupAndReset:
         # 验证文件被删除
         assert not os.path.exists(os.path.join(cmd_dir, "sc_cmd_1.json"))
         assert not os.path.exists(os.path.join(cmd_dir, "sc_ready_1.json"))
+        assert not os.path.exists(os.path.join(cmd_dir, "sc_bridge_1.json"))
         assert not os.path.exists(os.path.join(cmd_dir, "sc_result_1_abc.json"))
+
+    def test_load_bridge_monitor_info_records_spaceclaim_pid(self, tmp_path, monkeypatch):
+        """读取 Bridge 监控文件后应记录实际 SpaceClaim PID。"""
+        data_dir = str(tmp_path / "data")
+        cmd_dir = os.path.join(data_dir, "sc_ipc")
+        os.makedirs(cmd_dir, exist_ok=True)
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        monitor_file = os.path.join(cmd_dir, "sc_bridge_2.json")
+        with open(monitor_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "slot_id": 2,
+                "bridge_pid": 1234,
+                "spaceclaim_pid": 5678,
+                "status": "launched",
+            }, f)
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=2, cmd_dir=cmd_dir)
+
+        pool._load_bridge_monitor_info(slot)
+
+        assert slot.spaceclaim_pid == 5678

@@ -196,6 +196,8 @@ namespace AutoFluidSimulation.Bridge
             DateTime launchBaseline = DateTime.UtcNow;
 
             string runScriptArg = string.Format("/RunScript=\"{0}\"", o.Script);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (环境变量传参模式)...");
             Console.WriteLine(string.Format("[BRIDGE]   Exe: {0}", scExe));
@@ -216,10 +218,9 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = o.Config;
                 psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = o.StepDir;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = o.ScdocDir;
-                using (Process started = Process.Start(psi))
-                {
-                    // 仅用于触发启动，句柄由 WaitForProcessAppear 重新获取
-                }
+                Process started = Process.Start(psi);
+                workingProcess = ResolveStartedSpaceClaimProcess(
+                    started, launchBaseline, processAppearTimeout);
             }
             catch (Exception ex)
             {
@@ -227,9 +228,6 @@ namespace AutoFluidSimulation.Bridge
                 return (int)ExitCode.LaunchFailed;
             }
 
-            Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
-            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
                 Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] SpaceClaim 进程在 {0}s 内未出现", processAppearTimeout));
@@ -323,6 +321,8 @@ namespace AutoFluidSimulation.Bridge
 
             DateTime launchBaseline = DateTime.UtcNow;
             string runScriptArg = string.Format("/RunScript=\"{0}\"", o.Script);
+            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
+            Process workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (常驻模式)...");
             Console.WriteLine("[BRIDGE]   Exe: " + scExe);
@@ -344,10 +344,9 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
                 psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = o.CmdDir;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = o.SlotId.ToString();
-                using (Process started = Process.Start(psi))
-                {
-                    // 仅用于触发启动，句柄由 WaitForProcessAppear 重新获取
-                }
+                Process started = Process.Start(psi);
+                workingProcess = ResolveStartedSpaceClaimProcess(
+                    started, launchBaseline, processAppearTimeout);
             }
             catch (Exception ex)
             {
@@ -355,9 +354,6 @@ namespace AutoFluidSimulation.Bridge
                 return (int)ExitCode.LaunchFailed;
             }
 
-            Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
-            int processAppearTimeout = GetEnvInt("AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT", 120);
-            Process workingProcess = WaitForProcessAppear(launchBaseline, processAppearTimeout);
             if (workingProcess == null)
             {
                 Console.Error.WriteLine(string.Format("[BRIDGE_ERROR] SpaceClaim 进程在 {0}s 内未出现", processAppearTimeout));
@@ -365,6 +361,7 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine(string.Format("[BRIDGE] SpaceClaim 进程已出现 (PID={0}), 等待 GUI 就绪...", workingProcess.Id));
+            WritePersistentMonitorFile(o, workingProcess.Id, "launched");
             int guiReadyTimeout = GetEnvInt("AUTOFLUID_SC_GUI_READY_TIMEOUT", 30);
             WaitForGuiReady(workingProcess, guiReadyTimeout);
 
@@ -451,6 +448,7 @@ namespace AutoFluidSimulation.Bridge
                         if (workingProcess.HasExited)
                         {
                             Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出，Bridge 退出");
+                            WritePersistentMonitorFile(o, workingProcess.Id, "spaceclaim_exited");
                             break;
                         }
                         // 检测成功 → 重置失败计数器
@@ -489,6 +487,61 @@ namespace AutoFluidSimulation.Bridge
 
             Console.WriteLine("[BRIDGE] 常驻模式退出");
             return exitCode;
+        }
+
+        static Process ResolveStartedSpaceClaimProcess(Process startedProcess, DateTime launchBaseline, int processAppearTimeout)
+        {
+            if (startedProcess != null)
+            {
+                try
+                {
+                    startedProcess.Refresh();
+                    if (!startedProcess.HasExited)
+                    {
+                        Console.WriteLine(string.Format(
+                            "[BRIDGE] 使用 Process.Start 返回的 SpaceClaim 句柄 (PID={0})",
+                            startedProcess.Id));
+                        return startedProcess;
+                    }
+                    Console.WriteLine("[BRIDGE] Process.Start 返回的进程已退出，回退到进程扫描");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        "[BRIDGE] Warning: 检查启动进程句柄失败，回退到进程扫描: " + ex.Message);
+                }
+            }
+
+            Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
+            return WaitForProcessAppear(launchBaseline, processAppearTimeout);
+        }
+
+        static void WritePersistentMonitorFile(BridgeOptions o, int spaceClaimPid, string status)
+        {
+            if (o == null || string.IsNullOrEmpty(o.CmdDir))
+            {
+                return;
+            }
+
+            try
+            {
+                string monitorFile = Path.Combine(o.CmdDir, string.Format("sc_bridge_{0}.json", o.SlotId));
+                int bridgePid = Process.GetCurrentProcess().Id;
+                string json =
+                    "{" +
+                    string.Format("\"slot_id\":{0},", o.SlotId) +
+                    string.Format("\"bridge_pid\":{0},", bridgePid) +
+                    string.Format("\"spaceclaim_pid\":{0},", spaceClaimPid) +
+                    string.Format("\"status\":\"{0}\",", status) +
+                    string.Format("\"timestamp_utc\":\"{0:O}\"", DateTime.UtcNow) +
+                    "}";
+                File.WriteAllText(monitorFile, json);
+                Console.WriteLine("[BRIDGE] 监控信息已写入: " + monitorFile);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine("[BRIDGE] Warning: 写入监控信息失败: " + ex.Message);
+            }
         }
 
         static string FindSpaceClaimExe(string userPath = null)

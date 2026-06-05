@@ -392,6 +392,13 @@ class SWPhaseHandler:
                 if status in (STATUS_COMPLETED, STATUS_ERROR):
                     continue
 
+                if self._is_step_in_flight(cn, step):
+                    logger.debug(
+                        f"[下游扫描] 构型{cn} [{step}] 正在活跃处理中，"
+                        "跳过文件状态同步"
+                    )
+                    break
+
                 # ---- 依赖链检查：仅在上游步骤已完成时才检查下游 ----
                 if step == "transfer" and self.state.get_step_status(cn, "sc") != STATUS_COMPLETED:
                     continue
@@ -414,6 +421,17 @@ class SWPhaseHandler:
             )
         else:
             logger.info("[下游扫描] 所有待执行步骤均无现成输出文件")
+
+    def _is_step_in_flight(self, cn: int, step: str) -> bool:
+        """检查下游步骤是否已有活跃消费者，避免扫描线程抢跑状态。"""
+        if step == "sc" and self.worker_pool_manager is not None:
+            return bool(self.worker_pool_manager.is_sc_in_flight(cn))
+        if step == "transfer" and self.worker_pool_manager is not None:
+            return bool(self.worker_pool_manager.is_transfer_in_flight(cn))
+        if step == "meshing" and self.meshing_monitor is not None:
+            get_in_flight_config = getattr(self.meshing_monitor, "get_in_flight_config", None)
+            return callable(get_in_flight_config) and get_in_flight_config() == cn
+        return False
 
     # ------------------------------------------------------------------
     # SW 重试准备

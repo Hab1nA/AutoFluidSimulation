@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
-from utils.logger import setup_logger
+from utils.logger import get_session_log_dir, setup_logger
 
 logger = setup_logger(__name__)
 
@@ -44,6 +44,8 @@ class PersistentSlot:
     slot_id: int
     process: subprocess.Popen | None = field(default=None, repr=False)
     pid: int | None = None
+    spaceclaim_pid: int | None = None
+    bridge_log_path: str | None = None
     cmd_dir: str = ""
     status: str = "idle"  # idle | starting | ready | busy
     current_config: int | None = None
@@ -204,18 +206,26 @@ class SCProcessPool:
         不会基于已处理构型数主动回收——只要文档关闭逻辑正常工作，
         SpaceClaim 应能无限期稳定运行。
         """
+        ready_slots: list[PersistentSlot] = []
+
         for slot in list(self._persistent_slots.values()):
             if slot.status == "ready":
                 if slot.process is not None and slot.process.poll() is None:
-                    return slot
+                    ready_slots.append(slot)
                 else:
-                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} 进程已死亡，清理并移除")
+                    logger.warning(
+                        f"[SC-Pool] 常驻槽位{slot.slot_id} 进程已死亡，清理并移除 "
+                        f"(Bridge PID={slot.pid}, SpaceClaim PID={slot.spaceclaim_pid})"
+                    )
                     self._cleanup_persistent_slot(slot)
                     # 从字典中移除孤立槽位，防止长期累积
                     self._persistent_slots.pop(slot.slot_id, None)
             elif slot.status == "busy":
                 if slot.process is not None and slot.process.poll() is not None:
-                    logger.warning(f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理并重新启动")
+                    logger.warning(
+                        f"[SC-Pool] 常驻槽位{slot.slot_id} busy 但进程已死亡，清理并重新启动 "
+                        f"(Bridge PID={slot.pid}, SpaceClaim PID={slot.spaceclaim_pid})"
+                    )
                     self._cleanup_persistent_slot(slot)
                     # ★ 重新启动进程：不能直接返回已清理的空槽位，
                     #    否则后续 _send_persistent_command 会在无进程的情况下
@@ -226,6 +236,16 @@ class SCProcessPool:
                     else:
                         # 启动失败，移除槽位，让后续逻辑创建新槽位
                         self._persistent_slots.pop(slot.slot_id, None)
+
+        if ready_slots:
+            return min(
+                ready_slots,
+                key=lambda s: (
+                    s.configs_processed,
+                    s.started_at if s.started_at is not None else 0.0,
+                    s.slot_id,
+                ),
+            )
 
         active_slots = sum(
             1 for s in self._persistent_slots.values()
@@ -297,10 +317,14 @@ class SCProcessPool:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=creation_flags, env=sc_env,
-            )
+            bridge_log_path = self._build_bridge_log_path(slot.slot_id)
+            slot.bridge_log_path = bridge_log_path
+            logger.info(f"[SC-Pool] Bridge stdout/stderr 日志: {bridge_log_path}")
+            with open(bridge_log_path, "a", encoding="utf-8", errors="replace") as log_file:
+                process = subprocess.Popen(
+                    cmd, stdout=log_file, stderr=subprocess.STDOUT,
+                    creationflags=creation_flags, env=sc_env,
+                )
             slot.process = process
             slot.pid = process.pid
             slot.started_at = time.time()
@@ -341,6 +365,7 @@ class SCProcessPool:
             if os.path.exists(ready_file):
                 logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
                 with self._lock:
+                    self._load_bridge_monitor_info(slot)
                     slot.status = "ready"
                 return True
             time.sleep(2)
@@ -545,6 +570,46 @@ class SCProcessPool:
             except OSError:
                 pass
 
+    def _build_bridge_log_path(self, slot_id: int) -> str:
+        """构建 Bridge stdout/stderr 捕获日志路径。"""
+        base_log_dir = get_session_log_dir() or LOCAL_PATHS.get("log_dir", "logs")
+        bridge_log_dir = os.path.join(base_log_dir, "bridge")
+        os.makedirs(bridge_log_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        return os.path.join(
+            bridge_log_dir,
+            f"spaceclaim_bridge_slot{slot_id}_{timestamp}.log",
+        )
+
+    def _load_bridge_monitor_info(self, slot: PersistentSlot) -> None:
+        """读取 Bridge 写出的实际 SpaceClaim 监控 PID。"""
+        monitor_file = os.path.join(
+            self._persistent_cmd_dir,
+            f"sc_bridge_{slot.slot_id}.json",
+        )
+        if not os.path.exists(monitor_file):
+            logger.warning(
+                f"[SC-Pool] 常驻槽位{slot.slot_id} 未找到 Bridge 监控信息文件"
+            )
+            return
+
+        try:
+            with open(monitor_file, encoding="utf-8") as f:
+                data = json.load(f)
+            spaceclaim_pid = data.get("spaceclaim_pid")
+            if isinstance(spaceclaim_pid, int):
+                slot.spaceclaim_pid = spaceclaim_pid
+            bridge_pid = data.get("bridge_pid")
+            status = data.get("status", "")
+            logger.info(
+                f"[SC-Pool] 常驻槽位{slot.slot_id} 监控 SpaceClaim PID="
+                f"{slot.spaceclaim_pid} (Bridge PID={bridge_pid}, status={status})"
+            )
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(
+                f"[SC-Pool] 读取槽位{slot.slot_id} Bridge 监控信息失败: {e}"
+            )
+
     def _cleanup_ipc_files(self, slot_id: int) -> None:
         """清理槽位相关的所有 IPC 文件（命令、结果、就绪标志）。
 
@@ -555,7 +620,8 @@ class SCProcessPool:
         for suffix in [f"sc_cmd_{slot_id}.json",
                        f"sc_result_{slot_id}.json",
                        f"sc_result_{slot_id}.json.tmp",
-                       f"sc_ready_{slot_id}.json"]:
+                       f"sc_ready_{slot_id}.json",
+                       f"sc_bridge_{slot_id}.json"]:
             path = os.path.join(self._persistent_cmd_dir, suffix)
             try:
                 if os.path.exists(path):
@@ -585,8 +651,9 @@ class SCProcessPool:
                 slot.process.communicate(timeout=5)
             except (subprocess.TimeoutExpired, ProcessLookupError):
                 pass
-            slot.process = None
+        slot.process = None
         slot.pid = None
+        slot.spaceclaim_pid = None
         slot.status = "idle"
         slot.current_config = None
         slot.configs_processed = 0  # ★ 重置构型计数
@@ -612,6 +679,7 @@ class SCProcessPool:
                 pass
         slot.process = None
         slot.pid = None
+        slot.spaceclaim_pid = None
         slot.status = "idle"
         self._cleanup_ipc_files(slot.slot_id)
 
@@ -630,6 +698,8 @@ class SCProcessPool:
                 "slots": {
                     sid: {"slot_id": s.slot_id, "status": s.status,
                           "pid": s.pid, "current_config": s.current_config,
+                          "spaceclaim_pid": s.spaceclaim_pid,
+                          "bridge_log_path": s.bridge_log_path,
                           "configs_processed": s.configs_processed}
                     for sid, s in self._persistent_slots.items()
                 },

@@ -92,6 +92,7 @@ class WorkerPoolManager:
         self._queue_report_lock = threading.Lock()
         self._last_queue_report = time.time()
         self._queue_report_interval = 30.0
+        self._waiting_sc_seen_at: dict[int, float] = {}
 
         logger.info("工作线程池管理器初始化完成（SC/Transfer 解耦架构）")
 
@@ -245,9 +246,22 @@ class WorkerPoolManager:
                 if self.state.get_step_status(cn, "sc") == STATUS_WAITING
                 and self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
             ]
+            waiting_set = set(waiting_configs)
+            for cn in list(self._waiting_sc_seen_at):
+                if cn not in waiting_set:
+                    self._waiting_sc_seen_at.pop(cn, None)
+
             if waiting_configs:
                 for cn in waiting_configs:
-                    logger.warning(f"[队列异常] 构型{cn} SW 已完成但未入队")
+                    first_seen = self._waiting_sc_seen_at.setdefault(cn, now)
+                    if now - first_seen >= self._queue_report_interval:
+                        logger.warning(f"[队列异常] 构型{cn} SW 已完成但未入队")
+                    else:
+                        logger.debug(
+                            f"[队列健康] 构型{cn} SW 已完成，等待 SC 入队确认"
+                        )
+        else:
+            self._waiting_sc_seen_at.clear()
 
         # SC 全部完成检测：当 SC 队列为空且所有构型 SC/SW 均已终结时，
         # 触发 SC 进程清理（不再等待 Meshing 全局屏障）。

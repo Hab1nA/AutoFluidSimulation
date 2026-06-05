@@ -35,7 +35,7 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_COMPLETED,
     STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
+    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
 
@@ -412,6 +412,58 @@ class TestInFlightProtection:
             f"Transfer 队列深度不应增加: 之前={prev_depth}, 当前="
             f"{s.worker_pool._transfer_queue.qsize()}"
         )
+
+    def test_downstream_scan_skips_active_sc_even_when_scdoc_exists(self):
+        """活跃 SC 已产出 SCDOC 时，下游扫描不应抢先标记完成并提交 Transfer。"""
+        s = self.ctx.scheduler
+        st = self.ctx.state
+
+        for cn in st.get_all_configs():
+            st.set_step_status(cn, "sw", STATUS_COMPLETED)
+
+        scdoc_name = get_step_filename("sc", 2)
+        assert scdoc_name is not None
+        scdoc_path = os.path.join(self.ctx.tmp_scdoc_dir, scdoc_name)
+        with open(scdoc_path, "wb") as f:
+            f.write(b"scdoc-ready-but-worker-still-running")
+
+        st.set_step_status(2, "sc", STATUS_RUNNING)
+        assert s._sc_queue.submit((2, os.path.join(self.ctx.tmp_step_dir, "model_gen4_2.STEP")))
+
+        s.sw_phase_handler.scan_completed_downstream()
+
+        self.ctx.assert_step_status(2, "sc", STATUS_RUNNING,
+                                     "活跃 SC 不应被下游扫描抢先标记完成")
+        assert not s.worker_pool.is_transfer_in_flight(2), (
+            "Transfer 应等待 SC Worker 正常完成后再提交"
+        )
+
+    def test_queue_health_waits_before_warning_for_newly_completed_sw(self, monkeypatch):
+        """刚完成 SW 但尚未入队的构型只记录观察期，不立即报队列异常。"""
+        from engine.scheduler import worker_pool as worker_pool_module
+
+        s = self.ctx.scheduler
+        st = self.ctx.state
+        warnings: list[str] = []
+
+        for cn in st.get_all_configs():
+            st.set_step_status(cn, "sw", STATUS_COMPLETED)
+            if cn != 1:
+                st.set_step_status(cn, "sc", STATUS_COMPLETED)
+
+        monkeypatch.setattr(worker_pool_module.logger, "warning", warnings.append)
+        s.worker_pool._last_queue_report = 0.0
+
+        s.worker_pool._report_queue_health_if_due(100.0)
+
+        assert warnings == []
+        assert s.worker_pool._waiting_sc_seen_at[1] == 100.0
+
+        s.worker_pool._report_queue_health_if_due(
+            100.0 + s.worker_pool._queue_report_interval + 0.1
+        )
+
+        assert any("构型1 SW 已完成但未入队" in msg for msg in warnings)
 
 
 # ====================================================================
