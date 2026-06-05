@@ -414,9 +414,7 @@ fn build_edit_spans(
     let len = chars.len();
     let mut spans: Vec<Span<'static>> = Vec::new();
 
-    #[allow(clippy::needless_range_loop)] // i 用于 cursor/selection 比较，迭代器不更清晰
-    for i in 0..len {
-        let ch = chars[i];
+    for (i, ch) in chars.iter().copied().enumerate() {
         let style = if i == cursor {
             cursor_style
         } else if let Some((s, e)) = sel {

@@ -358,7 +358,7 @@ fn handle_command_result_refs(
                             "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
                             pid
                         ));
-                        DaemonManager::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
+                        DaemonManager::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
                     }
                     Err(e) => {
                         log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));

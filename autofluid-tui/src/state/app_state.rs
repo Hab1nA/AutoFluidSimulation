@@ -215,42 +215,29 @@ impl AppState {
         let btn_timeout = Duration::from_millis(120);
         let detail_timeout = Duration::from_millis(20);
 
-        if let Some(ct) = self.click_time {
-            if self.clicked_button.is_some() && ct.elapsed() > btn_timeout {
-                self.clicked_button = None;
-                self.click_time = None;
-                self.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = self.daemon_menu_click_time {
-            if self.clicked_daemon_menu_item.is_some() && ct.elapsed() > btn_timeout {
-                self.clicked_daemon_menu_item = None;
-                self.daemon_menu_click_time = None;
-                self.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = self.dialog_click_time {
-            if self.clicked_dialog_button.is_some() && ct.elapsed() > btn_timeout {
-                self.clicked_dialog_button = None;
-                self.dialog_click_time = None;
-                self.needs_redraw = true;
-            }
-        }
-        if let Some(ct) = self.detail_click_time {
-            if self.clicked_detail_row.is_some() && ct.elapsed() > detail_timeout {
-                self.clicked_detail_row = None;
-                self.detail_click_time = None;
-                self.needs_redraw = true;
-            }
-        }
+        self.needs_redraw |=
+            expire_click(&mut self.click_time, &mut self.clicked_button, btn_timeout);
+        self.needs_redraw |= expire_click(
+            &mut self.daemon_menu_click_time,
+            &mut self.clicked_daemon_menu_item,
+            btn_timeout,
+        );
+        self.needs_redraw |= expire_click(
+            &mut self.dialog_click_time,
+            &mut self.clicked_dialog_button,
+            btn_timeout,
+        );
+        self.needs_redraw |= expire_click(
+            &mut self.detail_click_time,
+            &mut self.clicked_detail_row,
+            detail_timeout,
+        );
         if let Some(ref mut ss) = self.settings_state {
-            if let Some(ct) = ss.field_click_time {
-                if ss.clicked_field.is_some() && ct.elapsed() > detail_timeout {
-                    ss.clicked_field = None;
-                    ss.field_click_time = None;
-                    self.needs_redraw = true;
-                }
-            }
+            self.needs_redraw |= expire_click(
+                &mut ss.field_click_time,
+                &mut ss.clicked_field,
+                detail_timeout,
+            );
         }
     }
 
@@ -407,4 +394,19 @@ impl AppState {
         self.ui_mode = UiMode::Normal;
         self.needs_redraw = true;
     }
+}
+
+fn expire_click<T>(
+    click_time: &mut Option<std::time::Instant>,
+    clicked: &mut Option<T>,
+    timeout: Duration,
+) -> bool {
+    if let Some(ct) = *click_time {
+        if clicked.is_some() && ct.elapsed() > timeout {
+            *clicked = None;
+            *click_time = None;
+            return true;
+        }
+    }
+    false
 }

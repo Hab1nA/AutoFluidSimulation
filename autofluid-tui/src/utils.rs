@@ -51,8 +51,11 @@ pub fn pad_label_by_display_width(label: &str, target_width: u16) -> String {
 /// 支持的占位符：%Y（年）、%m（月）、%d（日）、%H（时）、%M（分）、%S（秒）。
 /// 替代 chrono crate 以减少依赖。
 pub fn format_local_time(fmt: &str) -> String {
-    let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = unsafe { std::mem::zeroed() };
-    unsafe { windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st) };
+    let mut st = std::mem::MaybeUninit::<windows_sys::Win32::Foundation::SYSTEMTIME>::uninit();
+    let st = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetLocalTime(st.as_mut_ptr());
+        st.assume_init()
+    };
     fmt.replace("%Y", &format!("{:04}", st.wYear))
         .replace("%m", &format!("{:02}", st.wMonth))
         .replace("%d", &format!("{:02}", st.wDay))

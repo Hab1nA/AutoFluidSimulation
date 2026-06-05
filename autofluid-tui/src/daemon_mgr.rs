@@ -148,7 +148,7 @@ impl DaemonManager {
     // ------------------------------------------------------------------
 
     /// 后台引擎启动后重连 IPC，阻塞等待至超时。
-    pub fn reconnect_ipc_after_launch(
+    pub fn reconnect_ipc_after_launch_sync(
         rt: &tokio::runtime::Runtime,
         ipc: &mut IpcClient,
         state: &mut AppState,
@@ -223,7 +223,7 @@ impl DaemonManager {
                     "⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...",
                     pid
                 ));
-                Self::reconnect_ipc_after_launch(rt, ipc, state, log_buffer);
+                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
             }
             Err(e) => {
                 log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));

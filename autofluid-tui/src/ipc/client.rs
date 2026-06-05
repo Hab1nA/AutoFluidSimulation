@@ -87,11 +87,15 @@ impl IpcClient {
             Some(s) => s,
             None => {
                 log::warn!(
-                    "[IPC] 请求未发送: command={}, request_id={}, reason=未连接",
+                    "[IPC] 请求暂未发送: command={}, request_id={}, reason=未连接，尝试重连",
                     request.command,
                     request.request_id
                 );
-                return Err("未连接".to_string());
+                self.auto_reconnect("请求前未连接").await;
+                match self.stream.take() {
+                    Some(s) => s,
+                    None => return Err("未连接".to_string()),
+                }
             }
         };
 
@@ -138,15 +142,17 @@ impl IpcClient {
 
         match read_result {
             Ok(Ok(true)) => {
-                // 正常读取成功：从 reader 取回 stream 归还
-                let stream = reader.into_inner();
-                self.stream = Some(stream);
                 match IpcResponse::deserialize(&buffer) {
                     Some(resp) => {
+                        // 正常读取成功：从 reader 取回 stream 归还
+                        let stream = reader.into_inner();
+                        self.stream = Some(stream);
                         log_request_finish(request, &resp, started_at.elapsed());
                         Ok(resp)
                     }
                     None => {
+                        // 响应格式异常时丢弃当前连接，避免下一次请求复用已脱序的流。
+                        drop(reader);
                         self.auto_reconnect("响应解析失败").await;
                         log::warn!(
                             "[IPC] 响应解析失败: command={}, request_id={}, elapsed_ms={}",
