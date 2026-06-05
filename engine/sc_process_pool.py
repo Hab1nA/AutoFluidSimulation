@@ -314,6 +314,9 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_GUI_STABLE_DELAY"] = str(
             OPERATION_TIMEOUTS.get("sc_gui_stable_delay", 15)
         )
+        sc_env["AUTOFLUID_SC_PERSISTENT_READY_TIMEOUT"] = str(
+            ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)
+        )
 
         logger.info(f"[SC-Pool] 启动常驻 Bridge: 槽位{slot.slot_id}")
         logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
