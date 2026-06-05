@@ -210,8 +210,13 @@ class StateManager:
                         logger.debug(f"[State] 更新构型{config_name}: 参数 = {params}")
 
                 conn.executemany("""
-                    INSERT OR REPLACE INTO configs (config_name, param1, param2, param3, param4)
+                    INSERT INTO configs (config_name, param1, param2, param3, param4)
                     VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(config_name) DO UPDATE SET
+                        param1 = excluded.param1,
+                        param2 = excluded.param2,
+                        param3 = excluded.param3,
+                        param4 = excluded.param4
                 """, config_rows)
 
                 if new_step_rows:
@@ -319,10 +324,16 @@ class StateManager:
         """增加重试计数并返回当前值。"""
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     "UPDATE steps SET retry_count = retry_count + 1 WHERE config_name = ? AND step_name = ?",
                     (config_name, step_name)
                 )
+                if cursor.rowcount == 0:
+                    logger.warning(
+                        "[State] increment_retry: 构型%s 步骤%s 记录不存在",
+                        config_name,
+                        step_name,
+                    )
                 row = conn.execute(
                     "SELECT retry_count FROM steps WHERE config_name = ? AND step_name = ?",
                     (config_name, step_name)

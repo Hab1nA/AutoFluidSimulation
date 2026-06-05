@@ -161,6 +161,46 @@ class TestBuildMeshingCommand:
         assert '--working-dir "D:\\working"' in command
         assert "--processor-count 4" in command
 
+    def test_command_quotes_spaces_and_escapes_percent(self, monkeypatch):
+        """路径参数按 cmd 脚本语义转义，避免空格和百分号破坏命令。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\Program Files\conda%ROOT%\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\Auto Fluid\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\Auto Fluid\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 4)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_meshing_command(1)
+
+        assert '"C:\\Program Files\\conda%%ROOT%%\\conda.exe"' in command
+        assert '"D:\\Auto Fluid\\scripts/meshing_gen4.jou"' in command
+        assert '--working-dir "D:\\Auto Fluid\\work%%ROOT%%"' in command
+
+    def test_invalid_command_path_returns_false(self, monkeypatch):
+        """非法命令参数不会继续发往 SSH 后台任务。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r'D:\bad"path')
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 4)
+
+        class _SSH:
+            def exec_background(self, *args, **kwargs):
+                raise AssertionError("invalid command should not reach SSH")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+
+        assert executor._run_meshing_command(1) is False
+
     def test_invalid_meshing_processor_count_falls_back_to_default(self, monkeypatch):
         """无效 Meshing 核心数配置回退到保守默认值。"""
         monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
@@ -236,6 +276,26 @@ class TestBuildSolverCommand:
         command, _ = executor._build_solver_command(3)
 
         assert "--processor-count 64" in command
+
+    def test_solver_command_quotes_spaces_and_escapes_percent(self, monkeypatch):
+        """Solver 路径参数按 cmd 脚本语义转义。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\Program Files\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\Auto Fluid\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\Auto Fluid\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 64)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_iteration_count", 500)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_solver_command(3)
+
+        assert '"C:\\Program Files\\conda.exe"' in command
+        assert '--working-dir "D:\\Auto Fluid\\work%%ROOT%%"' in command
+        assert '--working-dir-t "D:\\Auto Fluid\\work%%ROOT%%/animation-t"' in command
 
     def test_invalid_solver_processor_count_falls_back_to_default(self, monkeypatch):
         """无效 Solver 核心数配置回退到默认值。"""

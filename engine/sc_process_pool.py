@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 SpaceClaim 进程池 — 常驻模式实现。
 
@@ -17,6 +15,7 @@ SpaceClaim 进程在处理完一个构型后不退出，等待下一个构型命
   就绪: {cmd_dir}/sc_ready_{slot_id}.json            -> {"ready":true,"slot_id":0}
   退出: sc_cmd_{slot_id}.json                        -> {"command":"quit"}
 """
+from __future__ import annotations
 
 import json
 import os

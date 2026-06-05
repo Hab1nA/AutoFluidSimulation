@@ -297,6 +297,13 @@ class TestRetryCount:
         with _TmpDB() as sm:
             assert sm.get_step_retry_count(999, "sw") == 0
 
+    def test_increment_nonexistent_step_logs_warning(self, caplog):
+        """缺失步骤记录仍保持旧返回值，但要暴露数据不一致信号。"""
+        caplog.set_level("WARNING")
+        with _TmpDB() as sm:
+            assert sm.increment_retry(999, "sw") == 0
+        assert "increment_retry: 构型999 步骤sw 记录不存在" in caplog.text
+
 
 # ====================================================================
 # set_meshing_running_if_idle 测试

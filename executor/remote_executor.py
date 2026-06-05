@@ -30,6 +30,19 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+
+def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
+    """Return a cmd.exe-safe argument for the generated remote batch script."""
+    text = str(value)
+    if any(ch in text for ch in ('"', "\r", "\n")):
+        raise ValueError(f"远程命令参数包含非法字符: {text!r}")
+    escaped = text.replace("%", "%%")
+    needs_quote = force_quote or not escaped or any(
+        ch.isspace() or ch in "&()[]{}^=;!'+,`~|<>"
+        for ch in escaped
+    )
+    return f'"{escaped}"' if needs_quote else escaped
+
 # 远程脚本文件列表（部署到 scripts_dir）
 REMOTE_SCRIPT_FILES = [
     "batch_meshing_gen4.py",
@@ -308,17 +321,31 @@ class RemoteExecutor:
         processor_count = self._meshing_processor_count()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
-        command = (
-            f'"{conda_exe}" run --no-capture-output -n {conda_env} '
-            f'python -u "{scripts_dir}/batch_meshing_gen4.py" {config_name}'
-            f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
-            f' --workflow-path "{scripts_dir}/meshing_gen4.wft"'
-            f' --journal-path "{scripts_dir}/meshing_gen4.jou"'
-            f' --scdoc-dir "{REMOTE_CONFIG["scdoc_dir"]}"'
-            f' --output-dir "{REMOTE_CONFIG["msh_dir"]}"'
-            f' --working-dir "{REMOTE_CONFIG["working_dir"]}"'
-            f' --processor-count {processor_count}'
-        )
+        command = " ".join([
+            _cmd_arg(conda_exe, force_quote=True),
+            "run",
+            "--no-capture-output",
+            "-n",
+            _cmd_arg(conda_env),
+            "python",
+            "-u",
+            _cmd_arg(f"{scripts_dir}/batch_meshing_gen4.py", force_quote=True),
+            str(config_name),
+            "--mpi-bin-dir",
+            _cmd_arg(REMOTE_CONFIG["mpi_bin_dir"], force_quote=True),
+            "--workflow-path",
+            _cmd_arg(f"{scripts_dir}/meshing_gen4.wft", force_quote=True),
+            "--journal-path",
+            _cmd_arg(f"{scripts_dir}/meshing_gen4.jou", force_quote=True),
+            "--scdoc-dir",
+            _cmd_arg(REMOTE_CONFIG["scdoc_dir"], force_quote=True),
+            "--output-dir",
+            _cmd_arg(REMOTE_CONFIG["msh_dir"], force_quote=True),
+            "--working-dir",
+            _cmd_arg(REMOTE_CONFIG["working_dir"], force_quote=True),
+            "--processor-count",
+            str(processor_count),
+        ])
         return command, flag_file
 
     def _run_meshing_command(self, config_name: int, log_prefix: str = "[Meshing]") -> bool:
@@ -338,7 +365,11 @@ class RemoteExecutor:
             logger.error(f"{log_prefix} 远程脚本同步失败，无法启动网格划分")
             return False
 
-        command, flag_file = self._build_meshing_command(config_name)
+        try:
+            command, flag_file = self._build_meshing_command(config_name)
+        except ValueError as e:
+            logger.error(f"{log_prefix} 远程网格划分命令构建失败: {e}")
+            return False
 
         logger.info(f"{log_prefix} 启动远程网格划分: 构型{config_name}")
         logger.debug(f"{log_prefix} 远程命令: {command}")
@@ -504,21 +535,39 @@ class RemoteExecutor:
         anim_dir = os.path.normpath(
             os.path.join(str(REMOTE_CONFIG["working_dir"]), "..", "animation")
         )
-        command = (
-            f'"{conda_exe}" run --no-capture-output -n {conda_env} '
-            f'python -u "{scripts_dir}/batch_solver_gen4.py" {config_name}'
-            f' --mpi-bin-dir "{REMOTE_CONFIG["mpi_bin_dir"]}"'
-            f' --journal-path "{scripts_dir}/solver_gen4.jou"'
-            f' --post-journal-path "{scripts_dir}/solver_post_gen4.jou"'
-            f' --msh-dir "{REMOTE_CONFIG["msh_dir"]}"'
-            f' --output-dir "{REMOTE_CONFIG["result_dir"]}"'
-            f' --anim-dir "{anim_dir}"'
-            f' --working-dir "{REMOTE_CONFIG["working_dir"]}"'
-            f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
-            f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
-            f' --processor-count {processor_count}'
-            f' --iterate-count {iteration_count}'
-        )
+        command = " ".join([
+            _cmd_arg(conda_exe, force_quote=True),
+            "run",
+            "--no-capture-output",
+            "-n",
+            _cmd_arg(conda_env),
+            "python",
+            "-u",
+            _cmd_arg(f"{scripts_dir}/batch_solver_gen4.py", force_quote=True),
+            str(config_name),
+            "--mpi-bin-dir",
+            _cmd_arg(REMOTE_CONFIG["mpi_bin_dir"], force_quote=True),
+            "--journal-path",
+            _cmd_arg(f"{scripts_dir}/solver_gen4.jou", force_quote=True),
+            "--post-journal-path",
+            _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
+            "--msh-dir",
+            _cmd_arg(REMOTE_CONFIG["msh_dir"], force_quote=True),
+            "--output-dir",
+            _cmd_arg(REMOTE_CONFIG["result_dir"], force_quote=True),
+            "--anim-dir",
+            _cmd_arg(anim_dir, force_quote=True),
+            "--working-dir",
+            _cmd_arg(REMOTE_CONFIG["working_dir"], force_quote=True),
+            "--working-dir-t",
+            _cmd_arg(f"{REMOTE_CONFIG['working_dir']}/animation-t", force_quote=True),
+            "--working-dir-v",
+            _cmd_arg(f"{REMOTE_CONFIG['working_dir']}/animation-v", force_quote=True),
+            "--processor-count",
+            str(processor_count),
+            "--iterate-count",
+            str(iteration_count),
+        ])
         return command, flag_file
 
     def execute_solver(self, config_name: int) -> bool:
@@ -537,7 +586,11 @@ class RemoteExecutor:
             logger.error("[Solver] 远程脚本同步失败，无法启动仿真求解")
             return False
 
-        command, flag_file = self._build_solver_command(config_name)
+        try:
+            command, flag_file = self._build_solver_command(config_name)
+        except ValueError as e:
+            logger.error(f"[Solver] 远程求解命令构建失败: {e}")
+            return False
 
         logger.info(f"[Solver] 启动远程仿真求解: 构型{config_name}")
         logger.debug(f"[Solver] 远程命令: {command}")

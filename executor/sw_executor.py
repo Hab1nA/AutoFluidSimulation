@@ -313,10 +313,13 @@ class SWExecutor:
         """
         # ★ CoInitialize 仅在首次调用时执行（同一线程内幂等）
         if not self._com_initialized:
-            import pythoncom
             try:
+                import pythoncom
                 pythoncom.CoInitialize()
                 self._com_initialized = True
+            except ImportError:
+                logger.error("[SW] pywin32 未安装，无法初始化 COM")
+                return False
             except Exception:
                 pass  # 已初始化
 
