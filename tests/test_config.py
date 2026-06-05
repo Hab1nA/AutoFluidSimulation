@@ -726,6 +726,7 @@ class TestConfigDictCompleteness:
         "watchdog_interval", "sw_macro_timeout", "max_retries",
         "sc_timeout", "transfer_timeout", "meshing_timeout",
         "meshing_processor_count", "solver_timeout", "solver_processor_count",
+        "solver_iteration_count",
     }
 
     def test_remote_config_keys(self):

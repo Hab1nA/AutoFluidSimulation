@@ -133,15 +133,41 @@ impl Default for SpaceClaimConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshingConfig {
+    pub meshing_timeout: u64,
+    pub meshing_processor_count: u32,
+}
+
+impl Default for MeshingConfig {
+    fn default() -> Self {
+        Self {
+            meshing_timeout: 600,
+            meshing_processor_count: 8,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolverConfig {
+    pub solver_timeout: u64,
+    pub solver_processor_count: u32,
+    pub solver_iteration_count: u32,
+}
+
+impl Default for SolverConfig {
+    fn default() -> Self {
+        Self {
+            solver_timeout: 7200,
+            solver_processor_count: 128,
+            solver_iteration_count: 1000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSettings {
     pub watchdog_interval: f64,
     pub transfer_timeout: u64,
-    pub meshing_timeout: u64,
-    #[serde(default = "default_meshing_processor_count")]
-    pub meshing_processor_count: u32,
-    pub solver_timeout: u64,
-    #[serde(default = "default_solver_processor_count")]
-    pub solver_processor_count: u32,
     pub max_retries: u32,
     pub state_refresh_interval: f64,
     pub ssh_connection: u64,
@@ -149,23 +175,11 @@ pub struct GlobalSettings {
     pub ssh_upload_max_retries: u32,
 }
 
-fn default_meshing_processor_count() -> u32 {
-    8
-}
-
-fn default_solver_processor_count() -> u32 {
-    128
-}
-
 impl Default for GlobalSettings {
     fn default() -> Self {
         Self {
             watchdog_interval: 1.0,
             transfer_timeout: 120,
-            meshing_timeout: 600,
-            meshing_processor_count: 8,
-            solver_timeout: 7200,
-            solver_processor_count: 128,
             max_retries: 3,
             state_refresh_interval: 0.5,
             ssh_connection: 10,
@@ -188,6 +202,10 @@ pub struct SettingsConfig {
     #[serde(default)]
     pub spaceclaim: SpaceClaimConfig,
     #[serde(default)]
+    pub meshing: MeshingConfig,
+    #[serde(default)]
+    pub solver: SolverConfig,
+    #[serde(default)]
     pub global_settings: GlobalSettings,
 }
 
@@ -199,17 +217,21 @@ pub enum SettingCategory {
     StepPatterns,
     SolidWorks,
     SpaceClaim,
+    Meshing,
+    Solver,
     GlobalSettings,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 7] = [
+    pub const ALL: [SettingCategory; 9] = [
         SettingCategory::LocalPaths,
         SettingCategory::RemoteConnection,
         SettingCategory::RemoteDirs,
         SettingCategory::StepPatterns,
         SettingCategory::SolidWorks,
         SettingCategory::SpaceClaim,
+        SettingCategory::Meshing,
+        SettingCategory::Solver,
         SettingCategory::GlobalSettings,
     ];
 
@@ -221,6 +243,8 @@ impl SettingCategory {
             SettingCategory::StepPatterns => "步骤文件模板",
             SettingCategory::SolidWorks => "SolidWorks",
             SettingCategory::SpaceClaim => "SpaceClaim",
+            SettingCategory::Meshing => "网格划分",
+            SettingCategory::Solver => "仿真求解",
             SettingCategory::GlobalSettings => "全局设置",
         }
     }
@@ -233,7 +257,9 @@ impl SettingCategory {
             SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 7,
             SettingCategory::SpaceClaim => 5,
-            SettingCategory::GlobalSettings => 11,
+            SettingCategory::Meshing => 2,
+            SettingCategory::Solver => 3,
+            SettingCategory::GlobalSettings => 7,
         }
     }
 
@@ -312,18 +338,31 @@ impl SettingCategory {
                     ""
                 }
             },
+            SettingCategory::Meshing => match idx {
+                0 => "meshing_timeout",
+                1 => "meshing_processor_count",
+                _ => {
+                    debug_assert!(false, "Meshing: invalid field index {idx}");
+                    ""
+                }
+            },
+            SettingCategory::Solver => match idx {
+                0 => "solver_timeout",
+                1 => "solver_processor_count",
+                2 => "solver_iteration_count",
+                _ => {
+                    debug_assert!(false, "Solver: invalid field index {idx}");
+                    ""
+                }
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => "watchdog_interval",
                 1 => "transfer_timeout",
-                2 => "meshing_timeout",
-                3 => "meshing_processor_count",
-                4 => "solver_timeout",
-                5 => "solver_processor_count",
-                6 => "max_retries",
-                7 => "state_refresh_interval",
-                8 => "ssh_connection",
-                9 => "dir_recursion_limit",
-                10 => "ssh_upload_max_retries",
+                2 => "max_retries",
+                3 => "state_refresh_interval",
+                4 => "ssh_connection",
+                5 => "dir_recursion_limit",
+                6 => "ssh_upload_max_retries",
                 _ => {
                     debug_assert!(false, "GlobalSettings: invalid field index {idx}");
                     ""
@@ -407,18 +446,31 @@ impl SettingCategory {
                     ""
                 }
             },
+            SettingCategory::Meshing => match idx {
+                0 => "网格超时(秒)",
+                1 => "网格核心数",
+                _ => {
+                    debug_assert!(false, "Meshing: invalid field index {idx}");
+                    ""
+                }
+            },
+            SettingCategory::Solver => match idx {
+                0 => "求解超时(秒)",
+                1 => "求解核心数",
+                2 => "求解迭代次数",
+                _ => {
+                    debug_assert!(false, "Solver: invalid field index {idx}");
+                    ""
+                }
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => "看门狗间隔(秒)",
                 1 => "传输超时(秒)",
-                2 => "网格超时(秒)",
-                3 => "网格核心数",
-                4 => "求解超时(秒)",
-                5 => "求解核心数",
-                6 => "最大重试",
-                7 => "状态刷新间隔(秒)",
-                8 => "SSH连接超时(秒)",
-                9 => "目录递归深度限制",
-                10 => "SSH上传最大重试",
+                2 => "最大重试",
+                3 => "状态刷新间隔(秒)",
+                4 => "SSH连接超时(秒)",
+                5 => "目录递归深度限制",
+                6 => "SSH上传最大重试",
                 _ => {
                     debug_assert!(false, "GlobalSettings: invalid field index {idx}");
                     ""
@@ -445,6 +497,8 @@ impl SettingCategory {
             SettingCategory::StepPatterns => format!("step_file_patterns.{}", self.field_name(idx)),
             SettingCategory::SolidWorks => format!("solidworks.{}", self.field_name(idx)),
             SettingCategory::SpaceClaim => format!("spaceclaim.{}", self.field_name(idx)),
+            SettingCategory::Meshing => format!("meshing.{}", self.field_name(idx)),
+            SettingCategory::Solver => format!("solver.{}", self.field_name(idx)),
             SettingCategory::GlobalSettings => format!("global_settings.{}", self.field_name(idx)),
         }
     }
@@ -600,18 +654,25 @@ impl SettingsState {
                 4 => field_val!(self.config.spaceclaim, sc_gui_stable_delay),
                 _ => String::new(),
             },
+            SettingCategory::Meshing => match idx {
+                0 => field_val!(self.config.meshing, meshing_timeout),
+                1 => field_val!(self.config.meshing, meshing_processor_count),
+                _ => String::new(),
+            },
+            SettingCategory::Solver => match idx {
+                0 => field_val!(self.config.solver, solver_timeout),
+                1 => field_val!(self.config.solver, solver_processor_count),
+                2 => field_val!(self.config.solver, solver_iteration_count),
+                _ => String::new(),
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => field_val!(self.config.global_settings, watchdog_interval),
                 1 => field_val!(self.config.global_settings, transfer_timeout),
-                2 => field_val!(self.config.global_settings, meshing_timeout),
-                3 => field_val!(self.config.global_settings, meshing_processor_count),
-                4 => field_val!(self.config.global_settings, solver_timeout),
-                5 => field_val!(self.config.global_settings, solver_processor_count),
-                6 => field_val!(self.config.global_settings, max_retries),
-                7 => field_val!(self.config.global_settings, state_refresh_interval),
-                8 => field_val!(self.config.global_settings, ssh_connection),
-                9 => field_val!(self.config.global_settings, dir_recursion_limit),
-                10 => field_val!(self.config.global_settings, ssh_upload_max_retries),
+                2 => field_val!(self.config.global_settings, max_retries),
+                3 => field_val!(self.config.global_settings, state_refresh_interval),
+                4 => field_val!(self.config.global_settings, ssh_connection),
+                5 => field_val!(self.config.global_settings, dir_recursion_limit),
+                6 => field_val!(self.config.global_settings, ssh_upload_max_retries),
                 _ => String::new(),
             },
         }
@@ -716,6 +777,37 @@ impl SettingsState {
                 }
                 _ => {}
             },
+            SettingCategory::Meshing => match idx {
+                0 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.meshing.meshing_timeout = v;
+                    }
+                }
+                1 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.meshing.meshing_processor_count = v;
+                    }
+                }
+                _ => {}
+            },
+            SettingCategory::Solver => match idx {
+                0 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.solver.solver_timeout = v;
+                    }
+                }
+                1 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.solver.solver_processor_count = v;
+                    }
+                }
+                2 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.solver.solver_iteration_count = v;
+                    }
+                }
+                _ => {}
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => {
                     if let Ok(v) = value.parse::<f64>() {
@@ -728,46 +820,26 @@ impl SettingsState {
                     }
                 }
                 2 => {
-                    if let Ok(v) = value.parse::<u64>() {
-                        self.config.global_settings.meshing_timeout = v;
-                    }
-                }
-                3 => {
-                    if let Ok(v) = value.parse::<u32>() {
-                        self.config.global_settings.meshing_processor_count = v;
-                    }
-                }
-                4 => {
-                    if let Ok(v) = value.parse::<u64>() {
-                        self.config.global_settings.solver_timeout = v;
-                    }
-                }
-                5 => {
-                    if let Ok(v) = value.parse::<u32>() {
-                        self.config.global_settings.solver_processor_count = v;
-                    }
-                }
-                6 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.max_retries = v;
                     }
                 }
-                7 => {
+                3 => {
                     if let Ok(v) = value.parse::<f64>() {
                         self.config.global_settings.state_refresh_interval = v;
                     }
                 }
-                8 => {
+                4 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.global_settings.ssh_connection = v;
                     }
                 }
-                9 => {
+                5 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.dir_recursion_limit = v;
                     }
                 }
-                10 => {
+                6 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.ssh_upload_max_retries = v;
                     }

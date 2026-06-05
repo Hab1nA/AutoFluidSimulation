@@ -107,6 +107,7 @@ class EngineConfig(TypedDict):
     meshing_processor_count: int
     solver_timeout: int
     solver_processor_count: int
+    solver_iteration_count: int
     max_retries: int
     state_refresh_interval: float
     sc_persistent_ready_timeout: int
@@ -333,6 +334,8 @@ ENGINE_CONFIG: EngineConfig = {
     "solver_timeout": 7200,
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
     "solver_processor_count": 128,
+    # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
+    "solver_iteration_count": 1000,
     # 最大重试次数
     "max_retries": 3,
     # 全局状态刷新间隔（秒）
@@ -481,6 +484,16 @@ def reload_config_from_toml() -> bool:
             OPERATION_TIMEOUTS.update(
                 cast(OperationTimeoutsConfig, {k: v for k, v in toml_data["spaceclaim"].items()
                  if k in OPERATION_TIMEOUTS})
+            )
+        if "meshing" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["meshing"].items()
+                 if k in ENGINE_CONFIG})
+            )
+        if "solver" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["solver"].items()
+                 if k in ENGINE_CONFIG})
             )
         if "global_settings" in toml_data:
             ENGINE_CONFIG.update(

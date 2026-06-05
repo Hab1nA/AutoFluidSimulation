@@ -23,6 +23,8 @@ pub fn validate_config(config: &SettingsConfig) -> Vec<ValidationError> {
     validate_step_patterns(config, &mut errors);
     validate_solidworks(config, &mut errors);
     validate_spaceclaim(config, &mut errors);
+    validate_meshing(config, &mut errors);
+    validate_solver(config, &mut errors);
     validate_global_settings(config, &mut errors);
     errors
 }
@@ -244,6 +246,65 @@ fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError
     }
 }
 
+fn validate_meshing(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if config.meshing.meshing_timeout == 0 {
+        errors.push(ValidationError {
+            field_name: "meshing.meshing_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.meshing.meshing_processor_count == 0 {
+        errors.push(ValidationError {
+            field_name: "meshing.meshing_processor_count".to_string(),
+            message: "网格核心数至少为 1".to_string(),
+            severity: Severity::Error,
+        });
+    } else if config.meshing.meshing_processor_count > 32 {
+        errors.push(ValidationError {
+            field_name: "meshing.meshing_processor_count".to_string(),
+            message: "Fluent Meshing 高核心数可能导致体网格阶段不稳定".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+}
+
+fn validate_solver(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if config.solver.solver_timeout == 0 {
+        errors.push(ValidationError {
+            field_name: "solver.solver_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if config.solver.solver_processor_count == 0 {
+        errors.push(ValidationError {
+            field_name: "solver.solver_processor_count".to_string(),
+            message: "求解核心数至少为 1".to_string(),
+            severity: Severity::Error,
+        });
+    } else if !(64..=128).contains(&config.solver.solver_processor_count) {
+        errors.push(ValidationError {
+            field_name: "solver.solver_processor_count".to_string(),
+            message: "Solver 建议使用 64-128 核".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+    if config.solver.solver_iteration_count == 0 {
+        errors.push(ValidationError {
+            field_name: "solver.solver_iteration_count".to_string(),
+            message: "迭代次数至少为 1".to_string(),
+            severity: Severity::Error,
+        });
+    } else if config.solver.solver_iteration_count > 100000 {
+        errors.push(ValidationError {
+            field_name: "solver.solver_iteration_count".to_string(),
+            message: "迭代次数异常偏高（> 100000）".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+}
+
 fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     if config.global_settings.watchdog_interval <= 0.0 {
         errors.push(ValidationError {
@@ -252,60 +313,18 @@ fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<Validation
             severity: Severity::Error,
         });
     }
-    let timeouts = [
-        (
-            "global_settings.transfer_timeout",
-            config.global_settings.transfer_timeout,
-        ),
-        (
-            "global_settings.meshing_timeout",
-            config.global_settings.meshing_timeout,
-        ),
-        (
-            "global_settings.solver_timeout",
-            config.global_settings.solver_timeout,
-        ),
-    ];
-    for (name, val) in &timeouts {
-        if *val == 0 {
-            errors.push(ValidationError {
-                field_name: name.to_string(),
-                message: "超时值必须大于 0".to_string(),
-                severity: Severity::Error,
-            });
-        }
+    if config.global_settings.transfer_timeout == 0 {
+        errors.push(ValidationError {
+            field_name: "global_settings.transfer_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
     }
     if config.global_settings.max_retries == 0 {
         errors.push(ValidationError {
             field_name: "global_settings.max_retries".to_string(),
             message: "重试次数至少为 1".to_string(),
             severity: Severity::Error,
-        });
-    }
-    if config.global_settings.meshing_processor_count == 0 {
-        errors.push(ValidationError {
-            field_name: "global_settings.meshing_processor_count".to_string(),
-            message: "网格核心数至少为 1".to_string(),
-            severity: Severity::Error,
-        });
-    } else if config.global_settings.meshing_processor_count > 32 {
-        errors.push(ValidationError {
-            field_name: "global_settings.meshing_processor_count".to_string(),
-            message: "Fluent Meshing 高核心数可能导致体网格阶段不稳定".to_string(),
-            severity: Severity::Warning,
-        });
-    }
-    if config.global_settings.solver_processor_count == 0 {
-        errors.push(ValidationError {
-            field_name: "global_settings.solver_processor_count".to_string(),
-            message: "求解核心数至少为 1".to_string(),
-            severity: Severity::Error,
-        });
-    } else if !(64..=128).contains(&config.global_settings.solver_processor_count) {
-        errors.push(ValidationError {
-            field_name: "global_settings.solver_processor_count".to_string(),
-            message: "Solver 建议使用 64-128 核".to_string(),
-            severity: Severity::Warning,
         });
     }
     if config.global_settings.state_refresh_interval <= 0.0 {
@@ -412,44 +431,44 @@ mod tests {
     #[test]
     fn test_zero_timeout_reports_error() {
         let mut config = SettingsConfig::default();
-        config.global_settings.solver_timeout = 0;
+        config.solver.solver_timeout = 0;
         let errors = validate_config(&config);
         assert!(errors
             .iter()
-            .any(|e| e.field_name == "global_settings.solver_timeout"
+            .any(|e| e.field_name == "solver.solver_timeout"
                 && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
     fn test_zero_meshing_processor_count_reports_error() {
         let mut config = SettingsConfig::default();
-        config.global_settings.meshing_processor_count = 0;
+        config.meshing.meshing_processor_count = 0;
         let errors = validate_config(&config);
-        assert!(errors.iter().any(
-            |e| e.field_name == "global_settings.meshing_processor_count"
-                && matches!(e.severity, Severity::Error)
-        ));
+        assert!(errors
+            .iter()
+            .any(|e| e.field_name == "meshing.meshing_processor_count"
+                && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
     fn test_zero_solver_processor_count_reports_error() {
         let mut config = SettingsConfig::default();
-        config.global_settings.solver_processor_count = 0;
+        config.solver.solver_processor_count = 0;
         let errors = validate_config(&config);
         assert!(errors
             .iter()
-            .any(|e| e.field_name == "global_settings.solver_processor_count"
+            .any(|e| e.field_name == "solver.solver_processor_count"
                 && matches!(e.severity, Severity::Error)));
     }
 
     #[test]
     fn test_low_solver_processor_count_reports_warning() {
         let mut config = SettingsConfig::default();
-        config.global_settings.solver_processor_count = 32;
+        config.solver.solver_processor_count = 32;
         let errors = validate_config(&config);
         assert!(errors
             .iter()
-            .any(|e| e.field_name == "global_settings.solver_processor_count"
+            .any(|e| e.field_name == "solver.solver_processor_count"
                 && matches!(e.severity, Severity::Warning)));
     }
 

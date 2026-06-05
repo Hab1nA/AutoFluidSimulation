@@ -496,6 +496,7 @@ class RemoteExecutor:
         conda_exe = REMOTE_CONFIG["conda_exe"]
         scripts_dir = REMOTE_CONFIG["scripts_dir"]
         processor_count = self._solver_processor_count()
+        iteration_count = ENGINE_CONFIG["solver_iteration_count"]
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
         # ★ --anim-dir 使用 normpath 消除 .. 相对路径段，确保在 schtasks
@@ -516,6 +517,7 @@ class RemoteExecutor:
             f' --working-dir-t "{REMOTE_CONFIG["working_dir"]}/animation-t"'
             f' --working-dir-v "{REMOTE_CONFIG["working_dir"]}/animation-v"'
             f' --processor-count {processor_count}'
+            f' --iterate-count {iteration_count}'
         )
         return command, flag_file
 
