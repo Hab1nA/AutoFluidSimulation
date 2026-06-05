@@ -123,16 +123,19 @@ pub(crate) fn apply_auto_scroll(
     scroll: &mut u16,
     visual_count: usize,
     content_height: usize,
-    new_logs_arrived: bool,
+    _new_logs_arrived: bool,
 ) {
-    if *auto_scroll && visual_count > content_height {
-        *scroll = (visual_count - content_height) as u16;
+    if visual_count <= content_height {
+        *scroll = 0;
+        *auto_scroll = true;
+        return;
     }
-    if new_logs_arrived && visual_count > content_height {
-        let max_scroll = (visual_count - content_height) as u16;
-        if *scroll >= max_scroll {
-            *auto_scroll = true;
-        }
+
+    let max_scroll = (visual_count - content_height) as u16;
+    if *auto_scroll {
+        *scroll = max_scroll;
+    } else if *scroll >= max_scroll {
+        *auto_scroll = true;
     }
 }
 
@@ -864,14 +867,25 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_auto_scroll_does_not_reenable_without_new_logs() {
+    fn test_apply_auto_scroll_reenables_when_manually_scrolled_to_bottom() {
         let mut auto_scroll = false;
         let mut scroll = 90;
 
         apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, false);
 
-        assert!(!auto_scroll, "无新日志时手动滚动到底部不应重启自动滚动");
+        assert!(auto_scroll, "手动滚动到底部时应恢复自动滚动");
         assert_eq!(scroll, 90);
+    }
+
+    #[test]
+    fn test_apply_auto_scroll_stays_disabled_when_not_at_bottom() {
+        let mut auto_scroll = false;
+        let mut scroll = 89;
+
+        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, false);
+
+        assert!(!auto_scroll, "未滚动到底部时不应恢复自动滚动");
+        assert_eq!(scroll, 89);
     }
 
     #[test]
