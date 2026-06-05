@@ -1,0 +1,45 @@
+请你调查并修复 AutoFluidSimulation 项目中 Fluent 远程任务在 SSH 断连/daemon 重启后的恢复能力问题。
+
+背景：
+项目在远程 Windows 工作站上运行 Fluent 2024R1，pyfluent 0.37.2。Meshing/Solver 等远程任务通过 SSH 启动，并使用 Windows 计划任务让 Fluent 在 SSH 会话断开后仍能继续运行。之前已经确认：如果 daemon 进程仍然存活，仅 SSH 连接短暂断开，utils/ssh_client.py 的 ensure_connected() 可以重新连接，继续轮询 done/error flag。
+
+当前发现的问题：
+如果 daemon 重启、线程丢失，或 executor 的内存状态丢失，项目目前不能重新识别远程仍在运行的 Fluent/Windows 计划任务。远程任务名只保存在 executor/remote_executor.py 的内存字段 _remote_tasks 中，没有持久化到数据库或远程状态文件。恢复时，engine/scheduler/meshing_monitor.py 只检查 mesh 输出文件和 done flag；如果 Fluent 仍在运行但尚未产出这些文件，程序会把数据库中的 Running 状态重置为 Waiting 并重新启动 Meshing，存在重复启动远程 Fluent 任务的风险。engine/scheduler/main.py 对 Running 步骤的恢复逻辑也有类似问题。
+
+请完成：
+1. 全面审计 Meshing/Solver 远程任务启动、轮询、取消、恢复、数据库状态同步逻辑。
+2. 明确当前在以下场景中的行为：
+   - 仅 SSH 断连但 daemon 仍在；
+   - daemon 重启但 Fluent 仍在远程运行；
+   - 计划任务存在但 done/error flag 尚未生成；
+   - 输出文件已存在；
+   - 任务失败但错误 flag 或日志存在。
+3. 创建一个分支，在分支里设计并实现恢复机制，目标是： 
+   - 远程任务启动后持久化任务元数据，例如 config_id、step_name、Windows task name、flag 文件、日志文件、输出文件、启动时间等；
+   - daemon 重启后能查询远程计划任务/进程/flag/output/log，重新识别对应 Fluent 任务；
+   - 如果远程任务仍在运行，数据库应保持或恢复为 Running，而不是重新启动；
+   - 如果任务已完成，应标记 Completed；
+   - 如果任务失败，应标记 Error 并保留日志信息；
+   - 如果远程任务不存在且无完成产物，才允许重新排队或重试；
+   - 取消/清理时也应能使用持久化元数据找到并终止/删除远程计划任务。
+4. 增加必要的单元测试/集成测试，覆盖 daemon 重启后的 Meshing/Solver 恢复场景，尤其是“DB=Running、远程计划任务仍存在、flag 尚未生成”时不得重复启动任务。
+5. 如果需要，可连接远程工作站执行真实 Fluent/Meshing 测试。工作站上可能有 360 安全管家，如果发现命令被安全策略拦截，请说明需要用户修改哪些设置。
+
+参考文件：
+- utils/ssh_client.py：SSH 连接、exec_background、远程计划任务启动逻辑
+- executor/remote_executor.py：Meshing/Solver 远程执行与 _remote_tasks 内存状态
+- engine/scheduler/meshing_monitor.py：Meshing 队列、Running 状态恢复逻辑
+- engine/scheduler/main.py：daemon 启动时恢复 Running/Retrying/Paused 步骤
+- engine/state_manager.py：数据库状态管理
+- tests/test_ssh_client.py
+- tests/test_remote_executor.py
+- tests/test_remote_executor_full.py
+
+项目约束：
+- 使用 AGENTS.md 指令。
+- Python 命令必须使用 .venv\Scripts\python.exe。
+- 修改后运行：
+  .venv\Scripts\python.exe -m ruff check .
+  .venv\Scripts\python.exe -m mypy .
+  .venv\Scripts\python.exe -m pytest tests/
+- 不要回滚用户已有改动。
