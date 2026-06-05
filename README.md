@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.6.0** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.6.1** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -172,7 +172,7 @@ AutoFluidSimulation/
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
 │       ├── state/           # 应用状态
 │       ├── event_handler/   # 事件处理（command.rs / key_handler.rs）
-│       ├── settings/        # 设置页面（7 分类 48 字段）
+│       ├── settings/        # 设置页面（9 分类 49 字段）
 │       └── ui/              # UI 渲染
 │
 ├── docs/                    # 项目文档
@@ -637,14 +637,14 @@ python main.py --all           # 同时启动
 
 ### 设置页面（Settings）
 
-输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **7 大分类 48 个字段**：
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 49 个字段**：
 
 | 分类                     | 字段数 | 内容                                                                                    |
 | ------------------------ | ------ | --------------------------------------------------------------------------------------- |
 | **本地文件路径**   | 10     | SW/SpaceClaim 可执行文件、模型/Excel/脚本/桥接程序/输出目录/日志/数据路径               |
 | **远程工作站连接** | 4      | 主机地址、SSH 端口、用户名、密码（密码字段掩码显示，写入 `.env` 文件）                |
 | **远程执行目录**   | 9      | 工程根目录、SCDOC/网格/结果/标志文件目录、Conda 环境名/路径、网格/求解脚本              |
-| **步骤文件模板**   | 4      | SW / SC / Meshing / Solver 各步骤输出文件命名模式（`{config}` 占位）                  |
+| **步骤文件模板**   | 5      | SW / SC / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位）    |
 | **SolidWorks**     | 7      | 宏超时、完成后关闭文档/退出、显示窗口、启动超时、调度启动延迟、退出等待                 |
 | **SpaceClaim**     | 5      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待                            |
 | **全局设置**       | 9      | 看门狗间隔、传输/网格/求解超时、最大重试、状态刷新间隔、SSH 连接/上传重试、目录递归深度 |
@@ -678,6 +678,8 @@ python main.py --all           # 同时启动
 | `[step_file_patterns]` | 各步骤输出文件命名模式                                      |
 | `[solidworks]`         | SolidWorks 自动化参数（宏超时、窗口控制、启动延迟等）       |
 | `[spaceclaim]`         | SpaceClaim 自动化参数（脚本超时、轮询间隔、GUI 就绪检测等） |
+| `[meshing]`            | 网格划分参数（超时、处理器数）                               |
+| `[solver]`             | 求解器参数（超时、处理器数、迭代数）                         |
 | `[global_settings]`    | 全局引擎参数（看门狗、各阶段超时、重试、SSH 上传等）        |
 
 > **向后兼容**：Python 侧硬编码默认值仍使用 `[engine_config]` 和 `[operation_timeouts]` 键名，TOML 中使用上述新键名即可覆盖。
@@ -774,10 +776,10 @@ compile_noref.bat    # 免引用版本
 ## 开发
 
 - 编码规范见 `docs/code-style-guide.md`
-- 远期规划见 `docs/roadmap.md`
+- 远期规划见 `docs/architecture-refactoring-plan.md`
 - Python: ruff linting + mypy 类型检查
 - Rust: `cargo check` + `cargo clippy`
 
 ---
 
-> **版本**: v2.6.0 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-05 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.6.1 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-05 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）

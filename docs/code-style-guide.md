@@ -94,12 +94,11 @@ reset_config()                # 重置指定构型步骤
 # 内部方法
 _prepare_sw_retry()           # SW 重试准备（taskkill + 监控器重置）
 _resume_paused_steps()        # 恢复暂停的步骤（SW + SC）
-_scan_completed_downstream()  # 同步下游步骤状态与文件系统
-_execute_with_retry()         # 通用重试包装器
-_execute_single_config()      # 处理单个构型（SC→Transfer→Meshing）
-_barrier_monitor_loop()       # 全局屏障监控线程
-_dispatch_solver_tasks()      # 屏障通过后分发 Solver
-_pause_aware_sleep()          # 可响应暂停/停止的 sleep
+scan_completed_downstream()   # 同步下游步骤状态与文件系统（SWPhaseHandler）
+execute_with_retry()          # 通用重试包装器（RetryManager）
+monitor_loop()                # 全局屏障监控线程（BarrierCoordinator）
+_dispatch_solver_tasks()      # 屏障通过后分发 Solver（BarrierCoordinator）
+pause_aware_sleep()           # 可响应暂停/停止的 sleep（独立函数）
 ```
 
 ### 2.4 变量命名规则
@@ -175,16 +174,19 @@ pub enum SettingCategory {
     RemoteConnection,
     RemoteDirs,
     StepPatterns,
-    EngineConfig,
-    OperationTimeouts,
+    SolidWorks,
+    SpaceClaim,
+    Meshing,
+    Solver,
+    GlobalSettings,
 }
 
 impl SettingCategory {
     pub fn display_label(self, idx: usize) -> &'static str {
         match self {
-            SettingCategory::EngineConfig => match idx {
-                0 => "看门狗间隔(秒)",
-                1 => "SW宏超时(秒)",
+            SettingCategory::SolidWorks => match idx {
+                0 => "SW宏超时(秒)",
+                1 => "完成后关闭文档",
                 // ...
                 _ => "",
             },
@@ -210,12 +212,15 @@ autofluid_config.toml  ← 用户可编辑的 TOML 配置文件
     ↕ TUI 可通过 Settings 页面读写
      ↕ Python reload_config_from_toml() 读取
         ↓
-OPERATION_TIMEOUTS  dict  ← 新增超时/轮询参数放这里
-ENGINE_CONFIG       dict  ← 引擎行为参数放这里
-LOCAL_PATHS         dict  ← 本地路径放这里
-REMOTE_CONFIG       dict  ← 远程连接信息放这里
-STEP_FILE_PATTERNS  dict  ← 文件命名模板放这里
+LOCAL_PATHS         dict  ← [local_paths] 节
+REMOTE_CONFIG       dict  ← [remote_config] 节
+STEP_FILE_PATTERNS  dict  ← [step_file_patterns] 节
+ENGINE_CONFIG       dict  ← [solidworks] + [spaceclaim] + [meshing] + [solver] + [global_settings] 节合并
+OPERATION_TIMEOUTS  dict  ← [solidworks] + [spaceclaim] + [global_settings] 节合并
 ```
+
+> **向后兼容**：Python 端也支持旧格式 `[engine_config]` / `[operation_timeouts]` 顶级节，
+> 但默认 TOML 文件和 Rust TUI Settings 使用细分节名。
 
 ### 4.2 数据流
 
@@ -224,8 +229,12 @@ Rust TUI Settings 页面 → 写入 autofluid_config.toml
                                               ↓
                                     Python reload_config_from_toml()
                                               ↓
-                              ENGINE_CONFIG.update(toml_data["engine_config"])
-                              OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
+                              ENGINE_CONFIG.update(toml_data["solidworks"])
+                              ENGINE_CONFIG.update(toml_data["spaceclaim"])
+                              ENGINE_CONFIG.update(toml_data["meshing"])
+                              ENGINE_CONFIG.update(toml_data["solver"])
+                              ENGINE_CONFIG.update(toml_data["global_settings"])
+                              OPERATION_TIMEOUTS.update(toml_data["solidworks"])
                               ...
 ```
 
