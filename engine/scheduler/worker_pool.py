@@ -238,7 +238,8 @@ class WorkerPoolManager:
         logger.debug(
             f"[队列健康] SC深度={qsize}, Transfer深度={tf_qsize}, "
             f"活跃SC={active_sc}, 活跃Transfer={active_tf}, "
-            f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}"
+            f"Barrier={'已通过' if self._barrier_passed.is_set() else '未通过'}",
+            extra={"broadcast": False},
         )
         if qsize == 0:
             waiting_configs = [
@@ -258,7 +259,8 @@ class WorkerPoolManager:
                         logger.warning(f"[队列异常] 构型{cn} SW 已完成但未入队")
                     else:
                         logger.debug(
-                            f"[队列健康] 构型{cn} SW 已完成，等待 SC 入队确认"
+                            f"[队列健康] 构型{cn} SW 已完成，等待 SC 入队确认",
+                            extra={"broadcast": False},
                         )
         else:
             self._waiting_sc_seen_at.clear()

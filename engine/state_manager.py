@@ -204,8 +204,10 @@ class StateManager:
                         for step_name in STEP_NAMES:
                             new_step_rows.append((config_name, step_name, STATUS_WAITING))
                         added_count += 1
+                        logger.debug(f"[State] 新增构型{config_name}: 参数 = {params}")
                     else:
                         updated_count += 1
+                        logger.debug(f"[State] 更新构型{config_name}: 参数 = {params}")
 
                 conn.executemany("""
                     INSERT OR REPLACE INTO configs (config_name, param1, param2, param3, param4)
@@ -426,16 +428,18 @@ class StateManager:
 
     def reset_all(self):
         """重置所有构型的所有步骤（含引擎全局状态）。"""
+        for cn in self.get_all_configs():
+            self._reset_single_config(cn, None)
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute("UPDATE steps SET status = ?, retry_count = 0, error_message = ?",
-                           (STATUS_WAITING, ""))
-                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
-                           ("false", "sw_macro_started"))
-                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
-                           ("false", "global_barrier_met"))
-                conn.execute("UPDATE engine_state SET value = ? WHERE key = ?",
-                           ("0", "error_count"))
+                conn.execute(
+                    "UPDATE engine_state SET value = ? WHERE key = ?",
+                    ("false", "global_barrier_met"),
+                )
+                conn.execute(
+                    "UPDATE engine_state SET value = ? WHERE key = ?",
+                    ("0", "error_count"),
+                )
         logger.warning("已重置所有构型的所有步骤！")
 
     # ------------------------------------------------------------------

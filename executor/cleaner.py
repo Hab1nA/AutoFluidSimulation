@@ -179,6 +179,7 @@ class FileCleaner:
                             filename = str(file_template).format(config=cn)
                             remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
                             ssh.delete_remote_file(remote_path)
+                            logger.info(f"[Cleaner] 已删除远程文件: {remote_path}")
                     logger.info(f"[Cleaner] 步骤 {step_name} 远程文件清理完成 ({target_dir})")
                 else:
                     logger.warning(f"[Cleaner] SSH 未连接，跳过远程文件清理: {step_name}")

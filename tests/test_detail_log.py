@@ -761,7 +761,98 @@ def test_broadcast_false_record_is_suppressed():
 
 
 # ============================================================================
-# 测试 10: 逐构型日志广播过滤
+# 测试 10: 周期性健康检查日志过滤（通过 broadcast=False 控制）
+# ============================================================================
+
+def test_periodic_log_queue_health_suppressed():
+    """测试 [队列健康] DEBUG 日志（broadcast=False）不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.worker_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug(
+        "[队列健康] SC深度=3, Transfer深度=1, "
+        "活跃SC=2, 活跃Transfer=1, Barrier=已通过",
+        extra={"broadcast": False},
+    )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, f"[队列健康] broadcast=False 应被过滤，实际 {result['total']} 条"
+
+    test_logger.removeHandler(handler)
+    print("  ✅ [队列健康] broadcast=False 日志被正确过滤")
+
+
+def test_periodic_log_queue_health_waiting_suppressed():
+    """测试 [队列健康] 构型等待确认 DEBUG 日志（broadcast=False）不会进入详细日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.worker_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug(
+        "[队列健康] 构型5 SW 已完成，等待 SC 入队确认",
+        extra={"broadcast": False},
+    )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, f"[队列健康] 等待确认日志应被过滤，实际 {result['total']} 条"
+
+    test_logger.removeHandler(handler)
+    print("  ✅ [队列健康] 构型等待确认日志被正确过滤")
+
+
+def test_periodic_log_queue_warning_passes_through():
+    """测试 [队列异常] WARNING 日志（无 broadcast=False）应被放行。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.worker_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.warning("[队列异常] 构型8 SW 已完成但未入队")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 1, f"[队列异常] WARNING 应被放行，实际 {result['total']} 条"
+    assert "[队列异常]" in result["entries"][0]["message"]
+
+    test_logger.removeHandler(handler)
+    print("  ✅ [队列异常] WARNING 日志被正确放行")
+
+
+def test_periodic_log_mixed_with_normal():
+    """测试 broadcast=False 日志与正常日志混合时，仅 broadcast=False 被过滤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.scheduler.worker_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.debug(
+        "[队列健康] SC深度=0, Transfer深度=0, 活跃SC=2, 活跃Transfer=1, Barrier=已通过",
+        extra={"broadcast": False},
+    )
+    test_logger.info("[WorkerPool] 检测到所有构型 SC 步骤已完成，触发 SC 进程清理")
+    test_logger.debug(
+        "[队列健康] SC深度=1, Transfer深度=2, 活跃SC=2, 活跃Transfer=1, Barrier=未通过",
+        extra={"broadcast": False},
+    )
+    test_logger.warning("[WorkerPool] SC 进程清理异常: timeout")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entries = result["entries"]
+    assert result["total"] == 2, f"期望 2 条正常日志（2 条 broadcast=False 被过滤），实际 {result['total']} 条"
+
+    messages = [e["message"] for e in entries]
+    assert any("SC 进程清理" in m for m in messages), "正常 INFO 日志应保留"
+    assert any("清理异常" in m for m in messages), "WARNING 日志应保留"
+    assert not any("队列健康" in m for m in messages), "[队列健康] 不应出现"
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 混合日志中 broadcast=False 被正确过滤，正常日志保留")
+
+
+# ============================================================================
+# 测试 11: 逐构型日志广播过滤
 # ============================================================================
 
 def test_config_scoped_logs_are_suppressed():

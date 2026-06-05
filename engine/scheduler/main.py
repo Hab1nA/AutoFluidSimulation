@@ -263,12 +263,17 @@ class PipelineScheduler:
             if sw_st not in terminal_states:
                 self.state.set_step_status(cn, "sw", STATUS_ERROR, error_detail)
                 error_count += 1
+                logger.error(f"[Scheduler] 构型{cn} SW 标记为 Error（递归深度超限）")
             # 下游步骤若处于 Waiting，也标记为 Error（阻断链条）
             for s in ["sc", "transfer", "meshing", "solver"]:
                 if self.state.get_step_status(cn, s) == STATUS_WAITING:
                     self.state.set_step_status(
                         cn, s, STATUS_ERROR,
                         f"上游 SW 步骤失败（递归深度超限），{s} 无法执行"
+                    )
+                    logger.error(
+                        f"[Scheduler] 构型{cn} {s} 标记为 Error"
+                        f"（上游 SW 递归深度超限）"
                     )
 
         logger.error(
