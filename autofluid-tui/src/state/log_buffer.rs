@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use super::filter::severity_rank;
+
 const MAX_DETAIL_BUFFER: usize = 2000;
 const MAX_INFO_BUFFER: usize = 200;
 
@@ -98,7 +100,7 @@ impl LogBuffer {
     ) -> impl Iterator<Item = &'a LogEntry> {
         self.detail_buffer.iter().filter(move |entry| {
             if let Some(lf) = level_filter {
-                if entry.level != *lf {
+                if severity_rank(&entry.level) < severity_rank(lf.as_str()) {
                     return false;
                 }
             }

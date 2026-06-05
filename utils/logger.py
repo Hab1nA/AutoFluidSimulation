@@ -416,6 +416,11 @@ class LogBroadcastHandler(logging.Handler):
                 return True
         return False
 
+    # 日志级别严重程度映射，数值越大越严重
+    _LEVEL_ORDER: dict[str, int] = {
+        "DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4
+    }
+
     def get_entries(
         self,
         since_id: int = 0,
@@ -428,7 +433,7 @@ class LogBroadcastHandler(logging.Handler):
         Args:
             since_id: 返回 ID 大于此值的所有条目（0 = 从头开始）
             limit: 最大返回条数
-            level_filter: 按日志级别过滤（如 "ERROR", "WARNING"）
+            level_filter: 按日志级别过滤（显示该级别及以上更严重级别）
             source_filter: 按来源过滤（如 "remote_ps", "local_ps"）
 
         Returns:
@@ -437,11 +442,12 @@ class LogBroadcastHandler(logging.Handler):
         with self._lock:
             snapshot = list(self._buffer)
 
+        threshold = self._LEVEL_ORDER.get(level_filter, 0) if level_filter else -1
         filtered = []
         for entry in snapshot:
             if entry.id <= since_id:
                 continue
-            if level_filter and entry.level != level_filter:
+            if level_filter and self._LEVEL_ORDER.get(entry.level, 1) < threshold:
                 continue
             if source_filter and entry.source != source_filter:
                 continue

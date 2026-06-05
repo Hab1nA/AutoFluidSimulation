@@ -324,7 +324,7 @@ fn cmd_filter(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         }
         _ => match filter::parse_filter_arg(&sub) {
             Some(filter::FilterType::Level(level)) => {
-                log_buffer.push_info(format!("日志过滤: 仅显示 {} 级别", level));
+                log_buffer.push_info(format!("日志过滤: 显示 {} 及以上级别", level));
                 state.log_filter_level = Some(level);
                 state.log_filter_source = None;
             }
@@ -491,11 +491,11 @@ const HELP_LINES: &[&str] = &[
     "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
     "",
     "日志命令:",
-    "  filter debug               - 仅显示 DEBUG 级别日志",
-    "  filter info                - 仅显示 INFO 级别日志",
-    "  filter warning             - 仅显示 WARNING 级别日志",
-    "  filter error               - 仅显示 ERROR 级别日志",
-    "  filter critical            - 仅显示 CRITICAL 级别日志",
+    "  filter debug               - 显示 DEBUG 及以上级别日志",
+    "  filter info                - 显示 INFO 及以上级别日志",
+    "  filter warning             - 显示 WARNING 及以上级别日志",
+    "  filter error               - 显示 ERROR 及以上级别日志",
+    "  filter critical            - 显示 CRITICAL 及以上级别日志",
     "  filter remote              - 仅显示远程命令日志",
     "  filter local               - 仅显示本地命令日志",
     "  filter com                 - 仅显示 COM 自动化日志",
