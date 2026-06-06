@@ -57,7 +57,7 @@ class FileCleaner:
     # 系统自检
     # ------------------------------------------------------------------
 
-    def run_system_check(self) -> dict:
+    def run_system_check(self) -> dict[str, dict[str, object]]:
         """执行系统自检：检查本地路径、SSH 连通性、远程进程状态。"""
         results: dict[str, dict[str, object]] = {
             "local_checks": {},

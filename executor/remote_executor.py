@@ -89,6 +89,18 @@ class RemoteExecutor:
         self._sync_cache_lock = threading.Lock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
 
+    # 步骤名 → 日志前缀映射（项目规范：中文消息 + 英文标签前缀）
+    _STEP_LOG_PREFIX: dict[str, str] = {
+        "transfer": "[Transfer]",
+        "meshing": "[Meshing]",
+        "solver": "[Solver]",
+    }
+
+    @classmethod
+    def _log_prefix(cls, step_name: str) -> str:
+        """将步骤名转换为规范的日志前缀。"""
+        return cls._STEP_LOG_PREFIX.get(step_name, f"[{step_name}]")
+
     @staticmethod
     def _remote_task_artifacts(task_name: str, flag_file: str) -> dict[str, str | None]:
         """根据计划任务名和 flag 路径推导 wrapper 产物路径。"""
@@ -163,7 +175,7 @@ class RemoteExecutor:
                     return "failed"
             except (OSError, ConnectionError) as e:
                 logger.warning(
-                    f"[{step_name}] 构型{config_name} 远程 flag 检查状态未知: {e}"
+                    f"{self._log_prefix(step_name)} 构型{config_name} 远程 flag 检查状态未知: {e}"
                 )
                 return "unknown"
 
@@ -178,7 +190,7 @@ class RemoteExecutor:
                 return "lost"
             except (OSError, ConnectionError) as e:
                 logger.warning(
-                    f"[{step_name}] 构型{config_name} 远程计划任务查询状态未知: {e}"
+                    f"{self._log_prefix(step_name)} 构型{config_name} 远程计划任务查询状态未知: {e}"
                 )
                 return "unknown"
 
@@ -192,7 +204,7 @@ class RemoteExecutor:
         if not pid_file:
             return None
 
-        read_pid = getattr(ssh, "_read_remote_pid_file", None)
+        read_pid = getattr(ssh, "read_remote_pid_file", None)
         if not callable(read_pid):
             return None
 
@@ -214,7 +226,7 @@ class RemoteExecutor:
         try:
             return float(str(task["started_at"]))
         except (KeyError, TypeError, ValueError):
-            logger.warning(f"[{step_name}] 构型{config_name} 远程任务 started_at 无效")
+            logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 远程任务 started_at 无效")
             return time.time()
 
     def set_control_events(
@@ -974,16 +986,16 @@ class RemoteExecutor:
         task_name = self._remote_tasks.pop(config_name, None)
         self.state.delete_remote_task(config_name, step_name)
         if not task_name:
-            logger.debug(f"[{step_name}] 构型{config_name} 无远程任务记录，跳过终止")
+            logger.debug(f"{self._log_prefix(step_name)} 构型{config_name} 无远程任务记录，跳过终止")
             return
 
         with self._ssh_lock:
             try:
                 ssh = self._get_ssh()
                 ssh.kill_remote_task(task_name)
-                logger.info(f"[{step_name}] 构型{config_name} 已请求终止远程任务: {task_name}")
+                logger.info(f"{self._log_prefix(step_name)} 构型{config_name} 已请求终止远程任务: {task_name}")
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[{step_name}] 构型{config_name} 终止远程任务异常: {e}")
+                logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 终止远程任务异常: {e}")
 
     def _cleanup_completed_remote_task(
         self,
@@ -1008,9 +1020,9 @@ class RemoteExecutor:
             cleaned = ssh.kill_remote_task(task_name)
 
         if cleaned:
-            logger.info(f"[{step_name}] 构型{config_name} 已清理远程任务条目: {task_name}")
+            logger.info(f"{self._log_prefix(step_name)} 构型{config_name} 已清理远程任务条目: {task_name}")
         else:
-            logger.warning(f"[{step_name}] 构型{config_name} 清理远程任务条目失败: {task_name}")
+            logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 清理远程任务条目失败: {task_name}")
 
     # ------------------------------------------------------------------
     # 脚本同步
@@ -1151,7 +1163,7 @@ class RemoteExecutor:
         self,
         local_dir: str,
         remote_dir: str,
-        filenames: list,
+        filenames: list[str],
         label: str,
         local_hashes: dict[str, str | None] | None = None,
     ) -> bool:
@@ -1371,17 +1383,18 @@ class RemoteExecutor:
                 f.write(content.encode('utf-8'))
 
             # ★ 上传临时文件（传递控制事件，允许暂停/停止中断大文件上传）
-            success = ssh.upload_file(
-                temp_file, remote_file,
-                paused_event=paused_event,
-                stopped_event=stopped_event,
-            )
-
-            # 清理临时文件
             try:
-                os.remove(temp_file)
-            except OSError:
-                pass
+                success = ssh.upload_file(
+                    temp_file, remote_file,
+                    paused_event=paused_event,
+                    stopped_event=stopped_event,
+                )
+            finally:
+                # 确保 temp_file 在 upload 成功或失败后都被清理
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
 
             if success:
                 logger.info(f"[Transfer] 上传配置文件（已替换路径）: {os.path.basename(local_file)}")

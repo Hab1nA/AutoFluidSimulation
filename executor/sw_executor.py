@@ -22,10 +22,11 @@ import gc
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
+    from engine.state_manager import StateManager
 
 from engine.config import (
     LOCAL_PATHS, ENGINE_CONFIG,
@@ -56,7 +57,7 @@ class SWExecutor:
     _SW_SAVE_AS_CURRENT_VERSION = 0   # swSaveAsCurrentVersion
     _SW_SAVE_AS_OPTIONS_SILENT = 1    # swSaveAsOptions_Silent
 
-    def __init__(self, state_manager):
+    def __init__(self, state_manager: StateManager):
         """初始化 SW 执行器。
 
         Args:
@@ -66,9 +67,9 @@ class SWExecutor:
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
         self._pipeline_control: PipelineControl | None = None
-        self._cached_sw_app = None
-        self._cached_doc = None
-        self._com_initialized = False
+        self._cached_sw_app: Any = None
+        self._cached_doc: Any = None
+        self._com_initialized: bool = False
         self._cleanup_lock = threading.RLock()
         self._first_cleanup_done = False
         self._final_cleanup_done = False
@@ -122,7 +123,7 @@ class SWExecutor:
         2. _open_sw_model()        — OpenDoc6 打开模型文件
         3. _import_design_table_with_retry() — 导入 Excel 设计表
         4. _rebuild_and_export_per_config() — 逐构型重建 + 即时导出 STEP
-           （替代旧的 _rebuild_all_configs + _export_all_configs_to_step 两步模式，
+           （替代旧的“批量重建后再批量导出”两步模式，
              每个构型独立重建后立即导出，支持 pause/stop 指令）
         5. _verify_step_exports()  — 安全网校验输出文件
 
@@ -551,7 +552,7 @@ class SWExecutor:
     # SW 连接管理
     # ------------------------------------------------------------------
 
-    def _connect_sw(self):
+    def _connect_sw(self) -> Any:  # noqa: ANN401  COM 动态对象
         """三层降级连接/启动 SolidWorks 并返回 ISldWorks COM 对象。"""
         import win32com.client
 
@@ -703,7 +704,7 @@ class SWExecutor:
             return False
         return "SLDWORKS.exe" in result.stdout
 
-    def _open_sw_model(self, sw_app, sw_model: str, doc_type: int):
+    def _open_sw_model(self, sw_app: Any, sw_model: str, doc_type: int) -> Any:  # noqa: ANN401  COM 动态对象
         """通过 OpenDoc6 打开 SW 模型文件并验证 COM 代理有效性。"""
         import win32com.client
         import pythoncom
@@ -792,7 +793,7 @@ class SWExecutor:
     # 设计表导入
     # ------------------------------------------------------------------
 
-    def _validate_design_table(self, excel_path: str) -> list:
+    def _validate_design_table(self, excel_path: str) -> list[str]:
         """预验证 Excel 设计表格式，返回诊断警告列表。"""
         warnings = []
         logger.info(f"[SW-DesignTable] 预验证 Excel 设计表格式: {os.path.basename(excel_path)}")
@@ -874,7 +875,7 @@ class SWExecutor:
             logger.info("[SW-DesignTable] Excel 设计表格式预验证通过")
         return warnings
 
-    def _model_has_design_table(self, doc) -> bool:
+    def _model_has_design_table(self, doc: Any) -> bool:  # noqa: ANN401  COM 动态对象
         """检测模型是否已存在设计表（链接或内嵌）。"""
         try:
             doc.InsertFamilyTableEdit()
@@ -906,7 +907,7 @@ class SWExecutor:
         logger.info("[SW-DesignTable] 模型无设计表，将进行导入")
         return False
 
-    def _import_design_table_with_retry(self, doc, sw_app, excel_path: str, sw_model: str) -> bool:
+    def _import_design_table_with_retry(self, doc: Any, sw_app: Any, excel_path: str, sw_model: str) -> bool:  # noqa: ANN401  COM 动态对象
         """带容错与多策略降级的设计表导入。"""
         basename_model = os.path.basename(sw_model)
 
@@ -981,7 +982,7 @@ class SWExecutor:
             pass
         return False
 
-    def _post_process_design_table(self, doc, excel_path: str):
+    def _post_process_design_table(self, doc: Any, excel_path: str) -> None:  # noqa: ANN401  COM 动态对象
         """InsertFamilyTableOpen 成功后的后处理。"""
         try:
             design_table = doc.GetDesignTable()
@@ -1010,7 +1011,7 @@ class SWExecutor:
             except OSError:
                 pass
 
-    def _apply_params_via_com(self, doc, excel_path: str) -> bool:
+    def _apply_params_via_com(self, doc: Any, excel_path: str) -> bool:  # noqa: ANN401  COM 动态对象
         """策略B: 解析 Excel 参数表，直接通过 COM API 为每个构型设置参数值。"""
         logger.info("[SW-DesignTable] 正在读取 Excel 参数表...")
         import openpyxl
@@ -1154,7 +1155,7 @@ class SWExecutor:
         )
         return success_count > 0
 
-    def _diagnose_param_mismatch(self, doc, excel_path: str):
+    def _diagnose_param_mismatch(self, doc: Any, excel_path: str) -> None:  # noqa: ANN401  COM 动态对象
         """详细诊断 Excel 参数表与模型参数的不匹配情况。"""
         logger.info("=" * 60)
         logger.info("[SW-DesignTable] 参数名不匹配分析")
@@ -1240,195 +1241,6 @@ class SWExecutor:
         )
         return False
 
-    def _export_all_configs_to_step(self, doc, step_dir: str):
-        """直接通过 COM API 遍历所有配置并导出 STEP 文件。"""
-        logger.info("[SW-Export] 正在通过 COM 直接导出各构型 STEP 文件...")
-
-        import pythoncom
-        import win32com.client
-
-        conf_names = []
-        try:
-            doc._FlagAsMethod('GetConfigurationNames')
-            raw = doc.GetConfigurationNames()
-        except TypeError:
-            raw = doc.GetConfigurationNames
-        if isinstance(raw, (tuple, list)):
-            conf_names = [str(c) for c in raw]
-        elif raw is not None:
-            conf_names = [str(raw)]
-
-        if not conf_names:
-            logger.error("[SW-Export] 无法获取模型配置名称列表")
-            return 0, 0, []
-
-        logger.info(f"[SW-Export] 发现 {len(conf_names)} 个配置，开始逐构型导出...")
-
-        success_configs = []
-        fail_configs = []
-
-        for cn_str in conf_names:
-            try:
-                cn_int = int(cn_str)
-            except ValueError:
-                cn_int = None
-
-            filename = get_step_filename("sw", cn_int) if cn_int is not None else None
-            if not filename:
-                logger.warning(f"[SW-Export] 构型{cn_str}: 无法生成 STEP 文件名，跳过")
-                fail_configs.append(cn_int if cn_int is not None else cn_str)
-                continue
-
-            filepath = os.path.join(step_dir, filename)
-
-            if cn_int is not None:
-                _sw_st = self.state.get_step_status(cn_int, "sw")
-                if _sw_st == STATUS_COMPLETED and os.path.exists(filepath):
-                    logger.info(
-                        f"[SW-Export] 构型{cn_str}: STEP 已存在且状态为 Completed，跳过导出"
-                    )
-                    success_configs.append(cn_int)
-                    continue
-
-            try:
-                doc.ShowConfiguration2(cn_str)
-            except Exception as e:
-                logger.error(
-                    f"[SW-Export] 构型{cn_str}: ShowConfiguration2 失败 "
-                    f"({type(e).__name__}: {e})"
-                )
-                if cn_int is not None:
-                    self.state.set_step_status(
-                        cn_int, "sw", STATUS_ERROR,
-                        f"ShowConfiguration2 失败: {type(e).__name__}: {e}"
-                    )
-                    fail_configs.append(cn_int)
-                continue
-
-            try:
-                save_errors = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                )
-                save_warnings = win32com.client.VARIANT(
-                    pythoncom.VT_BYREF | pythoncom.VT_I4, 0
-                )
-                export_data = win32com.client.VARIANT(
-                    pythoncom.VT_DISPATCH, None
-                )
-                status = doc.Extension.SaveAs(
-                    filepath,
-                    self._SW_SAVE_AS_CURRENT_VERSION,
-                    self._SW_SAVE_AS_OPTIONS_SILENT,
-                    export_data,
-                    save_errors,
-                    save_warnings,
-                )
-
-                if status:
-                    save_ok = True
-                    if not os.path.exists(filepath):
-                        logger.warning(
-                            f"[SW-Export] 构型{cn_str}: SaveAs 返回 True 但文件不存在"
-                            f"（{os.path.basename(filepath)}）"
-                        )
-                        save_ok = False
-                    if save_ok:
-                        logger.info(
-                            f"[SW-Export] 构型{cn_str}: {os.path.basename(filepath)} "
-                            f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
-                        )
-                        if cn_int is not None:
-                            self.state.set_step_status(cn_int, "sw", STATUS_COMPLETED)
-                            success_configs.append(cn_int)
-                    else:
-                        if cn_int is not None:
-                            self.state.set_step_status(
-                                cn_int, "sw", STATUS_ERROR,
-                                "SaveAs 返回 True 但 STEP 文件未写入磁盘"
-                            )
-                            fail_configs.append(cn_int)
-                else:
-                    logger.warning(
-                        f"[SW-Export] 构型{cn_str}: SaveAs 返回 False "
-                        f"(Errors={save_errors.value}, Warnings={save_warnings.value})"
-                    )
-                    if cn_int is not None:
-                        self.state.set_step_status(
-                            cn_int, "sw", STATUS_ERROR,
-                            f"SaveAs 返回 False (Errors={save_errors.value})"
-                        )
-                        fail_configs.append(cn_int)
-            except Exception as e:
-                logger.error(
-                    f"[SW-Export] 构型{cn_str}: SaveAs 异常 ({type(e).__name__}: {e})"
-                )
-                if cn_int is not None:
-                    self.state.set_step_status(
-                        cn_int, "sw", STATUS_ERROR,
-                        f"SaveAs 异常: {type(e).__name__}: {e}"
-                    )
-                    fail_configs.append(cn_int)
-
-        total = len(success_configs) + len(fail_configs)
-        logger.info(
-            f"[SW-Export] STEP 导出完成: {len(success_configs)}/{total} 成功"
-            f"（{len(fail_configs)} 失败）"
-        )
-        return len(success_configs), len(fail_configs), fail_configs
-
-    def _rebuild_all_configs(self, doc) -> bool:
-        """重建 SW 模型的所有构型。"""
-        logger.info("[SW-Export] 正在重建所有构型（ForceRebuildAll）...")
-        rebuild_ok = False
-
-        try:
-            ext = doc.Extension
-            ext._FlagAsMethod('ForceRebuildAll')
-            ext.ForceRebuildAll()
-            rebuild_ok = True
-            logger.info("[SW-Export] 所有构型重建完成 (ForceRebuildAll)")
-        except Exception as e_rebuild:
-            logger.warning(
-                f"[SW-Export] ForceRebuildAll 策略1 失败 "
-                f"({type(e_rebuild).__name__}: {e_rebuild})"
-            )
-
-        if not rebuild_ok:
-            try:
-                logger.info("[SW-Export] 降级为逐个配置 EditRebuild3...")
-                doc._FlagAsMethod('GetConfigurationNames')
-                doc._FlagAsMethod('EditRebuild3')
-                raw = doc.GetConfigurationNames()
-                if isinstance(raw, (tuple, list)):
-                    configs = [str(c) for c in raw]
-                elif raw is not None:
-                    configs = [str(raw)]
-                else:
-                    configs = []
-                rebuilt_count = 0
-                for cfg in configs:
-                    try:
-                        doc.ShowConfiguration2(cfg)
-                        doc.EditRebuild3()
-                        rebuilt_count += 1
-                    except Exception as e_cfg:
-                        logger.warning(
-                            f"[SW-Export] 构型{cfg} EditRebuild3 失败: "
-                            f"{type(e_cfg).__name__}: {e_cfg}"
-                        )
-                if rebuilt_count > 0:
-                    rebuild_ok = True
-                    logger.info(f"[SW-Export] 逐个配置重建完成 ({rebuilt_count}/{len(configs)} 个)")
-                else:
-                    logger.warning("[SW-Export] 逐个配置重建: 0 个成功")
-            except Exception as e_rebuild2:
-                logger.warning(
-                    f"[SW-Export] 逐个配置重建失败 "
-                    f"({type(e_rebuild2).__name__}: {e_rebuild2})"
-                )
-
-        return rebuild_ok
-
     def _verify_step_exports(self, step_dir: str) -> int:
         """安全网校验：扫描所有构型的 STEP 输出文件，补标记状态数据库。"""
         all_configs = self.state.get_all_configs()
@@ -1480,7 +1292,7 @@ class SWExecutor:
     def _rebuild_and_export_per_config(self, doc, step_dir: str):
         """逐构型重建 + 即时导出 STEP，每个构型独立重建后再导出。
 
-        与旧的 _rebuild_all_configs + _export_all_configs_to_step 两步分离
+        与旧的“批量重建后再批量导出”两步分离
         模式不同，本方法将重建与导出合并到同一个 per-config 循环中，
         使得构型 STEP 文件在重建后立即写入磁盘，StepFileMonitor 可立即
         检测到并推入 SC 队列，实现边重建边导出边处理的流水线效果。

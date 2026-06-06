@@ -592,7 +592,7 @@ def test_query_remote_task_status_uses_pid_file_when_available():
         def check_remote_file(self, remote_path: str) -> bool:
             return False
 
-        def _read_remote_pid_file(self, pid_file: str) -> int:
+        def read_remote_pid_file(self, pid_file: str) -> int:
             assert pid_file == "D:/flags/autofluid_bg_running.pid"
             return 4321
 
@@ -629,7 +629,7 @@ def test_query_remote_task_status_returns_lost_when_persisted_pid_is_not_running
         def check_remote_file(self, remote_path: str) -> bool:
             return False
 
-        def _read_remote_pid_file(self, pid_file: str) -> int:
+        def read_remote_pid_file(self, pid_file: str) -> int:
             return 9876
 
         def exec_command(self, command: str, timeout: int = 30):

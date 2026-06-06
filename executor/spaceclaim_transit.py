@@ -928,9 +928,6 @@ def _write_result(result_file, config_name, success, message="",
             logger.info("降级写入结果文件成功: {}".format(result_file))
         except Exception as e2:
             logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
-            logger.info("降级写入结果文件成功: {}".format(result_file))
-        except Exception as e2:
-            logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
 
 
 def Main():

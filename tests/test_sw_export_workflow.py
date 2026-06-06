@@ -5,7 +5,7 @@ SolidWorks Export 工作流通用验证测试脚本
   1. 模型导入 (OpenDoc6) 的正确调用参数
   2. 设计表导入 (InsertFamilyTableOpen) 及 COM 降级策略
   3. 配置枚举 (GetConfigurationNames / IGetConfigurationNames)
-  4. 逐构型 STEP 导出 (ShowConfiguration2 → EditRebuild3 → SaveAs)
+  4. 逐构型 STEP 导出 (ShowConfiguration2 → Rebuild → SaveAs)
   5. SW 文档关闭与 COM 资源清理 (CoUninitialize)
   6. 文件监控器 (FileStableDetector / StepFileMonitor)
   7. 配置过渡与状态管理
@@ -787,7 +787,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, _ = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
+        success, fail, _ = runner._sw_executor._rebuild_and_export_per_config(mock_doc, "C:\\step")
         self.assertEqual(success, 0)
         self.assertEqual(fail, 0)
 
@@ -801,7 +801,7 @@ class TestErrorHandling(unittest.TestCase):
 
         from engine.task_runner import TaskRunner
         runner = TaskRunner(self.state)
-        success, fail, fail_list = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
+        success, fail, fail_list = runner._sw_executor._rebuild_and_export_per_config(mock_doc, "C:\\step")
 
         self.assertEqual(success, 1, "Only config 0 should succeed")
         self.assertEqual(fail, 1, "Default should be in fail_list")
@@ -963,7 +963,7 @@ class TestComBindingCompatibility(unittest.TestCase):
     """测试 pywin32 动态 Dispatch 的 property/method 兼容性处理。
 
     注意：_safe_com_call / _com_rebuild / _com_get_config_names 已重构为内联代码，
-    此处改为测试 _export_all_configs_to_step 和 _apply_params_via_com 中的内联逻辑。
+    此处改为测试 _rebuild_and_export_per_config 和 _apply_params_via_com 中的内联逻辑。
     """
 
     def setUp(self):
@@ -979,10 +979,10 @@ class TestComBindingCompatibility(unittest.TestCase):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    # ---- GetConfigurationNames 兼容性（内联于 _export_all_configs_to_step） ----
+    # ---- GetConfigurationNames 兼容性（内联于 _rebuild_and_export_per_config） ----
 
     def test_com_get_config_names_tuple(self):
-        """GetConfigurationNames 返回正常 tuple（通过 _export_all_configs_to_step 内联逻辑）。"""
+        """GetConfigurationNames 返回正常 tuple（通过 _rebuild_and_export_per_config 内联逻辑）。"""
         mock_doc = MagicMock()
         mock_doc.GetConfigurationNames.return_value = ("0", "1", "2")
         mock_doc._FlagAsMethod = MagicMock()
@@ -1118,7 +1118,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         mock_obj = MagicMock(spec=[])
         self.assertFalse(self.SWExecutor._verify_com_object(mock_obj, "DeadObj"))
 
-    # ---- SaveAs 后置文件验证测试（_export_all_configs_to_step 行为） ----
+    # ---- SaveAs 后置文件验证测试（_rebuild_and_export_per_config 行为） ----
 
     @patch("os.path.exists", return_value=True)
     @patch("os.path.getsize", return_value=2048)
@@ -1132,7 +1132,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._sw_executor._rebuild_and_export_per_config(mock_doc, step_dir)
 
         self.assertGreater(success, 0)
         self.assertEqual(fail, 0)
@@ -1149,7 +1149,7 @@ class TestComBindingCompatibility(unittest.TestCase):
         )
 
         step_dir = self.tmpdir
-        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
+        success, fail, failed = runner._sw_executor._rebuild_and_export_per_config(mock_doc, step_dir)
 
         self.assertEqual(success, 0)
         self.assertGreater(fail, 0)

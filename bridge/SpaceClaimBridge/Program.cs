@@ -69,6 +69,11 @@ namespace AutoFluidSimulation.Bridge
         private const int GuiFallbackFixedDelayMs = 20000;
         private const int MaxConsecutiveProcessCheckFailures = 5;
 
+        /// <summary>
+        /// 程序入口点。解析命令行参数并执行 SpaceClaim 脚本，返回对应退出码。
+        /// </summary>
+        /// <param name="args">命令行参数数组</param>
+        /// <returns>退出码：0=成功, 1=脚本失败, 2=启动失败, 3=输出验证失败, 4=参数错误, 5=超时</returns>
         private static int Main(string[] args)
         {
             try
@@ -219,11 +224,11 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine($"[BRIDGE] SpaceClaim Bridge 启动");
-            Console.WriteLine($"[BRIDGE]   脚本: {opts.ScriptPath}");
-            Console.WriteLine($"[BRIDGE]   构型: {opts.ConfigName}");
-            Console.WriteLine($"[BRIDGE]   STEP目录: {opts.StepDir}");
-            Console.WriteLine($"[BRIDGE]   SCDOC目录: {opts.ScdocDir}");
-            Console.WriteLine($"[BRIDGE]   超时: {opts.TimeoutSeconds}s");
+            Console.WriteLine($"[BRIDGE] 脚本: {opts.ScriptPath}");
+            Console.WriteLine($"[BRIDGE] 构型: {opts.ConfigName}");
+            Console.WriteLine($"[BRIDGE] STEP目录: {opts.StepDir}");
+            Console.WriteLine($"[BRIDGE] SCDOC目录: {opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] 超时: {opts.TimeoutSeconds}s");
 
             var stepFile = GetStepFilePath(opts);
             if (!File.Exists(stepFile))
@@ -231,7 +236,7 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine($"[BRIDGE_ERROR] STEP 文件不存在: {stepFile}");
                 return (int)ExitCode.OutputValidationFailed;
             }
-            Console.WriteLine($"[BRIDGE]   STEP文件: {stepFile} ({new FileInfo(stepFile).Length} bytes)");
+            Console.WriteLine($"[BRIDGE] STEP文件: {stepFile} ({new FileInfo(stepFile).Length} bytes)");
 
             Directory.CreateDirectory(opts.ScdocDir);
 
@@ -251,11 +256,11 @@ namespace AutoFluidSimulation.Bridge
             Process workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (环境变量传参模式)...");
-            Console.WriteLine($"[BRIDGE]   Exe: {scExe}");
-            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} /Splash=False /Welcome=False /ExitAfterScript=True");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] Exe: {scExe}");
+            Console.WriteLine($"[BRIDGE] Args: {runScriptArg} /Splash=False /Welcome=False /ExitAfterScript=True");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
 
             try
             {
@@ -342,6 +347,11 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
                 return (int)ExitCode.Timeout;
             }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
+                return (int)ExitCode.LaunchFailed;
+            }
             finally
             {
                 workingProcess?.Dispose();
@@ -354,9 +364,9 @@ namespace AutoFluidSimulation.Bridge
         private static int ExecutePersistent(BridgeOptions opts)
         {
             Console.WriteLine($"[BRIDGE] SpaceClaim Bridge 常驻模式启动");
-            Console.WriteLine($"[BRIDGE]   脚本: {opts.ScriptPath}");
-            Console.WriteLine($"[BRIDGE]   槽位: {opts.SlotId}");
-            Console.WriteLine($"[BRIDGE]   IPC目录: {opts.CmdDir}");
+            Console.WriteLine($"[BRIDGE] 脚本: {opts.ScriptPath}");
+            Console.WriteLine($"[BRIDGE] 槽位: {opts.SlotId}");
+            Console.WriteLine($"[BRIDGE] IPC目录: {opts.CmdDir}");
 
             if (string.IsNullOrEmpty(opts.CmdDir))
             {
@@ -381,11 +391,11 @@ namespace AutoFluidSimulation.Bridge
             Process workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (常驻模式)...");
-            Console.WriteLine($"[BRIDGE]   Exe: {scExe}");
-            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} /Splash=False /Welcome=False");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_PERSISTENT=1");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_CMD_DIR={opts.CmdDir}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_SLOT_ID={opts.SlotId}");
+            Console.WriteLine($"[BRIDGE] Exe: {scExe}");
+            Console.WriteLine($"[BRIDGE] Args: {runScriptArg} /Splash=False /Welcome=False");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_PERSISTENT=1");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_CMD_DIR={opts.CmdDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SLOT_ID={opts.SlotId}");
 
             try
             {
@@ -423,7 +433,17 @@ namespace AutoFluidSimulation.Bridge
             int guiReadyTimeout = GetEnvInt(
                 "AUTOFLUID_SC_GUI_READY_TIMEOUT",
                 DefaultGuiReadyTimeoutSeconds);
-            WaitForGuiReady(workingProcess, guiReadyTimeout);
+            try
+            {
+                WaitForGuiReady(workingProcess, guiReadyTimeout);
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
+                WritePersistentMonitorFile(opts, GetProcessIdOrDefault(workingProcess), "gui_ready_failed");
+                workingProcess?.Dispose();
+                return (int)ExitCode.LaunchFailed;
+            }
 
             // 等待脚本就绪标志
             string readyFile = Path.Combine(opts.CmdDir, $"sc_ready_{opts.SlotId}.json");
@@ -787,6 +807,7 @@ namespace AutoFluidSimulation.Bridge
                         }
                         catch (Exception ex)
                         {
+                            // 无权访问进程 StartTime（如跨会话进程），跳过
                             Console.Error.WriteLine($"[BRIDGE] Warning: 访问进程信息失败: {ex.Message}");
                         }
                     }
@@ -837,6 +858,7 @@ namespace AutoFluidSimulation.Bridge
                     }
                     catch
                     {
+                        // 进程对象可能已释放，忽略清理异常
                     }
                 }
             }
@@ -852,6 +874,7 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch
                 {
+                    // 进程对象可能已释放，忽略清理异常
                 }
             }
         }
@@ -882,7 +905,7 @@ namespace AutoFluidSimulation.Bridge
                         string title = p.MainWindowTitle;
                         if (!string.IsNullOrEmpty(title))
                         {
-                            Console.WriteLine($"[BRIDGE]   主窗口已检测到: \"{title}\"");
+                            Console.WriteLine($"[BRIDGE] 主窗口已检测到: \"{title}\"");
                             mainWindowFound = true;
                         }
                     }
@@ -901,12 +924,12 @@ namespace AutoFluidSimulation.Bridge
 
             if (!mainWindowFound)
             {
-                Console.WriteLine("[BRIDGE]   Phase 1 超时, 使用 WaitForInputIdle 兜底...");
+                Console.WriteLine("[BRIDGE] Phase 1 超时, 使用 WaitForInputIdle 兜底...");
                 try
                 {
                     if (p.WaitForInputIdle(WaitForInputIdleTimeoutMs))
                     {
-                        Console.WriteLine("[BRIDGE]   WaitForInputIdle 兜底 OK");
+                        Console.WriteLine("[BRIDGE] WaitForInputIdle 兜底 OK");
                         Thread.Sleep(GuiFallbackStableDelayMs);
                         return;
                     }
@@ -916,7 +939,7 @@ namespace AutoFluidSimulation.Bridge
                     Console.Error.WriteLine($"[BRIDGE] Warning: WaitForInputIdle 异常: {ex.Message}");
                 }
                 Console.WriteLine(
-                    $"[BRIDGE]   兜底失败, 使用固定延时 ({GuiFallbackFixedDelayMs / 1000}s)");
+                    $"[BRIDGE] 兜底失败, 使用固定延时 ({GuiFallbackFixedDelayMs / 1000}s)");
                 Thread.Sleep(GuiFallbackFixedDelayMs);
                 return;
             }
@@ -927,11 +950,11 @@ namespace AutoFluidSimulation.Bridge
                 p.Refresh();
                 if (p.WaitForInputIdle(WaitForInputIdleTimeoutMs))
                 {
-                    Console.WriteLine("[BRIDGE]   主窗口线程已空闲");
+                    Console.WriteLine("[BRIDGE] 主窗口线程已空闲");
                 }
                 else
                 {
-                    Console.WriteLine("[BRIDGE]   WaitForInputIdle 超时, 继续...");
+                    Console.WriteLine("[BRIDGE] WaitForInputIdle 超时, 继续...");
                 }
             }
             catch (Exception ex)
@@ -949,16 +972,36 @@ namespace AutoFluidSimulation.Bridge
         }
     }
 
+    /// <summary>
+    /// SpaceClaim Bridge 命令行参数选项。
+    /// </summary>
     internal class BridgeOptions
     {
+        /// <summary>SpaceClaim transit 脚本路径（必需）。</summary>
         public string ScriptPath { get; set; }
+
+        /// <summary>构型编号，用于构建 STEP/SCDOC 文件名（一次性模式必需）。</summary>
         public string ConfigName { get; set; }
+
+        /// <summary>STEP 文件所在目录（一次性模式必需）。</summary>
         public string StepDir { get; set; }
+
+        /// <summary>SCDOC 输出目录（一次性模式必需）。</summary>
         public string ScdocDir { get; set; }
+
+        /// <summary>SpaceClaim 进程超时秒数，默认 300。</summary>
         public int TimeoutSeconds { get; set; } = 300;
+
+        /// <summary>自定义 SpaceClaim.exe 路径，覆盖自动检测。</summary>
         public string ScExePath { get; set; }
+
+        /// <summary>是否启用常驻模式（循环处理命令）。</summary>
         public bool Persistent { get; set; }
+
+        /// <summary>常驻模式 IPC 命令目录路径（常驻模式必需）。</summary>
         public string CmdDir { get; set; }
+
+        /// <summary>常驻模式槽位 ID，默认 0。</summary>
         public int SlotId { get; set; }
     }
 }

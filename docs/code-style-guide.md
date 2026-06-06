@@ -28,7 +28,7 @@
 | 常量 | `UPPER_SNAKE_CASE` | `STATUS_COMPLETED`, `MAX_SLOTS`, `ENGINE_CONFIG` |
 | 变量 | `descriptive_snake_case` | `all_configs`, `sw_status_dist`, `paused_sw` |
 | 临时/循环变量 | 简短描述性 | `cn` (config_name), `s` (step_name), `fn` (filename) |
-| 私有方法前缀 | `_snake_case` | `_connect_sw()`, `_export_all_configs_to_step()` |
+| 私有方法前缀 | `_snake_case` | `_connect_sw()`, `_rebuild_and_export_per_config()` |
 | 模块级常量 | `UPPER_SNAKE_CASE` | `LOCAL_PATHS`, `OPERATION_TIMEOUTS` |
 
 ### 1.2 基本原则
@@ -68,13 +68,12 @@ execute_{步骤名}_step()
 # SW 步骤辅助方法
 _connect_sw()              # 三层降级连接 SolidWorks
 _open_sw_model()           # OpenDoc6 打开模型
-_export_all_configs_to_step()  # 批量导出 STEP
+_rebuild_and_export_per_config()  # 逐构型重建并导出 STEP
 _verify_step_exports()     # 安全网校验输出文件
 _disconnect_sw()           # 清理 SW 资源
 _terminate_sw_processes()  # 强制终止 SW 进程
 _launch_sw_process()       # 通过 subprocess 启动 SW
 _validate_design_table()   # 验证 Excel 设计表格式
-_rebuild_all_configs()     # 重建所有构型
 
 # SC 步骤辅助方法
 _terminate_bridge_and_sc()  # 终止 Bridge 及关联 SC 进程
@@ -321,8 +320,7 @@ SW 和 SC 步骤遵循对称的方法结构：
 execute_sw_step()           # 入口
     _connect_sw()           # 连接
     _open_sw_model()        # 打开模型
-    _rebuild_all_configs()  # 重建
-    _export_all_configs_to_step()  # 导出
+    _rebuild_and_export_per_config()  # 逐构型重建并导出
     _verify_step_exports()  # 校验
     _disconnect_sw()        # 清理
 
@@ -375,7 +373,7 @@ def execute_sc_step(self, config_name: int) -> bool: ...
 
 # 校验/验证方法返回详细结果
 def _validate_design_table(self, excel_path: str) -> list: ...
-def _export_all_configs_to_step(self, doc, step_dir) -> tuple: ...
+def _rebuild_and_export_per_config(self, doc, step_dir) -> tuple: ...
 
 # 连接/初始化方法返回对象或 None
 def _connect_sw(self): ...  # → sw_app or None

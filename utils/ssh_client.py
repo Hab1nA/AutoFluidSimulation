@@ -711,6 +711,20 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 清理远程任务条目异常 {task_name}: {e}")
             return False
 
+    def read_remote_pid_file(self, pid_file: str) -> int | None:
+        """读取远程 wrapper 记录的子进程 PID（公共接口）。
+
+        供 RemoteExecutor 等外部模块在需要验证远程进程存活时调用，
+        避免通过 getattr 访问私有方法。
+
+        Args:
+            pid_file: 远程 PID 文件的路径（支持 / 和 \\ 分隔符）
+
+        Returns:
+            解析到的 PID 整数；无法读取或格式无效时返回 None
+        """
+        return self._read_remote_pid_file(pid_file)
+
     def _read_remote_pid_file(self, pid_file: str) -> int | None:
         """读取远程 wrapper 记录的子进程 PID。"""
         cmd_pid_file = pid_file.replace("/", "\\")

@@ -319,7 +319,7 @@ class SCProcessPool:
         )
 
         logger.info(f"[SC-Pool] 启动常驻 Bridge: 槽位{slot.slot_id}")
-        logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
+        logger.debug(f"[SC-Pool] 命令: {' '.join(cmd)}")
 
         self._cleanup_ipc_files(slot.slot_id)
 

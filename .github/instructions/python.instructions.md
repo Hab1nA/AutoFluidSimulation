@@ -40,7 +40,7 @@ applyTo: ["**/*.py"]
 # SW 步骤
 _connect_sw()                    # 三层降级连接 SolidWorks
 _open_sw_model()                 # OpenDoc6 打开模型
-_export_all_configs_to_step()    # 批量导出 STEP
+_rebuild_and_export_per_config() # 逐构型重建并导出 STEP
 _verify_step_exports()           # 安全网校验输出文件
 _disconnect_sw()                 # 清理 SW 资源
 _terminate_sw_processes()        # 强制终止 SW 进程

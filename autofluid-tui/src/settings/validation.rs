@@ -289,7 +289,7 @@ fn validate_solver(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
             message: "迭代次数至少为 1".to_string(),
             severity: Severity::Error,
         });
-    } else if config.solver.solver_iteration_count > 100000 {
+    } else if config.solver.solver_iteration_count > 100_000 {
         errors.push(ValidationError {
             field_name: "solver.solver_iteration_count".to_string(),
             message: "迭代次数异常偏高（> 100000）".to_string(),
