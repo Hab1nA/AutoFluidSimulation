@@ -679,6 +679,38 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
             return False
 
+    def cleanup_remote_task_entry(
+        self,
+        task_name: str,
+        pid_file: str | None = None,
+    ) -> bool:
+        """清理已结束远程任务的计划任务条目和残留 PID 文件。
+
+        完成态任务的 wrapper 会在退出前删除 PID 文件，因此这里不能按 PID
+        终止进程树；超时或主动停止仍应使用 kill_remote_task()。
+        """
+        if not task_name:
+            return True
+        if not self.ensure_connected():
+            return False
+
+        try:
+            del_cmd = f'schtasks /Delete /TN "{task_name}" /F'
+            _, err, del_code = self.exec_command(del_cmd, timeout=15)
+            if pid_file:
+                self.delete_remote_file(pid_file)
+            if del_code == 0:
+                logger.info(f"[SSH] 已清理远程计划任务条目: {task_name}")
+            else:
+                logger.debug(
+                    f"[SSH] 远程计划任务条目已不存在或自清理完成: {task_name} "
+                    f"(exit={del_code}): {err[:200]}"
+                )
+            return True
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 清理远程任务条目异常 {task_name}: {e}")
+            return False
+
     def _read_remote_pid_file(self, pid_file: str) -> int | None:
         """读取远程 wrapper 记录的子进程 PID。"""
         cmd_pid_file = pid_file.replace("/", "\\")
@@ -716,7 +748,16 @@ class RemoteWorkstation:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
-            command_runner = f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
+            pid_capture_line = (
+                "powershell -NoProfile -ExecutionPolicy Bypass "
+                "-Command \"$p=$PID; "
+                "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p))"
+                ".ParentProcessId\" > \"%AF_PID_FILE%\" 2>nul\r\n"
+            )
+            command_runner = (
+                f"{pid_capture_line}"
+                f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
+            )
         else:
             ps_command_arg = command.replace("'", "''")
             ps_script = (

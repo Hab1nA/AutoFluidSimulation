@@ -993,10 +993,21 @@ class RemoteExecutor:
     ) -> None:
         """清理已结束任务的计划任务条目和本地跟踪记录。"""
         task_name = self._remote_tasks.pop(config_name, None)
+        task = self.state.get_remote_task(config_name, step_name)
+        pid_file = None
+        if task is not None and task.get("pid_file"):
+            pid_file = str(task["pid_file"])
         self.state.delete_remote_task(config_name, step_name)
         if not task_name:
             return
-        if ssh.kill_remote_task(task_name):
+
+        cleanup_task = getattr(ssh, "cleanup_remote_task_entry", None)
+        if callable(cleanup_task):
+            cleaned = cleanup_task(task_name, pid_file)
+        else:
+            cleaned = ssh.kill_remote_task(task_name)
+
+        if cleaned:
             logger.info(f"[{step_name}] 构型{config_name} 已清理远程任务条目: {task_name}")
         else:
             logger.warning(f"[{step_name}] 构型{config_name} 清理远程任务条目失败: {task_name}")

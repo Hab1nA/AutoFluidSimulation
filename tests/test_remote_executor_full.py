@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 import pytest
 
@@ -483,7 +484,7 @@ class TestExecuteMeshing:
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 30)
 
         deleted: list[str] = []
-        killed: list[str] = []
+        cleaned: list[tuple[str, str | None]] = []
 
         class _SSH:
             def check_remote_file(self, path: str) -> bool:
@@ -493,16 +494,32 @@ class TestExecuteMeshing:
                 deleted.append(path)
                 return True
 
-            def kill_remote_task(self, task_name: str) -> bool:
-                killed.append(task_name)
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                cleaned.append((task_name, pid_file))
                 return True
 
-        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        state = _StateRecorder()
+        state.remote_tasks[(4, "meshing")] = {
+            "config_name": 4,
+            "step_name": "meshing",
+            "task_name": "AutoFluid_done_task",
+            "flag_file": "D:/flags/meshing_done_4.txt",
+            "error_flag_file": "D:/flags/meshing_done_4.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_done.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
         executor._remote_tasks[4] = "AutoFluid_done_task"
 
         assert executor.wait_meshing_completion(4) is True
         assert deleted == ["D:/flags/meshing_done_4.txt"]
-        assert killed == ["AutoFluid_done_task"]
+        assert cleaned == [
+            ("AutoFluid_done_task", "D:/flags/autofluid_bg_done.pid")
+        ]
         assert 4 not in executor._remote_tasks
 
 
@@ -559,7 +576,7 @@ class TestExecuteSolver:
         monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 30)
 
         deleted: list[str] = []
-        killed: list[str] = []
+        cleaned: list[tuple[str, str | None]] = []
 
         class _SSH:
             def check_remote_file(self, path: str) -> bool:
@@ -573,14 +590,30 @@ class TestExecuteSolver:
                 deleted.append(path)
                 return True
 
-            def kill_remote_task(self, task_name: str) -> bool:
-                killed.append(task_name)
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                cleaned.append((task_name, pid_file))
                 return True
 
-        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        state = _StateRecorder()
+        state.remote_tasks[(6, "solver")] = {
+            "config_name": 6,
+            "step_name": "solver",
+            "task_name": "AutoFluid_solver_done_task",
+            "flag_file": "D:/flags/solver_done_6.txt",
+            "error_flag_file": "D:/flags/solver_done_6.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_solver_done.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
         executor._remote_tasks[6] = "AutoFluid_solver_done_task"
 
         assert executor.wait_solver_completion(6) is True
         assert deleted == ["D:/flags/solver_done_6.txt"]
-        assert killed == ["AutoFluid_solver_done_task"]
+        assert cleaned == [
+            ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
+        ]
         assert 6 not in executor._remote_tasks

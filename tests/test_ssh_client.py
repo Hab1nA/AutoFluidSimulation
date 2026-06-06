@@ -43,6 +43,8 @@ def test_build_background_cmd_script_interactive_calls_command_directly():
     )
     assert "call conda run python script.py" in script
     assert "Start-Process" not in script
+    assert "ParentProcessId" in script
+    assert r'> "%AF_PID_FILE%"' in script
 
 
 def test_build_background_cmd_script_with_working_dir():
@@ -262,6 +264,36 @@ def test_kill_remote_task_kills_recorded_child_pid():
         ('schtasks /Delete /TN "AutoFluid_job" /F', 15),
     ]
     assert deleted == [r"D:/flags/autofluid_bg_job.pid"]
+
+
+def test_cleanup_remote_task_entry_deletes_task_without_reading_pid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "_read_remote_pid_file",
+                side_effect=AssertionError("completed cleanup must not read pid"),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    assert host.cleanup_remote_task_entry(
+                        "AutoFluid_done",
+                        r"D:/flags/autofluid_bg_done.pid",
+                    ) is True
+
+    assert calls == [('schtasks /Delete /TN "AutoFluid_done" /F', 15)]
+    assert deleted == [r"D:/flags/autofluid_bg_done.pid"]
 
 
 def test_upload_file_applies_sftp_channel_timeout():
