@@ -415,14 +415,7 @@ def _disconnect_sw(self, sw_app, doc, sw_model: str):
         except Exception:
             pass
     
-    # 步骤2: 退出 SW
-    if sw_app is not None and ENGINE_CONFIG.get("sw_exit_on_finish", True):
-        try:
-            sw_app.ExitApp()
-        except Exception:
-            self._terminate_sw_processes()
-    
-    # 步骤3: 释放 COM
+    # 步骤2: 释放 COM；SW 进程退出由全量清理统一处理
     del doc; del sw_app; gc.collect()
     pythoncom.CoUninitialize()
 ```
@@ -456,7 +449,6 @@ STATUS_ERROR      = "Error"       # 出错
 # 位于 OPERATION_TIMEOUTS dict:
 "sw_startup"             # SW 启动超时
 "sw_dispatch_startup_delay"  # SW Dispatch 启动延迟
-"sw_exit_wait_seconds"       # SW 退出等待
 "sc_poll_interval"           # SC 轮询间隔
 "ssh_connection"             # SSH 连接超时
 ```

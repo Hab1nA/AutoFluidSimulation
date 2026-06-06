@@ -758,7 +758,10 @@ class SWExecutor:
         return doc
 
     def _disconnect_sw(self, sw_app, doc, sw_model: str):
-        """清理 SW 资源：关闭文档 → 退出 SW → 释放 COM。"""
+        """清理 SW COM 资源：关闭文档 → 释放 COM。
+
+        SolidWorks 进程退出统一由全量清理流程处理。
+        """
         import pythoncom
 
         # 步骤 1: 关闭模型文档
@@ -773,33 +776,7 @@ class SWExecutor:
             except Exception as e_doc:
                 logger.debug(f"[SW-Cleanup] 关闭模型文档异常: {e_doc}")
 
-        # 步骤 2: 退出 SolidWorks
-        if sw_app is not None and ENGINE_CONFIG.get("sw_exit_on_finish", True):
-            try:
-                sw_app.ExitApp()
-                logger.info("[SW-Cleanup] 已请求 SolidWorks 退出 (ExitApp)")
-            except Exception as e_exit:
-                logger.warning(
-                    f"[SW-Cleanup] ExitApp 调用异常 ({type(e_exit).__name__}): {e_exit}，"
-                    f"尝试强制终止..."
-                )
-                self._terminate_sw_processes()
-            else:
-                logger.info("[SW-Cleanup] 等待 SolidWorks 进程退出...")
-                sw_exited = False
-                for _ in range(OPERATION_TIMEOUTS["sw_exit_wait_seconds"]):
-                    time.sleep(1)
-                    if not self._is_sw_process_running(timeout=5):
-                        sw_exited = True
-                        logger.info("[SW-Cleanup] ✓ SolidWorks 进程已退出")
-                        break
-                if not sw_exited:
-                    logger.warning(
-                        "[SW-Cleanup] SolidWorks 未在 15 秒内退出，强制终止..."
-                    )
-                    self._terminate_sw_processes()
-
-        # 步骤 3: 释放 COM 资源
+        # 步骤 2: 释放 COM 资源
         del doc
         del sw_app
         gc.collect()

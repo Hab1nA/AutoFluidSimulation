@@ -90,11 +90,9 @@ impl Default for StepFilePatterns {
 pub struct SolidWorksConfig {
     pub sw_macro_timeout: u64,
     pub sw_close_doc_on_finish: bool,
-    pub sw_exit_on_finish: bool,
     pub sw_visible: bool,
     pub sw_startup: u64,
     pub sw_dispatch_startup_delay: u64,
-    pub sw_exit_wait_seconds: u64,
 }
 
 impl Default for SolidWorksConfig {
@@ -102,11 +100,9 @@ impl Default for SolidWorksConfig {
         Self {
             sw_macro_timeout: 3600,
             sw_close_doc_on_finish: true,
-            sw_exit_on_finish: true,
             sw_visible: true,
             sw_startup: 60,
             sw_dispatch_startup_delay: 8,
-            sw_exit_wait_seconds: 15,
         }
     }
 }
@@ -255,7 +251,7 @@ impl SettingCategory {
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
             SettingCategory::StepPatterns => 6,
-            SettingCategory::SolidWorks => 7,
+            SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 5,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
@@ -318,11 +314,9 @@ impl SettingCategory {
             SettingCategory::SolidWorks => match idx {
                 0 => "sw_macro_timeout",
                 1 => "sw_close_doc_on_finish",
-                2 => "sw_exit_on_finish",
-                3 => "sw_visible",
-                4 => "sw_startup",
-                5 => "sw_dispatch_startup_delay",
-                6 => "sw_exit_wait_seconds",
+                2 => "sw_visible",
+                3 => "sw_startup",
+                4 => "sw_dispatch_startup_delay",
                 _ => {
                     debug_assert!(false, "SolidWorks: invalid field index {idx}");
                     ""
@@ -427,11 +421,9 @@ impl SettingCategory {
             SettingCategory::SolidWorks => match idx {
                 0 => "宏超时(秒)",
                 1 => "完成后关闭文档",
-                2 => "完成后退出SW",
-                3 => "显示窗口",
-                4 => "启动超时(秒)",
-                5 => "调度启动延迟(秒)",
-                6 => "退出等待(秒)",
+                2 => "显示窗口",
+                3 => "启动超时(秒)",
+                4 => "调度启动延迟(秒)",
                 _ => {
                     debug_assert!(false, "SolidWorks: invalid field index {idx}");
                     ""
@@ -482,7 +474,7 @@ impl SettingCategory {
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=3)
+        matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=2)
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
@@ -647,11 +639,9 @@ impl SettingsState {
             SettingCategory::SolidWorks => match idx {
                 0 => field_val!(self.config.solidworks, sw_macro_timeout),
                 1 => field_val!(self.config.solidworks, sw_close_doc_on_finish),
-                2 => field_val!(self.config.solidworks, sw_exit_on_finish),
-                3 => field_val!(self.config.solidworks, sw_visible),
-                4 => field_val!(self.config.solidworks, sw_startup),
-                5 => field_val!(self.config.solidworks, sw_dispatch_startup_delay),
-                6 => field_val!(self.config.solidworks, sw_exit_wait_seconds),
+                2 => field_val!(self.config.solidworks, sw_visible),
+                3 => field_val!(self.config.solidworks, sw_startup),
+                4 => field_val!(self.config.solidworks, sw_dispatch_startup_delay),
                 _ => String::new(),
             },
             SettingCategory::SpaceClaim => match idx {
@@ -745,21 +735,15 @@ impl SettingsState {
                 1 => {
                     self.config.solidworks.sw_close_doc_on_finish = value == "true" || value == "是"
                 }
-                2 => self.config.solidworks.sw_exit_on_finish = value == "true" || value == "是",
-                3 => self.config.solidworks.sw_visible = value == "true" || value == "是",
-                4 => {
+                2 => self.config.solidworks.sw_visible = value == "true" || value == "是",
+                3 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.solidworks.sw_startup = v;
                     }
                 }
-                5 => {
+                4 => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.solidworks.sw_dispatch_startup_delay = v;
-                    }
-                }
-                6 => {
-                    if let Ok(v) = value.parse::<u64>() {
-                        self.config.solidworks.sw_exit_wait_seconds = v;
                     }
                 }
                 _ => {}
@@ -1079,5 +1063,25 @@ mod tests {
 
         state.set_field_value(SettingCategory::StepPatterns, 2, "");
         assert_eq!(state.config.step_file_patterns.transfer, None);
+    }
+
+    #[test]
+    fn solidworks_settings_do_not_expose_exit_fields() {
+        assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
+
+        let field_names = (0..SettingCategory::SolidWorks.field_count())
+            .map(|idx| SettingCategory::SolidWorks.field_name(idx))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            field_names,
+            vec![
+                "sw_macro_timeout",
+                "sw_close_doc_on_finish",
+                "sw_visible",
+                "sw_startup",
+                "sw_dispatch_startup_delay",
+            ]
+        );
     }
 }

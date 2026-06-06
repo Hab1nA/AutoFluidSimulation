@@ -84,7 +84,6 @@ class ProcessManagementConfig(TypedDict):
 class OperationTimeoutsConfig(TypedDict):
     sw_startup: int
     sw_dispatch_startup_delay: int
-    sw_exit_wait_seconds: int
     sc_poll_interval: float
     ssh_connection: int
     dir_recursion_limit: int
@@ -99,7 +98,6 @@ class EngineConfig(TypedDict):
     watchdog_interval: float
     sw_macro_timeout: int
     sw_close_doc_on_finish: bool
-    sw_exit_on_finish: bool
     sw_visible: bool
     sc_timeout: int
     transfer_timeout: int
@@ -282,8 +280,6 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     "sw_startup": 60,
     # SW COM Dispatch 后等待窗口加载的延迟（秒）
     "sw_dispatch_startup_delay": 8,
-    # SW ExitApp 后等待进程退出的最大秒数
-    "sw_exit_wait_seconds": 15,
     # SC 进程轮询间隔（秒）
     "sc_poll_interval": 2.0,
     # SSH 连接超时（秒）
@@ -317,10 +313,8 @@ ENGINE_CONFIG: EngineConfig = {
     "sw_macro_timeout": 3600,
     # SW 自动化行为控制
     # - sw_close_doc_on_finish: 宏完成后关闭已打开的模型文档（减少资源占用）
-    # - sw_exit_on_finish: 宏完成后退出 SolidWorks（默认为 True，确保程序运行整洁性）
     # - sw_visible: 是否显示 SolidWorks 主窗口
     "sw_close_doc_on_finish": True,
-    "sw_exit_on_finish": True,
     "sw_visible": True,
     # SC 脚本执行超时（秒）
     "sc_timeout": 300,

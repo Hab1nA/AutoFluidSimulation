@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 from executor.sw_executor import SWExecutor
 
 
@@ -103,3 +107,37 @@ class TestSWProcessCleanup:
             executor._shutdown_all_internal()
 
         assert calls == ["disconnect", "terminate"]
+
+    def test_disconnect_sw_defers_exit_to_full_cleanup(self, monkeypatch) -> None:
+        executor = SWExecutor(_State())
+        sw_app = MagicMock()
+        doc = MagicMock()
+        doc.GetTitle.return_value = "model_gen4.SLDPRT"
+        com_calls: list[str] = []
+
+        monkeypatch.setitem(
+            sys.modules,
+            "pythoncom",
+            SimpleNamespace(
+                CoFreeUnusedLibraries=lambda: com_calls.append("free"),
+                CoUninitialize=lambda: com_calls.append("uninitialize"),
+            ),
+        )
+        monkeypatch.setattr("executor.sw_executor.time.sleep", lambda _seconds: None)
+        monkeypatch.setattr(
+            executor,
+            "_terminate_sw_processes",
+            lambda: com_calls.append("terminate"),
+        )
+
+        executor._disconnect_sw(
+            sw_app,
+            doc,
+            r"C:\models\model_gen4.SLDPRT",
+        )
+
+        sw_app.CloseDoc.assert_called_once_with("model_gen4.SLDPRT")
+        sw_app.ExitApp.assert_not_called()
+        assert "terminate" not in com_calls
+        assert com_calls.count("free") == 2
+        assert com_calls[-1] == "uninitialize"

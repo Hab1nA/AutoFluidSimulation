@@ -31,11 +31,9 @@ solverdata = "model_gen4_{config}.dat.h5"
 [solidworks]
 sw_macro_timeout = 3600
 sw_close_doc_on_finish = true
-sw_exit_on_finish = true
 sw_visible = true
 sw_startup = 60
 sw_dispatch_startup_delay = 8
-sw_exit_wait_seconds = 15
 
 [spaceclaim]
 sc_timeout = 300

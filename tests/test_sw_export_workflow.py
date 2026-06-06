@@ -6,7 +6,7 @@ SolidWorks Export 工作流通用验证测试脚本
   2. 设计表导入 (InsertFamilyTableOpen) 及 COM 降级策略
   3. 配置枚举 (GetConfigurationNames / IGetConfigurationNames)
   4. 逐构型 STEP 导出 (ShowConfiguration2 → EditRebuild3 → SaveAs)
-  5. SW 退出与 COM 资源清理 (ExitApp / CoUninitialize)
+  5. SW 文档关闭与 COM 资源清理 (CoUninitialize)
   6. 文件监控器 (FileStableDetector / StepFileMonitor)
   7. 配置过渡与状态管理
   8. 错误处理与边界情况
@@ -381,11 +381,11 @@ class TestConfigEnumAndStepExport(unittest.TestCase):
 
 
 # ============================================================================
-# 测试类 4: SW 退出与 COM 清理
+# 测试类 4: SW 文档关闭与 COM 清理
 # ============================================================================
 
 class TestSwExitAndCleanup(unittest.TestCase):
-    """测试 SolidWorks 退出和 COM 资源清理。"""
+    """测试 SolidWorks 文档关闭和 COM 资源清理。"""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sw_test_cleanup_")
@@ -429,12 +429,6 @@ class TestSwExitAndCleanup(unittest.TestCase):
             ]
             self.assertEqual(len(kill_calls), 0,
                              "Should NOT call taskkill when no SW process")
-
-    def test_sw_exit_on_finish_config_flag(self):
-        """测试 sw_exit_on_finish 配置标志是否被正确读取。"""
-        from engine.config import ENGINE_CONFIG
-        self.assertIn("sw_exit_on_finish", ENGINE_CONFIG)
-        self.assertIsInstance(ENGINE_CONFIG["sw_exit_on_finish"], bool)
 
     def test_sw_close_doc_on_finish_config_flag(self):
         """测试 sw_close_doc_on_finish 配置标志是否被正确读取。"""

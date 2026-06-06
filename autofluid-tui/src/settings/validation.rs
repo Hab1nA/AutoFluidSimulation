@@ -197,13 +197,6 @@ fn validate_solidworks(config: &SettingsConfig, errors: &mut Vec<ValidationError
             severity: Severity::Error,
         });
     }
-    if config.solidworks.sw_exit_wait_seconds == 0 {
-        errors.push(ValidationError {
-            field_name: "solidworks.sw_exit_wait_seconds".to_string(),
-            message: "超时值必须大于 0".to_string(),
-            severity: Severity::Error,
-        });
-    }
 }
 
 fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
