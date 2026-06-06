@@ -88,59 +88,76 @@ impl DaemonManager {
         // full_quit IPC 命令已在主循环中发送，daemon 的 shutdown() 正在执行。
         // 仅等待进程自行退出，不做额外干预——与 Ctrl+C 行为一致。
         log::info!("[Daemon] 等待后台引擎退出");
-        if let Some(mut child) = self.process.take() {
-            Self::wait_for_exit(&mut child);
+        let stopped = if let Some(mut child) = self.process.take() {
+            Self::wait_for_exit(&mut child)
         } else if let Some(pid) = Self::read_pid_file(project_dir) {
             log::info!("[Daemon] 通过 PID 文件等待后台引擎退出: pid={}", pid);
-            Self::wait_for_pid_exit(project_dir);
+            Self::wait_for_pid_exit(project_dir)
         } else {
             log::info!("[Daemon] 未发现需要等待的后台引擎进程");
+            true
+        };
+        Self::cleanup_pid_file_after_wait(project_dir, stopped)
+    }
+
+    fn cleanup_pid_file_after_wait(project_dir: &str, stopped: bool) -> Result<(), String> {
+        if stopped {
+            Self::remove_pid_file(project_dir);
+            Ok(())
+        } else {
+            Err(format!(
+                "等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)"
+            ))
         }
-        Self::remove_pid_file(project_dir);
-        Ok(())
     }
 
     /// 等待子进程自行退出。
     ///
     /// 注意：此方法在同步上下文中调用（`run_app` 主循环退出阶段），
     /// 不在 tokio 异步上下文中，因此使用 `std::thread::sleep` 是安全的。
-    fn wait_for_exit(child: &mut Child) {
+    fn wait_for_exit(child: &mut Child) -> bool {
         let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
         while Instant::now() < deadline {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     log::info!("[Daemon] 后台引擎已退出: status={}", status);
-                    return;
+                    return true;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(200)),
                 Err(e) => {
                     log::warn!("[Daemon] 检查后台引擎退出状态失败: {}", e);
-                    return;
+                    return false;
                 }
             }
         }
         // 超时仅记录，不强杀——daemon 可能仍在清理中
         log::warn!("[Daemon] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
         eprintln!("[TUI] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)，TUI 退出");
+        false
     }
 
     /// 等待外部 daemon 进程自行退出（通过 PID 文件检测）。
     ///
     /// 注意：此方法在同步上下文中调用，不在 tokio 异步上下文中，
     /// 因此使用 `std::thread::sleep` 是安全的。
-    fn wait_for_pid_exit(project_dir: &str) {
+    fn wait_for_pid_exit(project_dir: &str) -> bool {
         let pid_file = Self::pid_file_path(project_dir);
-        let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
+        Self::wait_for_pid_file_removed(&pid_file, DAEMON_SHUTDOWN_TIMEOUT_SECS)
+    }
+
+    fn wait_for_pid_file_removed(pid_file: &std::path::Path, timeout_secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
             // PID 文件被删除说明 daemon shutdown 已完成
             if !pid_file.exists() {
                 log::info!("[Daemon] 后台引擎已完成退出清理");
-                return;
+                return true;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        log::warn!("[Daemon] 等待后台引擎 PID 文件清理超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
-        eprintln!("[TUI] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)，TUI 退出");
+        log::warn!("[Daemon] 等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
+        eprintln!("[TUI] 等待后台引擎退出超时 ({timeout_secs}s)，TUI 退出");
+        false
     }
 
     // ------------------------------------------------------------------
@@ -198,12 +215,28 @@ impl DaemonManager {
     ) {
         if ipc.is_connected() {
             log::info!("[Daemon] 发送后台引擎停止请求");
-            let _ = rt.block_on(ipc.full_quit());
+            match rt.block_on(ipc.full_quit()) {
+                Ok(resp) if resp.is_ok() => {
+                    log_buffer.push_info(format!("✅ {}", resp.message));
+                }
+                Ok(resp) => {
+                    log_buffer.push_info(format!("❌ {}", resp.message));
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                }
+            }
             rt.block_on(ipc.disconnect());
         }
-        let _ = self.stop(project_dir);
-        state.connected = false;
-        log_buffer.push_info("✅ 后台引擎已停止".to_string());
+        match self.stop(project_dir) {
+            Ok(()) => {
+                state.connected = false;
+                log_buffer.push_info("✅ 后台引擎已停止".to_string());
+            }
+            Err(e) => {
+                log_buffer.push_info(format!("⚠️ {}", e));
+            }
+        }
     }
 
     /// 重启后台引擎：停止 → 启动 → 等待 IPC 就绪。
@@ -229,5 +262,51 @@ impl DaemonManager {
                 log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_project_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-daemon-test-{}",
+            crate::generate_request_id()
+        ));
+        fs::create_dir_all(dir.join("data")).expect("create temp project data dir");
+        dir
+    }
+
+    #[test]
+    fn cleanup_pid_file_after_wait_removes_pid_when_stopped() {
+        let project_dir = unique_temp_project_dir();
+        let pid_file = project_dir.join("data").join("daemon.pid");
+        fs::write(&pid_file, "12345").expect("write pid file");
+
+        let result = DaemonManager::cleanup_pid_file_after_wait(
+            project_dir.to_str().expect("utf8 temp path"),
+            true,
+        );
+
+        assert!(result.is_ok());
+        assert!(!pid_file.exists());
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn cleanup_pid_file_after_wait_keeps_pid_when_timeout() {
+        let project_dir = unique_temp_project_dir();
+        let pid_file = project_dir.join("data").join("daemon.pid");
+        fs::write(&pid_file, "12345").expect("write pid file");
+
+        let result = DaemonManager::cleanup_pid_file_after_wait(
+            project_dir.to_str().expect("utf8 temp path"),
+            false,
+        );
+
+        assert!(result.is_err());
+        assert!(pid_file.exists());
+        let _ = fs::remove_dir_all(project_dir);
     }
 }

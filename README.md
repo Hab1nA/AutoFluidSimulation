@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.6.1** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.7.0** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -13,7 +13,7 @@ AutoFluid 是一个**全自动 CFD 仿真流水线控制系统**，用于批量�
 - **全自动五阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解全流程
 - **C/S 分离架构**: Python 后台守护进程 (Daemon) + Rust TUI 终端界面，独立部署、独立重启
 - **直接 COM API**: 通过 `win32com` 直接调用 SolidWorks COM 接口导出 STEP，无需宏文件
-- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（7 分类 48 字段在线编辑）
+- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（9 分类 48 字段在线编辑）
 - **SQLite WAL 持久化**: 状态实时落盘，支持断点续传，Daemon 重启不丢失进度
 - **DAG 异步调度**: Producer-Consumer 队列 + 全局 Barrier，边导出边处理的并行流水线
 - **SCProcessPool**: 3 槽位进程池管理 SpaceClaim 并发调用，含等待队列与断点续传
@@ -130,8 +130,10 @@ AutoFluidSimulation/
 │   ├── scheduler/           # PipelineScheduler DAG 调度器（子包）
 │   │   ├── main.py          # 调度主逻辑
 │   │   ├── barrier.py       # 全局屏障协调器
+│   │   ├── control.py       # 暂停/恢复/停止控制
 │   │   ├── sw_phase.py      # SW 阶段处理器
 │   │   ├── worker_pool.py   # Worker 线程池管理
+│   │   ├── work_queue.py    # 工作队列
 │   │   ├── meshing_monitor.py # 网格阶段监控
 │   │   ├── retry.py         # 重试管理器
 │   │   └── utils.py         # 调度工具函数
@@ -148,14 +150,16 @@ AutoFluidSimulation/
 │   ├── spaceclaim_transit.py # SC 转换脚本（V23 API）
 │   ├── sw_executor.py        # SolidWorks COM 执行器
 │   ├── remote_executor.py    # 远程 SSH 执行器
-│   └── cleaner.py            # 中间文件清理器
+│   ├── cleaner.py            # 中间文件清理器
+│   └── remote_scripts/       # 远程部署脚本
 │
 ├── bridge/                  # C# SpaceClaim 桥接
 │   └── SpaceClaimBridge/
 │       ├── Program.cs       # 主程序（.NET 4.8，进程检测模式）
 │       ├── Program.NoRef.cs # 免 ANSYS 引用版本
 │       ├── compile.bat      # MSBuild 编译
-│       └── compile_noref.bat
+│       ├── compile_noref.bat
+│       └── find_msbuild.bat # MSBuild 自动探测
 │
 ├── utils/                   # 工具模块
 │   ├── excel_reader.py      # Excel 读取
@@ -172,14 +176,25 @@ AutoFluidSimulation/
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
 │       ├── state/           # 应用状态
 │       ├── event_handler/   # 事件处理（command.rs / key_handler.rs）
-│       ├── settings/        # 设置页面（9 分类 49 字段）
+│       ├── settings/        # 设置页面（9 分类 48 字段）
 │       └── ui/              # UI 渲染
+│
+├── scripts/                 # 环境检查与部署脚本
+│   ├── check_local_env.ps1  # 本地控制机环境检查
+│   ├── check_remote_env.ps1 # 远程工作站环境检查（通过 SSH）
+│   ├── setup_remote_workstation.ps1 # 远程工作站一键部署
+│   ├── verify_remote_setup.ps1     # 远程环境快速验证
+│   ├── start_client_window.ps1     # TUI 客户端启动窗口
+│   └── start_daemon_window.ps1     # Daemon 启动窗口
 │
 ├── docs/                    # 项目文档
 │   ├── code-style-guide.md  # 代码规范
-│   └── roadmap.md           # 远期路线图
+│   ├── architecture-refactoring-plan.md # 远期架构改进计划
+│   ├── daemon-split-plan.md # Daemon 拆分迁移方案
+│   ├── solver-remaining-time-design.md # 求解器剩余时间估算
+│   └── task-investigation-remote-workstation-environment.md # 远程环境调研
 │
-└── tests/                   # 测试
+└── tests/                   # 测试（25 个测试文件）
 ```
 
 ---
@@ -206,7 +221,6 @@ python-dotenv≥1.0.0    # .env 加载
 toml≥0.10.0            # TOML 配置
 pywin32≥305            # SolidWorks COM
 paramiko≥3.0.0         # SSH/SFTP
-watchdog≥3.0.0         # 文件监控
 ```
 
 安装：`pip install -r requirements.txt`
@@ -247,7 +261,6 @@ watchdog≥3.0.0         # 文件监控
 | `python-dotenv` | ≥1.0.0  | 加载 `.env` 敏感信息（SSH 密码等）     |
 | `pywin32`       | ≥305    | SolidWorks COM 自动化接口                |
 | `paramiko`      | ≥3.0.0  | SSH/SFTP 远程连接与文件传输              |
-| `watchdog`      | ≥3.0.0  | 文件系统事件监控（STEP 文件稳定性检测）  |
 | `sqlite3`       | —       | Python 标准库自带，SQLite WAL 状态持久化 |
 
 ```powershell
@@ -464,6 +477,33 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 9  | 目录结构就位        | 确认 `step_dir` / `scdoc_dir` / `.env` / `Excel` / `.SLDPRT` 均已存在        |
 | 10 | TOML 配置正确       | TUI 启动后执行 `check` 命令或进入 `settings` 页面验证                              |
 
+### 环境自动化脚本
+
+`scripts/` 目录提供一套 PowerShell 脚本，用于快速检查和配置本地及远程环境：
+
+| 脚本                               | 用途                                                        | 运行位置     |
+| ---------------------------------- | ----------------------------------------------------------- | ------------ |
+| `check_local_env.ps1`            | 逐项检查本地控制机环境（Python/Rust/MSBuild/SW/SC/SSH等）  | 本地控制机   |
+| `check_remote_env.ps1`           | 通过 SSH 检查远程工作站环境（Conda/PyFluent/Fluent/MPI等） | 本地控制机   |
+| `setup_remote_workstation.ps1`   | 一键部署远程工作站（SSH+Conda+PyFluent+目录结构）           | 远程工作站   |
+| `verify_remote_setup.ps1`        | 在远程工作站本机快速验证环境就绪状态                        | 远程工作站   |
+| `start_client_window.ps1`        | 设置窗口标题并启动 TUI 客户端                               | 本地控制机   |
+| `start_daemon_window.ps1`        | 设置窗口标题并启动后台 Daemon                               | 本地控制机   |
+
+```powershell
+# 本地环境检查
+.\scripts\check_local_env.ps1
+
+# 远程环境检查（会提示输入 SSH 主机/用户）
+.\scripts\check_remote_env.ps1
+
+# 在远程工作站上（管理员身份）一键部署
+.\scripts\setup_remote_workstation.ps1
+
+# 在远程工作站上快速验证
+.\scripts\verify_remote_setup.ps1
+```
+
 ### 编译（首次使用）
 
 ```powershell
@@ -556,7 +596,7 @@ python main.py --all           # 同时启动
 | ---------------------- | ------------- | ------------------------------------------------------------------- |
 | **▶ Start**     | `start`     | 启动/继续流水线                                                     |
 | **⏸ Pause**     | `pause`     | 暂停流水线                                                          |
-| **⚙ Settings**  | `settings`  | 可视化配置（7 分类 48 字段在线编辑）                                |
+| **⚙ Settings**  | `settings`  | 可视化配置（9 分类 48 字段在线编辑）                                |
 | **🔧 Check**     | `check`     | 系统自检（弹出结果对话框）                                          |
 | **📊 Status**    | `status`    | 统计摘要（引擎状态/各步骤完成数）                                   |
 | **😈 Daemon**    | 下拉菜单      | 展开子菜单：`daemon start` / `daemon stop` / `daemon restart` |
@@ -637,17 +677,19 @@ python main.py --all           # 同时启动
 
 ### 设置页面（Settings）
 
-输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 49 个字段**：
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 48 个字段**：
 
 | 分类                     | 字段数 | 内容                                                                                    |
 | ------------------------ | ------ | --------------------------------------------------------------------------------------- |
-| **本地文件路径**   | 10     | SW/SpaceClaim 可执行文件、模型/Excel/脚本/桥接程序/输出目录/日志/数据路径               |
+| **本地文件路径**   | 6      | SW/SpaceClaim 可执行文件、模型、Excel 参数表、STEP/SCDOC 输出目录                      |
 | **远程工作站连接** | 4      | 主机地址、SSH 端口、用户名、密码（密码字段掩码显示，写入 `.env` 文件）                |
-| **远程执行目录**   | 9      | 工程根目录、SCDOC/网格/结果/标志文件目录、Conda 环境名/路径、网格/求解脚本              |
-| **步骤文件模板**   | 5      | SW / SC / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位）    |
-| **SolidWorks**     | 7      | 宏超时、完成后关闭文档/退出、显示窗口、启动超时、调度启动延迟、退出等待                 |
+| **远程执行目录**   | 10     | 工作目录、脚本/引用文件目录、SCDOC/网格/结果/标志目录、Conda 环境名/路径、MPI 目录      |
+| **步骤文件模板**   | 6      | SW / SC / Transfer / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位） |
+| **SolidWorks**     | 5      | 宏超时、完成后关闭文档、显示窗口、启动超时、调度启动延迟                                |
 | **SpaceClaim**     | 5      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待                            |
-| **全局设置**       | 9      | 看门狗间隔、传输/网格/求解超时、最大重试、状态刷新间隔、SSH 连接/上传重试、目录递归深度 |
+| **网格划分**       | 2      | 网格超时、网格核心数                                                                    |
+| **仿真求解**       | 3      | 求解超时、求解核心数、求解迭代次数                                                      |
+| **全局设置**       | 7      | 看门狗间隔、状态刷新间隔、传输超时、SSH 连接/上传重试、最大重试、目录递归深度           |
 
 **设置页面操作**：
 
@@ -776,10 +818,12 @@ compile_noref.bat    # 免引用版本
 ## 开发
 
 - 编码规范见 `docs/code-style-guide.md`
-- 远期规划见 `docs/architecture-refactoring-plan.md`
+- 远期架构规划见 `docs/architecture-refactoring-plan.md`
+- Daemon 拆分方案见 `docs/daemon-split-plan.md`
+- 求解器剩余时间设计见 `docs/solver-remaining-time-design.md`
 - Python: ruff linting + mypy 类型检查
 - Rust: `cargo check` + `cargo clippy`
 
 ---
 
-> **版本**: v2.6.1 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-05 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.7.0 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）

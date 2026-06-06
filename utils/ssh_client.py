@@ -587,8 +587,7 @@ class RemoteWorkstation:
                 working_dir=working_dir, interactive=interactive,
             )
             self._write_remote_text_file(script_file, script)
-            if not interactive:
-                self._task_pid_files[task_name] = pid_file
+            self._task_pid_files[task_name] = pid_file
 
             script_cmd_path = script_file.replace("/", "\\")
             create_cmd = (
@@ -621,6 +620,8 @@ class RemoteWorkstation:
                 return (True, task_name)
             else:
                 logger.error(f"[SSH] 远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
+                self.exec_command(f'schtasks /Delete /TN "{task_name}" /F', timeout=15)
+                self._task_pid_files.pop(task_name, None)
                 return (False, task_name)
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] 启动远程后台任务异常: {e}")

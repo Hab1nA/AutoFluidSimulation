@@ -106,6 +106,7 @@ class PipelineScheduler:
             stopped_event=self._stopped,
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
+            on_solver_terminal=self.finalize_pipeline,
         )
         self.meshing_monitor = MeshingMonitor(
             state_manager=self.state,
@@ -267,6 +268,28 @@ class PipelineScheduler:
         )
         self._control.stop()
         self.state.set_engine_status("stopped")
+
+    def finalize_pipeline(self, outcome: str) -> None:
+        """流水线自然终结收尾，不复用用户 stop() 的暂停落库逻辑."""
+        if outcome == "completed":
+            logger.info("[Scheduler] 全部构型处理完成，开始自然收尾")
+        else:
+            logger.error("[Scheduler] Solver 阶段终结但存在错误，开始失败收尾")
+
+        self._control.stop()
+        self.state.set_engine_status("stopped")
+
+        if self._file_monitor is not None:
+            self._file_monitor.stop()
+
+        self.worker_pool.join_worker_threads(timeout=3)
+
+        try:
+            self.runner.disconnect_ssh()
+        except Exception as e:
+            logger.warning(f"[Scheduler] 自然收尾断开 SSH 异常: {e}")
+
+        logger.info("[Scheduler] 流水线终态收尾完成")
 
     def _handle_recursion_limit_exceeded(self, recursion_depth: int):
         """处理递归深度超限的情况。"""
@@ -472,6 +495,29 @@ class PipelineScheduler:
                 # ---- 找到第一个非 COMPLETED 步骤 ----
 
                 if status == STATUS_RUNNING:
+                    if step in ("meshing", "solver"):
+                        remote_executor = self.runner.get_remote_executor()
+                        remote_status = remote_executor.query_remote_task_status(cn, step)
+                        if remote_status == "completed":
+                            self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                            remote_executor.forget_remote_task(cn, step)
+                            continue
+                        if remote_status == "failed":
+                            self.state.set_step_status(
+                                cn,
+                                step,
+                                STATUS_ERROR,
+                                f"远程 {step} 任务失败",
+                            )
+                            remote_executor.forget_remote_task(cn, step)
+                            break
+                        if remote_status in ("running", "unknown"):
+                            logger.warning(
+                                f"{log_prefix} 构型{cn} [{step}] 状态={status}，"
+                                f"远程状态={remote_status}，保留 Running 并跳过重启"
+                            )
+                            break
+
                     # ★ 孤立 RUNNING 检测：Daemon 重启或 stop() 后，
                     #   步骤可能停留在 RUNNING 状态（进程已不存在）。
                     #   检查输出文件：存在则标记完成，否则重置为 Waiting 重新执行。
@@ -480,6 +526,8 @@ class PipelineScheduler:
                         continue
                     else:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
+                        if step in ("meshing", "solver"):
+                            self.runner.get_remote_executor().forget_remote_task(cn, step)
                         if step == "sw":
                             # SW 步骤由 start_pipeline 统一处理
                             break

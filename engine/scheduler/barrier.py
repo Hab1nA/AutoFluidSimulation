@@ -5,9 +5,11 @@
 """
 
 import threading
+from typing import Callable
 
 from engine.config import (
-    STATUS_WAITING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_RETRYING,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -34,6 +36,7 @@ class BarrierCoordinator:
         stopped_event: threading.Event,
         barrier_passed_event: threading.Event,
         retry_manager: RetryManager,
+        on_solver_terminal: Callable[[str], None] | None = None,
     ):
         """
         初始化全局屏障协调器。
@@ -52,6 +55,8 @@ class BarrierCoordinator:
         self._stopped = stopped_event
         self._barrier_passed = barrier_passed_event
         self._retry_manager = retry_manager
+        self._on_solver_terminal = on_solver_terminal
+        self._solver_terminal_reported = False
         self._guard = PauseGuard(paused_event, stopped_event)
 
         # ---- Solver 线程（串行执行：同一时刻仅一个构型求解）----
@@ -230,6 +235,7 @@ class BarrierCoordinator:
 
             if self._next_solver_config() is None:
                 logger.info("[Solver] 当前没有待执行的求解任务")
+                self._report_solver_terminal_if_ready()
                 return False
 
             t = threading.Thread(
@@ -247,7 +253,12 @@ class BarrierCoordinator:
         """返回下一个可执行 Solver 的构型；没有则返回 None。"""
         for cn in self.state.get_all_configs():
             solver_status = self.state.get_step_status(cn, "solver")
-            if solver_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_RETRYING):
+            if solver_status in (
+                STATUS_WAITING,
+                STATUS_RUNNING,
+                STATUS_PAUSED,
+                STATUS_RETRYING,
+            ):
                 return cn
         return None
 
@@ -268,6 +279,7 @@ class BarrierCoordinator:
                     with self._solver_dispatch_lock:
                         self._solver_active_config = None
         finally:
+            self._report_solver_terminal_if_ready()
             logger.info("[Solver] 串行调度循环退出")
 
     def _execute_solver_for_config(self, config_name: int):
@@ -281,6 +293,38 @@ class BarrierCoordinator:
         if self._guard.check_should_abort():
             return
 
+        if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
+            remote_executor = self.runner.get_remote_executor()
+            remote_status = remote_executor.query_remote_task_status(config_name, "solver")
+            if remote_status == "completed":
+                self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+                remote_executor.forget_remote_task(config_name, "solver")
+                logger.info(f"[Solver] 构型{config_name} 重启后检测到完成标志")
+                return
+            if remote_status == "failed":
+                self.state.set_step_status(
+                    config_name,
+                    "solver",
+                    STATUS_ERROR,
+                    "远程求解任务失败",
+                )
+                remote_executor.forget_remote_task(config_name, "solver")
+                return
+            if remote_status == "running":
+                logger.info(f"[Solver] 构型{config_name} 远程任务仍在运行，恢复轮询")
+                self._wait_for_solver_completion(config_name)
+                return
+            if remote_status == "unknown":
+                logger.warning(
+                    f"[Solver] 构型{config_name} 远程状态未知，保留 Running 状态并跳过重启"
+                )
+                return
+            self.state.set_step_status(config_name, "solver", STATUS_WAITING)
+            remote_executor.forget_remote_task(config_name, "solver")
+            logger.warning(
+                f"[Solver] 构型{config_name} 远程任务已丢失，重置为 Waiting 后重新启动"
+            )
+
         logger.info(f"[Solver] 构型{config_name} 开始求解...")
 
         # 启动远程求解后台任务
@@ -290,27 +334,60 @@ class BarrierCoordinator:
             if self._guard.check_should_abort():
                 return
 
-            # 轮询等待求解完成
-            if self.runner.wait_solver_completion(
-                config_name,
-                paused_event=self._paused,
-                stopped_event=self._stopped,
-            ):
-                self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
-                logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
+            self._wait_for_solver_completion(config_name)
+
+    def _wait_for_solver_completion(self, config_name: int) -> None:
+        """轮询等待 Solver 完成，并按控制状态更新数据库。"""
+        if self.runner.wait_solver_completion(
+            config_name,
+            paused_event=self._paused,
+            stopped_event=self._stopped,
+        ):
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+            logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
+        else:
+            # ★ 区分暂停和真正的超时
+            if self._paused.is_set():
+                self.state.set_step_status(
+                    config_name, "solver", STATUS_PAUSED,
+                    "等待求解期间暂停"
+                )
+            elif self._stopped.is_set():
+                self.state.set_step_status(
+                    config_name, "solver", STATUS_PAUSED,
+                    "引擎已停止"
+                )
             else:
-                # ★ 区分暂停和真正的超时
-                if self._paused.is_set():
-                    self.state.set_step_status(
-                        config_name, "solver", STATUS_PAUSED,
-                        "等待求解期间暂停"
-                    )
-                elif self._stopped.is_set():
-                    self.state.set_step_status(
-                        config_name, "solver", STATUS_PAUSED,
-                        "引擎已停止"
-                    )
-                else:
-                    self.state.set_step_status(
-                        config_name, "solver", STATUS_ERROR, "求解超时"
-                    )
+                self.state.set_step_status(
+                    config_name, "solver", STATUS_ERROR, "求解超时"
+                )
+
+    def _report_solver_terminal_if_ready(self) -> None:
+        """Solver 全部终结时报告流水线自然完成或失败终态。"""
+        if self._solver_terminal_reported or self._paused.is_set() or self._stopped.is_set():
+            return
+        all_configs = self.state.get_all_configs()
+        if not all_configs:
+            return
+
+        has_error = False
+        for cn in all_configs:
+            status = self.state.get_step_status(cn, "solver")
+            if status == STATUS_ERROR:
+                has_error = True
+                continue
+            if status != STATUS_COMPLETED:
+                return
+
+        outcome = "failed" if has_error else "completed"
+        self._solver_terminal_reported = True
+        if outcome == "completed":
+            logger.info("=" * 60)
+            logger.info(">>> 全部构型处理完成，流水线进入收尾状态 <<<")
+            logger.info("=" * 60)
+        else:
+            logger.error("=" * 60)
+            logger.error(">>> Solver 阶段已终结但存在错误，流水线进入失败收尾状态 <<<")
+            logger.error("=" * 60)
+        if self._on_solver_terminal is not None:
+            self._on_solver_terminal(outcome)

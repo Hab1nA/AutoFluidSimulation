@@ -482,9 +482,6 @@ pub async fn execute_confirm_action(
         }
         ConfirmAction::FullQuit => {
             log::info!("[TUI] 确认完全退出后台引擎和界面");
-            if ipc.is_connected() {
-                let _ = ipc.full_quit().await;
-            }
             CommandResult::FullQuit
         }
         ConfirmAction::StopDaemon => {

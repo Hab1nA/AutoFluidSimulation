@@ -68,6 +68,80 @@ enum ExitCode
 - 异常处理：顶层 `try-catch` 捕获所有未处理异常，返回对应 `ExitCode`
 - 进程管理：使用 `Process` 类启动 SpaceClaim，通过轮询检测进程状态
 
+### XML 文档注释规范
+
+公共类型和方法必须使用 `///` 注释，包含 `<summary>` 和 `<param>` 标签：
+
+```csharp
+/// <summary>
+/// 解析命令行参数并返回结构化选项。
+/// </summary>
+/// <param name="args">原始命令行参数数组</param>
+/// <returns>解析后的选项对象，解析失败返回 null</returns>
+static Options? ParseArguments(string[] args)
+{
+    // ...
+}
+```
+
+- 所有 `public` 方法、属性和类应有 `<summary>`
+- 带参数的方法应有 `<param>` 标签
+- 有返回值的方法应有 `<returns>` 标签
+- 可能为 `null` 的返回值需在注释中注明
+
+### 异常处理模式
+
+```csharp
+static ExitCode Main(string[] args)
+{
+    try
+    {
+        // 主逻辑
+        var options = ParseArguments(args);
+        if (options == null) return ExitCode.InvalidArgs;
+
+        RunScript(options);
+        return ExitCode.Success;
+    }
+    catch (TimeoutException)
+    {
+        Console.Error.WriteLine("操作超时");
+        return ExitCode.Timeout;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"未处理异常: {ex.Message}");
+        return ExitCode.ScriptFailed;
+    }
+}
+```
+
+- 顶层 `try-catch` 必须覆盖所有 `ExitCode` 枚举值
+- 已知异常（如超时）优先捕获并返回专用退出码
+- 未知异常兜底返回 `ScriptFailed`（ExitCode = 1）
+- 使用 `Console.Error.WriteLine` 输出错误信息（stderr）
+
+### 进程检测轮询规范
+
+```csharp
+// ✅ 使用轮询 + 超时检测进程状态
+var sw = Stopwatch.StartNew();
+while (!process.HasExited)
+{
+    if (sw.ElapsedMilliseconds > timeoutMs)
+    {
+        process.Kill();
+        throw new TimeoutException("SpaceClaim 进程超时");
+    }
+    Thread.Sleep(1000); // 每秒轮询一次
+}
+```
+
+- 轮询间隔建议 1 秒（`Thread.Sleep(1000)`），避免 CPU 空转
+- 必须设置超时上限（默认值在调用方通过 `--timeout` 传入）
+- 超时后先 `Kill()` 进程再抛异常
+- 使用 `Stopwatch` 而非 `DateTime` 测量耗时
+
 ---
 
 ## Bridge 与 Python 端的交互

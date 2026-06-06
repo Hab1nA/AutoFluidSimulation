@@ -82,6 +82,7 @@ class TestInit:
             assert "configs" in tables
             assert "steps" in tables
             assert "engine_state" in tables
+            assert "remote_tasks" in tables
 
     def test_wal_mode(self):
         with _TmpDB() as sm:
@@ -107,6 +108,95 @@ class TestInit:
             conn.close()
             assert "idx_steps_config" in indexes
             assert "idx_steps_status" in indexes
+            assert "idx_remote_tasks_step" in indexes
+
+
+class TestRemoteTasks:
+    """验证远程后台任务元数据持久化。"""
+
+    def test_save_get_list_and_delete_remote_task(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_abc123",
+                flag_file="D:/flags/meshing_done_1.txt",
+                error_flag_file="D:/flags/meshing_done_1.txt.error",
+                log_file="D:/flags/autofluid_bg_abc123.log",
+                pid_file="D:/flags/autofluid_bg_abc123.pid",
+                script_file="D:/flags/autofluid_bg_abc123.cmd",
+                started_at=123.5,
+            )
+
+            task = sm.get_remote_task(1, "meshing")
+            assert task == {
+                "config_name": 1,
+                "step_name": "meshing",
+                "task_name": "AutoFluid_abc123",
+                "flag_file": "D:/flags/meshing_done_1.txt",
+                "error_flag_file": "D:/flags/meshing_done_1.txt.error",
+                "log_file": "D:/flags/autofluid_bg_abc123.log",
+                "pid_file": "D:/flags/autofluid_bg_abc123.pid",
+                "script_file": "D:/flags/autofluid_bg_abc123.cmd",
+                "started_at": 123.5,
+            }
+            assert sm.get_all_remote_tasks() == [task]
+
+            sm.delete_remote_task(1, "meshing")
+            assert sm.get_remote_task(1, "meshing") is None
+            assert sm.get_all_remote_tasks() == []
+
+    def test_save_remote_task_upserts_same_config_and_step(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_old",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_new",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                log_file="D:/flags/autofluid_bg_new.log",
+                started_at=20.0,
+            )
+
+            tasks = sm.get_all_remote_tasks()
+            assert len(tasks) == 1
+            assert tasks[0]["task_name"] == "AutoFluid_new"
+            assert tasks[0]["started_at"] == 20.0
+
+    def test_reset_config_steps_deletes_downstream_remote_tasks(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_meshing",
+                flag_file="D:/flags/meshing_done_1.txt",
+                error_flag_file="D:/flags/meshing_done_1.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_solver",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                started_at=20.0,
+            )
+
+            sm.reset_config_steps(1, "solver")
+
+            assert sm.get_remote_task(1, "meshing") is not None
+            assert sm.get_remote_task(1, "solver") is None
 
 # ====================================================================
 # load_configs 测试

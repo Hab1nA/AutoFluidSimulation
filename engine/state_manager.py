@@ -132,6 +132,24 @@ class StateManager:
                 )
             """)
 
+            # 远程后台任务元数据。用于 Daemon 重启后恢复 Meshing/Solver
+            # 计划任务，避免状态仍为 Running 但内存映射丢失时重复启动 Fluent。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS remote_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    config_name INTEGER NOT NULL,
+                    step_name TEXT NOT NULL,
+                    task_name TEXT NOT NULL,
+                    flag_file TEXT NOT NULL,
+                    error_flag_file TEXT NOT NULL,
+                    log_file TEXT,
+                    pid_file TEXT,
+                    script_file TEXT,
+                    started_at REAL NOT NULL,
+                    UNIQUE(config_name, step_name)
+                )
+            """)
+
             # 初始化引擎状态默认值
             defaults = {
                 "engine_status": "stopped",   # stopped | running | paused
@@ -148,6 +166,10 @@ class StateManager:
             # 创建索引加速查询
             conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_config ON steps(config_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_steps_status ON steps(status)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_remote_tasks_step "
+                "ON remote_tasks(step_name)"
+            )
 
         logger.info(f"状态数据库已初始化: {self.db_path}")
 
@@ -181,6 +203,10 @@ class StateManager:
                 removed_configs = existing_configs - new_configs
                 if removed_configs:
                     for cn in removed_configs:
+                        conn.execute(
+                            "DELETE FROM remote_tasks WHERE config_name = ?",
+                            (cn,)
+                        )
                         conn.execute(
                             "DELETE FROM steps WHERE config_name = ?",
                             (cn,)
@@ -351,6 +377,112 @@ class StateManager:
             result: int = row["retry_count"] if row else 0
             return result
 
+    # ------------------------------------------------------------------
+    # 远程任务元数据
+    # ------------------------------------------------------------------
+
+    def save_remote_task(
+        self,
+        *,
+        config_name: int,
+        step_name: str,
+        task_name: str,
+        flag_file: str,
+        error_flag_file: str,
+        log_file: str | None = None,
+        pid_file: str | None = None,
+        script_file: str | None = None,
+        started_at: float,
+    ) -> None:
+        """保存或更新远程计划任务元数据。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO remote_tasks (
+                        config_name, step_name, task_name, flag_file,
+                        error_flag_file, log_file, pid_file, script_file,
+                        started_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(config_name, step_name) DO UPDATE SET
+                        task_name = excluded.task_name,
+                        flag_file = excluded.flag_file,
+                        error_flag_file = excluded.error_flag_file,
+                        log_file = excluded.log_file,
+                        pid_file = excluded.pid_file,
+                        script_file = excluded.script_file,
+                        started_at = excluded.started_at
+                    """,
+                    (
+                        config_name,
+                        step_name,
+                        task_name,
+                        flag_file,
+                        error_flag_file,
+                        log_file,
+                        pid_file,
+                        script_file,
+                        started_at,
+                    ),
+                )
+
+    def get_remote_task(self, config_name: int, step_name: str) -> dict[str, object] | None:
+        """获取指定构型和步骤的远程任务元数据。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                """
+                SELECT config_name, step_name, task_name, flag_file,
+                       error_flag_file, log_file, pid_file, script_file,
+                       started_at
+                FROM remote_tasks
+                WHERE config_name = ? AND step_name = ?
+                """,
+                (config_name, step_name),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_all_remote_tasks(self) -> list[dict[str, object]]:
+        """列出所有持久化的远程任务元数据。"""
+        with self._get_connection(readonly=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT config_name, step_name, task_name, flag_file,
+                       error_flag_file, log_file, pid_file, script_file,
+                       started_at
+                FROM remote_tasks
+                ORDER BY config_name, step_name
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_remote_task(self, config_name: int, step_name: str) -> None:
+        """删除指定构型和步骤的远程任务元数据。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM remote_tasks WHERE config_name = ? AND step_name = ?",
+                    (config_name, step_name),
+                )
+
+    def delete_remote_tasks_for_config(
+        self,
+        config_name: int,
+        from_step: str | None = None,
+    ) -> None:
+        """删除构型在指定步骤及其下游的远程任务元数据。"""
+        if from_step is None:
+            steps_to_delete = STEP_NAMES
+        else:
+            start_idx = STEP_INDEX.get(from_step, 0)
+            steps_to_delete = STEP_NAMES[start_idx:]
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.executemany(
+                    "DELETE FROM remote_tasks WHERE config_name = ? AND step_name = ?",
+                    [(config_name, step_name) for step_name in steps_to_delete],
+                )
+
     def set_meshing_running_if_idle(self, config_name: int) -> bool:
         """原子设置 Meshing 为 Running，同一时刻只允许一个构型执行网格划分。
 
@@ -410,6 +542,11 @@ class StateManager:
 
         with self._lock:
             with self._get_connection() as conn:
+                for step_name in steps_to_reset:
+                    conn.execute(
+                        "DELETE FROM remote_tasks WHERE config_name = ? AND step_name = ?",
+                        (config_name, step_name),
+                    )
                 for step_name in steps_to_reset:
                     conn.execute("""
                         UPDATE steps

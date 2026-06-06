@@ -128,7 +128,7 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
                         "_write_remote_text_file",
                         side_effect=lambda path, content: written.append((path, content)),
                     ):
-                        result, _ = host.exec_background(
+                        result, task_name = host.exec_background(
                             r"conda run python meshing.py",
                             r"D:/flags/job.done",
                             interactive=True,
@@ -141,6 +141,34 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
     assert calls[2][0].endswith('" /DISABLE')
     assert "call conda run python meshing.py" in written[0][1]
     assert "Start-Process" not in written[0][1]
+    assert host._task_pid_files[task_name].startswith("D:/flags/autofluid_bg_")
+    assert host._task_pid_files[task_name].endswith(".pid")
+
+
+def test_exec_background_deletes_created_task_when_run_fails():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        if command.startswith('schtasks /Run /TN "AutoFluid_'):
+            return ("", "run failed", 1)
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with patch.object(host, "_ensure_remote_dir"):
+                    with patch.object(host, "_write_remote_text_file"):
+                        result, task_name = host.exec_background(
+                            r"conda run python meshing.py",
+                            r"D:/flags/job.done",
+                            interactive=True,
+                        )
+
+    assert result is False
+    assert task_name.startswith("AutoFluid_")
+    assert calls[-1] == (f'schtasks /Delete /TN "{task_name}" /F', 15)
 
 
 def test_solver_background_task_is_disabled_after_run():

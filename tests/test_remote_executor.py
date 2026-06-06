@@ -12,6 +12,7 @@ from executor.remote_executor import RemoteExecutor
 class _StateRecorder:
     def __init__(self) -> None:
         self.status_updates: list[tuple[int, str, str, str]] = []
+        self.remote_tasks: dict[tuple[int, str], dict[str, object]] = {}
 
     def set_step_status(
         self,
@@ -21,6 +22,19 @@ class _StateRecorder:
         error_message: str = "",
     ) -> None:
         self.status_updates.append((config_name, step_name, status, error_message))
+
+    def save_remote_task(self, **kwargs) -> None:
+        key = (kwargs["config_name"], kwargs["step_name"])
+        self.remote_tasks[key] = dict(kwargs)
+
+    def get_remote_task(self, config_name: int, step_name: str):
+        return self.remote_tasks.get((config_name, step_name))
+
+    def get_all_remote_tasks(self):
+        return list(self.remote_tasks.values())
+
+    def delete_remote_task(self, config_name: int, step_name: str) -> None:
+        self.remote_tasks.pop((config_name, step_name), None)
 
 
 def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatch):
@@ -475,6 +489,284 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
     assert checked == [error_flag]
     assert deleted == [error_flag]
     assert 4 not in executor._remote_tasks
+
+
+def test_start_meshing_persists_remote_task_metadata(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\work")
+
+    class _SSH:
+        def exec_background(
+            self,
+            command: str,
+            flag_file: str,
+            *,
+            working_dir: str | None,
+            interactive: bool,
+        ):
+            assert flag_file == "D:/flags/meshing_done_5.txt"
+            assert working_dir == r"D:\work"
+            assert interactive is True
+            return True, "AutoFluid_abc123"
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+
+    assert executor.start_meshing(5) is True
+    assert state.remote_tasks[(5, "meshing")] == {
+        "config_name": 5,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_abc123",
+        "flag_file": "D:/flags/meshing_done_5.txt",
+        "error_flag_file": "D:/flags/meshing_done_5.txt.error",
+        "log_file": "D:/flags/autofluid_bg_abc123.log",
+        "pid_file": "D:/flags/autofluid_bg_abc123.pid",
+        "script_file": "D:/flags/autofluid_bg_abc123.cmd",
+        "started_at": state.remote_tasks[(5, "meshing")]["started_at"],
+    }
+
+
+def test_restore_remote_tasks_from_db_rebuilds_memory_mapping():
+    state = _StateRecorder()
+    state.remote_tasks[(9, "solver")] = {
+        "config_name": 9,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver",
+        "flag_file": "D:/flags/solver_done_9.txt",
+        "error_flag_file": "D:/flags/solver_done_9.txt.error",
+        "started_at": 100.0,
+    }
+    executor = RemoteExecutor(state, lambda: None, threading.RLock())
+
+    executor.restore_remote_tasks_from_db()
+
+    assert executor._remote_tasks == {9: "AutoFluid_solver"}
+
+
+def test_query_remote_task_status_returns_running_when_task_exists(monkeypatch):
+    state = _StateRecorder()
+    state.remote_tasks[(2, "meshing")] = {
+        "config_name": 2,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_running",
+        "flag_file": "D:/flags/meshing_done_2.txt",
+        "error_flag_file": "D:/flags/meshing_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_running.pid",
+        "started_at": 100.0,
+    }
+    checked: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            checked.append(remote_path)
+            return False
+
+        def exec_command(self, command: str, timeout: int = 30):
+            assert 'schtasks /Query /TN "AutoFluid_running"' in command
+            return '"AutoFluid_running","Ready"\r\n', "", 0
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(2, "meshing") == "running"
+    assert checked == [
+        "D:/flags/meshing_done_2.txt",
+        "D:/flags/meshing_done_2.txt.error",
+    ]
+
+
+def test_query_remote_task_status_uses_pid_file_when_available():
+    state = _StateRecorder()
+    state.remote_tasks[(2, "meshing")] = {
+        "config_name": 2,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_running",
+        "flag_file": "D:/flags/meshing_done_2.txt",
+        "error_flag_file": "D:/flags/meshing_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_running.pid",
+        "started_at": 100.0,
+    }
+    commands: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def _read_remote_pid_file(self, pid_file: str) -> int:
+            assert pid_file == "D:/flags/autofluid_bg_running.pid"
+            return 4321
+
+        def exec_command(self, command: str, timeout: int = 30):
+            commands.append(command)
+            if command.startswith("schtasks"):
+                return '"AutoFluid_running","Ready"\r\n', "", 0
+            if command.startswith("tasklist"):
+                return '"python.exe","4321","Console","1","10,000 K"\r\n', "", 0
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(2, "meshing") == "running"
+    assert commands == [
+        'schtasks /Query /TN "AutoFluid_running" /FO CSV /NH',
+        'tasklist /FI "PID eq 4321" /FO CSV /NH',
+    ]
+
+
+def test_query_remote_task_status_returns_lost_when_persisted_pid_is_not_running():
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_stale",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_stale.pid",
+        "started_at": 100.0,
+    }
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def _read_remote_pid_file(self, pid_file: str) -> int:
+            return 9876
+
+        def exec_command(self, command: str, timeout: int = 30):
+            if command.startswith("schtasks"):
+                return '"AutoFluid_stale","Ready"\r\n', "", 0
+            if command.startswith("tasklist"):
+                return "INFO: No tasks are running which match the specified criteria.\r\n", "", 0
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(2, "solver") == "lost"
+
+
+def test_query_remote_task_status_returns_failed_for_error_flag():
+    state = _StateRecorder()
+    state.remote_tasks[(3, "solver")] = {
+        "config_name": 3,
+        "step_name": "solver",
+        "task_name": "AutoFluid_failed",
+        "flag_file": "D:/flags/solver_done_3.txt",
+        "error_flag_file": "D:/flags/solver_done_3.txt.error",
+        "started_at": 100.0,
+    }
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return remote_path.endswith(".error")
+
+        def exec_command(self, command: str, timeout: int = 30):
+            raise AssertionError("error flag should decide status before schtasks")
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(3, "solver") == "failed"
+
+
+def test_query_remote_task_status_returns_unknown_on_remote_check_failure():
+    state = _StateRecorder()
+    state.remote_tasks[(4, "meshing")] = {
+        "config_name": 4,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_unknown",
+        "flag_file": "D:/flags/meshing_done_4.txt",
+        "error_flag_file": "D:/flags/meshing_done_4.txt.error",
+        "started_at": 100.0,
+    }
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            raise OSError("sftp unavailable")
+
+        def exec_command(self, command: str, timeout: int = 30):
+            raise AssertionError("unknown file state should not query schtasks")
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(4, "meshing") == "unknown"
+
+
+def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 60)
+
+    state = _StateRecorder()
+    state.remote_tasks[(7, "meshing")] = {
+        "config_name": 7,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_meshing",
+        "flag_file": "D:/flags/meshing_done_7.txt",
+        "error_flag_file": "D:/flags/meshing_done_7.txt.error",
+        "started_at": 1_000.0,
+    }
+    killed: list[tuple[int, str]] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[7] = "AutoFluid_meshing"
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: 1_061.0)
+    monkeypatch.setattr(
+        executor,
+        "_kill_remote_task_for_config",
+        lambda config_name, step_name: killed.append((config_name, step_name)),
+    )
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("expired persisted timeout must not sleep")
+        ),
+    )
+
+    assert executor.wait_meshing_completion(7) is False
+    assert killed == [(7, "meshing")]
+
+
+def test_wait_solver_completion_uses_persisted_started_at_for_timeout(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 60)
+
+    state = _StateRecorder()
+    state.remote_tasks[(8, "solver")] = {
+        "config_name": 8,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver",
+        "flag_file": "D:/flags/solver_done_8.txt",
+        "error_flag_file": "D:/flags/solver_done_8.txt.error",
+        "started_at": 1_000.0,
+    }
+    killed: list[tuple[int, str]] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[8] = "AutoFluid_solver"
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: 1_061.0)
+    monkeypatch.setattr(
+        executor,
+        "_kill_remote_task_for_config",
+        lambda config_name, step_name: killed.append((config_name, step_name)),
+    )
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("expired persisted timeout must not sleep")
+        ),
+    )
+
+    assert executor.wait_solver_completion(8) is False
+    assert killed == [(8, "solver")]
 
 
 def test_apply_placeholders_uses_forward_slashes_for_fluent_templates(monkeypatch):

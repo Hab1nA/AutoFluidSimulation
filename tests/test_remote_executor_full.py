@@ -25,6 +25,7 @@ from executor.remote_executor import RemoteExecutor
 class _StateRecorder:
     def __init__(self) -> None:
         self.status_updates: list[tuple[int, str, str, str]] = []
+        self.remote_tasks: dict[tuple[int, str], dict[str, object]] = {}
 
     def set_step_status(
         self,
@@ -34,6 +35,19 @@ class _StateRecorder:
         error_message: str = "",
     ) -> None:
         self.status_updates.append((config_name, step_name, status, error_message))
+
+    def save_remote_task(self, **kwargs: object) -> None:
+        key = (int(kwargs["config_name"]), str(kwargs["step_name"]))
+        self.remote_tasks[key] = dict(kwargs)
+
+    def get_remote_task(self, config_name: int, step_name: str) -> dict[str, object] | None:
+        return self.remote_tasks.get((config_name, step_name))
+
+    def get_all_remote_tasks(self) -> list[dict[str, object]]:
+        return list(self.remote_tasks.values())
+
+    def delete_remote_task(self, config_name: int, step_name: str) -> None:
+        self.remote_tasks.pop((config_name, step_name), None)
 
 
 # ====================================================================

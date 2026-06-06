@@ -433,6 +433,15 @@ class PipelineDaemon:
         if step_name is not None and step_name != "all" and step_name not in STEP_NAMES:
             return False, None, f"无效步骤名: {step_name}，有效值: {STEP_NAMES} 或 all"
 
+        guard_ok, guard_msg = self._validate_mutation_safe(
+            action_name="重置",
+            config_name=config_name,
+            step_name=step_name,
+            include_downstream=True,
+        )
+        if not guard_ok:
+            return False, None, guard_msg
+
         if self.scheduler is None:
             raise RuntimeError("PipelineScheduler 未初始化，请先调用 start()")
         self.scheduler.reset_config(config_name, step_name)
@@ -459,6 +468,15 @@ class PipelineDaemon:
         """
         step_name = params.get("step_name")
         config_name = params.get("config_name")
+
+        guard_ok, guard_msg = self._validate_mutation_safe(
+            action_name="清理",
+            config_name=config_name,
+            step_name=step_name,
+            include_downstream=False,
+        )
+        if not guard_ok:
+            return False, None, guard_msg
 
         if step_name == "cache":
             if config_name not in (None, "all"):
@@ -518,6 +536,99 @@ class PipelineDaemon:
                 self.scheduler.request_file_monitor_reset()
 
         return True, None, msg
+
+    def _validate_mutation_safe(
+        self,
+        *,
+        action_name: str,
+        config_name: int | str | None,
+        step_name: str | None,
+        include_downstream: bool,
+    ) -> tuple[bool, str]:
+        """拒绝会破坏活跃流水线或未确认远程任务现场的 reset/clean 操作。"""
+        state = getattr(self, "state", None)
+        if state is not None and state.get_engine_status() == "running":
+            return False, f"流水线运行中，{action_name}前请先 pause 或 stop"
+
+        blocking = self._find_blocking_remote_task(
+            config_name=config_name,
+            step_name=step_name,
+            include_downstream=include_downstream,
+        )
+        if blocking is None:
+            return True, ""
+
+        cfg, step, status = blocking
+        return (
+            False,
+            f"构型{cfg}的 {step} 远程任务状态为 {status}，"
+            f"{action_name}前请先确认任务结束或停止后台任务",
+        )
+
+    def _find_blocking_remote_task(
+        self,
+        *,
+        config_name: int | str | None,
+        step_name: str | None,
+        include_downstream: bool,
+    ) -> tuple[int, str, str] | None:
+        state = getattr(self, "state", None)
+        runner = getattr(self, "runner", None)
+        if state is None or runner is None:
+            return None
+
+        get_all_remote_tasks = getattr(state, "get_all_remote_tasks", None)
+        get_remote_executor = getattr(runner, "get_remote_executor", None)
+        if not callable(get_all_remote_tasks) or not callable(get_remote_executor):
+            return None
+
+        affected_steps = self._affected_remote_steps(step_name, include_downstream)
+        if not affected_steps:
+            return None
+
+        try:
+            remote_executor = get_remote_executor()
+            remote_tasks = get_all_remote_tasks()
+        except Exception as e:
+            logger.warning(f"[IPC] 检查远程任务状态失败，拒绝变更以保护现场: {e}")
+            return (-1, "remote", "unknown")
+
+        for task in remote_tasks:
+            task_step = str(task.get("step_name", ""))
+            if task_step not in affected_steps:
+                continue
+
+            task_config = int(task["config_name"])
+            if not self._config_matches(config_name, task_config):
+                continue
+
+            status = remote_executor.query_remote_task_status(task_config, task_step)
+            if status in {"running", "unknown"}:
+                return task_config, task_step, status
+
+        return None
+
+    @staticmethod
+    def _affected_remote_steps(step_name: str | None, include_downstream: bool) -> set[str]:
+        remote_steps = {"meshing", "solver"}
+        if step_name in (None, "all", "cache"):
+            return remote_steps
+        if step_name not in STEP_NAMES:
+            return set()
+        if not include_downstream:
+            return {step_name} & remote_steps
+
+        step_index = STEP_NAMES.index(step_name)
+        return set(STEP_NAMES[step_index:]) & remote_steps
+
+    @staticmethod
+    def _config_matches(requested: int | str | None, task_config: int) -> bool:
+        if requested is None or requested == "all":
+            return True
+        try:
+            return int(requested) == task_config
+        except (TypeError, ValueError):
+            return str(requested) == str(task_config)
 
     def handle_reload_config(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 reload_config 命令（从 TOML 文件重新加载配置）。"""

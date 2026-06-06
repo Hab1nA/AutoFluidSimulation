@@ -18,7 +18,17 @@ pub fn handle_confirm_result(
         command::CommandResult::FullQuit => {
             *full_quit = true;
             if ipc.is_connected() {
-                let _ = rt.block_on(ipc.full_quit());
+                match rt.block_on(ipc.full_quit()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                    }
+                }
             }
             rt.block_on(ipc.disconnect());
             state.should_quit = true;

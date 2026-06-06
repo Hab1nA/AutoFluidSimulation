@@ -1,7 +1,7 @@
 """
 ===============================================================================
 文件监控模块 (File Monitor)
-基于 watchdog 库实现的 STEP 文件目录监控。
+基于轮询实现的 STEP 文件目录监控。
 当 SW 宏批量导出 .step 文件时，监控每个文件的生成完成事件，
 并将完成的构型推入后续处理队列（Producer-Consumer 模式）。
 
@@ -122,8 +122,7 @@ class StepFileMonitor:
     持续扫描 STEP 目录，检测新生成的 model_gen4.SLDPRT_XX.step 文件，
     当文件写入完成（大小稳定）后，通过回调函数通知调度器。
 
-    设计为轮询模式（兼容性好，不依赖 watchdog 的 Native 文件系统事件），
-    同时也支持 watchdog 事件驱动的混合模式。
+    设计为轮询模式（兼容性好，不依赖第三方文件系统事件库）。
     """
 
     _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")

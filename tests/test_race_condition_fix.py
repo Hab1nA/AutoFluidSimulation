@@ -80,6 +80,12 @@ class _MockRemoteExecutor:
         time.sleep(0.05)
         return self.wait_meshing_returns
 
+    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
+        return "lost"
+
+    def forget_remote_task(self, config_name: int, step_name: str) -> None:
+        pass
+
 
 class _MockSWExecutor:
     def __init__(self, state_manager):

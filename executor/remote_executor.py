@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import threading
 from typing import Callable, TYPE_CHECKING
@@ -87,6 +88,134 @@ class RemoteExecutor:
         self._remote_tasks: dict[int, str] = {}  # config_name → task_name
         self._sync_cache_lock = threading.Lock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
+
+    @staticmethod
+    def _remote_task_artifacts(task_name: str, flag_file: str) -> dict[str, str | None]:
+        """根据计划任务名和 flag 路径推导 wrapper 产物路径。"""
+        task_hash = (
+            task_name.removeprefix("AutoFluid_")
+            if task_name.startswith("AutoFluid_")
+            else ""
+        )
+        if not task_hash:
+            return {"log_file": None, "pid_file": None, "script_file": None}
+        flag_dir = flag_file.rsplit("/", 1)[0] if "/" in flag_file else "."
+        return {
+            "log_file": f"{flag_dir}/autofluid_bg_{task_hash}.log",
+            "pid_file": f"{flag_dir}/autofluid_bg_{task_hash}.pid",
+            "script_file": f"{flag_dir}/autofluid_bg_{task_hash}.cmd",
+        }
+
+    def _persist_remote_task(
+        self,
+        *,
+        config_name: int,
+        step_name: str,
+        task_name: str,
+        flag_file: str,
+    ) -> None:
+        """保存远程计划任务元数据，供 daemon 重启后恢复。"""
+        artifacts = self._remote_task_artifacts(task_name, flag_file)
+        self.state.save_remote_task(
+            config_name=config_name,
+            step_name=step_name,
+            task_name=task_name,
+            flag_file=flag_file,
+            error_flag_file=f"{flag_file}.error",
+            log_file=artifacts["log_file"],
+            pid_file=artifacts["pid_file"],
+            script_file=artifacts["script_file"],
+            started_at=time.time(),
+        )
+
+    def restore_remote_tasks_from_db(self) -> None:
+        """Daemon 重启后从数据库恢复 config → 计划任务名映射。"""
+        self._remote_tasks.clear()
+        for task in self.state.get_all_remote_tasks():
+            config_name = int(str(task["config_name"]))
+            task_name = str(task["task_name"])
+            self._remote_tasks[config_name] = task_name
+
+    def forget_remote_task(self, config_name: int, step_name: str) -> None:
+        """远程任务已在恢复扫描中判定终态时，清理本地和 DB 跟踪记录。"""
+        self._remote_tasks.pop(config_name, None)
+        self.state.delete_remote_task(config_name, step_name)
+
+    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
+        """查询持久化远程任务当前状态。
+
+        Returns:
+            completed | failed | running | lost | unknown
+        """
+        task = self.state.get_remote_task(config_name, step_name)
+        if task is None:
+            return "lost"
+        flag_file = str(task["flag_file"])
+        error_flag_file = str(task["error_flag_file"])
+        task_name = str(task["task_name"])
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh()
+                if ssh.check_remote_file(flag_file):
+                    return "completed"
+                if ssh.check_remote_file(error_flag_file):
+                    return "failed"
+            except (OSError, ConnectionError) as e:
+                logger.warning(
+                    f"[{step_name}] 构型{config_name} 远程 flag 检查状态未知: {e}"
+                )
+                return "unknown"
+
+            try:
+                query_cmd = f'schtasks /Query /TN "{task_name}" /FO CSV /NH'
+                _, _, exit_code = ssh.exec_command(query_cmd, timeout=30)
+                if exit_code == 0:
+                    pid_running = self._remote_task_pid_running(ssh, task)
+                    if pid_running is False:
+                        return "lost"
+                    return "running"
+                return "lost"
+            except (OSError, ConnectionError) as e:
+                logger.warning(
+                    f"[{step_name}] 构型{config_name} 远程计划任务查询状态未知: {e}"
+                )
+                return "unknown"
+
+    def _remote_task_pid_running(
+        self,
+        ssh: "RemoteWorkstation",
+        task: dict[str, object],
+    ) -> bool | None:
+        """用持久化 PID 文件进一步校验远程进程是否仍存活。"""
+        pid_file = task.get("pid_file")
+        if not pid_file:
+            return None
+
+        read_pid = getattr(ssh, "_read_remote_pid_file", None)
+        if not callable(read_pid):
+            return None
+
+        pid = read_pid(str(pid_file))
+        if pid is None:
+            return None
+
+        tasklist_cmd = f'tasklist /FI "PID eq {pid}" /FO CSV /NH'
+        out, _, exit_code = ssh.exec_command(tasklist_cmd, timeout=30)
+        if exit_code != 0:
+            return None
+        return re.search(rf"\b{pid}\b", out) is not None
+
+    def _remote_task_start_time(self, config_name: int, step_name: str) -> float:
+        """返回远程任务持久化启动时间；无记录时使用当前时间。"""
+        task = self.state.get_remote_task(config_name, step_name)
+        if task is None:
+            return time.time()
+        try:
+            return float(str(task["started_at"]))
+        except (KeyError, TypeError, ValueError):
+            logger.warning(f"[{step_name}] 构型{config_name} 远程任务 started_at 无效")
+            return time.time()
 
     def set_control_events(
         self,
@@ -426,6 +555,12 @@ class RemoteExecutor:
                 )
                 if success:
                     self._remote_tasks[config_name] = task_name
+                    self._persist_remote_task(
+                        config_name=config_name,
+                        step_name="meshing",
+                        task_name=task_name,
+                        flag_file=flag_file,
+                    )
                     logger.info(f"{log_prefix} 网格划分后台任务已启动: 构型{config_name}")
                 else:
                     logger.error(f"{log_prefix} 网格划分远程任务启动失败: 构型{config_name}")
@@ -531,7 +666,7 @@ class RemoteExecutor:
         error_flag = f"{flag_file}.error"
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
-        start_time = time.time()
+        start_time = self._remote_task_start_time(config_name, "meshing")
 
         logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
@@ -693,6 +828,12 @@ class RemoteExecutor:
                 )
                 if success:
                     self._remote_tasks[config_name] = task_name
+                    self._persist_remote_task(
+                        config_name=config_name,
+                        step_name="solver",
+                        task_name=task_name,
+                        flag_file=flag_file,
+                    )
                     logger.info(f"[Solver] 仿真求解后台任务已启动: 构型{config_name}")
                     return True
                 else:
@@ -726,7 +867,7 @@ class RemoteExecutor:
 
         timeout = ENGINE_CONFIG["solver_timeout"]
         poll_interval = 30
-        start_time = time.time()
+        start_time = self._remote_task_start_time(config_name, "solver")
         file_grace_period = 60
         first_file_seen_time: float | None = None
 
@@ -831,6 +972,7 @@ class RemoteExecutor:
             step_name: 步骤名（用于日志）
         """
         task_name = self._remote_tasks.pop(config_name, None)
+        self.state.delete_remote_task(config_name, step_name)
         if not task_name:
             logger.debug(f"[{step_name}] 构型{config_name} 无远程任务记录，跳过终止")
             return
@@ -851,6 +993,7 @@ class RemoteExecutor:
     ) -> None:
         """清理已结束任务的计划任务条目和本地跟踪记录。"""
         task_name = self._remote_tasks.pop(config_name, None)
+        self.state.delete_remote_task(config_name, step_name)
         if not task_name:
             return
         if ssh.kill_remote_task(task_name):

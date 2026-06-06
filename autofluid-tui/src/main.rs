@@ -9,7 +9,7 @@ mod ui;
 mod utils;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self as crossterm_event, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent,
@@ -139,6 +139,30 @@ pub(crate) fn apply_auto_scroll(
     }
 }
 
+pub(crate) fn should_poll_ipc(last_poll: Instant, interval: Duration) -> bool {
+    last_poll.elapsed() >= interval
+}
+
+pub(crate) fn initial_ipc_poll_timestamp(interval: Duration) -> Instant {
+    Instant::now()
+        .checked_sub(interval)
+        .unwrap_or_else(Instant::now)
+}
+
+pub(crate) fn initial_engine_status_poll_counter() -> u64 {
+    4
+}
+
+pub(crate) fn should_poll_engine_status(poll_counter: &mut u64) -> bool {
+    *poll_counter += 1;
+    if *poll_counter >= 5 {
+        *poll_counter = 0;
+        true
+    } else {
+        false
+    }
+}
+
 // ====================================================================
 // IPC 后台轮询线程
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -216,9 +240,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut full_quit = false;
     let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
-    let mut last_ipc_poll = std::time::Instant::now();
-    let mut last_clock_refresh = std::time::Instant::now();
-    let mut poll_counter: u64 = 0;
+    let mut last_ipc_poll = initial_ipc_poll_timestamp(ipc_poll_interval);
+    let mut last_clock_refresh = Instant::now();
+    let mut poll_counter: u64 = initial_engine_status_poll_counter();
 
     let mut ctx = EventContext {
         state: &mut state,
@@ -260,7 +284,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
-        if ctx.ipc.is_connected() && last_ipc_poll.elapsed() >= ipc_poll_interval {
+        if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
             // 拉取所有构型状态
             if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_all_status()) {
                 if resp.is_ok() {
@@ -268,42 +292,46 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 }
             }
 
-            // 每 5 轮拉取一次引擎状态
-            poll_counter += 1;
-            if poll_counter >= 5 {
-                poll_counter = 0;
-                if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_engine_status()) {
-                    if resp.is_ok() {
-                        ctx.state.update_engine_info(&resp.data);
+            if ctx.ipc.is_connected() {
+                // 首轮立即拉取引擎状态，之后每 5 轮刷新一次。
+                if should_poll_engine_status(&mut poll_counter) {
+                    if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_engine_status()) {
+                        if resp.is_ok() {
+                            ctx.state.update_engine_info(&resp.data);
+                        }
                     }
                 }
-            }
 
-            // 增量拉取日志
-            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_log_entries(
-                ctx.state.last_log_id,
-                50,
-                ctx.state.log_filter_level.as_deref(),
-                ctx.state.log_filter_source.as_deref(),
-            )) {
-                if resp.is_ok() {
-                    if let Some(data_obj) = resp.data.as_object() {
-                        if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
-                            for entry_val in entries {
-                                if let Some(entry) = LogEntry::from_dict(entry_val) {
-                                    ctx.state.last_log_id = ctx.state.last_log_id.max(entry.id);
-                                    ctx.log_buffer.push_detail(entry);
+                // 增量拉取日志
+                if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_log_entries(
+                    ctx.state.last_log_id,
+                    50,
+                    ctx.state.log_filter_level.as_deref(),
+                    ctx.state.log_filter_source.as_deref(),
+                )) {
+                    if resp.is_ok() {
+                        if let Some(data_obj) = resp.data.as_object() {
+                            if let Some(entries) =
+                                data_obj.get("entries").and_then(|v| v.as_array())
+                            {
+                                for entry_val in entries {
+                                    if let Some(entry) = LogEntry::from_dict(entry_val) {
+                                        ctx.state.last_log_id = ctx.state.last_log_id.max(entry.id);
+                                        ctx.log_buffer.push_detail(entry);
+                                    }
                                 }
                             }
-                        }
-                        if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64()) {
-                            ctx.state.last_log_id = ctx.state.last_log_id.max(latest);
+                            if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64())
+                            {
+                                ctx.state.last_log_id = ctx.state.last_log_id.max(latest);
+                            }
                         }
                     }
                 }
             }
 
-            last_ipc_poll = std::time::Instant::now();
+            ctx.state.connected = ctx.ipc.is_connected();
+            last_ipc_poll = Instant::now();
             ctx.state.needs_redraw = true;
         }
 
@@ -367,7 +395,17 @@ fn handle_command_result_refs(
             log::info!("[TUI] 收到完全退出请求，准备停止后台引擎并关闭界面");
             *full_quit = true;
             if ipc.is_connected() {
-                let _ = rt.block_on(ipc.full_quit());
+                match rt.block_on(ipc.full_quit()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                    }
+                }
             }
             rt.block_on(ipc.disconnect());
             state.should_quit = true;
@@ -896,6 +934,40 @@ mod tests {
         apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, true);
 
         assert!(auto_scroll, "有新日志且停在底部时应恢复自动滚动");
+    }
+
+    #[test]
+    fn test_initial_ipc_poll_timestamp_is_due_immediately() {
+        let interval = Duration::from_secs(1);
+        let last_poll = initial_ipc_poll_timestamp(interval);
+
+        assert!(should_poll_ipc(last_poll, interval));
+    }
+
+    #[test]
+    fn test_should_poll_ipc_respects_interval() {
+        let last_poll = Instant::now();
+
+        assert!(!should_poll_ipc(last_poll, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_initial_engine_status_poll_counter_refreshes_immediately() {
+        let mut poll_counter = initial_engine_status_poll_counter();
+
+        assert!(should_poll_engine_status(&mut poll_counter));
+        assert_eq!(poll_counter, 0);
+    }
+
+    #[test]
+    fn test_engine_status_poll_counter_refreshes_every_five_polls() {
+        let mut poll_counter = 0;
+
+        for _ in 0..4 {
+            assert!(!should_poll_engine_status(&mut poll_counter));
+        }
+        assert!(should_poll_engine_status(&mut poll_counter));
+        assert_eq!(poll_counter, 0);
     }
 
     #[test]

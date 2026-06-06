@@ -66,6 +66,7 @@ class TaskRunner:
             ssh_getter=self.get_ssh,
             ssh_lock=self._ssh_lock,
         )
+        self._remote_executor.restore_remote_tasks_from_db()
         self._cleaner = FileCleaner(
             self.state,
             ssh_getter=self.get_ssh,

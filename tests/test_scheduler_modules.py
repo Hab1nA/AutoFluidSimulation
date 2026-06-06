@@ -313,6 +313,8 @@ class _MockTaskRunner:
         self._sc_cleanup_called = False
         self._solver_dispatched = []
         self._solver_wait_result = True
+        self._solver_wait_count = 0
+        self._remote_executor = _MockRemoteExecutor(self.state)
 
     def set_control_events(self, paused_event, stopped_event):
         self._paused_event = paused_event
@@ -346,10 +348,11 @@ class _MockTaskRunner:
         return True
 
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        self._solver_wait_count += 1
         return self._solver_wait_result
 
     def get_remote_executor(self):
-        return _MockRemoteExecutor(self.state)
+        return self._remote_executor
 
 
 class _MockRemoteExecutor:
@@ -360,6 +363,9 @@ class _MockRemoteExecutor:
         self._meshing_started: list[int] = []
         self._meshing_output_exists = False
         self._meshing_output_checks: list[tuple[int, float | None]] = []
+        self._remote_task_status = "lost"
+        self._remote_task_status_checks: list[tuple[int, str]] = []
+        self._forgotten_remote_tasks: list[tuple[int, str]] = []
 
     def start_meshing(self, config_name: int) -> bool:
         self._meshing_started.append(config_name)
@@ -383,6 +389,13 @@ class _MockRemoteExecutor:
     ) -> bool:
         self._meshing_output_checks.append((config_name, timeout))
         return self._meshing_output_exists
+
+    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
+        self._remote_task_status_checks.append((config_name, step_name))
+        return self._remote_task_status
+
+    def forget_remote_task(self, config_name: int, step_name: str) -> None:
+        self._forgotten_remote_tasks.append((config_name, step_name))
 
 
 class _SpyFileMonitor:
@@ -493,6 +506,74 @@ class TestPipelineSchedulerStartRecovery:
         assert self.file_monitor.reset_only_count == 1
         assert self.file_monitor.resume_and_reset_count == 0
         assert self.scheduler._paused.is_set()
+
+    def test_resume_scan_keeps_running_meshing_when_remote_task_running(self):
+        """启动扫描遇到仍在运行的远程 Meshing 时不能重置或入队重启。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "meshing")]
+        assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_resume_scan_keeps_running_solver_when_remote_task_unknown(self):
+        """启动扫描无法确认远程 Solver 状态时保留 Running，避免重启。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "unknown"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
+        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+
+    def test_resume_scan_resets_lost_remote_meshing_and_forgets_task(self):
+        """远程 Meshing 确认丢失时才允许回到 Waiting 并重新入队。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "lost"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 1
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "meshing")]
+
+    def test_resume_scan_completed_remote_solver_forgets_task(self):
+        """恢复扫描确认 Solver 已完成时清理远程任务元数据。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "completed"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver")]
+
+    def test_finalize_pipeline_completed_sets_stopped_without_pausing_completed_steps(self):
+        """自然完成收尾应停止后台循环，但保持 Completed 步骤不被改为 Paused。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_engine_status("running")
+
+        self.scheduler.finalize_pipeline("completed")
+
+        assert self.scheduler._stopped.is_set()
+        assert self.state.get_engine_status() == "stopped"
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            assert self.state.get_step_status(1, step) == STATUS_COMPLETED
 
     def test_start_pipeline_unhandled_exception_marks_engine_stopped(self, caplog):
         """调度器线程启动阶段异常时不能让 engine_status 残留 running。"""
@@ -605,10 +686,35 @@ class TestPipelineSchedulerStartRecovery:
         )
 
 
+def test_task_runner_restores_remote_tasks_from_db_on_init(monkeypatch):
+    from engine import task_runner as task_runner_module
+
+    remote_instances = []
+    restore_calls = []
+
+    class _RemoteExecutor:
+        def __init__(self, *args, **kwargs):
+            remote_instances.append(self)
+
+        def restore_remote_tasks_from_db(self):
+            restore_calls.append(self)
+
+    monkeypatch.setattr(task_runner_module, "SCProcessPool", lambda: object())
+    monkeypatch.setattr(task_runner_module, "SWExecutor", lambda state: object())
+    monkeypatch.setattr(task_runner_module, "RemoteExecutor", _RemoteExecutor)
+    monkeypatch.setattr(task_runner_module, "FileCleaner", lambda *args, **kwargs: object())
+
+    runner = task_runner_module.TaskRunner(object())
+
+    assert restore_calls == remote_instances
+    assert runner.get_remote_executor() is remote_instances[0]
+
+
 class _CleanStepRunner:
-    def __init__(self):
+    def __init__(self, remote_status=None):
         self.clean_calls = []
         self.clean_all_cache_count = 0
+        self.remote_executor = _DaemonRemoteExecutor(remote_status)
 
     def clean_step_files(self, step_name, config_name):
         self.clean_calls.append((step_name, config_name))
@@ -616,13 +722,46 @@ class _CleanStepRunner:
     def clean_all_cache(self):
         self.clean_all_cache_count += 1
 
+    def get_remote_executor(self):
+        return self.remote_executor
+
 
 class _CleanStepScheduler:
     def __init__(self):
         self.file_monitor_reset_count = 0
+        self.reset_calls = []
 
     def request_file_monitor_reset(self):
         self.file_monitor_reset_count += 1
+
+    def reset_config(self, config_name, step_name):
+        self.reset_calls.append((config_name, step_name))
+
+
+class _DaemonState:
+    def __init__(self, engine_status="stopped", remote_tasks=None):
+        self.engine_status = engine_status
+        self.remote_tasks = remote_tasks or []
+
+    def get_engine_status(self):
+        return self.engine_status
+
+    def get_all_remote_tasks(self):
+        return self.remote_tasks
+
+
+class _DaemonRemoteExecutor:
+    def __init__(self, remote_status=None):
+        self.remote_status = remote_status or {}
+        self.query_calls = []
+        self.forgotten: list[tuple[int, str]] = []
+
+    def query_remote_task_status(self, config_name, step_name):
+        self.query_calls.append((config_name, step_name))
+        return self.remote_status.get((config_name, step_name), "completed")
+
+    def forget_remote_task(self, config_name, step_name):
+        self.forgotten.append((config_name, step_name))
 
 
 class TestPipelineDaemonCleanStep:
@@ -694,6 +833,105 @@ class TestPipelineDaemonCleanStep:
         assert "clean all cache" in message
         assert daemon.runner.clean_all_cache_count == 0
 
+    def test_clean_rejects_when_pipeline_running(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="running")
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": 1,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "pause 或 stop" in message
+        assert daemon.runner.clean_calls == []
+        assert daemon.scheduler.file_monitor_reset_count == 0
+
+    def test_clean_rejects_remote_task_with_unknown_status(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[{"config_name": 1, "step_name": "meshing"}],
+        )
+        daemon.runner = _CleanStepRunner({(1, "meshing"): "unknown"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": 1,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "远程任务状态为 unknown" in message
+        assert daemon.runner.clean_calls == []
+
+
+class TestPipelineDaemonResetStep:
+    def test_reset_rejects_when_pipeline_running(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="running")
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": 1,
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "pause 或 stop" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_rejects_downstream_remote_task_still_running(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[{"config_name": 1, "step_name": "solver"}],
+        )
+        daemon.runner = _CleanStepRunner({(1, "solver"): "running"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": 1,
+            "step_name": "transfer",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "solver 远程任务状态为 running" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_allows_stopped_without_blocking_remote_task(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[{"config_name": 1, "step_name": "solver"}],
+        )
+        daemon.runner = _CleanStepRunner({(1, "solver"): "completed"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": 1,
+            "step_name": "solver",
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已重置构型1的solver 及后续步骤" in message
+        assert daemon.scheduler.reset_calls == [(1, "solver")]
+
 
 # ====================================================================
 # BarrierCoordinator 测试
@@ -714,6 +952,7 @@ class TestBarrierCoordinator:
         self.stopped = threading.Event()
         self.barrier_passed = threading.Event()
         self.retry_mgr = RetryManager(self.state, self.paused, self.stopped)
+        self.solver_terminal_outcomes: list[str] = []
 
         from engine.scheduler.barrier import BarrierCoordinator
         self.coordinator = BarrierCoordinator(
@@ -723,6 +962,7 @@ class TestBarrierCoordinator:
             stopped_event=self.stopped,
             barrier_passed_event=self.barrier_passed,
             retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
         )
 
     def teardown_method(self):
@@ -850,6 +1090,80 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+
+    def test_all_solver_completed_reports_completed_terminal(self):
+        """全部 Solver Completed 后应报告自然完成终态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.solver_terminal_outcomes == ["completed"]
+
+    def test_solver_terminal_with_error_reports_failed_terminal(self):
+        """全部 Solver 终结但存在 Error 时应报告失败终态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.solver_terminal_outcomes == ["failed"]
+
+    def test_running_solver_with_remote_task_recovers_wait_without_restart(self):
+        """Daemon 重启后远程 Solver 仍运行时应恢复等待，不重复启动。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
+        assert self.runner._solver_dispatched == []
+        assert self.runner._solver_wait_count == 1
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_running_solver_unknown_remote_state_does_not_restart(self):
+        """远程 Solver 状态未知时保守保持 Running，不重复启动。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "unknown"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert self.runner._solver_wait_count == 0
+        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+
+    def test_running_solver_lost_remote_task_restarts_once_and_forgets_task(self):
+        """远程 Solver 确认丢失后才重启，且清理旧元数据。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "lost"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver")]
+        assert self.runner._solver_dispatched == [1]
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 
 
 # ====================================================================
@@ -996,6 +1310,45 @@ class TestMeshingMonitor:
         assert self.monitor._check_remote_outputs_exist(3) is True
         assert self.remote._meshing_output_checks == [(3, 120.0)]
 
+    def test_running_meshing_with_remote_task_keeps_running_without_restart(self):
+        """Daemon 重启后远程 Meshing 仍运行时应恢复等待，不重复启动。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.remote._remote_task_status = "running"
+
+        assert self.monitor._process_single_meshing(1) is False
+
+        assert self.remote._remote_task_status_checks == [(1, "meshing")]
+        assert self.remote._meshing_started == []
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
+
+    def test_running_meshing_unknown_remote_state_does_not_restart(self):
+        """远程状态未知时保守保持 Running，避免重复启动 Fluent。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.remote._remote_task_status = "unknown"
+
+        assert self.monitor._process_single_meshing(1) is False
+
+        assert self.remote._meshing_started == []
+        assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
+
+    def test_running_meshing_lost_remote_task_restarts_once_and_forgets_task(self):
+        """远程 Meshing 确认丢失后才重启，且清理旧元数据。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.remote._remote_task_status = "lost"
+
+        assert self.monitor._process_single_meshing(1) is False
+
+        assert self.remote._remote_task_status_checks == [(1, "meshing")]
+        assert self.remote._forgotten_remote_tasks == [(1, "meshing")]
+        assert self.remote._meshing_started == [1]
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
+
 
 # ====================================================================
 # utils 工具函数补充测试
@@ -1108,3 +1461,65 @@ class TestUtilsExtended:
             remote_check_timeout=7,
         ) is False
         assert all(timeout == 7 for _, timeout in calls)
+
+    def test_remote_output_check_treats_meshing_error_flag_as_terminal(self):
+        """Meshing .error flag 应被视为终结输出，避免恢复时重复启动。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def check_remote_file(
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+            ) -> bool:
+                return remote_path == "D:/flags/meshing_done_3.txt.error"
+
+        assert check_step_output_exists(
+            3,
+            "meshing",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+        ) is True
+
+    def test_remote_output_check_treats_solver_error_flag_as_terminal(self):
+        """Solver .error flag 应被视为终结输出，避免恢复时重复启动。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def check_remote_file(
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+            ) -> bool:
+                return remote_path == "D:/flags/solver_done_4.txt.error"
+
+        assert check_step_output_exists(
+            4,
+            "solver",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+        ) is True

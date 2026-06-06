@@ -316,6 +316,7 @@ def check_step_output_exists(
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/meshing_done_{config_name}.txt"
         )
+        error_flag = f"{flag_file}.error"
         mesh_name = get_step_filename("meshing", config_name)
         mesh_file = None
         if mesh_name:
@@ -324,7 +325,7 @@ def check_step_output_exists(
                 f"/{mesh_name}"
             )
         try:
-            return _check_remote_file(flag_file) or (
+            return _check_remote_file(flag_file) or _check_remote_file(error_flag) or (
                 mesh_file is not None and _check_remote_file(mesh_file)
             )
         except Exception:
@@ -335,13 +336,14 @@ def check_step_output_exists(
             f"{remote_config['flag_dir'].replace(chr(92), '/')}"
             f"/solver_done_{config_name}.txt"
         )
+        error_flag = f"{flag_file}.error"
         result_dir = remote_config['result_dir'].replace(chr(92), '/')
         cas_name = get_step_filename("solver", config_name)
         dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            if _check_remote_file(flag_file):
+            if _check_remote_file(flag_file) or _check_remote_file(error_flag):
                 return True
             cas_exists = cas_file is not None and _check_remote_file(cas_file)
             dat_exists = dat_file is not None and _check_remote_file(dat_file)

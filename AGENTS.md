@@ -22,12 +22,10 @@ Command forms:
 
 ## Source Instructions
 
-- General implementation and architecture:
-  `.github/instructions/implementation-planning.instructions.md`
 - Python rules: `.github/instructions/python.instructions.md`
 - Rust rules: `.github/instructions/rust.instructions.md`
 - C# rules: `.github/instructions/csharp.instructions.md`
-- Commit message rules: `.github/copilot-instructions.md`
+- Commit message rules: see "Commit Messages" section below
 - Review prompts:
   `.github/prompts/review-python.prompt.md`,
   `.github/prompts/review-rust.prompt.md`,

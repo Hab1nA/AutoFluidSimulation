@@ -193,17 +193,41 @@ class MeshingMonitor:
         # ---- 检查是否为重启后仍在运行的 Meshing ----
         meshing_status = self.state.get_step_status(config_name, "meshing")
         if meshing_status == STATUS_RUNNING:
-            # Daemon 重启后发现 Meshing=Running，无法确定远程是否仍在运行
-            # 先检查标志文件，若不存在则重置为 Waiting 后重新启动
-            if self._remote_executor.check_meshing_done(config_name):
+            remote_status = self._remote_executor.query_remote_task_status(
+                config_name, "meshing"
+            )
+            if remote_status == "completed":
                 self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
+                self._remote_executor.forget_remote_task(config_name, "meshing")
                 logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 重启后检测到完成标志")
                 return False
-            # ★ 重置为 Waiting：清除孤儿 Running 状态，避免原子防护误判
+            if remote_status == "failed":
+                self.state.set_step_status(
+                    config_name,
+                    "meshing",
+                    STATUS_ERROR,
+                    "远程网格划分任务失败",
+                )
+                self._remote_executor.forget_remote_task(config_name, "meshing")
+                return False
+            if remote_status == "running":
+                logger.info(
+                    f"[MeshingMonitor] 构型{config_name} Meshing 远程任务仍在运行，恢复轮询"
+                )
+                return self._wait_for_meshing_completion(config_name)
+            if remote_status == "unknown":
+                logger.warning(
+                    f"[MeshingMonitor] 构型{config_name} Meshing 远程状态未知，"
+                    "保留 Running 状态并跳过重启"
+                )
+                return False
+
+            # lost：确认无远程任务且无产物后，清除孤儿 Running 并重新启动。
             self.state.set_step_status(config_name, "meshing", STATUS_WAITING)
+            self._remote_executor.forget_remote_task(config_name, "meshing")
             logger.warning(
-                f"[MeshingMonitor] 构型{config_name} Meshing 重启后状态为 Running，"
-                f"无法确定远程状态，重置为 Waiting 后重新启动"
+                f"[MeshingMonitor] 构型{config_name} Meshing 重启后远程任务已丢失，"
+                "重置为 Waiting 后重新启动"
             )
 
         # ---- 启动远程 Meshing（带重试） ----
@@ -251,7 +275,10 @@ class MeshingMonitor:
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
                 return False
 
-        # ---- 轮询等待完成 ----
+        return self._wait_for_meshing_completion(config_name)
+
+    def _wait_for_meshing_completion(self, config_name: int) -> bool:
+        """轮询等待 Meshing 完成，并按控制状态更新数据库。"""
         logger.info(f"[MeshingMonitor] 等待构型{config_name} 网格划分完成...")
         if self._remote_executor.wait_meshing_completion(
             config_name,
