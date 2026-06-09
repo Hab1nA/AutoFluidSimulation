@@ -362,6 +362,9 @@ class PipelineDaemon:
         if engine_status == "paused":
             if self._server_mode_requires_worker():
                 return self._server_mode_worker_missing_response()
+            auth_error = self._server_mode_remote_auth_error()
+            if auth_error:
+                return False, None, auth_error
             # 暂停状态下恢复运行
             # 检查调度器主线程是否存活（SW 宏执行期间线程可能因异常退出）
             if not self.scheduler.pipeline_alive and not self.scheduler.is_paused:
@@ -386,6 +389,9 @@ class PipelineDaemon:
         # 全新启动（engine_status 为 stopped 或其他）
         if self._server_mode_requires_worker():
             return self._server_mode_worker_missing_response()
+        auth_error = self._server_mode_remote_auth_error()
+        if auth_error:
+            return False, None, auth_error
 
         self.state.set_engine_status("running")
         self._pipeline_ever_started = True
@@ -410,6 +416,24 @@ class PipelineDaemon:
         )
         has_adapter = getattr(self, "local_worker_adapter", None) is not None
         return is_server_mode() and (not has_worker or not has_adapter)
+
+    @staticmethod
+    def _server_mode_remote_auth_error() -> str | None:
+        """Return an operator-facing error when server-mode SSH auth is absent."""
+        if not is_server_mode():
+            return None
+        missing: list[str] = []
+        for workstation in WORKSTATIONS:
+            password = str(workstation.get("password") or "").strip()
+            if not password or (password.startswith("${") and password.endswith("}")):
+                missing.append(str(workstation.get("id") or "default"))
+        if not missing:
+            return None
+        return (
+            "server 模式下 ocar 需要工作站 SSH 密码才能执行 transfer/meshing/solver；"
+            f"缺少工作站 {', '.join(missing)} 的密码。请在 ocar 运行环境设置 "
+            "AUTOFLUID_SSH_PASSWORD 或对应 workstations[].password 环境变量。"
+        )
 
     @staticmethod
     def _server_mode_worker_missing_response() -> tuple[bool, None, str]:

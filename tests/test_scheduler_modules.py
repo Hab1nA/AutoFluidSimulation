@@ -1039,6 +1039,41 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_server_mode_start_rejects_missing_remote_password(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "23.247.137.76",
+                "port": 22,
+                "username": "ps",
+                "password": "",
+            }],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "AUTOFLUID_SSH_PASSWORD" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
+
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
