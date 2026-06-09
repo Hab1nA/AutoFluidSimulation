@@ -399,6 +399,12 @@ WORKSTATIONS = [
 
 > 部署到 ocar 后，`WORKSTATIONS[*].host` 必须是从 ocar 所在网络位置可路由、可 SSH 握手的地址。不要把本地 Windows PC 才能访问的内网 `[IP]` 直接写入服务器端配置；如果工作站不在 ocar 可达网络内，应先配置公网端口映射、VPN、Tailscale、反向 SSH 隧道或等价链路。过渡期也可以保留原始 `host` 作为诊断信息，并额外配置 `reachable_host`；`AUTOFLUID_SERVER_MODE=server` 时 Python 后端会优先使用 `reachable_host` 作为实际 SSH 目标。
 
+端口映射、VPN、堡垒机或其他不依赖本地开发机在线的网络链路还应配置
+`reachable_port`，例如工作站经独立公网映射暴露为
+`WORKSTATION_PUBLIC_HOST:2222` 时，可保留 `host = "172.17.135.240"`、
+`port = 22` 作为本地诊断值，并设置
+`reachable_host = "WORKSTATION_PUBLIC_HOST"`、`reachable_port = 2222`。
+
 为保持向后兼容，可保留 `REMOTE_CONFIG` 作为默认工作站的快捷引用。
 
 #### 4.2.2 SSH 连接池

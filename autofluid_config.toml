@@ -8,8 +8,9 @@ scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solid
 
 [remote_config]
 host = "172.17.135.240"
-reachable_host = "23.247.137.76"
-connectivity_mode = "public"
+reachable_host = "127.0.0.1"
+reachable_port = 2222
+connectivity_mode = "reverse_tunnel"
 port = 22
 username = "ps"
 working_dir = 'D:\xkz_1020\workingdir'

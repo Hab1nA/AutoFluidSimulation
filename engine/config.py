@@ -70,6 +70,7 @@ class RemoteConfig(TypedDict):
 class WorkstationConfig(RemoteConfig, total=False):
     id: str
     reachable_host: str
+    reachable_port: int
     connectivity_mode: str
     postprocess_script: str
     postprocess_output_dir: str
@@ -250,6 +251,8 @@ def _effective_workstation_config(workstation: WorkstationConfig) -> Workstation
     reachable_host = str(result.get("reachable_host", "")).strip()
     if is_server_mode() and reachable_host:
         result["host"] = reachable_host
+        if "reachable_port" in result:
+            result["port"] = int(result["reachable_port"])
     return result
 
 # ============================================================================
@@ -440,13 +443,16 @@ def _apply_env_overrides():
     _env_remote_keys = [
         ("host", "AUTOFLUID_SSH_HOST"),
         ("port", "AUTOFLUID_SSH_PORT"),
+        ("reachable_host", "AUTOFLUID_SSH_REACHABLE_HOST"),
+        ("reachable_port", "AUTOFLUID_SSH_REACHABLE_PORT"),
+        ("connectivity_mode", "AUTOFLUID_SSH_CONNECTIVITY_MODE"),
         ("username", "AUTOFLUID_SSH_USER"),
         ("password", "AUTOFLUID_SSH_PASSWORD"),
     ]
     for key, env_name in _env_remote_keys:
         env_val = os.environ.get(env_name)
         if env_val:
-            if key == "port":
+            if key in {"port", "reachable_port"}:
                 REMOTE_CONFIG[key] = int(env_val)
             else:
                 REMOTE_CONFIG[key] = env_val
@@ -530,8 +536,9 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
     merged: dict[str, Any] = dict(REMOTE_CONFIG)
     merged.update(raw)
     merged["id"] = str(merged.get("id") or f"WS-{index + 1}")
-    if "port" in merged:
-        merged["port"] = int(merged["port"])
+    for port_key in ("port", "reachable_port"):
+        if port_key in merged:
+            merged[port_key] = int(merged[port_key])
     return cast(WorkstationConfig, merged)
 
 

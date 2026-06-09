@@ -413,6 +413,7 @@ id = "WS-A"
 host = "WORKSTATION_A_ROUTABLE_IP"
 # 可选：保留 host 为原始诊断地址时，server 模式下实际 SSH 使用 reachable_host
 reachable_host = "OCAR_REACHABLE_WORKSTATION_A_HOST"
+reachable_port = 2222  # 可选：独立端口映射/VPN/工作站侧反向隧道场景下的 ocar 可达端口
 connectivity_mode = "tailscale"  # public | vpn | tailscale | reverse_tunnel
 port = 22
 username = "ps"
@@ -442,7 +443,7 @@ password = "${AUTOFLUID_WS_C_PASSWORD}"
 # ... 同上路径结构
 ```
 
-> 注意：`workstations[].host` 必须填写从服务器 A（例如 ocar）所在网络位置可路由、可 SSH 访问的工作站地址，不能直接沿用仅本地 Windows PC 内网可达的 `[IP]`。如果需要保留原始内网地址作为诊断信息，可额外设置 `reachable_host`；`AUTOFLUID_SERVER_MODE=server` 时实际 SSH 目标会优先使用 `reachable_host`。部署前需在服务器 A 上逐台验证 `ssh <username>@<effective_host>` 与端口、防火墙、NAT/VPN/隧道可用性。
+> 注意：`workstations[].host` 必须填写从服务器 A（例如 ocar）所在网络位置可路由、可 SSH 访问的工作站地址，不能直接沿用仅本地 Windows PC 内网可达的 `[IP]`。如果需要保留原始内网地址作为诊断信息，可额外设置 `reachable_host`；若使用端口映射、VPN、堡垒机或工作站侧反向 SSH 隧道，还应设置 `reachable_port`。`AUTOFLUID_SERVER_MODE=server` 时 Python 后端会优先使用 `reachable_host`，并在存在 `reachable_port` 时同时覆盖实际 SSH 端口。部署前需在服务器 A 上逐台验证 `ssh -p <effective_port> <username>@<effective_host>` 与防火墙、NAT/VPN/隧道可用性；该链路不能依赖本地开发机在线。
 
 ### 6.3 Python 侧 TypedDict 扩展
 
@@ -453,6 +454,8 @@ class WorkstationConfig(TypedDict):
     id: str
     host: str
     port: int
+    reachable_host: NotRequired[str]
+    reachable_port: NotRequired[int]
     username: str
     password: str
     scdoc_dir: str
