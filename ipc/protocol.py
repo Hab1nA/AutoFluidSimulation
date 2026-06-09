@@ -57,6 +57,10 @@ CMD_GET_ENGINE_STATUS = "get_engine_status"  # 获取引擎状态
 CMD_GET_LOG_ENTRIES = "get_log_entries"  # 增量拉取日志条目
 CMD_RELOAD_CONFIG = "reload_config"      # 重新加载 TOML 配置文件
 
+# ---- LocalWorker 命令 ----
+CMD_WORKER_REGISTER = "worker_register"    # LocalWorker 注册
+CMD_WORKER_HEARTBEAT = "worker_heartbeat"  # LocalWorker 心跳
+
 
 # ============================================================================
 # 消息构造与解析

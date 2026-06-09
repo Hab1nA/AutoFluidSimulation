@@ -37,6 +37,7 @@ from engine.config import (
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
+from engine.local_worker_registry import LocalWorkerRegistry
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
@@ -132,6 +133,7 @@ class PipelineDaemon:
         self.runner = None
         self.scheduler = None
         self.ipc_server = None
+        self.local_worker_registry = LocalWorkerRegistry()
 
         # 运行标志
         self._running = False
@@ -383,7 +385,13 @@ class PipelineDaemon:
 
     def _server_mode_requires_worker(self) -> bool:
         """Return True when server mode cannot execute local SW/SC yet."""
-        return is_server_mode() and getattr(self, "local_worker_adapter", None) is None
+        registry = getattr(self, "local_worker_registry", None)
+        has_worker = (
+            registry is not None
+            and registry.has_online_worker()
+        )
+        has_adapter = getattr(self, "local_worker_adapter", None) is not None
+        return is_server_mode() and (not has_worker or not has_adapter)
 
     @staticmethod
     def _server_mode_worker_missing_response() -> tuple[bool, None, str]:
@@ -425,6 +433,27 @@ class PipelineDaemon:
             raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
         results = self.runner.run_system_check()
         return True, results, "系统自检完成"
+
+    def handle_worker_register(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """Handle LocalWorker registration."""
+        params = params or {}
+        worker_id = str(params.get("worker_id") or "")
+        if not worker_id:
+            return False, None, "缺少 worker_id"
+        capabilities = params.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+        worker = self.local_worker_registry.register(worker_id, capabilities)
+        return True, worker, "LocalWorker 已注册"
+
+    def handle_worker_heartbeat(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """Handle LocalWorker heartbeat."""
+        params = params or {}
+        worker_id = str(params.get("worker_id") or "")
+        if not worker_id:
+            return False, None, "缺少 worker_id"
+        worker = self.local_worker_registry.heartbeat(worker_id)
+        return True, worker, "LocalWorker 心跳已更新"
 
     def handle_get_all_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取所有构型的状态。"""

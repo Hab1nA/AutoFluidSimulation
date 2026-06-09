@@ -315,6 +315,39 @@ impl IpcClient {
             .await
     }
 
+    #[allow(dead_code)]
+    pub async fn worker_register(
+        &mut self,
+        worker_id: &str,
+        capabilities: serde_json::Value,
+    ) -> Result<IpcResponse, String> {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "worker_id".to_string(),
+            serde_json::Value::String(worker_id.to_string()),
+        );
+        params.insert("capabilities".to_string(), capabilities);
+        self.send_request(&IpcRequest::with_params(
+            super::protocol::CMD_WORKER_REGISTER,
+            serde_json::Value::Object(params),
+        ))
+        .await
+    }
+
+    #[allow(dead_code)]
+    pub async fn worker_heartbeat(&mut self, worker_id: &str) -> Result<IpcResponse, String> {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "worker_id".to_string(),
+            serde_json::Value::String(worker_id.to_string()),
+        );
+        self.send_request(&IpcRequest::with_params(
+            super::protocol::CMD_WORKER_HEARTBEAT,
+            serde_json::Value::Object(params),
+        ))
+        .await
+    }
+
     pub async fn get_log_entries(
         &mut self,
         since_id: u64,

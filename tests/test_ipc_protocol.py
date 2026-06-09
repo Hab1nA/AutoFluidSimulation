@@ -72,6 +72,8 @@ _EXPECTED_COMMANDS = frozenset({
     "get_engine_status",
     "get_log_entries",
     "reload_config",
+    "worker_register",
+    "worker_heartbeat",
 })
 
 

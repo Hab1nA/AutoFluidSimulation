@@ -18,6 +18,7 @@ from ipc.protocol import (
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
     CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
+    CMD_WORKER_REGISTER, CMD_WORKER_HEARTBEAT,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -103,6 +104,10 @@ class IPCServer:
 
         # 配置重载
         self.register_handler(CMD_RELOAD_CONFIG, daemon.handle_reload_config)
+
+        # LocalWorker
+        self.register_handler(CMD_WORKER_REGISTER, daemon.handle_worker_register)
+        self.register_handler(CMD_WORKER_HEARTBEAT, daemon.handle_worker_heartbeat)
 
     # ------------------------------------------------------------------
     # 服务器生命周期

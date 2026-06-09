@@ -977,12 +977,59 @@ class TestPipelineDaemonCleanStep:
 
     def test_server_mode_rejects_pipeline_start_without_local_worker(self, monkeypatch):
         from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
 
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
         daemon = PipelineDaemon.__new__(PipelineDaemon)
         daemon.state = _DaemonState(engine_status="stopped")
         daemon.scheduler = _CleanStepScheduler()
         daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = LocalWorkerRegistry()
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "LocalWorker" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
+
+    def test_worker_register_and_heartbeat_handlers_update_registry(self):
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.local_worker_registry = LocalWorkerRegistry()
+
+        ok, data, message = daemon.handle_worker_register({
+            "worker_id": "local-pc-01",
+            "capabilities": {"sw": True, "sc_slots": 3},
+        })
+
+        assert ok is True
+        assert message == "LocalWorker 已注册"
+        assert data["worker_id"] == "local-pc-01"
+        assert daemon.local_worker_registry.has_online_worker() is True
+
+        ok, data, message = daemon.handle_worker_heartbeat({
+            "worker_id": "local-pc-01",
+        })
+
+        assert ok is True
+        assert message == "LocalWorker 心跳已更新"
+        assert data["worker_id"] == "local-pc-01"
+
+    def test_server_mode_start_rejects_online_worker_without_adapter(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon.local_worker_registry.register("local-pc-01", {})
 
         ok, data, message = daemon.handle_start({})
 

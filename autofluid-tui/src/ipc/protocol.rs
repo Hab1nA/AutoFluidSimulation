@@ -19,6 +19,10 @@ pub const CMD_GET_STATISTICS: &str = "get_statistics";
 pub const CMD_GET_ENGINE_STATUS: &str = "get_engine_status";
 pub const CMD_GET_LOG_ENTRIES: &str = "get_log_entries";
 pub const CMD_RELOAD_CONFIG: &str = "reload_config";
+#[allow(dead_code)]
+pub const CMD_WORKER_REGISTER: &str = "worker_register";
+#[allow(dead_code)]
+pub const CMD_WORKER_HEARTBEAT: &str = "worker_heartbeat";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequest {
