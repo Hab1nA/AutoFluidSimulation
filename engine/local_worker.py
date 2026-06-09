@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass, field
 import os
 import socket
@@ -10,7 +11,7 @@ from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from engine.config import LOCAL_PATHS
+from engine.config import LOCAL_PATHS, get_step_filename
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from ipc.protocol import (
@@ -224,7 +225,29 @@ class LocalWorker:
         config_name = params.get("config_name")
         if config_name is None:
             raise RuntimeError("SC 任务缺少 config_name")
-        return {"ok": bool(runner.execute_sc_step(int(config_name)))}
+        config_id = int(config_name)
+        ok = bool(runner.execute_sc_step(config_id))
+        result: dict[str, Any] = {"ok": ok}
+        if ok:
+            result["scdoc_file"] = self._build_scdoc_payload(config_id)
+        return result
+
+    def _build_scdoc_payload(self, config_name: int) -> dict[str, Any]:
+        """Read the generated SCDOC so the server daemon can continue transfer."""
+        scdoc_name = get_step_filename("sc", config_name)
+        if not scdoc_name:
+            raise RuntimeError("无法生成 SCDOC 文件名")
+        scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
+        with open(scdoc_path, "rb") as handle:
+            content = handle.read()
+        if not content:
+            raise RuntimeError(f"SCDOC 文件为空: {scdoc_path}")
+        return {
+            "config_name": config_name,
+            "filename": scdoc_name,
+            "size": len(content),
+            "content_b64": base64.b64encode(content).decode("ascii"),
+        }
 
     def _get_default_runner(self) -> TaskRunner:
         if self._default_runner is None:

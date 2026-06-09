@@ -35,7 +35,7 @@ class IPCServer:
     收到命令后，调用注册的回调函数进行处理。
     """
 
-    MAX_BUFFER_BYTES = 1_000_000
+    MAX_BUFFER_BYTES = 5 * 1024 * 1024
 
     def __init__(
         self,

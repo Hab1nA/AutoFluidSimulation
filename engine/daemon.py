@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import sys
 import signal
@@ -33,7 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, ensure_directories,
-    is_server_mode, validate_config,
+    get_step_filename, is_server_mode, validate_config,
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
@@ -576,8 +578,56 @@ class PipelineDaemon:
         result = params.get("result")
         if not isinstance(result, dict):
             result = {}
+        try:
+            scdoc_metadata = self._persist_worker_scdoc(result)
+        except (OSError, TypeError, ValueError, binascii.Error) as exc:
+            task = self.local_worker_registry.fail_task(task_id, worker_id, str(exc))
+            return False, task, f"LocalWorker SCDOC 接收失败: {exc}"
+        if scdoc_metadata is not None:
+            result = dict(result)
+            result["scdoc_file"] = scdoc_metadata
         task = self.local_worker_registry.complete_task(task_id, worker_id, result)
         return True, task, "LocalWorker 任务完成"
+
+    def _persist_worker_scdoc(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Persist a LocalWorker-produced SCDOC for server-side transfer."""
+        payload = result.get("scdoc_file")
+        if not isinstance(payload, dict):
+            return None
+        raw_config_name = payload.get("config_name")
+        if raw_config_name is None:
+            raise ValueError("SCDOC 载荷缺少 config_name")
+        config_name = int(raw_config_name)
+        expected_name = get_step_filename("sc", config_name)
+        filename = str(payload.get("filename") or "")
+        if not expected_name or filename != expected_name or os.path.basename(filename) != filename:
+            raise ValueError(f"非法 SCDOC 文件名: {filename!r}")
+        content_b64 = str(payload.get("content_b64") or "")
+        content = base64.b64decode(content_b64.encode("ascii"), validate=True)
+        expected_size = int(payload.get("size") or 0)
+        if expected_size and len(content) != expected_size:
+            raise ValueError(
+                f"SCDOC 文件大小不匹配: expected={expected_size}, actual={len(content)}"
+            )
+        if not content:
+            raise ValueError("SCDOC 文件为空")
+        scdoc_dir = str(LOCAL_PATHS["scdoc_dir"])
+        os.makedirs(scdoc_dir, exist_ok=True)
+        target_path = os.path.join(scdoc_dir, filename)
+        with open(target_path, "wb") as handle:
+            handle.write(content)
+        logger.info(
+            "[LocalWorker] 已接收构型%s SCDOC: %s (%d bytes)",
+            config_name,
+            target_path,
+            len(content),
+        )
+        return {
+            "config_name": config_name,
+            "filename": filename,
+            "size": len(content),
+            "server_path": target_path,
+        }
 
     def handle_worker_step_error(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """Handle LocalWorker task failure."""

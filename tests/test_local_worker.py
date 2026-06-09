@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 
 def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> None:
     import engine.local_worker as local_worker_module
@@ -230,9 +232,53 @@ def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
     monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+    monkeypatch.setattr(
+        LocalWorker,
+        "_build_scdoc_payload",
+        lambda _self, config_name: {"config_name": config_name},
+    )
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
 
     assert worker._execute_task("sw", {"config_name": 3}) == {"ok": True}
-    assert worker._execute_task("sc", {"config_name": 7}) == {"ok": True}
+    assert worker._execute_task("sc", {"config_name": 7}) == {
+        "ok": True,
+        "scdoc_file": {"config_name": 7},
+    }
     assert calls == [("sw", 3), ("sc", 7)]
+
+
+def test_local_worker_sc_task_includes_scdoc_payload(tmp_path, monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.config import LOCAL_PATHS
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    scdoc_file = scdoc_dir / "model_gen4_7.scdoc"
+    scdoc_file.write_bytes(b"scdoc payload")
+
+    class _Runner:
+        def execute_sc_step(self, config_name: int) -> bool:
+            assert config_name == 7
+            return True
+
+    class _State:
+        def load_configs(self, _configs):
+            pass
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    result = worker._execute_task("sc", {"config_name": 7})
+
+    assert result["ok"] is True
+    payload = result["scdoc_file"]
+    assert payload["config_name"] == 7
+    assert payload["filename"] == "model_gen4_7.scdoc"
+    assert payload["size"] == len(b"scdoc payload")
+    assert base64.b64decode(payload["content_b64"]) == b"scdoc payload"
