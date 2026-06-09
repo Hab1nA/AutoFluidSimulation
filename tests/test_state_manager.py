@@ -757,6 +757,31 @@ class TestAllConfigsCompletedAtStep:
             assert sm.all_configs_completed_at_step("meshing", config_names=[1]) is True
             assert sm.all_configs_completed_at_step("meshing", config_names=[1, 2]) is False
 
+    def test_filters_by_workstation_and_config_names(self):
+        with _TmpDB() as sm:
+            sm.load_configs({
+                1: [1.0, 2.0, 3.0, 4.0],
+                2: [5.0, 6.0, 7.0, 8.0],
+                3: [9.0, 10.0, 11.0, 12.0],
+            })
+            sm.set_config_workstation(1, "WS-A")
+            sm.set_config_workstation(2, "WS-B")
+            sm.set_config_workstation(3, "WS-A")
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(2, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(3, "meshing", STATUS_WAITING)
+
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="WS-A",
+                config_names=[1],
+            ) is True
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="WS-A",
+                config_names=[1, 3],
+            ) is False
+
 
 # ====================================================================
 # get_error_configs 测试

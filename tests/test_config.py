@@ -657,6 +657,34 @@ class TestReloadConfigFromToml:
             REMOTE_CONFIG.update(original_remote)
             WORKSTATIONS[:] = original_workstations
 
+    def test_merges_ipc_config_and_applies_env_overrides(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import IPC_CONFIG
+
+        original = dict(IPC_CONFIG)
+        monkeypatch.setenv("AUTOFLUID_IPC_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_IPC_PORT", "9650")
+        monkeypatch.setenv("AUTOFLUID_IPC_AUTH_TOKEN", "env-token")
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "ipc_config": {
+                    "host": "0.0.0.0",
+                    "port": 9528,
+                    "auth_token": "${AUTOFLUID_IPC_AUTH_TOKEN}",
+                }
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert IPC_CONFIG["host"] == "127.0.0.1"
+            assert IPC_CONFIG["port"] == 9650
+            assert IPC_CONFIG["auth_token"] == "env-token"
+        finally:
+            IPC_CONFIG.clear()
+            IPC_CONFIG.update(original)
+
     def test_merges_step_file_patterns(self, monkeypatch):
         import engine.config as cfg
         from engine.config import STEP_FILE_PATTERNS
@@ -795,7 +823,7 @@ class TestConfigDictCompleteness:
     }
 
     _IPC_REQUIRED_KEYS = {
-        "host", "port", "db_path", "timeout", "max_connections",
+        "host", "port", "db_path", "timeout", "max_connections", "auth_token",
     }
 
     _ENGINE_REQUIRED_KEYS = {

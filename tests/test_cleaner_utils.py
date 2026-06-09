@@ -19,7 +19,7 @@ from types import TracebackType
 
 import pytest
 
-from engine.config import LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS
+from engine.config import LOCAL_PATHS, REMOTE_CONFIG, STEP_FILE_PATTERNS, WORKSTATIONS
 
 
 # ====================================================================
@@ -133,6 +133,42 @@ class TestFileCleanerSystemCheck:
             assert lock.entries == 1
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_server_mode_warns_about_private_workstation_host(self, tmp_path, monkeypatch):
+        """server/ocar 模式下应提示私网工作站地址可能不可达。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _DisconnectedSSH:
+            def is_connected(self):
+                return False
+
+        import engine.config as cfg
+        original_db_path = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+            }
+        ]
+        try:
+            state = StateManager(db_path=cfg.IPC_CONFIG["db_path"])
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            workstation_checks = result["workstation_checks"]
+            assert workstation_checks["server_mode"] is True
+            assert workstation_checks["workstations"][0]["id"] == "WS-A"
+            assert "ocar" in workstation_checks["workstations"][0]["warning"]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = original_db_path
+            WORKSTATIONS[:] = original_workstations
 
 
 class TestFileCleanerCleanStepFiles:

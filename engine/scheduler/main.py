@@ -819,6 +819,7 @@ class PipelineScheduler:
         if config_name == "all" and step_name is None:
             self.state.reset_all()
             self._barrier_passed.clear()
+            self.barrier_coordinator.clear_all_workstation_barriers()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
@@ -829,6 +830,7 @@ class PipelineScheduler:
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
+                self.barrier_coordinator.clear_all_workstation_barriers()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
@@ -836,9 +838,11 @@ class PipelineScheduler:
                 _monitor_reset_method()
             self._sc_queue.clear()
         else:
+            reset_workstation_id = self._workstation_for_config(int(config_name))
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()
+                self.barrier_coordinator.clear_workstation_barrier(reset_workstation_id)
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)

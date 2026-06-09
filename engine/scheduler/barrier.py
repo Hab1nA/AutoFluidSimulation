@@ -64,6 +64,7 @@ class BarrierCoordinator:
         self._solver_threads: list[threading.Thread] = []
         self._solver_dispatch_lock = threading.Lock()
         self._solver_active_config: int | None = None
+        self._workstation_barriers_passed: set[str] = set()
 
         logger.info("全局屏障协调器初始化完成")
 
@@ -75,6 +76,34 @@ class BarrierCoordinator:
             if workstation_id:
                 return str(workstation_id)
         return DEFAULT_WORKSTATION_ID
+
+    def _configs_by_workstation(self) -> dict[str, list[int]]:
+        """Group configs by assigned workstation."""
+        grouped: dict[str, list[int]] = {}
+        for config_name in self.state.get_all_configs():
+            workstation_id = self._workstation_for_config(config_name)
+            grouped.setdefault(workstation_id, []).append(config_name)
+        return grouped
+
+    def _ready_workstations_for_solver(self) -> set[str]:
+        """Return workstations whose Meshing barrier has passed."""
+        ready: set[str] = set()
+        for workstation_id, config_names in self._configs_by_workstation().items():
+            if self.state.all_configs_completed_at_step(
+                "meshing",
+                workstation_id=workstation_id,
+                config_names=config_names,
+            ):
+                ready.add(workstation_id)
+        return ready
+
+    def clear_workstation_barrier(self, workstation_id: str) -> None:
+        """Clear one workstation barrier cache after reset."""
+        self._workstation_barriers_passed.discard(workstation_id)
+
+    def clear_all_workstation_barriers(self) -> None:
+        """Clear all workstation barrier caches after broad reset."""
+        self._workstation_barriers_passed.clear()
 
     def join_solver_threads(self, timeout: float = 3.0) -> None:
         """等待所有 Solver 线程退出并清空列表。
@@ -143,9 +172,8 @@ class BarrierCoordinator:
                 self.state.set_engine_status("stopped")
                 break
 
-            # 检查是否所有构型的 Meshing 都已完成
-            if self.state.all_configs_completed_at_step("meshing"):
-                self.dispatch_solver_if_ready()
+            # 检查是否已有工作站的 Meshing 屏障通过
+            if self.dispatch_solver_if_ready() and self.state.all_configs_completed_at_step("meshing"):
                 break
 
             # 检查是否所有 Meshing 均已终结（Completed 或 Error）
@@ -161,15 +189,23 @@ class BarrierCoordinator:
                     has_error = True
 
             if all_terminal and has_error:
-                logger.error("=" * 60)
-                logger.error(">>> 全局屏障失败！所有构型网格划分均已终结但存在错误 <<<")
-                logger.error("=" * 60)
                 # 将所有 Meshing=Error 的构型的 Solver 也标记为 Error（屏障未通过）
                 for cn in all_configs:
                     if self.state.get_step_status(cn, "meshing") == STATUS_ERROR:
                         self.state.set_step_status(cn, "solver", STATUS_ERROR, "网格划分失败，屏障未通过")
-                self._stopped.set()
-                self.state.set_engine_status("stopped")
+                if any(
+                    self.state.get_step_status(cn, "meshing") == STATUS_COMPLETED
+                    for cn in all_configs
+                ):
+                    logger.warning("=" * 60)
+                    logger.warning(">>> 部分工作站 Meshing 失败，已通过工作站继续进入 Solver <<<")
+                    logger.warning("=" * 60)
+                else:
+                    logger.error("=" * 60)
+                    logger.error(">>> 全局屏障失败！所有构型网格划分均已终结但存在错误 <<<")
+                    logger.error("=" * 60)
+                    self._stopped.set()
+                    self.state.set_engine_status("stopped")
                 break
 
             # 检查是否有 Meshing 失败的（仅报告新增的失败，按构型去重）
@@ -193,19 +229,23 @@ class BarrierCoordinator:
     # ------------------------------------------------------------------
 
     def dispatch_solver_if_ready(self) -> bool:
-        """当 Meshing 屏障已满足时，幂等地触发 Solver 分发。
+        """当任一工作站 Meshing 屏障已满足时，幂等地触发 Solver 分发。
 
         该入口用于正常屏障通过，也用于 Daemon 重启/仅重置 Solver 后的
-        断点续传场景：此时持久化的 global_barrier_met 可能已为 true，
+        断点续传场景：此时持久化的 barrier 状态可能已为 true，
         barrier monitor 不会进入轮询循环，但 Solver 仍需要重新分发。
         """
         if self._stopped.is_set():
             return False
 
-        if not self.state.all_configs_completed_at_step("meshing"):
+        ready_workstations = self._ready_workstations_for_solver()
+        if not ready_workstations:
             return False
 
-        if not self._barrier_passed.is_set():
+        all_meshing_completed = self.state.all_configs_completed_at_step("meshing")
+        new_workstations = ready_workstations - self._workstation_barriers_passed
+
+        if all_meshing_completed and not self._barrier_passed.is_set():
             logger.info("=" * 60)
             logger.info(">>> 全局屏障通过！所有构型网格划分已完成 <<<")
             logger.info("=" * 60)
@@ -214,15 +254,21 @@ class BarrierCoordinator:
 
             # 末次 SC 全体清理：所有 SC→Transfer→Meshing 完成后清理。
             self.runner.do_sc_final_cleanup()
+        elif new_workstations:
+            logger.info(
+                "[BarrierMonitor] 工作站级屏障通过: %s",
+                ", ".join(sorted(new_workstations)),
+            )
         else:
             logger.info("[BarrierMonitor] 全局屏障已通过，检查待分发 Solver 任务")
 
-        self._dispatch_solver_tasks()
+        self._workstation_barriers_passed.update(ready_workstations)
+        self._dispatch_solver_tasks(ready_workstations)
         return True
 
-    def _dispatch_solver_tasks(self) -> bool:
+    def _dispatch_solver_tasks(self, allowed_workstations: set[str] | None = None) -> bool:
         """
-        全局屏障通过后，统一启动所有构型的仿真求解。
+        工作站屏障通过后，启动对应构型的仿真求解。
 
         Solver 使用单个调度线程串行执行，确保同一时刻只有一个构型
         处于求解阶段。
@@ -237,19 +283,25 @@ class BarrierCoordinator:
         logger.info("开始串行调度仿真求解任务...")
         logger.info("=" * 60)
 
+        allowed_snapshot = (
+            set(allowed_workstations)
+            if allowed_workstations is not None
+            else None
+        )
         with self._solver_dispatch_lock:
             self._solver_threads = [t for t in self._solver_threads if t.is_alive()]
             if self._solver_threads:
                 logger.info("[Solver] 串行调度线程已在运行，跳过重复启动")
                 return True
 
-            if self._next_solver_config() is None:
+            if self._next_solver_config(allowed_snapshot) is None:
                 logger.info("[Solver] 当前没有待执行的求解任务")
                 self._report_solver_terminal_if_ready()
                 return False
 
             t = threading.Thread(
                 target=self._solver_dispatch_loop,
+                args=(allowed_snapshot,),
                 name="SolverDispatcher",
                 daemon=True,
             )
@@ -259,9 +311,19 @@ class BarrierCoordinator:
         logger.info("[Solver] 串行调度线程已启动")
         return True
 
-    def _next_solver_config(self) -> int | None:
+    def _next_solver_config(
+        self,
+        allowed_workstations: set[str] | None = None,
+    ) -> int | None:
         """返回下一个可执行 Solver 的构型；没有则返回 None。"""
         for cn in self.state.get_all_configs():
+            if self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
+                continue
+            if (
+                allowed_workstations is not None
+                and self._workstation_for_config(cn) not in allowed_workstations
+            ):
+                continue
             solver_status = self.state.get_step_status(cn, "solver")
             if solver_status in (
                 STATUS_WAITING,
@@ -272,12 +334,15 @@ class BarrierCoordinator:
                 return cn
         return None
 
-    def _solver_dispatch_loop(self) -> None:
+    def _solver_dispatch_loop(
+        self,
+        allowed_workstations: set[str] | None = None,
+    ) -> None:
         """串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
         logger.info("[Solver] 串行调度循环启动")
         try:
             while not self._stopped.is_set():
-                config_name = self._next_solver_config()
+                config_name = self._next_solver_config(allowed_workstations)
                 if config_name is None:
                     break
 

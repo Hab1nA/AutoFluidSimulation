@@ -55,4 +55,39 @@ def test_process_message_bad_payload():
     assert resp["request_id"] == "unknown"
 
 
+def test_process_message_rejects_missing_auth_token_when_required():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {})
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "error"
+    assert resp["request_id"] == req["request_id"]
+    assert "认证失败" in resp["message"]
+
+
+def test_process_message_rejects_wrong_auth_token_when_required():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {}, auth_token="wrong-token")
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "error"
+    assert resp["request_id"] == req["request_id"]
+    assert "认证失败" in resp["message"]
+
+
+def test_process_message_accepts_matching_auth_token():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {}, auth_token="secret-token")
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "ok"
+    assert resp["data"] == {"ok": True}
+
+
 

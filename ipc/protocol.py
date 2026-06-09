@@ -62,7 +62,11 @@ CMD_RELOAD_CONFIG = "reload_config"      # 重新加载 TOML 配置文件
 # 消息构造与解析
 # ============================================================================
 
-def create_request(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def create_request(
+    command: str,
+    params: dict[str, Any] | None = None,
+    auth_token: str | None = None,
+) -> dict[str, Any]:
     """
     创建一个标准请求消息。
 
@@ -73,11 +77,14 @@ def create_request(command: str, params: dict[str, Any] | None = None) -> dict[s
     Returns:
         请求消息字典
     """
-    return {
+    request = {
         "command": command,
         "params": params or {},
         "request_id": str(uuid.uuid4())[:8],
     }
+    if auth_token:
+        request["auth_token"] = auth_token
+    return request
 
 
 def create_response(status: str, request_id: str, data: Any = None,

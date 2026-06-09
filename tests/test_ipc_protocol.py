@@ -11,6 +11,12 @@ def test_create_request_and_response_roundtrip():
     assert resp["request_id"] == req["request_id"]
 
 
+def test_create_request_includes_auth_token_when_provided():
+    req = protocol.create_request("ping", auth_token="secret-token")
+
+    assert req["auth_token"] == "secret-token"
+
+
 def test_serialize_deserialize_basic():
     msg = {"command": "ping", "params": {"a": 1}, "request_id": "abcd"}
     b = protocol.serialize(msg)

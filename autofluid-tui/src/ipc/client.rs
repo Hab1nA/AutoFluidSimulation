@@ -24,8 +24,8 @@ pub struct IpcClient {
 impl IpcClient {
     pub fn new(host: Option<&str>, port: Option<u16>) -> Self {
         Self {
-            host: host.unwrap_or(DEFAULT_HOST).to_string(),
-            port: port.unwrap_or(DEFAULT_PORT),
+            host: host.map(str::to_string).unwrap_or_else(default_host),
+            port: port.unwrap_or_else(default_port),
             stream: None,
             last_reconnect: None,
         }
@@ -348,6 +348,20 @@ impl IpcClient {
     }
 }
 
+fn default_host() -> String {
+    std::env::var("AUTOFLUID_IPC_HOST")
+        .ok()
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| DEFAULT_HOST.to_string())
+}
+
+fn default_port() -> u16 {
+    std::env::var("AUTOFLUID_IPC_PORT")
+        .ok()
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
 fn log_request_start(request: &IpcRequest, timeout: Duration) {
     if is_polling_command(&request.command) {
         log::debug!(
@@ -402,4 +416,42 @@ fn is_polling_command(command: &str) -> bool {
             | super::protocol::CMD_GET_ENGINE_STATUS
             | super::protocol::CMD_GET_LOG_ENTRIES
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IpcClient;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn client_uses_env_endpoint_when_args_absent() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_IPC_HOST", "ocar.example");
+        std::env::set_var("AUTOFLUID_IPC_PORT", "9650");
+
+        let client = IpcClient::new(None, None);
+
+        assert_eq!(client.host, "ocar.example");
+        assert_eq!(client.port, 9650);
+
+        std::env::remove_var("AUTOFLUID_IPC_HOST");
+        std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
+
+    #[test]
+    fn client_args_override_env_endpoint() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_IPC_HOST", "ocar.example");
+        std::env::set_var("AUTOFLUID_IPC_PORT", "9650");
+
+        let client = IpcClient::new(Some("127.0.0.1"), Some(9527));
+
+        assert_eq!(client.host, "127.0.0.1");
+        assert_eq!(client.port, 9527);
+
+        std::env::remove_var("AUTOFLUID_IPC_HOST");
+        std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
 }

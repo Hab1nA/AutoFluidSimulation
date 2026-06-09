@@ -26,6 +26,8 @@ pub struct IpcRequest {
     #[serde(default)]
     pub params: Value,
     pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ impl IpcRequest {
             command: command.to_string(),
             params: Value::Object(serde_json::Map::new()),
             request_id: generate_request_id(),
+            auth_token: auth_token_from_env(),
         }
     }
 
@@ -52,6 +55,7 @@ impl IpcRequest {
             command: command.to_string(),
             params,
             request_id: generate_request_id(),
+            auth_token: auth_token_from_env(),
         }
     }
 
@@ -76,6 +80,12 @@ impl IpcRequest {
     }
 }
 
+fn auth_token_from_env() -> Option<String> {
+    std::env::var("AUTOFLUID_IPC_AUTH_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
 impl IpcResponse {
     pub fn is_ok(&self) -> bool {
         self.status == "ok"
@@ -94,5 +104,39 @@ impl IpcResponse {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IpcRequest;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn request_omits_empty_auth_token() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_IPC_AUTH_TOKEN");
+
+        let request = IpcRequest::new("ping");
+        let json = String::from_utf8(request.serialize()).expect("request json");
+
+        assert!(request.auth_token.is_none());
+        assert!(!json.contains("auth_token"));
+    }
+
+    #[test]
+    fn request_includes_auth_token_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_IPC_AUTH_TOKEN", "secret-token");
+
+        let request = IpcRequest::new("ping");
+        let json = String::from_utf8(request.serialize()).expect("request json");
+
+        assert_eq!(request.auth_token.as_deref(), Some("secret-token"));
+        assert!(json.contains(r#""auth_token":"secret-token""#));
+
+        std::env::remove_var("AUTOFLUID_IPC_AUTH_TOKEN");
     }
 }

@@ -20,6 +20,13 @@ impl DaemonManager {
     }
 
     pub fn launch(&mut self, project_dir: &str) -> Result<u32, String> {
+        if is_server_mode() {
+            return Err(
+                "server 模式下不会启动本地 Daemon；请确认 ocar 后端已运行并连接远程 IPC"
+                    .to_string(),
+            );
+        }
+
         let daemon_script = PathBuf::from(project_dir).join("start_daemon.py");
         let python = std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
         log::info!(
@@ -265,9 +272,18 @@ impl DaemonManager {
     }
 }
 
+fn is_server_mode() -> bool {
+    std::env::var("AUTOFLUID_SERVER_MODE")
+        .map(|mode| mode.eq_ignore_ascii_case("server"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -307,6 +323,22 @@ mod tests {
 
         assert!(result.is_err());
         assert!(pid_file.exists());
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn launch_rejects_local_daemon_start_in_server_mode() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let mut daemon = DaemonManager::new();
+
+        let result = daemon.launch(project_dir.to_str().expect("utf8 temp path"));
+
+        assert!(result.is_err());
+        assert!(result.expect_err("launch should fail").contains("ocar"));
+
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
     }
 }

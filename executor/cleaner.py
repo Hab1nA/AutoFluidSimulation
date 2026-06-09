@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
+import ipaddress
 import os
 from typing import Callable, TYPE_CHECKING
 
@@ -20,13 +21,22 @@ if TYPE_CHECKING:
     from engine.state_manager import StateManager
 
 from engine.config import (
-    LOCAL_PATHS, REMOTE_CONFIG,
+    IPC_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, WORKSTATIONS,
     STEP_NAMES, STEP_FILE_PATTERNS,
 )
 from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def _is_private_ip(host: str) -> bool:
+    """Return True when host is a literal private/link-local/loopback IP."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 class FileCleaner:
@@ -62,6 +72,7 @@ class FileCleaner:
         results: dict[str, dict[str, object]] = {
             "local_checks": {},
             "remote_checks": {},
+            "workstation_checks": self._build_workstation_checks(),
         }
 
         # 仅检查 settings 页面「本地文件路径」分类中展示的 6 个用户可配置路径
@@ -121,6 +132,30 @@ class FileCleaner:
             })
 
         return results
+
+    def _build_workstation_checks(self) -> dict[str, object]:
+        """Build deployment-oriented workstation reachability warnings."""
+        server_mode = os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
+        server_mode = server_mode or IPC_CONFIG.get("host") in {"0.0.0.0", "::"}
+        workstations: list[dict[str, object]] = []
+        for workstation in WORKSTATIONS:
+            host = str(workstation.get("host", ""))
+            warning = ""
+            if server_mode and _is_private_ip(host):
+                warning = (
+                    "该工作站 host 是私网地址；daemon 部署在 ocar 时必须替换为 "
+                    "从 ocar 可达的公网/VPN/隧道地址，并在 ocar 上验证 ssh 连通性"
+                )
+            workstations.append({
+                "id": str(workstation.get("id", "")),
+                "host": host,
+                "port": int(workstation.get("port", 22)),
+                "warning": warning,
+            })
+        return {
+            "server_mode": server_mode,
+            "workstations": workstations,
+        }
 
     # ------------------------------------------------------------------
     # 文件清理

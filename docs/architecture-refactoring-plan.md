@@ -272,6 +272,24 @@ LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC
 
 当前 `IPC_CONFIG["host"]` 为 `"127.0.0.1"`（仅本地回环），需改为 `"0.0.0.0"` 以接受远程连接。同时需增加 TLS/SSL 加密或 SSH 隧道，防止明文传输 SSH 密码等敏感信息。
 
+当前过渡实现采用环境变量控制远程控制面：
+
+```text
+# ocar daemon
+AUTOFLUID_SERVER_MODE=server
+AUTOFLUID_IPC_HOST=0.0.0.0
+AUTOFLUID_IPC_PORT=9527
+AUTOFLUID_IPC_AUTH_TOKEN=<shared-secret>
+
+# 本地 TUI
+AUTOFLUID_SERVER_MODE=server
+AUTOFLUID_IPC_HOST=<OCAR_REACHABLE_HOST>
+AUTOFLUID_IPC_PORT=9527
+AUTOFLUID_IPC_AUTH_TOKEN=<shared-secret>
+```
+
+`server` 模式下 TUI 不启动本地 `start_daemon.py`，只连接远程 IPC。`auth_token` 是过渡期的最低限度保护；实际部署仍建议使用 SSH 隧道、VPN 或 TLS，避免裸露控制端口。
+
 **TaskRunner 本地部分替换**：
 
 原来 `TaskRunner.execute_sw_step()` 和 `TaskRunner.execute_sc_step()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。新增 `LocalWorkerAdapter` 类：

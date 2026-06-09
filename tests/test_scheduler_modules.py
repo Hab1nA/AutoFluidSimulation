@@ -625,6 +625,50 @@ class TestPipelineSchedulerStartRecovery:
         assert self.file_monitor.resume_and_reset_count == 0
         assert self.scheduler._paused.is_set()
 
+    def test_reset_config_clears_only_assigned_workstation_barrier(self):
+        """单构型 reset 触及 Meshing 时，只清理该构型所属工作站屏障。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        cleared_workstations: list[str] = []
+        cleared_all = False
+
+        def clear_workstation(workstation_id: str) -> None:
+            cleared_workstations.append(workstation_id)
+
+        def clear_all() -> None:
+            nonlocal cleared_all
+            cleared_all = True
+
+        self.scheduler.barrier_coordinator.clear_workstation_barrier = clear_workstation
+        self.scheduler.barrier_coordinator.clear_all_workstation_barriers = clear_all
+
+        self.scheduler.reset_config(1, "meshing")
+
+        assert cleared_workstations == ["WS-A"]
+        assert cleared_all is False
+
+    def test_reset_all_clears_all_workstation_barriers(self):
+        """全量 reset 应清理所有工作站屏障缓存。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        cleared_workstations: list[str] = []
+        cleared_all = False
+
+        def clear_workstation(workstation_id: str) -> None:
+            cleared_workstations.append(workstation_id)
+
+        def clear_all() -> None:
+            nonlocal cleared_all
+            cleared_all = True
+
+        self.scheduler.barrier_coordinator.clear_workstation_barrier = clear_workstation
+        self.scheduler.barrier_coordinator.clear_all_workstation_barriers = clear_all
+
+        self.scheduler.reset_config("all", None)
+
+        assert cleared_all is True
+        assert cleared_workstations == []
+
     def test_resume_scan_keeps_running_meshing_when_remote_task_running(self):
         """启动扫描遇到仍在运行的远程 Meshing 时不能重置或入队重启。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -1195,6 +1239,29 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
         assert self.state.get_step_status(2, "solver") == STATUS_ERROR
 
+    def test_meshing_error_on_one_workstation_does_not_block_ready_workstation_solver(self):
+        """某工作站 Meshing 失败时，不应阻断其他已通过工作站的 Solver。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        for cn in [1, 2]:
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_ERROR, "发散")
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.runner._solver_dispatched:
+            time.sleep(0.05)
+        t.join(timeout=1)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
+        assert not self.stopped.is_set()
+        assert not t.is_alive()
+
     def test_barrier_waits_when_paused(self):
         """暂停期间屏障监控等待，恢复后继续。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -1277,6 +1344,33 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+
+    def test_workstation_barrier_dispatches_only_ready_workstation(self):
+        """单个工作站 Meshing 完成后，应只分发该工作站的 Solver。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-A")
+        for cn in [1, 2, 3]:
+            for step in ["sw", "sc", "transfer"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+        self.state.set_step_status(3, "meshing", STATUS_COMPLETED)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 3]
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+        assert self.state.get_step_status(3, "solver") == STATUS_COMPLETED
+        assert self.state.is_global_barrier_met() is False
+        assert self.runner._sc_cleanup_called is False
 
     def test_all_solver_completed_reports_completed_terminal(self):
         """全部 Solver Completed 后应报告自然完成终态。"""

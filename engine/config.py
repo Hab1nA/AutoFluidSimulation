@@ -80,6 +80,7 @@ class IPCConfig(TypedDict):
     db_path: str
     timeout: float
     max_connections: int
+    auth_token: str
 
 
 class ProcessManagementConfig(TypedDict):
@@ -289,6 +290,8 @@ IPC_CONFIG: IPCConfig = {
     "timeout": 5.0,
     # IPC 服务器最大同时连接数（防止资源耗尽）
     "max_connections": 10,
+    # 远程部署时启用；为空表示本地兼容模式不校验
+    "auth_token": os.environ.get("AUTOFLUID_IPC_AUTH_TOKEN", ""),
 }
 
 # ============================================================================
@@ -432,6 +435,19 @@ def _apply_env_overrides():
             else:
                 REMOTE_CONFIG[key] = env_val
 
+    _env_ipc_keys = [
+        ("host", "AUTOFLUID_IPC_HOST"),
+        ("port", "AUTOFLUID_IPC_PORT"),
+        ("auth_token", "AUTOFLUID_IPC_AUTH_TOKEN"),
+    ]
+    for key, env_name in _env_ipc_keys:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            if key == "port":
+                IPC_CONFIG[key] = int(env_val)
+            else:
+                IPC_CONFIG[key] = env_val
+
 
 def _sync_default_workstation() -> None:
     """Keep WORKSTATIONS[0] aligned with REMOTE_CONFIG in legacy mode."""
@@ -516,6 +532,15 @@ def reload_config_from_toml() -> bool:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:
             REMOTE_CONFIG.update(toml_data["remote_config"])
+        if "ipc_config" in toml_data:
+            ipc_updates = {
+                key: value
+                for key, value in toml_data["ipc_config"].items()
+                if key in IPC_CONFIG
+            }
+            if "port" in ipc_updates:
+                ipc_updates["port"] = int(ipc_updates["port"])
+            IPC_CONFIG.update(cast(IPCConfig, ipc_updates))
         explicit_workstations = "workstations" in toml_data
         if explicit_workstations:
             workstation_items = toml_data["workstations"]

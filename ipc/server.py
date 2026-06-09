@@ -7,6 +7,7 @@ IPC 服务器模块 (IPC Server)
 """
 from __future__ import annotations
 
+import hmac
 import socket
 import threading
 from collections.abc import Callable
@@ -34,7 +35,12 @@ class IPCServer:
 
     MAX_BUFFER_BYTES = 1_000_000
 
-    def __init__(self, host: str | None = None, port: int | None = None):
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        auth_token: str | None = None,
+    ):
         """
         初始化 IPC 服务器。
 
@@ -45,6 +51,7 @@ class IPCServer:
         self.host = host or IPC_CONFIG["host"]
         self.port = port or IPC_CONFIG["port"]
         self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
+        self._auth_token = auth_token if auth_token is not None else IPC_CONFIG.get("auth_token", "")
         self._socket: socket.socket | None = None
         self._running = False
         self._server_thread: threading.Thread | None = None
@@ -268,6 +275,14 @@ class IPCServer:
         request_id = msg.get("request_id", "")
 
         logger.debug(f"[IPC] 收到命令: {command}, params={params}")
+
+        if self._auth_token:
+            incoming_token = msg.get("auth_token", "")
+            if not isinstance(incoming_token, str) or not hmac.compare_digest(
+                incoming_token,
+                self._auth_token,
+            ):
+                return create_response("error", request_id, message="认证失败")
 
         handler = self._handlers.get(command)
         if handler is None:
