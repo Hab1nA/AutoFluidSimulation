@@ -1,6 +1,18 @@
 from __future__ import annotations
 
 
+def test_daemon_init_does_not_create_directories_before_config_load(monkeypatch) -> None:
+    from engine import daemon as daemon_module
+    from engine.daemon import PipelineDaemon
+
+    calls = []
+    monkeypatch.setattr(daemon_module, "ensure_directories", lambda: calls.append(True))
+
+    PipelineDaemon()
+
+    assert calls == []
+
+
 def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp_path) -> None:
     from engine import daemon as daemon_module
     from engine.daemon import PipelineDaemon
@@ -20,8 +32,17 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
             pass
 
     released = []
+    config_events = []
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-    monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
+    monkeypatch.setattr(
+        "engine.config.reload_config_from_toml",
+        lambda: config_events.append("reload"),
+    )
+    monkeypatch.setattr(
+        daemon_module,
+        "ensure_directories",
+        lambda: config_events.append("ensure"),
+    )
     monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: released.append(True))
@@ -38,6 +59,7 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     assert daemon.scheduler is not None
     assert daemon._config_load_error is not None
     assert "Excel 文件未找到" in daemon._config_load_error
+    assert config_events == ["reload", "ensure"]
     assert released == [True]
 
 

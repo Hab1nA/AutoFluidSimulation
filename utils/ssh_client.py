@@ -763,10 +763,13 @@ class RemoteWorkstation:
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
             pid_capture_line = (
-                "powershell -NoProfile -ExecutionPolicy Bypass "
-                "-Command \"$p=$PID; "
-                "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p))"
-                ".ParentProcessId\" > \"%AF_PID_FILE%\" 2>nul\r\n"
+                "set \"AF_WRAPPER_PID=\"\r\n"
+                "for /f \"tokens=2 delims==\" %%P in ('wmic process where "
+                "\"Name='cmd.exe' and CommandLine like '%%%~nx0%%' "
+                "and not CommandLine like '%%wmic process%%'\" "
+                "get ProcessId /value 2^>nul ^| find \"=\"') do "
+                "if not defined AF_WRAPPER_PID set \"AF_WRAPPER_PID=%%P\"\r\n"
+                "if defined AF_WRAPPER_PID > \"%AF_PID_FILE%\" echo %AF_WRAPPER_PID%\r\n"
             )
             command_runner = (
                 f"{pid_capture_line}"

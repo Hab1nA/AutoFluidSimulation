@@ -125,10 +125,7 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 初始化中...")
         logger.info("=" * 60)
 
-        # 0. 确保必要目录存在
-        ensure_directories()
-
-        # 1. 安装日志广播处理器（供 TUI 增量拉取）
+        # 0. 安装日志广播处理器（供 TUI 增量拉取）
         install_broadcast_handler(capacity=1000)
 
         # 业务组件在 start() 中创建，因为需要先读取 Excel 确定数据库路径
@@ -166,6 +163,7 @@ class PipelineDaemon:
         # ---- 0.5 加载 TOML 配置 & 验证 ----
         from engine.config import reload_config_from_toml
         reload_config_from_toml()
+        ensure_directories()
         config_warnings = validate_config()
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")

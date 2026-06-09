@@ -43,7 +43,9 @@ def test_build_background_cmd_script_interactive_calls_command_directly():
     )
     assert "call conda run python script.py" in script
     assert "Start-Process" not in script
-    assert "ParentProcessId" in script
+    assert "wmic process where" in script
+    assert "AF_WRAPPER_PID" in script
+    assert "ParentProcessId" not in script
     assert r'> "%AF_PID_FILE%"' in script
 
 

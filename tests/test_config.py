@@ -984,3 +984,73 @@ class TestWorkstationLookup:
 
         with pytest.raises(KeyError):
             cfg.get_workstation_config("missing")
+
+
+class TestServerModeLocalPaths:
+    """验证 server 模式下 daemon 本地产物路径不会落到 Windows 默认路径。"""
+
+    def test_reload_config_uses_server_local_scdoc_dir(self, monkeypatch, tmp_path):
+        import engine.config as cfg
+
+        original_local = dict(cfg.LOCAL_PATHS)
+        original_remote = dict(cfg.REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in cfg.WORKSTATIONS]
+        data_dir = tmp_path / "server-data"
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.delenv("AUTOFLUID_SCDOC_DIR", raising=False)
+        monkeypatch.delenv("AUTOFLUID_DATA_DIR", raising=False)
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda: {
+                "local_paths": {
+                    "data_dir": str(data_dir),
+                    "scdoc_dir": r"C:\Users\XKZ\Documents\000ansys_data\scdoc",
+                }
+            },
+        )
+
+        try:
+            assert cfg.reload_config_from_toml() is True
+
+            assert cfg.LOCAL_PATHS["data_dir"] == str(data_dir)
+            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(data_dir / "scdoc")
+        finally:
+            cfg.LOCAL_PATHS.clear()
+            cfg.LOCAL_PATHS.update(original_local)
+            cfg.REMOTE_CONFIG.clear()
+            cfg.REMOTE_CONFIG.update(original_remote)
+            cfg.WORKSTATIONS[:] = original_workstations
+
+    def test_reload_config_keeps_explicit_scdoc_env_override(self, monkeypatch, tmp_path):
+        import engine.config as cfg
+
+        original_local = dict(cfg.LOCAL_PATHS)
+        original_remote = dict(cfg.REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in cfg.WORKSTATIONS]
+        explicit_scdoc_dir = tmp_path / "explicit-scdoc"
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(explicit_scdoc_dir))
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda: {
+                "local_paths": {
+                    "data_dir": str(tmp_path / "server-data"),
+                    "scdoc_dir": r"C:\Users\XKZ\Documents\000ansys_data\scdoc",
+                }
+            },
+        )
+
+        try:
+            assert cfg.reload_config_from_toml() is True
+
+            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(explicit_scdoc_dir)
+        finally:
+            cfg.LOCAL_PATHS.clear()
+            cfg.LOCAL_PATHS.update(original_local)
+            cfg.REMOTE_CONFIG.clear()
+            cfg.REMOTE_CONFIG.update(original_remote)
+            cfg.WORKSTATIONS[:] = original_workstations

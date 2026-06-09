@@ -245,6 +245,21 @@ def is_server_mode() -> bool:
     return os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
 
 
+def _server_mode_scdoc_dir() -> str:
+    """Return the daemon-local SCDOC cache used on a Linux server."""
+    data_dir = str(LOCAL_PATHS.get("data_dir") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+    ))
+    return os.path.join(data_dir, "scdoc")
+
+
+def _apply_server_mode_local_defaults() -> None:
+    """Keep server-mode daemon artifacts out of Windows-only local paths."""
+    if is_server_mode() and not os.environ.get("AUTOFLUID_SCDOC_DIR"):
+        LOCAL_PATHS["scdoc_dir"] = _server_mode_scdoc_dir()
+
+
 def _effective_workstation_config(workstation: WorkstationConfig) -> WorkstationConfig:
     """Return workstation config with server-reachable host applied."""
     result = cast(WorkstationConfig, dict(workstation))
@@ -619,6 +634,7 @@ def reload_config_from_toml() -> bool:
         if "operation_timeouts" in toml_data:
             OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
         _apply_env_overrides()
+        _apply_server_mode_local_defaults()
         if not explicit_workstations:
             _sync_default_workstation()
         return True
