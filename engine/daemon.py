@@ -136,6 +136,7 @@ class PipelineDaemon:
         self.ipc_server = None
         self.local_worker_registry = LocalWorkerRegistry()
         self.local_worker_adapter = LocalWorkerAdapter(self.local_worker_registry)
+        self._config_load_error: str | None = None
 
         # 运行标志
         self._running = False
@@ -171,35 +172,43 @@ class PipelineDaemon:
 
         # ---- 1. 加载 Excel 数据，计算构型指纹，确定数据库路径 ----
         excel_path = LOCAL_PATHS["excel"]
+        configs: dict[int, list[float]] = {}
+        fingerprint: str | None = None
         try:
             configs = read_model_configs(excel_path)
         except FileNotFoundError as e:
-            logger.error(f"Excel 文件未找到: {e}")
-            release_process_lock()
-            self._running = False
-            return
+            self._config_load_error = f"Excel 文件未找到: {e}"
         except (ValueError, OSError) as e:
-            logger.error(f"Excel 读取失败: {e}")
+            self._config_load_error = f"Excel 读取失败: {e}"
+
+        if self._config_load_error is None and not configs:
+            self._config_load_error = "Excel 中未读取到任何构型数据"
+
+        if self._config_load_error and not is_server_mode():
+            logger.error(self._config_load_error)
             release_process_lock()
             self._running = False
             return
 
-        if not configs:
-            logger.error("Excel 中未读取到任何构型数据！")
-            release_process_lock()
-            self._running = False
-            return
-
-        fingerprint = compute_config_fingerprint(configs)
-        db_path = get_db_path_for_fingerprint(fingerprint)
-        logger.info(f"构型组合指纹: {fingerprint}（{len(configs)} 个构型）")
-        logger.info(f"状态数据库: {db_path}")
+        if self._config_load_error:
+            logger.warning(
+                "[ServerMode] %s；仅启动 IPC/LocalWorker 控制面，start 将拒绝启动流水线",
+                self._config_load_error,
+            )
+            db_path = IPC_CONFIG["db_path"]
+            logger.info(f"状态数据库: {db_path}")
+        else:
+            fingerprint = compute_config_fingerprint(configs)
+            db_path = get_db_path_for_fingerprint(fingerprint)
+            logger.info(f"构型组合指纹: {fingerprint}（{len(configs)} 个构型）")
+            logger.info(f"状态数据库: {db_path}")
 
         # ---- 2. 创建业务组件 ----
         self.state = StateManager(db_path=db_path)
-        self.state.load_configs(configs)
-        self._assign_config_workstations()
-        logger.info(f"已同步 {len(configs)} 个构型到状态库")
+        if configs:
+            self.state.load_configs(configs)
+            self._assign_config_workstations()
+            logger.info(f"已同步 {len(configs)} 个构型到状态库")
 
         self.runner = TaskRunner(self.state, local_worker_adapter=self.local_worker_adapter)
         self.scheduler = PipelineScheduler(self.state, self.runner)
@@ -234,7 +243,7 @@ class PipelineDaemon:
 
         logger.info("PipelineDaemon 已就绪，等待客户端指令...")
         logger.info(f"IPC 地址: {IPC_CONFIG['host']}:{IPC_CONFIG['port']}")
-        logger.info(f"数据库指纹: {fingerprint}")
+        logger.info(f"数据库指纹: {fingerprint or '未加载'}")
 
         # ---- 5. 主循环 ----
         try:
@@ -332,6 +341,13 @@ class PipelineDaemon:
         """
         if self.state is None or self.scheduler is None:
             raise RuntimeError("Daemon 组件未初始化，请先调用 start()")
+        config_load_error = getattr(self, "_config_load_error", None)
+        if config_load_error:
+            return (
+                False,
+                None,
+                f"server 模式下构型数据未就绪，不能启动流水线: {config_load_error}",
+            )
         engine_status = self.state.get_engine_status()
 
         if engine_status == "running":
