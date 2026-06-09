@@ -255,6 +255,15 @@ impl DaemonManager {
         log_buffer: &mut LogBuffer,
         project_dir: &str,
     ) {
+        if is_server_mode() {
+            log::warn!("[Daemon] server 模式下拒绝从 TUI 重启远程 ocar 后端");
+            log_buffer.push_info(
+                "server 模式下不会从 TUI 重启 ocar 后端；请在服务器上重启 daemon 后重新连接"
+                    .to_string(),
+            );
+            state.connected = ipc.is_connected();
+            return;
+        }
         log::info!("[Daemon] 开始重启后台引擎");
         self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
         match self.launch(project_dir) {
@@ -281,6 +290,7 @@ fn is_server_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::client::IpcClient;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -338,6 +348,79 @@ mod tests {
         assert!(result.is_err());
         assert!(result.expect_err("launch should fail").contains("ocar"));
 
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn restart_rejects_before_sending_stop_in_server_mode() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ipc");
+        let port = listener.local_addr().expect("listener addr").port();
+        let (tx, rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept ipc client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .expect("set read timeout");
+            let mut buf = [0_u8; 1024];
+            let bytes = match stream.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
+                Err(e) => panic!("read ipc request: {e}"),
+            };
+            if bytes > 0 {
+                let _ = stream.write_all(
+                    br#"{"status":"ok","data":null,"message":"stopping","request_id":"test"}"#,
+                );
+                let _ = stream.write_all(b"\n");
+            }
+            tx.send(bytes).expect("send byte count");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(port));
+        rt.block_on(ipc.connect()).expect("connect test ipc");
+        let mut state = AppState::new();
+        state.connected = true;
+        let mut log_buffer = LogBuffer::new();
+        let project_dir = unique_temp_project_dir();
+        let mut daemon = DaemonManager::new();
+
+        daemon.restart_with_ipc(
+            &mut ipc,
+            &rt,
+            &mut state,
+            &mut log_buffer,
+            project_dir.to_str().expect("utf8 temp path"),
+        );
+
+        let bytes = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server byte count");
+        assert_eq!(
+            bytes, 0,
+            "restart must not send stop/full_quit in server mode"
+        );
+        assert!(state.connected);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("不会从 TUI 重启 ocar 后端")));
+
+        rt.block_on(ipc.disconnect());
+        server.join().expect("server thread");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
     }
