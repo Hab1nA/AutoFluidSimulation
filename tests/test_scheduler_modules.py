@@ -907,6 +907,9 @@ class _CleanStepScheduler:
     def __init__(self):
         self.file_monitor_reset_count = 0
         self.reset_calls = []
+        self.start_calls = 0
+        self.is_paused = False
+        self.pipeline_alive = False
 
     def request_file_monitor_reset(self):
         self.file_monitor_reset_count += 1
@@ -914,14 +917,25 @@ class _CleanStepScheduler:
     def reset_config(self, config_name, step_name):
         self.reset_calls.append((config_name, step_name))
 
+    def start_pipeline(self):
+        self.start_calls += 1
+
+    def set_pipeline_thread(self, thread):
+        self.thread = thread
+
 
 class _DaemonState:
     def __init__(self, engine_status="stopped", remote_tasks=None):
         self.engine_status = engine_status
         self.remote_tasks = remote_tasks or []
+        self.set_status_calls = []
 
     def get_engine_status(self):
         return self.engine_status
+
+    def set_engine_status(self, status):
+        self.engine_status = status
+        self.set_status_calls.append(status)
 
     def get_all_remote_tasks(self):
         return self.remote_tasks
@@ -960,6 +974,23 @@ class _DaemonRemoteExecutor:
 
 class TestPipelineDaemonCleanStep:
     """验证 clean_step IPC handler 与调度器文件监控接口兼容。"""
+
+    def test_server_mode_rejects_pipeline_start_without_local_worker(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "LocalWorker" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
 
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
         from engine import daemon as daemon_module

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 from engine.config import (
     IPC_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, WORKSTATIONS,
-    STEP_NAMES, STEP_FILE_PATTERNS,
+    STEP_NAMES, STEP_FILE_PATTERNS, is_server_mode,
 )
 from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
@@ -135,8 +135,7 @@ class FileCleaner:
 
     def _build_workstation_checks(self) -> dict[str, object]:
         """Build deployment-oriented workstation reachability warnings."""
-        server_mode = os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
-        server_mode = server_mode or IPC_CONFIG.get("host") in {"0.0.0.0", "::"}
+        server_mode = is_server_mode() or IPC_CONFIG.get("host") in {"0.0.0.0", "::"}
         workstations: list[dict[str, object]] = []
         for workstation in WORKSTATIONS:
             host = str(workstation.get("host", ""))

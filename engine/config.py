@@ -236,6 +236,11 @@ def get_workstation_config(
             return cast(WorkstationConfig, dict(workstation))
     raise KeyError(f"未知工作站配置: {workstation_id}")
 
+
+def is_server_mode() -> bool:
+    """Return True when daemon/TUI are running in remote-server mode."""
+    return os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
+
 # ============================================================================
 # 步骤名称枚举（与状态表和命令系统对应）
 # ============================================================================

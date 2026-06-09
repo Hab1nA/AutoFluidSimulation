@@ -481,6 +481,8 @@ AUTOFLUID_IPC_AUTH_TOKEN=xxx
 
 `AUTOFLUID_SERVER_MODE=server` 时，TUI 不再尝试启动本地 `start_daemon.py`，只连接 `AUTOFLUID_IPC_HOST:AUTOFLUID_IPC_PORT`。如果 IPC 直接监听 `0.0.0.0`，必须配置 `AUTOFLUID_IPC_AUTH_TOKEN`；更推荐用 SSH 隧道或 VPN 暴露 IPC。
 
+过渡阶段注意：server 模式下 ocar 后端可以启动并响应 `check` / `get_*` 等控制面命令，但在 `LocalWorker` 接入前会拒绝 `start`，避免 Linux 后端误调用本地 Windows-only 的 SolidWorks / SpaceClaim 执行路径。
+
 ### 6.5 Rust TUI 设置适配
 
 当前 Rust TUI 设置系统（`autofluid-tui/src/settings/mod.rs`）有 7 分类 48 字段。新增多工作站配置后：

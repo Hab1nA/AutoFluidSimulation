@@ -32,7 +32,8 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, ensure_directories, validate_config,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, ensure_directories,
+    is_server_mode, validate_config,
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
@@ -339,6 +340,8 @@ class PipelineDaemon:
             return True, None, "流水线已在运行中"
 
         if engine_status == "paused":
+            if self._server_mode_requires_worker():
+                return self._server_mode_worker_missing_response()
             # 暂停状态下恢复运行
             # 检查调度器主线程是否存活（SW 宏执行期间线程可能因异常退出）
             if not self.scheduler.pipeline_alive and not self.scheduler.is_paused:
@@ -361,6 +364,9 @@ class PipelineDaemon:
             return True, None, "流水线已恢复运行"
 
         # 全新启动（engine_status 为 stopped 或其他）
+        if self._server_mode_requires_worker():
+            return self._server_mode_worker_missing_response()
+
         self.state.set_engine_status("running")
         self._pipeline_ever_started = True
 
@@ -374,6 +380,18 @@ class PipelineDaemon:
         self.scheduler.set_pipeline_thread(scheduler_thread)
 
         return True, None, "流水线已启动"
+
+    def _server_mode_requires_worker(self) -> bool:
+        """Return True when server mode cannot execute local SW/SC yet."""
+        return is_server_mode() and getattr(self, "local_worker_adapter", None) is None
+
+    @staticmethod
+    def _server_mode_worker_missing_response() -> tuple[bool, None, str]:
+        return (
+            False,
+            None,
+            "server 模式下后端运行在 ocar，必须先接入 LocalWorker 才能启动流水线",
+        )
 
     def handle_pause(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 pause 命令。
