@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 
-def test_local_worker_builds_register_and_heartbeat_requests() -> None:
+def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
     from engine.local_worker import LocalWorker, LocalWorkerConfig
     from ipc.protocol import (
         CMD_WORKER_HEARTBEAT,
@@ -11,6 +12,11 @@ def test_local_worker_builds_register_and_heartbeat_requests() -> None:
         CMD_WORKER_STEP_ERROR,
     )
 
+    monkeypatch.setattr(
+        local_worker_module,
+        "read_model_configs",
+        lambda _path: (_ for _ in ()).throw(FileNotFoundError("missing")),
+    )
     worker = LocalWorker(
         LocalWorkerConfig(
             worker_id="local-pc-01",
@@ -91,6 +97,25 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
         "reachable_host": "100.64.1.20",
         "connectivity_mode": "tailscale",
         "ssh_port": 22,
+    }
+
+
+def test_local_worker_register_includes_local_excel_configs(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    monkeypatch.setattr(
+        local_worker_module,
+        "read_model_configs",
+        lambda _path: {1: [1.0, 2.0, 3.0, 4.0], 2: [3.5, 4.5, 5.5, 6.5]},
+    )
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    request = worker.build_register_request()
+
+    assert request["params"]["configs"] == {
+        "1": [1.0, 2.0, 3.0, 4.0],
+        "2": [3.5, 4.5, 5.5, 6.5],
     }
 
 

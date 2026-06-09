@@ -79,3 +79,71 @@ def test_server_mode_rejects_pipeline_start_when_configs_are_not_loaded() -> Non
     assert "构型数据未就绪" in message
     assert daemon.state.set_status_calls == []
     assert daemon.scheduler.start_calls == 0
+
+
+def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch, tmp_path) -> None:
+    from engine.daemon import PipelineDaemon
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    class _Scheduler:
+        is_paused = False
+        pipeline_alive = False
+
+        def __init__(self) -> None:
+            self.start_calls = 0
+            self.thread_was_set = False
+
+        def start_pipeline(self) -> None:
+            self.start_calls += 1
+
+        def set_pipeline_thread(self, _thread) -> None:
+            self.thread_was_set = True
+
+    class _ImmediateThread:
+        def __init__(self, target, daemon, name):
+            self._target = target
+            self.daemon = daemon
+            self.name = name
+
+        def start(self) -> None:
+            self._target()
+
+    worker_db = tmp_path / "worker-configs.db"
+    monkeypatch.setattr(
+        "engine.daemon.get_db_path_for_fingerprint",
+        lambda _fingerprint: str(worker_db),
+    )
+    monkeypatch.setattr("engine.daemon.threading.Thread", _ImmediateThread)
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = None
+    daemon.runner = None
+    daemon.scheduler = None
+    daemon.local_worker_registry = LocalWorkerRegistry()
+    daemon.local_worker_adapter = object()
+    daemon._pipeline_ever_started = False
+    daemon._config_load_error = "Excel 文件未找到: missing.xlsx"
+
+    ok, data, message = daemon.handle_worker_register({
+        "worker_id": "local-pc-01",
+        "capabilities": {"sw": True},
+        "configs": {"1": [1.0, "2.0", 3, 4], "2": [3, 4, 5, 6]},
+    })
+
+    assert ok is True
+    assert data["worker_id"] == "local-pc-01"
+    assert message == "LocalWorker 已注册"
+    assert daemon._config_load_error is None
+    assert daemon.state is not None
+    assert daemon.state.get_all_configs() == [1, 2]
+    assert daemon.state.db_path == str(worker_db)
+
+    daemon.scheduler = _Scheduler()
+    ok, data, message = daemon.handle_start({})
+
+    assert ok is True
+    assert data is None
+    assert message == "流水线已启动"
+    assert daemon.state.get_engine_status() == "running"
+    assert daemon.scheduler.start_calls == 1
+    assert daemon.scheduler.thread_was_set is True

@@ -89,13 +89,17 @@ class LocalWorker:
 
     def build_register_request(self) -> dict[str, Any]:
         """Return the IPC request used to register this LocalWorker."""
+        params: dict[str, Any] = {
+            "worker_id": self.config.worker_id,
+            "capabilities": dict(self.config.capabilities),
+            "network": dict(self.config.network),
+        }
+        config_payload = self._load_config_payload()
+        if config_payload:
+            params["configs"] = config_payload
         return create_request(
             CMD_WORKER_REGISTER,
-            {
-                "worker_id": self.config.worker_id,
-                "capabilities": dict(self.config.capabilities),
-                "network": dict(self.config.network),
-            },
+            params,
             auth_token=self.config.auth_token,
         )
 
@@ -228,6 +232,19 @@ class LocalWorker:
             state.load_configs(read_model_configs(LOCAL_PATHS["excel"]))
             self._default_runner = TaskRunner(state)
         return self._default_runner
+
+    def _load_config_payload(self) -> dict[str, list[float]] | None:
+        """Best-effort local Excel payload for server-side state initialization."""
+        try:
+            configs = read_model_configs(LOCAL_PATHS["excel"])
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+        if not configs:
+            return None
+        return {
+            str(config_name): list(values)
+            for config_name, values in configs.items()
+        }
 
     def _send_request(self, request: dict[str, Any]) -> dict[str, Any]:
         with socket.create_connection(

@@ -471,7 +471,56 @@ class PipelineDaemon:
             network=network,
             remote_addr=str(remote_addr) if remote_addr else None,
         )
+        worker_configs = params.get("configs")
+        if isinstance(worker_configs, dict):
+            try:
+                self._load_configs_from_worker(worker_configs)
+            except ValueError as e:
+                return False, None, f"LocalWorker 构型数据无效: {e}"
         return True, worker, "LocalWorker 已注册"
+
+    def _load_configs_from_worker(self, raw_configs: dict[Any, Any]) -> None:
+        """Initialize server-mode state from LocalWorker-provided Excel configs."""
+        if self._pipeline_ever_started:
+            return
+        configs = self._coerce_worker_configs(raw_configs)
+        fingerprint = compute_config_fingerprint(configs)
+        db_path = get_db_path_for_fingerprint(fingerprint)
+        if self.state is None or getattr(self.state, "db_path", None) != db_path:
+            self.state = StateManager(db_path=db_path)
+            self.runner = TaskRunner(
+                self.state,
+                local_worker_adapter=self.local_worker_adapter,
+            )
+            self.scheduler = PipelineScheduler(self.state, self.runner)
+        self.state.load_configs(configs)
+        self._assign_config_workstations()
+        self._config_load_error = None
+        logger.info(
+            "[LocalWorker] 已从 worker 注册信息同步 %d 个构型，状态数据库: %s",
+            len(configs),
+            db_path,
+        )
+
+    @staticmethod
+    def _coerce_worker_configs(raw_configs: dict[Any, Any]) -> dict[int, list[float]]:
+        configs: dict[int, list[float]] = {}
+        for raw_name, raw_values in raw_configs.items():
+            try:
+                config_name = int(raw_name)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"无效构型编号: {raw_name!r}") from e
+            if not isinstance(raw_values, (list, tuple)):
+                raise ValueError(f"构型 {config_name} 参数不是列表")
+            if len(raw_values) != 4:
+                raise ValueError(f"构型 {config_name} 参数数量必须为 4")
+            try:
+                configs[config_name] = [float(value) for value in raw_values]
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"构型 {config_name} 参数无法转换为数字") from e
+        if not configs:
+            raise ValueError("构型数据为空")
+        return configs
 
     def handle_worker_heartbeat(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """Handle LocalWorker heartbeat."""
