@@ -10,6 +10,7 @@ import os
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
+    is_server_mode,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -249,6 +250,7 @@ class SWPhaseHandler:
         sw_completed = [cn for cn in all_configs
                         if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
         if sw_completed:
+            self._enqueue_server_mode_completed_sw(sw_completed)
             logger.info(
                 f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
             )
@@ -317,6 +319,28 @@ class SWPhaseHandler:
         cleanup = getattr(self.runner, method_name, None)
         if callable(cleanup):
             cleanup()
+
+    def _enqueue_server_mode_completed_sw(self, config_names: list[int]) -> None:
+        """server 模式下将 LocalWorker 已完成的 SW 构型推入 SC 队列。"""
+        if not is_server_mode():
+            return
+
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        for config_name in config_names:
+            sc_status = self.state.get_step_status(config_name, "sc")
+            if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
+                continue
+
+            step_filename = get_step_filename("sw", config_name)
+            if not step_filename:
+                continue
+
+            step_file = os.path.join(step_dir, step_filename)
+            if self._sc_queue.submit((config_name, step_file)):
+                logger.info(
+                    f"[SW] 构型{config_name} 已推入 SC 处理队列 "
+                    "(server 模式 LocalWorker 完成)"
+                )
 
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。
