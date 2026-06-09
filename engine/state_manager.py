@@ -20,6 +20,7 @@ from engine.config import (
     STEP_NAMES, STEP_INDEX,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
     ALL_STATUSES, IPC_CONFIG,
+    DEFAULT_WORKSTATION_ID,
 )
 from utils.logger import setup_logger
 
@@ -95,6 +96,91 @@ class StateManager:
             except Exception as e:
                 logger.error("数据库连接关闭异常: %s", e)
 
+    @staticmethod
+    def _column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+        """Return whether a table has a column."""
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return any(row["name"] == column_name for row in rows)
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_sql: str,
+    ) -> None:
+        """Add a column to an existing SQLite table if it is missing."""
+        if not self._column_exists(conn, table_name, column_name):
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
+
+    @staticmethod
+    def _create_remote_tasks_table(conn: sqlite3.Connection) -> None:
+        """Create the current remote_tasks table shape."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS remote_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workstation_id TEXT NOT NULL DEFAULT 'default',
+                config_name INTEGER NOT NULL,
+                step_name TEXT NOT NULL,
+                task_name TEXT NOT NULL,
+                flag_file TEXT NOT NULL,
+                error_flag_file TEXT NOT NULL,
+                log_file TEXT,
+                pid_file TEXT,
+                script_file TEXT,
+                started_at REAL NOT NULL,
+                UNIQUE(workstation_id, config_name, step_name)
+            )
+        """)
+
+    @staticmethod
+    def _remote_tasks_unique_has_workstation(conn: sqlite3.Connection) -> bool:
+        """Return whether remote_tasks has the workstation-aware unique key."""
+        for index in conn.execute("PRAGMA index_list(remote_tasks)").fetchall():
+            is_unique = bool(index["unique"])
+            if not is_unique:
+                continue
+            columns = [
+                row["name"]
+                for row in conn.execute(f"PRAGMA index_info({index['name']})").fetchall()
+            ]
+            if columns == ["workstation_id", "config_name", "step_name"]:
+                return True
+        return False
+
+    def _ensure_remote_tasks_schema(self, conn: sqlite3.Connection) -> None:
+        """Migrate remote_tasks to the workstation-aware unique key."""
+        self._create_remote_tasks_table(conn)
+        self._ensure_column(
+            conn,
+            "remote_tasks",
+            "workstation_id",
+            "TEXT NOT NULL DEFAULT 'default'",
+        )
+        if self._remote_tasks_unique_has_workstation(conn):
+            return
+
+        old_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(remote_tasks)").fetchall()
+        }
+        conn.execute("ALTER TABLE remote_tasks RENAME TO remote_tasks_legacy")
+        self._create_remote_tasks_table(conn)
+        workstation_expr = (
+            "COALESCE(workstation_id, 'default')"
+            if "workstation_id" in old_columns
+            else "'default'"
+        )
+        conn.execute(f"""
+            INSERT OR REPLACE INTO remote_tasks (
+                workstation_id, config_name, step_name, task_name, flag_file,
+                error_flag_file, log_file, pid_file, script_file, started_at
+            )
+            SELECT {workstation_expr}, config_name, step_name, task_name, flag_file,
+                   error_flag_file, log_file, pid_file, script_file, started_at
+            FROM remote_tasks_legacy
+        """)
+        conn.execute("DROP TABLE remote_tasks_legacy")
+
     def _init_database(self):
         """初始化数据库表结构。"""
         with self._get_connection() as conn:
@@ -119,10 +205,14 @@ class StateManager:
                     retry_count INTEGER NOT NULL DEFAULT 0,
                     error_message TEXT DEFAULT '',
                     updated_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+                    workstation_id TEXT DEFAULT NULL,
+                    slot_id INTEGER DEFAULT NULL,
                     UNIQUE(config_name, step_name),
                     FOREIGN KEY(config_name) REFERENCES configs(config_name)
                 )
             """)
+            self._ensure_column(conn, "steps", "workstation_id", "TEXT DEFAULT NULL")
+            self._ensure_column(conn, "steps", "slot_id", "INTEGER DEFAULT NULL")
 
             # 引擎全局状态表（单行记录）
             conn.execute("""
@@ -134,21 +224,7 @@ class StateManager:
 
             # 远程后台任务元数据。用于 Daemon 重启后恢复 Meshing/Solver
             # 计划任务，避免状态仍为 Running 但内存映射丢失时重复启动 Fluent。
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS remote_tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    config_name INTEGER NOT NULL,
-                    step_name TEXT NOT NULL,
-                    task_name TEXT NOT NULL,
-                    flag_file TEXT NOT NULL,
-                    error_flag_file TEXT NOT NULL,
-                    log_file TEXT,
-                    pid_file TEXT,
-                    script_file TEXT,
-                    started_at REAL NOT NULL,
-                    UNIQUE(config_name, step_name)
-                )
-            """)
+            self._ensure_remote_tasks_schema(conn)
 
             # 初始化引擎状态默认值
             defaults = {
@@ -384,6 +460,7 @@ class StateManager:
     def save_remote_task(
         self,
         *,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
         config_name: int,
         step_name: str,
         task_name: str,
@@ -400,12 +477,12 @@ class StateManager:
                 conn.execute(
                     """
                     INSERT INTO remote_tasks (
-                        config_name, step_name, task_name, flag_file,
+                        workstation_id, config_name, step_name, task_name, flag_file,
                         error_flag_file, log_file, pid_file, script_file,
                         started_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(config_name, step_name) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workstation_id, config_name, step_name) DO UPDATE SET
                         task_name = excluded.task_name,
                         flag_file = excluded.flag_file,
                         error_flag_file = excluded.error_flag_file,
@@ -415,6 +492,7 @@ class StateManager:
                         started_at = excluded.started_at
                     """,
                     (
+                        workstation_id,
                         config_name,
                         step_name,
                         task_name,
@@ -427,42 +505,71 @@ class StateManager:
                     ),
                 )
 
-    def get_remote_task(self, config_name: int, step_name: str) -> dict[str, object] | None:
+    def get_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> dict[str, object] | None:
         """获取指定构型和步骤的远程任务元数据。"""
         with self._get_connection(readonly=True) as conn:
             row = conn.execute(
                 """
-                SELECT config_name, step_name, task_name, flag_file,
+                SELECT workstation_id, config_name, step_name, task_name, flag_file,
                        error_flag_file, log_file, pid_file, script_file,
                        started_at
                 FROM remote_tasks
-                WHERE config_name = ? AND step_name = ?
+                WHERE workstation_id = ? AND config_name = ? AND step_name = ?
                 """,
-                (config_name, step_name),
+                (workstation_id, config_name, step_name),
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def get_all_remote_tasks(self) -> list[dict[str, object]]:
+    def get_all_remote_tasks(
+        self,
+        workstation_id: str | None = None,
+    ) -> list[dict[str, object]]:
         """列出所有持久化的远程任务元数据。"""
         with self._get_connection(readonly=True) as conn:
-            rows = conn.execute(
-                """
-                SELECT config_name, step_name, task_name, flag_file,
-                       error_flag_file, log_file, pid_file, script_file,
-                       started_at
-                FROM remote_tasks
-                ORDER BY config_name, step_name
-                """
-            ).fetchall()
+            if workstation_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT workstation_id, config_name, step_name, task_name, flag_file,
+                           error_flag_file, log_file, pid_file, script_file,
+                           started_at
+                    FROM remote_tasks
+                    ORDER BY workstation_id, config_name, step_name
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT workstation_id, config_name, step_name, task_name, flag_file,
+                           error_flag_file, log_file, pid_file, script_file,
+                           started_at
+                    FROM remote_tasks
+                    WHERE workstation_id = ?
+                    ORDER BY config_name, step_name
+                    """,
+                    (workstation_id,),
+                ).fetchall()
         return [dict(row) for row in rows]
 
-    def delete_remote_task(self, config_name: int, step_name: str) -> None:
+    def delete_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
         """删除指定构型和步骤的远程任务元数据。"""
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute(
-                    "DELETE FROM remote_tasks WHERE config_name = ? AND step_name = ?",
-                    (config_name, step_name),
+                    """
+                    DELETE FROM remote_tasks
+                    WHERE workstation_id = ? AND config_name = ? AND step_name = ?
+                    """,
+                    (workstation_id, config_name, step_name),
                 )
 
     def delete_remote_tasks_for_config(
@@ -483,37 +590,92 @@ class StateManager:
                     [(config_name, step_name) for step_name in steps_to_delete],
                 )
 
-    def set_meshing_running_if_idle(self, config_name: int) -> bool:
+    def set_config_workstation(
+        self,
+        config_name: int,
+        workstation_id: str,
+        slot_id: int | None = None,
+    ) -> None:
+        """保存构型到工作站的分配关系。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE steps
+                    SET workstation_id = ?, slot_id = ?
+                    WHERE config_name = ?
+                    """,
+                    (workstation_id, slot_id, config_name),
+                )
+
+    def get_config_workstation(self, config_name: int) -> str | None:
+        """读取构型的工作站分配关系。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                """
+                SELECT workstation_id
+                FROM steps
+                WHERE config_name = ? AND workstation_id IS NOT NULL
+                ORDER BY step_name
+                LIMIT 1
+                """,
+                (config_name,),
+            ).fetchone()
+        return str(row["workstation_id"]) if row else None
+
+    def set_meshing_running_if_idle(
+        self,
+        config_name: int,
+        workstation_id: str | None = None,
+    ) -> bool:
         """原子设置 Meshing 为 Running，同一时刻只允许一个构型执行网格划分。
 
         在同一个 self._lock 临界区内完成 SELECT + UPDATE，
-        确保不会有多个构型同时处于 Meshing Running 状态。
+        确保同一工作站不会有多个构型同时处于 Meshing Running 状态。
 
         Args:
             config_name: 要启动网格划分的构型名称
+            workstation_id: 工作站 ID；None 保持旧的全局单工作站语义
 
         Returns:
             True 表示成功设置为 Running；False 表示已有其他构型在执行
         """
         with self._lock:
             with self._get_connection() as conn:
-                row = conn.execute(
-                    "SELECT COUNT(*) as cnt FROM steps "
-                    "WHERE step_name = 'meshing' AND status = ?",
-                    (STATUS_RUNNING,),
-                ).fetchone()
+                if workstation_id is None:
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM steps "
+                        "WHERE step_name = 'meshing' AND status = ?",
+                        (STATUS_RUNNING,),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM steps "
+                        "WHERE step_name = 'meshing' AND status = ? "
+                        "AND workstation_id = ?",
+                        (STATUS_RUNNING, workstation_id),
+                    ).fetchone()
                 if (row["cnt"] or 0) > 0:
                     logger.debug(
                         f"set_meshing_running_if_idle({config_name}): "
                         f"已有其他构型在执行网格划分，拒绝"
                     )
                     return False
-                conn.execute(
-                    "UPDATE steps SET status = ?, error_message = '', "
-                    "updated_at = strftime('%s','now') "
-                    "WHERE config_name = ? AND step_name = ?",
-                    (STATUS_RUNNING, config_name, "meshing"),
-                )
+                if workstation_id is None:
+                    conn.execute(
+                        "UPDATE steps SET status = ?, error_message = '', "
+                        "updated_at = strftime('%s','now') "
+                        "WHERE config_name = ? AND step_name = ?",
+                        (STATUS_RUNNING, config_name, "meshing"),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE steps SET status = ?, error_message = '', "
+                        "workstation_id = COALESCE(workstation_id, ?), "
+                        "updated_at = strftime('%s','now') "
+                        "WHERE config_name = ? AND step_name = ?",
+                        (STATUS_RUNNING, workstation_id, config_name, "meshing"),
+                    )
                 logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
                 return True
 
@@ -680,7 +842,12 @@ class StateManager:
                 ).fetchall()
             return [row["config_name"] for row in rows]
 
-    def all_configs_completed_at_step(self, step_name: str) -> bool:
+    def all_configs_completed_at_step(
+        self,
+        step_name: str,
+        workstation_id: str | None = None,
+        config_names: list[int] | None = None,
+    ) -> bool:
         """
         检查所有构型在指定步骤是否全部为 Completed 状态。
 
@@ -688,9 +855,20 @@ class StateManager:
         才能解锁 Solver。
         """
         with self._get_connection(readonly=True) as conn:
+            clauses = ["step_name = ?", "status != ?"]
+            params: list[object] = [step_name, STATUS_COMPLETED]
+            if workstation_id is not None:
+                clauses.append("workstation_id = ?")
+                params.append(workstation_id)
+            if config_names is not None:
+                if not config_names:
+                    return True
+                placeholders = ", ".join("?" for _ in config_names)
+                clauses.append(f"config_name IN ({placeholders})")
+                params.extend(config_names)
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM steps WHERE step_name = ? AND status != ?",
-                (step_name, STATUS_COMPLETED)
+                f"SELECT COUNT(*) as cnt FROM steps WHERE {' AND '.join(clauses)}",
+                params,
             ).fetchone()
             return (row["cnt"] or 0) == 0
 

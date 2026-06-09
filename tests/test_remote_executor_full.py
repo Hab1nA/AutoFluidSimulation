@@ -228,7 +228,7 @@ class TestBuildMeshingCommand:
                 raise AssertionError("invalid command should not reach SSH")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor._run_meshing_command(1) is False
 
@@ -471,7 +471,7 @@ class TestExecuteMeshing:
                 return (True, "AutoFluid_meshing")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor._run_meshing_command(2) is True
         assert captured["working_dir"] == r"D:\working"
@@ -561,7 +561,7 @@ class TestExecuteSolver:
                 return (True, "AutoFluid_solver")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor.execute_solver(2) is True
         assert captured["working_dir"] == r"D:\working"

@@ -8,6 +8,7 @@ import threading
 from typing import Callable
 
 from engine.config import (
+    DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
     STATUS_RETRYING,
 )
@@ -65,6 +66,15 @@ class BarrierCoordinator:
         self._solver_active_config: int | None = None
 
         logger.info("全局屏障协调器初始化完成")
+
+    def _workstation_for_config(self, config_name: int) -> str:
+        """Return assigned workstation for a config, preserving legacy default."""
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = get_config_workstation(config_name)
+            if workstation_id:
+                return str(workstation_id)
+        return DEFAULT_WORKSTATION_ID
 
     def join_solver_threads(self, timeout: float = 3.0) -> None:
         """等待所有 Solver 线程退出并清空列表。
@@ -295,10 +305,19 @@ class BarrierCoordinator:
 
         if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
             remote_executor = self.runner.get_remote_executor()
-            remote_status = remote_executor.query_remote_task_status(config_name, "solver")
+            workstation_id = self._workstation_for_config(config_name)
+            remote_status = remote_executor.query_remote_task_status(
+                config_name,
+                "solver",
+                workstation_id=workstation_id,
+            )
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
-                remote_executor.forget_remote_task(config_name, "solver")
+                remote_executor.forget_remote_task(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
                 logger.info(f"[Solver] 构型{config_name} 重启后检测到完成标志")
                 return
             if remote_status == "failed":
@@ -308,7 +327,11 @@ class BarrierCoordinator:
                     STATUS_ERROR,
                     "远程求解任务失败",
                 )
-                remote_executor.forget_remote_task(config_name, "solver")
+                remote_executor.forget_remote_task(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
                 return
             if remote_status == "running":
                 logger.info(f"[Solver] 构型{config_name} 远程任务仍在运行，恢复轮询")
@@ -320,7 +343,11 @@ class BarrierCoordinator:
                 )
                 return
             self.state.set_step_status(config_name, "solver", STATUS_WAITING)
-            remote_executor.forget_remote_task(config_name, "solver")
+            remote_executor.forget_remote_task(
+                config_name,
+                "solver",
+                workstation_id=workstation_id,
+            )
             logger.warning(
                 f"[Solver] 构型{config_name} 远程任务已丢失，重置为 Waiting 后重新启动"
             )

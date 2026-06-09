@@ -20,9 +20,9 @@ import threading
 import os
 
 from engine.config import (
-    STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG,
+    STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, get_step_filename,
+    LOCAL_PATHS, get_step_filename, get_workstation_config,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -456,6 +456,22 @@ class PipelineScheduler:
         """设置主调度线程引用（供外部模块在启动新线程后注入）。"""
         self._pipeline_thread = thread
 
+    def _workstation_for_config(self, config_name: int) -> str:
+        """Return assigned workstation for a config, preserving legacy default."""
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = get_config_workstation(config_name)
+            if workstation_id:
+                return str(workstation_id)
+        return DEFAULT_WORKSTATION_ID
+
+    @staticmethod
+    def _remote_config_for_workstation(workstation_id: str) -> dict[str, object]:
+        """Return remote config for output checks, preserving legacy default."""
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return dict(REMOTE_CONFIG)
+        return dict(get_workstation_config(workstation_id))
+
     def _resume_paused_steps(self, log_prefix: str = "[Resume]") -> None:
         """
         断点续传扫描：对每个构型从 SW 开始逐步检查，
@@ -497,10 +513,19 @@ class PipelineScheduler:
                 if status == STATUS_RUNNING:
                     if step in ("meshing", "solver"):
                         remote_executor = self.runner.get_remote_executor()
-                        remote_status = remote_executor.query_remote_task_status(cn, step)
+                        workstation_id = self._workstation_for_config(cn)
+                        remote_status = remote_executor.query_remote_task_status(
+                            cn,
+                            step,
+                            workstation_id=workstation_id,
+                        )
                         if remote_status == "completed":
                             self.state.set_step_status(cn, step, STATUS_COMPLETED)
-                            remote_executor.forget_remote_task(cn, step)
+                            remote_executor.forget_remote_task(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
                             continue
                         if remote_status == "failed":
                             self.state.set_step_status(
@@ -509,7 +534,11 @@ class PipelineScheduler:
                                 STATUS_ERROR,
                                 f"远程 {step} 任务失败",
                             )
-                            remote_executor.forget_remote_task(cn, step)
+                            remote_executor.forget_remote_task(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
                             break
                         if remote_status in ("running", "unknown"):
                             logger.warning(
@@ -527,7 +556,11 @@ class PipelineScheduler:
                     else:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
                         if step in ("meshing", "solver"):
-                            self.runner.get_remote_executor().forget_remote_task(cn, step)
+                            self.runner.get_remote_executor().forget_remote_task(
+                                cn,
+                                step,
+                                workstation_id=self._workstation_for_config(cn),
+                            )
                         if step == "sw":
                             # SW 步骤由 start_pipeline 统一处理
                             break
@@ -599,13 +632,15 @@ class PipelineScheduler:
     ) -> bool:
         """检查某步骤的输出文件是否已存在（委托给统一函数）。"""
         ssh = None
-        if step == "transfer":
+        workstation_id = self._workstation_for_config(cn)
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        if step in {"transfer", "meshing", "solver"}:
             try:
-                ssh = self.runner.get_ssh()
+                ssh = self.runner.get_ssh(workstation_id)
             except Exception:
                 pass
         return check_step_output_exists(
-            cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh
+            cn, step, step_dir, scdoc_dir, remote_config, ssh
         )
 
     def _is_step_in_flight(self, cn: int, step: str) -> bool:

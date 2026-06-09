@@ -319,7 +319,7 @@ class LocalWorkerAdapter:
 ```python
 # 当前 (engine/config.py)
 REMOTE_CONFIG = {
-    "host": "172.17.135.240",
+    "host": "WORKSTATION_A_OCAR_REACHABLE_HOST",
     "port": 22,
     "username": "ps",
     ...
@@ -329,7 +329,7 @@ REMOTE_CONFIG = {
 WORKSTATIONS = [
     {
         "id": "WS-A",
-        "host": "172.17.135.240",
+        "host": "WORKSTATION_A_OCAR_REACHABLE_HOST",
         "port": 22,
         "username": "ps",
         "password": os.environ.get("AUTOFLUID_WS_A_PASSWORD", ""),
@@ -343,10 +343,10 @@ WORKSTATIONS = [
     },
     {
         "id": "WS-B",
-        "host": "172.17.135.89",
+        "host": "WORKSTATION_B_OCAR_REACHABLE_HOST",
         "port": 22,
         "username": "ps",
-        "password": None,            # 无需密码，直接 ssh ps@172.17.135.89 即可连接
+        "password": None,            # 可通过 ocar 到该地址的 SSH 隧道/公网映射连接
         "scdoc_dir": r"D:\xkz_1020\scdoc",
         "msh_dir": r"D:\xkz_1020\msh",
         "result_dir": r"D:\xkz_1020\case",
@@ -357,10 +357,10 @@ WORKSTATIONS = [
     },
     {
         "id": "WS-C",
-        "host": "172.17.135.254",
+        "host": "WORKSTATION_C_OCAR_REACHABLE_HOST",
         "port": 22,
         "username": "ps",
-        "password": None,            # 无需密码，直接 ssh ps@172.17.135.254 即可连接
+        "password": None,            # 可通过 ocar 到该地址的 SSH 隧道/公网映射连接
         "scdoc_dir": r"D:\xkz_1020\scdoc",
         "msh_dir": r"D:\xkz_1020\msh",
         "result_dir": r"D:\xkz_1020\case",
@@ -371,6 +371,8 @@ WORKSTATIONS = [
     },
 ]
 ```
+
+> 部署到 ocar 后，`WORKSTATIONS[*].host` 必须是从 ocar 所在网络位置可路由、可 SSH 握手的地址。不要把本地 Windows PC 才能访问的内网 `[IP]` 直接写入服务器端配置；如果工作站不在 ocar 可达网络内，应先配置公网端口映射、VPN、Tailscale、反向 SSH 隧道或等价链路。
 
 为保持向后兼容，可保留 `REMOTE_CONFIG` 作为默认工作站的快捷引用。
 
@@ -442,7 +444,7 @@ class ConfigAssigner:
 
 #### 4.2.6 工作站环境配置指引
 
-在引入 WS-B (172.17.135.89) 和 WS-C (172.17.135.254) 之前，需要确保其软件环境与现有工作站 WS-A (172.17.135.240) 保持一致。以下是环境配置检查清单：
+在引入 WS-B 和 WS-C 之前，需要确保其软件环境与现有工作站 WS-A 保持一致。以下命令中的 `<WS_A_HOST>` / `<WS_B_HOST>` / `<WS_C_HOST>` 均指从 ocar 可达的工作站地址，而不是本地 PC 专属内网地址。
 
 ##### 4.2.6.1 现有工作站环境基线（WS-A）
 
@@ -450,43 +452,43 @@ class ConfigAssigner:
 
 ```powershell
 # 1. 检查 Python 版本
-ssh ps@172.17.135.240 "python --version"
-ssh ps@172.17.135.240 "where python"
+ssh ps@<WS_A_HOST> "python --version"
+ssh ps@<WS_A_HOST> "where python"
 
 # 2. 检查 Conda 环境（如果使用）
-ssh ps@172.17.135.240 "conda --version"
-ssh ps@172.17.135.240 "conda env list"
-ssh ps@172.17.135.240 "conda list -n <fluent_env_name>"
+ssh ps@<WS_A_HOST> "conda --version"
+ssh ps@<WS_A_HOST> "conda env list"
+ssh ps@<WS_A_HOST> "conda list -n <fluent_env_name>"
 
 # 3. 检查 PyFluent 版本
-ssh ps@172.17.135.240 "python -c 'import ansys.fluent.core; print(ansys.fluent.core.__version__)'"
+ssh ps@<WS_A_HOST> "python -c 'import ansys.fluent.core; print(ansys.fluent.core.__version__)'"
 
 # 4. 检查 Fluent 安装路径和版本
-ssh ps@172.17.135.240 "dir 'C:\Program Files\ANSYS Inc'"
-ssh ps@172.17.135.240 'reg query "HKLM\SOFTWARE\ANSYS, Inc.\Fluent" /s 2>nul'
+ssh ps@<WS_A_HOST> "dir 'C:\Program Files\ANSYS Inc'"
+ssh ps@<WS_A_HOST> 'reg query "HKLM\SOFTWARE\ANSYS, Inc.\Fluent" /s 2>nul'
 
 # 5. 导出当前环境为 requirements.txt（用于复现）
-ssh ps@172.17.135.240 "pip freeze > D:\xkz_1020\ws_env_requirements.txt"
+ssh ps@<WS_A_HOST> "pip freeze > D:\xkz_1020\ws_env_requirements.txt"
 
 # 6. 检查 ANSYS 许可证配置
-ssh ps@172.17.135.240 'echo %ANSYSLMD_LICENSE_FILE%'
-ssh ps@172.17.135.240 'echo %ANSYS_VER%'
+ssh ps@<WS_A_HOST> 'echo %ANSYSLMD_LICENSE_FILE%'
+ssh ps@<WS_A_HOST> 'echo %ANSYS_VER%'
 
 # 7. 检查关键目录结构
-ssh ps@172.17.135.240 "dir D:\xkz_1020"
+ssh ps@<WS_A_HOST> "dir D:\xkz_1020"
 ```
 
 ##### 4.2.6.2 新工作站环境配置步骤
 
-对 WS-B (172.17.135.89) 和 WS-C (172.17.135.254) 分别按以下步骤配置：
+对 WS-B 和 WS-C 分别按以下步骤配置：
 
 **Step 1：基础环境**
 ```powershell
 # WS-B：无需密码
-ssh ps@172.17.135.89
+ssh ps@<WS_B_HOST>
 
 # WS-C：无需密码
-ssh ps@172.17.135.254
+ssh ps@<WS_C_HOST>
 ```
 
 ```powershell
@@ -529,8 +531,8 @@ mkdir D:\xkz_1020\scripts
 ```powershell
 # 将 WS-A 上的 Fluent journal 文件和后处理脚本复制到新工作站
 # 从 WS-A 拉取脚本列表:
-ssh ps@172.17.135.240 "dir D:\xkz_1020\*.py"
-ssh ps@172.17.135.240 "dir D:\xkz_1020\scripts\*"
+ssh ps@<WS_A_HOST> "dir D:\xkz_1020\*.py"
+ssh ps@<WS_A_HOST> "dir D:\xkz_1020\scripts\*"
 
 # 然后逐个 scp/sftp 到新工作站对应目录
 ```
@@ -538,19 +540,19 @@ ssh ps@172.17.135.240 "dir D:\xkz_1020\scripts\*"
 **Step 6：连通性验证**
 ```powershell
 # 从服务器 A 测试 SSH 连通性
-ssh ps@172.17.135.89 "echo 'WS-B OK'"
-ssh ps@172.17.135.254 "echo 'WS-C OK'"
+ssh ps@<WS_B_HOST> "echo 'WS-B OK'"
+ssh ps@<WS_C_HOST> "echo 'WS-C OK'"
 
 # 测试 Python 环境
-ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core; print(\"PyFluent OK\")'"
+ssh ps@<WS_B_HOST> "python -c 'import ansys.fluent.core; print(\"PyFluent OK\")'"
 
 # 测试 Fluent 可用性
-ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"Fluent launch test OK\")'"
+ssh ps@<WS_B_HOST> "python -c 'import ansys.fluent.core as pyfluent; print(\"Fluent launch test OK\")'"
 ```
 
 ##### 4.2.6.3 环境一致性检查清单
 
-| 检查项 | WS-A (172.17.135.240) | WS-B (172.17.135.89) | WS-C (172.17.135.254) |
+| 检查项 | WS-A (`<WS_A_HOST>`) | WS-B (`<WS_B_HOST>`) | WS-C (`<WS_C_HOST>`) |
 |--------|:---:|:---:|:---:|
 | Windows 版本 | ✅ 已确认 | ⬜ 待检查 | ⬜ 待检查 |
 | Python 版本 | ✅ 已确认 | ⬜ 待安装 | ⬜ 待安装 |
@@ -560,7 +562,7 @@ ssh ps@172.17.135.89 "python -c 'import ansys.fluent.core as pyfluent; print(\"F
 | 许可证配置 | ✅ 已确认 | ⬜ 待配置 | ⬜ 待配置 |
 | 目录结构 (D:\xkz_1020\) | ✅ 已确认 | ⬜ 待创建 | ⬜ 待创建 |
 | 仿真脚本部署 | ✅ 已确认 | ⬜ 待部署 | ⬜ 待部署 |
-| SSH 免密/密码连接 | ✅ 已确认 | ✅ ssh ps@IP 无密码 | ✅ ssh ps@IP 无密码 |
+| SSH 免密/密码连接 | ✅ 已确认 | ⬜ 从 ocar 验证 | ⬜ 从 ocar 验证 |
 | 22 端口可达 | ✅ 已确认 | ⬜ 待验证 | ⬜ 待验证 |
 
 ##### 4.2.6.4 注意事项
@@ -810,7 +812,7 @@ PostProcess 是流水线中紧接在 Solver 之后的阶段。**关键理解**�
 
 #### 4.4.3 对架构设计的影响
 
-由于后处理内嵌在仿真脚本中自动执行，ROADMAP 中之前设想的以下内容需要调整：
+由于后处理内嵌在仿真脚本中自动执行，早期架构设想中的以下内容需要调整：
 
 1. **不需要 Solver 屏障**：各构型 Solver 完成后自动进入 PostProcess，无需等待同工作站其他构型
 2. **不需要独立的 PostProcess 调度逻辑**：`_solver_barrier_monitor_loop` / `_start_postprocess` 等方法不再需要

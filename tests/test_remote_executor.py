@@ -4,7 +4,14 @@ import json
 import hashlib
 import threading
 
-from engine.config import LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG, OPERATION_TIMEOUTS, STATUS_ERROR
+from engine.config import (
+    DEFAULT_WORKSTATION_ID,
+    LOCAL_PATHS,
+    REMOTE_CONFIG,
+    ENGINE_CONFIG,
+    OPERATION_TIMEOUTS,
+    STATUS_ERROR,
+)
 import executor.remote_executor as remote_executor_module
 from executor.remote_executor import RemoteExecutor
 
@@ -24,17 +31,46 @@ class _StateRecorder:
         self.status_updates.append((config_name, step_name, status, error_message))
 
     def save_remote_task(self, **kwargs) -> None:
-        key = (kwargs["config_name"], kwargs["step_name"])
+        key = self._remote_task_key(
+            kwargs["config_name"],
+            kwargs["step_name"],
+            str(kwargs.get("workstation_id", DEFAULT_WORKSTATION_ID)),
+        )
         self.remote_tasks[key] = dict(kwargs)
 
-    def get_remote_task(self, config_name: int, step_name: str):
-        return self.remote_tasks.get((config_name, step_name))
+    def get_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ):
+        return self.remote_tasks.get(
+            self._remote_task_key(config_name, step_name, workstation_id)
+        )
 
     def get_all_remote_tasks(self):
         return list(self.remote_tasks.values())
 
-    def delete_remote_task(self, config_name: int, step_name: str) -> None:
-        self.remote_tasks.pop((config_name, step_name), None)
+    def delete_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
+        self.remote_tasks.pop(
+            self._remote_task_key(config_name, step_name, workstation_id),
+            None,
+        )
+
+    @staticmethod
+    def _remote_task_key(
+        config_name: object,
+        step_name: object,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> tuple[object, ...]:
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return (config_name, step_name)
+        return (workstation_id, config_name, step_name)
 
 
 def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatch):
@@ -106,6 +142,46 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
             "stopped_event": stopped,
         }
     ]
+
+
+def test_execute_transfer_uses_workstation_specific_remote_dir(tmp_path, monkeypatch):
+    scdoc_dir = tmp_path / "scdoc"
+    scdoc_dir.mkdir()
+    scdoc_file = scdoc_dir / "model_gen4_1.scdoc"
+    scdoc_file.write_bytes(b"scdoc")
+
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\default scdoc")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scdoc_dir": r"E:\ws-a scdoc",
+        },
+    )
+
+    requested_workstations: list[str] = []
+    uploaded: list[str] = []
+
+    class _SSH:
+        def get_remote_file_size(self, remote_path: str, *, timeout: int | None = None):
+            return None
+
+        def upload_file(self, _local_path: str, remote_path: str, **_kwargs) -> bool:
+            uploaded.append(remote_path)
+            return True
+
+    def _get_ssh(workstation_id: str):
+        requested_workstations.append(workstation_id)
+        return _SSH()
+
+    executor = RemoteExecutor(_StateRecorder(), _get_ssh, threading.RLock())
+
+    assert executor.execute_transfer(1, workstation_id="WS-A") is True
+    assert requested_workstations == ["WS-A"]
+    assert uploaded == ["E:/ws-a scdoc/model_gen4_1.scdoc"]
 
 
 def test_execute_transfer_uses_one_timeout_budget(tmp_path, monkeypatch):
@@ -511,10 +587,11 @@ def test_start_meshing_persists_remote_task_metadata(monkeypatch):
 
     state = _StateRecorder()
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
-    monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+    monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id=DEFAULT_WORKSTATION_ID: True)
 
     assert executor.start_meshing(5) is True
     assert state.remote_tasks[(5, "meshing")] == {
+        "workstation_id": DEFAULT_WORKSTATION_ID,
         "config_name": 5,
         "step_name": "meshing",
         "task_name": "AutoFluid_abc123",
@@ -525,6 +602,81 @@ def test_start_meshing_persists_remote_task_metadata(monkeypatch):
         "script_file": "D:/flags/autofluid_bg_abc123.cmd",
         "started_at": state.remote_tasks[(5, "meshing")]["started_at"],
     }
+
+
+def test_start_meshing_uses_workstation_specific_paths(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\default scripts")
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\default scdoc")
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\default msh")
+    monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\default work")
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\default flags")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scripts_dir": r"E:\ws-a scripts",
+            "scdoc_dir": r"E:\ws-a scdoc",
+            "msh_dir": r"E:\ws-a msh",
+            "working_dir": r"E:\ws-a work",
+            "flag_dir": r"E:\ws-a flags",
+        },
+    )
+
+    calls: list[dict[str, str | None]] = []
+
+    class _SSH:
+        def exec_background(
+            self,
+            command: str,
+            flag_file: str,
+            *,
+            working_dir: str | None,
+            interactive: bool,
+        ):
+            calls.append(
+                {
+                    "command": command,
+                    "flag_file": flag_file,
+                    "working_dir": working_dir,
+                }
+            )
+            return True, "AutoFluid_ws_a"
+
+    executor = RemoteExecutor(_StateRecorder(), lambda _ws: _SSH(), threading.RLock())
+    monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id=DEFAULT_WORKSTATION_ID: True)
+
+    assert executor.start_meshing(5, workstation_id="WS-A") is True
+
+    assert calls[0]["flag_file"] == "E:/ws-a flags/meshing_done_5.txt"
+    assert calls[0]["working_dir"] == r"E:\ws-a work"
+    assert "E:\\ws-a scripts/batch_meshing_gen4.py" in str(calls[0]["command"])
+    assert '"E:\\ws-a scdoc"' in str(calls[0]["command"])
+    assert '"E:\\ws-a msh"' in str(calls[0]["command"])
+
+
+def test_persist_remote_task_keeps_workstation_dimension():
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: None, threading.RLock())
+
+    executor._persist_remote_task(
+        config_name=5,
+        step_name="meshing",
+        task_name="AutoFluid_default",
+        flag_file="D:/flags/default_done.txt",
+    )
+    executor._persist_remote_task(
+        workstation_id="WS-A",
+        config_name=5,
+        step_name="meshing",
+        task_name="AutoFluid_ws_a",
+        flag_file="D:/flags/ws_a_done.txt",
+    )
+
+    assert state.remote_tasks[(5, "meshing")]["task_name"] == "AutoFluid_default"
+    assert state.remote_tasks[("WS-A", 5, "meshing")]["task_name"] == "AutoFluid_ws_a"
+    assert state.remote_tasks[("WS-A", 5, "meshing")]["workstation_id"] == "WS-A"
 
 
 def test_restore_remote_tasks_from_db_rebuilds_memory_mapping():
@@ -541,7 +693,69 @@ def test_restore_remote_tasks_from_db_rebuilds_memory_mapping():
 
     executor.restore_remote_tasks_from_db()
 
-    assert executor._remote_tasks == {9: "AutoFluid_solver"}
+    assert executor._remote_tasks == {
+        (DEFAULT_WORKSTATION_ID, 9, "solver"): "AutoFluid_solver",
+    }
+
+
+def test_restore_remote_tasks_from_db_preserves_workstation_dimension():
+    state = _StateRecorder()
+    state.remote_tasks[(9, "solver")] = {
+        "workstation_id": DEFAULT_WORKSTATION_ID,
+        "config_name": 9,
+        "step_name": "solver",
+        "task_name": "AutoFluid_default_solver",
+        "flag_file": "D:/flags/default_solver_done_9.txt",
+        "error_flag_file": "D:/flags/default_solver_done_9.txt.error",
+        "started_at": 100.0,
+    }
+    state.remote_tasks[("WS-A", 9, "solver")] = {
+        "workstation_id": "WS-A",
+        "config_name": 9,
+        "step_name": "solver",
+        "task_name": "AutoFluid_ws_a_solver",
+        "flag_file": "D:/flags/ws_a_solver_done_9.txt",
+        "error_flag_file": "D:/flags/ws_a_solver_done_9.txt.error",
+        "started_at": 100.0,
+    }
+    executor = RemoteExecutor(state, lambda: None, threading.RLock())
+
+    executor.restore_remote_tasks_from_db()
+
+    assert executor._remote_tasks == {
+        (DEFAULT_WORKSTATION_ID, 9, "solver"): "AutoFluid_default_solver",
+        ("WS-A", 9, "solver"): "AutoFluid_ws_a_solver",
+    }
+
+
+def test_query_remote_task_status_uses_workstation_specific_ssh():
+    state = _StateRecorder()
+    state.remote_tasks[("WS-A", 2, "meshing")] = {
+        "workstation_id": "WS-A",
+        "config_name": 2,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_running",
+        "flag_file": "D:/flags/meshing_done_2.txt",
+        "error_flag_file": "D:/flags/meshing_done_2.txt.error",
+        "started_at": 100.0,
+    }
+    requested_workstations: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, _remote_path: str) -> bool:
+            return False
+
+        def exec_command(self, _command: str, timeout: int = 30):
+            return '"AutoFluid_running","Ready"\r\n', "", 0
+
+    def _get_ssh(workstation_id: str):
+        requested_workstations.append(workstation_id)
+        return _SSH()
+
+    executor = RemoteExecutor(state, _get_ssh, threading.RLock())
+
+    assert executor.query_remote_task_status(2, "meshing", workstation_id="WS-A") == "running"
+    assert requested_workstations == ["WS-A"]
 
 
 def test_query_remote_task_status_returns_running_when_task_exists(monkeypatch):
@@ -690,6 +904,59 @@ def test_query_remote_task_status_returns_unknown_on_remote_check_failure():
     assert executor.query_remote_task_status(4, "meshing") == "unknown"
 
 
+def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\default scripts")
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\default msh")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\default result")
+    monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\default work")
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\default flags")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scripts_dir": r"E:\ws-a scripts",
+            "msh_dir": r"E:\ws-a msh",
+            "result_dir": r"E:\ws-a result",
+            "working_dir": r"E:\ws-a work",
+            "flag_dir": r"E:\ws-a flags",
+        },
+    )
+
+    calls: list[dict[str, str | None]] = []
+
+    class _SSH:
+        def exec_background(
+            self,
+            command: str,
+            flag_file: str,
+            *,
+            working_dir: str | None,
+            interactive: bool,
+        ):
+            calls.append(
+                {
+                    "command": command,
+                    "flag_file": flag_file,
+                    "working_dir": working_dir,
+                }
+            )
+            return True, "AutoFluid_solver_ws_a"
+
+    executor = RemoteExecutor(_StateRecorder(), lambda _ws: _SSH(), threading.RLock())
+    monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id=DEFAULT_WORKSTATION_ID: True)
+
+    assert executor.execute_solver(6, workstation_id="WS-A") is True
+
+    assert calls[0]["flag_file"] == "E:/ws-a flags/solver_done_6.txt"
+    assert calls[0]["working_dir"] == r"E:\ws-a work"
+    assert "E:\\ws-a scripts/batch_solver_gen4.py" in str(calls[0]["command"])
+    assert '"E:\\ws-a msh"' in str(calls[0]["command"])
+    assert '"E:\\ws-a result"' in str(calls[0]["command"])
+    assert '"E:\\ws-a work"' in str(calls[0]["command"])
+
+
 def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypatch):
     monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
     monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 60)
@@ -715,7 +982,9 @@ def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypat
     monkeypatch.setattr(
         executor,
         "_kill_remote_task_for_config",
-        lambda config_name, step_name: killed.append((config_name, step_name)),
+        lambda config_name, step_name, workstation_id=DEFAULT_WORKSTATION_ID: killed.append(
+            (config_name, step_name)
+        ),
     )
     monkeypatch.setattr(
         remote_executor_module.time,
@@ -755,7 +1024,9 @@ def test_wait_solver_completion_uses_persisted_started_at_for_timeout(monkeypatc
     monkeypatch.setattr(
         executor,
         "_kill_remote_task_for_config",
-        lambda config_name, step_name: killed.append((config_name, step_name)),
+        lambda config_name, step_name, workstation_id=DEFAULT_WORKSTATION_ID: killed.append(
+            (config_name, step_name)
+        ),
     )
     monkeypatch.setattr(
         remote_executor_module.time,

@@ -2,8 +2,8 @@
 
 > 文档版本：v2.0  
 > 创建日期：2026-05-29  
-> 最后更新：2026-06-04  
-> 基于：`docs/roadmap.md` 远期计划  
+> 最后更新：2026-06-09
+> 基于：`docs/architecture-refactoring-plan.md` 远期计划
 > 目标：将单机 Daemon 拆分为"本地 PC + 服务器 A"分布式架构
 
 ---
@@ -376,7 +376,7 @@ TOML 支持 `${VAR}` 语法引用环境变量（如 `password = "${AUTOFLUID_SSH
 
 ```toml
 [remote_config]
-host = "172.17.135.240"
+host = "WORKSTATION_A_OCAR_REACHABLE_HOST"
 port = 22
 username = "ps"
 scdoc_dir = 'D:\xkz_1020\scdoc'
@@ -388,7 +388,7 @@ scdoc_dir = 'D:\xkz_1020\scdoc'
 ```toml
 # 向后兼容：默认工作站（等价于 workstations[0]）
 [remote_config]
-host = "172.17.135.240"
+host = "WORKSTATION_A_OCAR_REACHABLE_HOST"
 port = 22
 username = "ps"
 password = "${AUTOFLUID_SSH_PASSWORD}"
@@ -403,7 +403,7 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
 # 多工作站配置（新增）
 [[workstations]]
 id = "WS-A"
-host = "172.17.135.240"
+host = "WORKSTATION_A_ROUTABLE_IP"
 port = 22
 username = "ps"
 password = "${AUTOFLUID_WS_A_PASSWORD}"
@@ -417,7 +417,7 @@ notes = "现有工作站，已配置好环境"
 
 [[workstations]]
 id = "WS-B"
-host = "172.17.135.89"
+host = "WORKSTATION_B_ROUTABLE_IP"
 port = 22
 username = "ps"
 password = "${AUTOFLUID_WS_B_PASSWORD}"
@@ -425,12 +425,14 @@ password = "${AUTOFLUID_WS_B_PASSWORD}"
 
 [[workstations]]
 id = "WS-C"
-host = "172.17.135.254"
+host = "WORKSTATION_C_ROUTABLE_IP"
 port = 22
 username = "ps"
 password = "${AUTOFLUID_WS_C_PASSWORD}"
 # ... 同上路径结构
 ```
+
+> 注意：`workstations[].host` 必须填写从服务器 A（例如 ocar）所在网络位置可路由、可 SSH 访问的工作站地址，不能直接沿用仅本地 Windows PC 内网可达的 `[IP]`。部署前需在服务器 A 上逐台验证 `ssh <username>@<workstations.host>` 与端口、防火墙、NAT/公网映射可用性。
 
 ### 6.3 Python 侧 TypedDict 扩展
 
@@ -463,10 +465,10 @@ WORKSTATIONS: list[WorkstationConfig] = []
 AUTOFLUID_WS_A_PASSWORD=xxx
 AUTOFLUID_WS_B_PASSWORD=xxx  # 或留空（无需密码）
 AUTOFLUID_WS_C_PASSWORD=xxx  # 或留空（无需密码）
-AUTOFLUID_SERVER_HOST=192.168.1.100  # 服务器 A 地址
+AUTOFLUID_SERVER_HOST=OCAR_REACHABLE_HOST  # 服务器 A/ocar 地址
 
 # 本地 PC
-AUTOFLUID_SERVER_HOST=192.168.1.100  # 服务器 A 地址
+AUTOFLUID_SERVER_HOST=OCAR_REACHABLE_HOST  # 服务器 A/ocar 地址
 ```
 
 ### 6.5 Rust TUI 设置适配
@@ -785,11 +787,11 @@ P1: 工作站级屏障 ◄──────────────────
 
 ---
 
-## 附录 A：与 roadmap.md 的关系
+## 附录 A：与 architecture-refactoring-plan.md 的关系
 
 本文档（daemon-split-plan.md）聚焦于**代码级拆分方案**，包含模块清单、IPC 协议扩展、配置层改造等实施细节。
 
-`roadmap.md` 包含更广泛的架构设计内容：
+`architecture-refactoring-plan.md` 包含更广泛的架构设计内容：
 - 多工作站环境配置指引（WS-B/WS-C 的软件环境部署步骤）
 - 屏障机制的动态分配方案详细设计（`WorkstationMesher` 自感知屏障）
 - PostProcess 阶段的实际运行方式分析（内嵌在仿真脚本中自动执行）

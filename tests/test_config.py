@@ -581,6 +581,82 @@ class TestReloadConfigFromToml:
         finally:
             REMOTE_CONFIG["host"] = original_host
 
+    def test_merges_workstations_and_expands_env_vars(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        monkeypatch.setenv("AUTOFLUID_WS_A_PASSWORD", "secret-a")
+        original = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "10.0.0.10",
+                        "port": 2222,
+                        "username": "ps",
+                        "password": "${AUTOFLUID_WS_A_PASSWORD}",
+                        "working_dir": r"D:\work",
+                        "scripts_dir": r"D:\scripts",
+                        "ref_files_dir": r"D:\refs",
+                        "scdoc_dir": r"D:\scdoc",
+                        "msh_dir": r"D:\msh",
+                        "result_dir": r"D:\case",
+                        "flag_dir": r"D:\flags",
+                        "conda_env": "pyfluent",
+                        "conda_exe": r"C:\conda.exe",
+                        "mpi_bin_dir": r"C:\mpi",
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert WORKSTATIONS == [
+                {
+                    "id": "WS-A",
+                    "host": "10.0.0.10",
+                    "port": 2222,
+                    "username": "ps",
+                    "password": "secret-a",
+                    "working_dir": r"D:\work",
+                    "scripts_dir": r"D:\scripts",
+                    "ref_files_dir": r"D:\refs",
+                    "scdoc_dir": r"D:\scdoc",
+                    "msh_dir": r"D:\msh",
+                    "result_dir": r"D:\case",
+                    "flag_dir": r"D:\flags",
+                    "conda_env": "pyfluent",
+                    "conda_exe": r"C:\conda.exe",
+                    "mpi_bin_dir": r"C:\mpi",
+                }
+            ]
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_remote_config_backfills_default_workstation(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.delenv("AUTOFLUID_SSH_PASSWORD", raising=False)
+
+        def _mock_load(*args, **kwargs):
+            return {"remote_config": {"host": "10.99.99.99", "password": "pw"}}
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert WORKSTATIONS[0]["id"] == "default"
+            assert WORKSTATIONS[0]["host"] == "10.99.99.99"
+            assert WORKSTATIONS[0]["password"] == "pw"
+        finally:
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
     def test_merges_step_file_patterns(self, monkeypatch):
         import engine.config as cfg
         from engine.config import STEP_FILE_PATTERNS
@@ -734,6 +810,14 @@ class TestConfigDictCompleteness:
         missing = self._REMOTE_REQUIRED_KEYS - set(REMOTE_CONFIG.keys())
         assert not missing, f"REMOTE_CONFIG 缺失: {sorted(missing)}"
 
+    def test_workstations_keys(self):
+        from engine.config import WORKSTATIONS
+
+        assert WORKSTATIONS
+        for workstation in WORKSTATIONS:
+            missing = (self._REMOTE_REQUIRED_KEYS | {"id"}) - set(workstation.keys())
+            assert not missing, f"WORKSTATIONS 缺失: {sorted(missing)}"
+
     def test_ipc_config_keys(self):
         from engine.config import IPC_CONFIG
         missing = self._IPC_REQUIRED_KEYS - set(IPC_CONFIG.keys())
@@ -743,3 +827,45 @@ class TestConfigDictCompleteness:
         from engine.config import ENGINE_CONFIG
         missing = self._ENGINE_REQUIRED_KEYS - set(ENGINE_CONFIG.keys())
         assert not missing, f"ENGINE_CONFIG 缺失: {sorted(missing)}"
+
+
+class TestWorkstationLookup:
+    """验证工作站配置查询。"""
+
+    def test_get_workstation_config_returns_copy(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.10",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\work",
+                "scripts_dir": r"D:\scripts",
+                "ref_files_dir": r"D:\refs",
+                "scdoc_dir": r"D:\scdoc",
+                "msh_dir": r"D:\msh",
+                "result_dir": r"D:\case",
+                "flag_dir": r"D:\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            }
+        ]
+        try:
+            workstation = cfg.get_workstation_config("WS-A")
+            workstation["host"] = "changed"
+            assert WORKSTATIONS[0]["host"] == "10.0.0.10"
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_get_workstation_config_rejects_unknown_id(self):
+        import pytest
+        import engine.config as cfg
+
+        with pytest.raises(KeyError):
+            cfg.get_workstation_config("missing")

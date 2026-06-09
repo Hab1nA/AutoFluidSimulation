@@ -23,8 +23,9 @@ if TYPE_CHECKING:
     from engine.state_manager import StateManager
 
 from engine.config import (
-    LOCAL_PATHS, REMOTE_CONFIG,
+    DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
     STATUS_ERROR, get_step_filename,
+    get_workstation_config,
 )
 from engine.sc_process_pool import SCProcessPool
 from executor.sw_executor import SWExecutor
@@ -52,6 +53,10 @@ class TaskRunner:
         self.state = state_manager
         self._ssh: RemoteWorkstation | None = None
         self._ssh_lock = threading.RLock()
+        self._ssh_pool: dict[str, RemoteWorkstation] = {}
+        self._ssh_locks: dict[str, threading.RLock] = {
+            DEFAULT_WORKSTATION_ID: self._ssh_lock,
+        }
 
         self._sc_pool = SCProcessPool()
 
@@ -103,27 +108,75 @@ class TaskRunner:
     # SSH 连接管理
     # ------------------------------------------------------------------
 
-    def get_ssh(self) -> RemoteWorkstation:
+    def get_ssh(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> RemoteWorkstation:
         """获取（或创建）SSH 客户端实例。线程安全。"""
-        with self._ssh_lock:
-            if self._ssh is None:
-                self._ssh = RemoteWorkstation(
-                    host=REMOTE_CONFIG["host"],
-                    port=REMOTE_CONFIG["port"],
-                    username=REMOTE_CONFIG["username"],
-                    password=REMOTE_CONFIG["password"],
+        lock = self._ssh_locks.setdefault(workstation_id, threading.RLock())
+        with lock:
+            ssh = self._ssh_pool.get(workstation_id)
+            if ssh is None:
+                remote_config = get_workstation_config(workstation_id)
+                ssh = RemoteWorkstation(
+                    host=remote_config["host"],
+                    port=remote_config["port"],
+                    username=remote_config["username"],
+                    password=remote_config["password"],
                 )
-            if not self._ssh.is_connected():
-                if not self._ssh.connect():
-                    logger.error("SSH 重连失败")
-            return self._ssh
+                self._ssh_pool[workstation_id] = ssh
+                if workstation_id == DEFAULT_WORKSTATION_ID:
+                    self._ssh = ssh
+            if not ssh.is_connected():
+                if not ssh.connect():
+                    logger.error("SSH 重连失败: %s", workstation_id)
+            return ssh
 
-    def disconnect_ssh(self) -> None:
+    def disconnect_ssh(self, workstation_id: str | None = None) -> None:
         """断开 SSH 连接。"""
+        ssh_pool = getattr(self, "_ssh_pool", None)
+        ssh_locks = getattr(self, "_ssh_locks", None)
+        if ssh_pool is None or ssh_locks is None:
+            with self._ssh_lock:
+                if self._ssh:
+                    self._ssh.disconnect()
+                    self._ssh = None
+            return
+
+        if workstation_id is not None:
+            lock = ssh_locks.setdefault(workstation_id, threading.RLock())
+            with lock:
+                ssh = ssh_pool.pop(workstation_id, None)
+                if ssh:
+                    ssh.disconnect()
+                if workstation_id == DEFAULT_WORKSTATION_ID:
+                    self._ssh = None
+            return
+
         with self._ssh_lock:
-            if self._ssh:
-                self._ssh.disconnect()
+            legacy_ssh = self._ssh
+            if legacy_ssh:
+                legacy_ssh.disconnect()
                 self._ssh = None
+            default_pooled = ssh_pool.pop(DEFAULT_WORKSTATION_ID, None)
+            if default_pooled and default_pooled is not legacy_ssh:
+                default_pooled.disconnect()
+
+        for current_id in list(ssh_pool):
+            lock = ssh_locks.setdefault(current_id, threading.RLock())
+            with lock:
+                pooled = ssh_pool.pop(current_id, None)
+                if pooled:
+                    pooled.disconnect()
+
+    def _workstation_for_config(self, config_name: int) -> str:
+        """Return assigned workstation for a config, falling back to legacy default."""
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = get_config_workstation(config_name)
+            if workstation_id:
+                return str(workstation_id)
+        return DEFAULT_WORKSTATION_ID
 
     # ------------------------------------------------------------------
     # 阶段 1: SolidWorks STEP 导出（委托给 SWExecutor）
@@ -213,7 +266,10 @@ class TaskRunner:
 
     def execute_transfer(self, config_name: int) -> bool:
         """执行 Transfer 步骤（委托给 RemoteExecutor）。"""
-        return self._remote_executor.execute_transfer(config_name)
+        return self._remote_executor.execute_transfer(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
 
     # ------------------------------------------------------------------
     # 阶段 4: 网格划分（委托给 RemoteExecutor）
@@ -221,7 +277,10 @@ class TaskRunner:
 
     def execute_meshing(self, config_name: int) -> bool:
         """执行 Meshing 步骤（委托给 RemoteExecutor）。"""
-        return self._remote_executor.execute_meshing(config_name)
+        return self._remote_executor.execute_meshing(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
 
     def wait_meshing_completion(
         self, config_name: int,
@@ -230,7 +289,10 @@ class TaskRunner:
     ) -> bool:
         """等待网格划分完成（委托给 RemoteExecutor）。"""
         return self._remote_executor.wait_meshing_completion(
-            config_name, paused_event, stopped_event
+            config_name,
+            paused_event,
+            stopped_event,
+            workstation_id=self._workstation_for_config(config_name),
         )
 
     # ------------------------------------------------------------------
@@ -239,7 +301,10 @@ class TaskRunner:
 
     def execute_solver(self, config_name: int) -> bool:
         """执行 Solver 步骤（委托给 RemoteExecutor）。"""
-        return self._remote_executor.execute_solver(config_name)
+        return self._remote_executor.execute_solver(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
 
     def wait_solver_completion(
         self, config_name: int,
@@ -248,7 +313,10 @@ class TaskRunner:
     ) -> bool:
         """等待求解完成（委托给 RemoteExecutor）。"""
         return self._remote_executor.wait_solver_completion(
-            config_name, paused_event, stopped_event
+            config_name,
+            paused_event,
+            stopped_event,
+            workstation_id=self._workstation_for_config(config_name),
         )
 
     # ------------------------------------------------------------------

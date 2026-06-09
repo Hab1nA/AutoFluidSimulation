@@ -67,6 +67,13 @@ class RemoteConfig(TypedDict):
     mpi_bin_dir: str
 
 
+class WorkstationConfig(RemoteConfig, total=False):
+    id: str
+    postprocess_script: str
+    postprocess_output_dir: str
+    notes: str
+
+
 class IPCConfig(TypedDict):
     host: str
     port: int
@@ -203,6 +210,30 @@ REMOTE_CONFIG: RemoteConfig = {
     # 远程 ANSYS 安装根目录
     "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"),
 }
+
+DEFAULT_WORKSTATION_ID = "default"
+
+
+def _workstation_from_remote_config(
+    workstation_id: str = DEFAULT_WORKSTATION_ID,
+) -> WorkstationConfig:
+    """Build a workstation entry from the legacy single-workstation config."""
+    workstation = cast(WorkstationConfig, dict(REMOTE_CONFIG))
+    workstation["id"] = workstation_id
+    return workstation
+
+
+WORKSTATIONS: list[WorkstationConfig] = [_workstation_from_remote_config()]
+
+
+def get_workstation_config(
+    workstation_id: str = DEFAULT_WORKSTATION_ID,
+) -> WorkstationConfig:
+    """Return a copy of one configured remote workstation."""
+    for workstation in WORKSTATIONS:
+        if workstation.get("id") == workstation_id:
+            return cast(WorkstationConfig, dict(workstation))
+    raise KeyError(f"未知工作站配置: {workstation_id}")
 
 # ============================================================================
 # 步骤名称枚举（与状态表和命令系统对应）
@@ -402,6 +433,16 @@ def _apply_env_overrides():
                 REMOTE_CONFIG[key] = env_val
 
 
+def _sync_default_workstation() -> None:
+    """Keep WORKSTATIONS[0] aligned with REMOTE_CONFIG in legacy mode."""
+    default = _workstation_from_remote_config()
+    if not WORKSTATIONS:
+        WORKSTATIONS.append(default)
+        return
+    if WORKSTATIONS[0].get("id") == DEFAULT_WORKSTATION_ID:
+        WORKSTATIONS[0] = default
+
+
 def load_toml_config(toml_path: str | None = None) -> dict[str, Any]:
     """
     从 autofluid_config.toml 加载配置。
@@ -438,9 +479,28 @@ def _expand_env_vars(value: Any) -> Any:
     return re.sub(r'\$\{(\w+)\}', _replace, value)
 
 
+def _expand_config_value(value: Any) -> Any:
+    """Recursively expand ${VAR} references in TOML-derived config values."""
+    if isinstance(value, dict):
+        return {k: _expand_config_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_config_value(v) for v in value]
+    return _expand_env_vars(value)
+
+
 def _expand_dict_env_vars(d: dict) -> dict:
     """展开字典中所有字符串值的 ${VAR} 环境变量引用。"""
-    return {k: _expand_env_vars(v) for k, v in d.items()}
+    return cast(dict, _expand_config_value(d))
+
+
+def _normalize_workstation_config(raw: dict[str, Any], index: int) -> WorkstationConfig:
+    """Merge a TOML workstation entry with legacy defaults."""
+    merged: dict[str, Any] = dict(REMOTE_CONFIG)
+    merged.update(raw)
+    merged["id"] = str(merged.get("id") or f"WS-{index + 1}")
+    if "port" in merged:
+        merged["port"] = int(merged["port"])
+    return cast(WorkstationConfig, merged)
 
 
 def reload_config_from_toml() -> bool:
@@ -451,13 +511,20 @@ def reload_config_from_toml() -> bool:
     toml_data = load_toml_config()
     if toml_data:
         # 展开 ${VAR} 环境变量引用（如 password = "${AUTOFLUID_SSH_PASSWORD}"）
-        for section_key in toml_data:
-            if isinstance(toml_data[section_key], dict):
-                toml_data[section_key] = _expand_dict_env_vars(toml_data[section_key])
+        toml_data = cast(dict[str, Any], _expand_config_value(toml_data))
         if "local_paths" in toml_data:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:
             REMOTE_CONFIG.update(toml_data["remote_config"])
+        explicit_workstations = "workstations" in toml_data
+        if explicit_workstations:
+            workstation_items = toml_data["workstations"]
+            if isinstance(workstation_items, list):
+                WORKSTATIONS[:] = [
+                    _normalize_workstation_config(item, idx)
+                    for idx, item in enumerate(workstation_items)
+                    if isinstance(item, dict)
+                ]
         if "step_file_patterns" in toml_data:
             STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
         # 新分类格式：按工具维度拆分为 solidworks / spaceclaim / global_settings
@@ -504,6 +571,8 @@ def reload_config_from_toml() -> bool:
         if "operation_timeouts" in toml_data:
             OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
         _apply_env_overrides()
+        if not explicit_workstations:
+            _sync_default_workstation()
         return True
     return False
 

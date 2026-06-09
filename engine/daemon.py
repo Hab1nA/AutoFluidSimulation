@@ -32,8 +32,9 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, ensure_directories, validate_config,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, ensure_directories, validate_config,
 )
+from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -192,6 +193,7 @@ class PipelineDaemon:
         # ---- 2. 创建业务组件 ----
         self.state = StateManager(db_path=db_path)
         self.state.load_configs(configs)
+        self._assign_config_workstations()
         logger.info(f"已同步 {len(configs)} 个构型到状态库")
 
         self.runner = TaskRunner(self.state)
@@ -277,6 +279,25 @@ class PipelineDaemon:
             logger.warning(f"进程锁释放异常: {e}")
 
         logger.info("PipelineDaemon 已关闭")
+
+    def _assign_config_workstations(self) -> None:
+        """Persist stable workstation assignments for newly loaded configs."""
+        if self.state is None:
+            raise RuntimeError("StateManager 未初始化，请先调用 start()")
+
+        workstation_ids = [str(ws.get("id")) for ws in WORKSTATIONS if ws.get("id")]
+        assigner = ConfigAssigner(workstation_ids, self.state.get_all_configs())
+        assigned_count = 0
+        for config_name in self.state.get_all_configs():
+            if self.state.get_config_workstation(config_name) is not None:
+                continue
+            self.state.set_config_workstation(
+                config_name,
+                assigner.get_workstation(config_name),
+            )
+            assigned_count += 1
+        if assigned_count:
+            logger.info("[Config] 已持久化 %d 个构型的工作站分配", assigned_count)
 
     def _setup_signal_handlers(self):
         """设置系统信号处理器。"""
@@ -602,7 +623,12 @@ class PipelineDaemon:
             if not self._config_matches(config_name, task_config):
                 continue
 
-            status = remote_executor.query_remote_task_status(task_config, task_step)
+            workstation_id = str(task.get("workstation_id", "default"))
+            status = remote_executor.query_remote_task_status(
+                task_config,
+                task_step,
+                workstation_id=workstation_id,
+            )
             if status in {"running", "unknown"}:
                 return task_config, task_step, status
 

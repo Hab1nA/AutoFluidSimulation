@@ -22,9 +22,10 @@ if TYPE_CHECKING:
     from engine.state_manager import StateManager
 
 from engine.config import (
-    LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
+    DEFAULT_WORKSTATION_ID, LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     OPERATION_TIMEOUTS,
     STATUS_ERROR, get_step_filename, STEP_FILE_PATTERNS,
+    get_workstation_config,
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
 from utils.logger import setup_logger
@@ -71,7 +72,7 @@ class RemoteExecutor:
     共享同一个 SSH 连接。
     """
 
-    def __init__(self, state_manager: StateManager, ssh_getter: Callable[[], "RemoteWorkstation"], ssh_lock: threading.RLock):
+    def __init__(self, state_manager: StateManager, ssh_getter: Callable[..., "RemoteWorkstation"], ssh_lock: threading.RLock):
         """初始化远程执行器。
 
         Args:
@@ -85,9 +86,10 @@ class RemoteExecutor:
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
         # 跟踪远程后台任务名称（用于超时后终止）
-        self._remote_tasks: dict[int, str] = {}  # config_name → task_name
+        self._remote_tasks: dict[object, str] = {}
         self._sync_cache_lock = threading.Lock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
+        self._last_successful_sync_signatures: dict[str, tuple[object, ...]] = {}
 
     # 步骤名 → 日志前缀映射（项目规范：中文消息 + 英文标签前缀）
     _STEP_LOG_PREFIX: dict[str, str] = {
@@ -118,9 +120,136 @@ class RemoteExecutor:
             "script_file": f"{flag_dir}/autofluid_bg_{task_hash}.cmd",
         }
 
+    @staticmethod
+    def _remote_task_key(
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> tuple[str, int, str]:
+        """Build the in-memory remote-task key."""
+        return (workstation_id, config_name, step_name)
+
+    def _get_ssh_for_workstation(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> "RemoteWorkstation":
+        """Call the SSH getter with workstation support while preserving legacy default callers."""
+        try:
+            return self._get_ssh(workstation_id)
+        except TypeError:
+            if workstation_id != DEFAULT_WORKSTATION_ID:
+                raise
+            return self._get_ssh()
+
+    @staticmethod
+    def _remote_config_for_workstation(
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> dict[str, object]:
+        """Return remote paths/settings for one workstation."""
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return dict(REMOTE_CONFIG)
+        return dict(get_workstation_config(workstation_id))
+
+    def _save_remote_task(
+        self,
+        *,
+        workstation_id: str,
+        config_name: int,
+        step_name: str,
+        task_name: str,
+        flag_file: str,
+        error_flag_file: str,
+        log_file: str | None,
+        pid_file: str | None,
+        script_file: str | None,
+        started_at: float,
+    ) -> None:
+        """Persist remote-task metadata with legacy StateManager compatibility."""
+        try:
+            self.state.save_remote_task(
+                workstation_id=workstation_id,
+                config_name=config_name,
+                step_name=step_name,
+                task_name=task_name,
+                flag_file=flag_file,
+                error_flag_file=error_flag_file,
+                log_file=log_file,
+                pid_file=pid_file,
+                script_file=script_file,
+                started_at=started_at,
+            )
+        except TypeError:
+            if workstation_id != DEFAULT_WORKSTATION_ID:
+                raise
+            self.state.save_remote_task(
+                config_name=config_name,
+                step_name=step_name,
+                task_name=task_name,
+                flag_file=flag_file,
+                error_flag_file=error_flag_file,
+                log_file=log_file,
+                pid_file=pid_file,
+                script_file=script_file,
+                started_at=started_at,
+            )
+
+    def _get_remote_task_from_state(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> dict[str, object] | None:
+        """Read persisted remote-task metadata with legacy StateManager compatibility."""
+        try:
+            return self.state.get_remote_task(config_name, step_name, workstation_id)
+        except TypeError:
+            if workstation_id != DEFAULT_WORKSTATION_ID:
+                raise
+            return self.state.get_remote_task(config_name, step_name)
+
+    def _delete_remote_task_from_state(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
+        """Delete persisted remote-task metadata with legacy StateManager compatibility."""
+        try:
+            self.state.delete_remote_task(config_name, step_name, workstation_id)
+        except TypeError:
+            if workstation_id != DEFAULT_WORKSTATION_ID:
+                raise
+            self.state.delete_remote_task(config_name, step_name)
+
+    def _remember_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        task_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
+        """Remember a remote scheduled task in memory."""
+        self._remote_tasks[self._remote_task_key(config_name, step_name, workstation_id)] = task_name
+
+    def _pop_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> str | None:
+        """Remove one remembered remote scheduled task, accepting legacy int keys."""
+        task_name = self._remote_tasks.pop(
+            self._remote_task_key(config_name, step_name, workstation_id),
+            None,
+        )
+        if task_name is None and workstation_id == DEFAULT_WORKSTATION_ID:
+            task_name = self._remote_tasks.pop(config_name, None)
+        return task_name
+
     def _persist_remote_task(
         self,
         *,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
         config_name: int,
         step_name: str,
         task_name: str,
@@ -128,7 +257,8 @@ class RemoteExecutor:
     ) -> None:
         """保存远程计划任务元数据，供 daemon 重启后恢复。"""
         artifacts = self._remote_task_artifacts(task_name, flag_file)
-        self.state.save_remote_task(
+        self._save_remote_task(
+            workstation_id=workstation_id,
             config_name=config_name,
             step_name=step_name,
             task_name=task_name,
@@ -141,25 +271,39 @@ class RemoteExecutor:
         )
 
     def restore_remote_tasks_from_db(self) -> None:
-        """Daemon 重启后从数据库恢复 config → 计划任务名映射。"""
+        """Daemon 重启后从数据库恢复工作站/构型/步骤 → 计划任务名映射。"""
         self._remote_tasks.clear()
         for task in self.state.get_all_remote_tasks():
+            workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
             config_name = int(str(task["config_name"]))
+            step_name = str(task["step_name"])
             task_name = str(task["task_name"])
-            self._remote_tasks[config_name] = task_name
+            self._remote_tasks[
+                self._remote_task_key(config_name, step_name, workstation_id)
+            ] = task_name
 
-    def forget_remote_task(self, config_name: int, step_name: str) -> None:
+    def forget_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
         """远程任务已在恢复扫描中判定终态时，清理本地和 DB 跟踪记录。"""
-        self._remote_tasks.pop(config_name, None)
-        self.state.delete_remote_task(config_name, step_name)
+        self._pop_remote_task(config_name, step_name, workstation_id)
+        self._delete_remote_task_from_state(config_name, step_name, workstation_id)
 
-    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
+    def query_remote_task_status(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> str:
         """查询持久化远程任务当前状态。
 
         Returns:
             completed | failed | running | lost | unknown
         """
-        task = self.state.get_remote_task(config_name, step_name)
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
         if task is None:
             return "lost"
         flag_file = str(task["flag_file"])
@@ -168,7 +312,7 @@ class RemoteExecutor:
 
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 if ssh.check_remote_file(flag_file):
                     return "completed"
                 if ssh.check_remote_file(error_flag_file):
@@ -218,9 +362,14 @@ class RemoteExecutor:
             return None
         return re.search(rf"\b{pid}\b", out) is not None
 
-    def _remote_task_start_time(self, config_name: int, step_name: str) -> float:
+    def _remote_task_start_time(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> float:
         """返回远程任务持久化启动时间；无记录时使用当前时间。"""
-        task = self.state.get_remote_task(config_name, step_name)
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
         if task is None:
             return time.time()
         try:
@@ -251,7 +400,7 @@ class RemoteExecutor:
         """同步状态文件路径（记录上次同步的远程目录）。"""
         return os.path.join(str(LOCAL_PATHS["data_dir"]), "last_sync_paths.json")
 
-    def _load_last_sync_paths(self) -> dict[str, str]:
+    def _load_last_sync_paths(self) -> dict[str, object]:
         """加载上次同步时的远程目录路径。
 
         Returns:
@@ -266,21 +415,53 @@ class RemoteExecutor:
                 data = json.load(f)
             if not isinstance(data, dict):
                 return {}
-            return {
-                str(key): str(value)
-                for key, value in data.items()
-                if isinstance(key, str) and isinstance(value, str)
-            }
+            return {str(key): value for key, value in data.items() if isinstance(key, str)}
         except (OSError, json.JSONDecodeError) as e:
             logger.warning(f"[Sync] 加载同步状态失败: {e}")
             return {}
 
-    def _save_last_sync_paths(self) -> None:
+    def _last_sync_paths_for_workstation(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> dict[str, str]:
+        """Return last synced paths for one workstation."""
+        data = self._load_last_sync_paths()
+        nested = data.get("workstations")
+        if isinstance(nested, dict):
+            workstation_paths = nested.get(workstation_id)
+            if isinstance(workstation_paths, dict):
+                return {
+                    str(key): str(value)
+                    for key, value in workstation_paths.items()
+                    if isinstance(key, str) and isinstance(value, str)
+                }
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return {
+                str(key): str(value)
+                for key, value in data.items()
+                if key in {"scripts_dir", "ref_files_dir"} and isinstance(value, str)
+            }
+        return {}
+
+    def _save_last_sync_paths(
+        self,
+        remote_config: dict[str, object] | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
         """将当前远程目录配置保存为下次同步的比对基准。"""
-        state = {
-            "scripts_dir": str(REMOTE_CONFIG["scripts_dir"]),
-            "ref_files_dir": str(REMOTE_CONFIG["ref_files_dir"]),
+        config = remote_config or self._remote_config_for_workstation(workstation_id)
+        paths = {
+            "scripts_dir": str(config["scripts_dir"]),
+            "ref_files_dir": str(config["ref_files_dir"]),
         }
+        state = self._load_last_sync_paths()
+        nested = state.get("workstations")
+        if not isinstance(nested, dict):
+            nested = {}
+        nested[workstation_id] = paths
+        state["workstations"] = nested
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            state.update(paths)
         try:
             with open(self._sync_state_path, 'w', encoding='utf-8') as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
@@ -288,7 +469,13 @@ class RemoteExecutor:
         except OSError as e:
             logger.warning(f"[Sync] 保存同步状态失败: {e}")
 
-    def _cleanup_remote_files(self, remote_dir: str, filenames: list[str], label: str) -> None:
+    def _cleanup_remote_files(
+        self,
+        remote_dir: str,
+        filenames: list[str],
+        label: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
         """清理旧远程目录中我们上传过的已知文件。
 
         逐个删除文件，忽略不存在或删除失败的情况。
@@ -302,7 +489,7 @@ class RemoteExecutor:
         logger.info(f"[Sync] 检测到{label}远程目录变更，清理旧路径: {remote_dir}")
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 for filename in filenames:
                     remote_path = f"{remote_dir}/{filename}".replace("\\", "/")
                     try:
@@ -316,7 +503,11 @@ class RemoteExecutor:
     # 文件传输
     # ------------------------------------------------------------------
 
-    def execute_transfer(self, config_name: int) -> bool:
+    def execute_transfer(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """通过 SFTP 将 SCDOC 文件上传到远程工作站。
 
         内部先检查远程文件是否已存在且大小>0，若已存在则直接返回成功
@@ -332,8 +523,9 @@ class RemoteExecutor:
             str(LOCAL_PATHS["scdoc_dir"]),
             _scdoc_name,
         )
+        remote_config = self._remote_config_for_workstation(workstation_id)
         remote_file = os.path.join(
-            str(REMOTE_CONFIG["scdoc_dir"]),
+            str(remote_config["scdoc_dir"]),
             _scdoc_name,
         ).replace("\\", "/")
 
@@ -366,7 +558,7 @@ class RemoteExecutor:
 
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
 
                 remote_check_timeout = _remaining_transfer_timeout()
                 if remote_check_timeout <= 0:
@@ -478,17 +670,31 @@ class RemoteExecutor:
         if type(config_name) is not int:
             raise ValueError(f"构型名称必须是整数，当前为 {type(config_name).__name__}")
 
-    def _meshing_flag_file(self, config_name: int) -> str:
+    def _meshing_flag_file(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> str:
         """返回 Meshing 完成标志文件路径。"""
         self._validate_config_name(config_name)
-        return f"{REMOTE_CONFIG['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
+        config = remote_config or self._remote_config_for_workstation()
+        return f"{config['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
 
-    def _solver_flag_file(self, config_name: int) -> str:
+    def _solver_flag_file(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> str:
         """返回 Solver 完成标志文件路径。"""
         self._validate_config_name(config_name)
-        return f"{REMOTE_CONFIG['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
+        config = remote_config or self._remote_config_for_workstation()
+        return f"{config['flag_dir']}/solver_done_{config_name}.txt".replace("\\", "/")
 
-    def _build_meshing_command(self, config_name: int) -> tuple[str, str]:
+    def _build_meshing_command(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> tuple[str, str]:
         """构建远程网格划分命令和标志文件路径。
 
         Args:
@@ -497,10 +703,11 @@ class RemoteExecutor:
         Returns:
             (command, flag_file) 元组
         """
-        flag_file = self._meshing_flag_file(config_name)
-        conda_env = REMOTE_CONFIG["conda_env"]
-        conda_exe = REMOTE_CONFIG["conda_exe"]
-        scripts_dir = REMOTE_CONFIG["scripts_dir"]
+        config = remote_config or self._remote_config_for_workstation()
+        flag_file = self._meshing_flag_file(config_name, config)
+        conda_env = config["conda_env"]
+        conda_exe = config["conda_exe"]
+        scripts_dir = config["scripts_dir"]
         processor_count = self._meshing_processor_count()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
@@ -515,23 +722,28 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/batch_meshing_gen4.py", force_quote=True),
             str(config_name),
             "--mpi-bin-dir",
-            _cmd_arg(REMOTE_CONFIG["mpi_bin_dir"], force_quote=True),
+            _cmd_arg(config["mpi_bin_dir"], force_quote=True),
             "--workflow-path",
             _cmd_arg(f"{scripts_dir}/meshing_gen4.wft", force_quote=True),
             "--journal-path",
             _cmd_arg(f"{scripts_dir}/meshing_gen4.jou", force_quote=True),
             "--scdoc-dir",
-            _cmd_arg(REMOTE_CONFIG["scdoc_dir"], force_quote=True),
+            _cmd_arg(config["scdoc_dir"], force_quote=True),
             "--output-dir",
-            _cmd_arg(REMOTE_CONFIG["msh_dir"], force_quote=True),
+            _cmd_arg(config["msh_dir"], force_quote=True),
             "--working-dir",
-            _cmd_arg(REMOTE_CONFIG["working_dir"], force_quote=True),
+            _cmd_arg(config["working_dir"], force_quote=True),
             "--processor-count",
             str(processor_count),
         ])
         return command, flag_file
 
-    def _run_meshing_command(self, config_name: int, log_prefix: str = "[Meshing]") -> bool:
+    def _run_meshing_command(
+        self,
+        config_name: int,
+        log_prefix: str = "[Meshing]",
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """启动远程网格划分后台任务（内部方法）。
 
         统一处理参数校验、脚本同步、命令构建和 SSH 执行。
@@ -544,12 +756,13 @@ class RemoteExecutor:
         Returns:
             True 表示后台任务启动成功
         """
-        if not self.sync_scripts():
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        if not self.sync_scripts(workstation_id=workstation_id):
             logger.error(f"{log_prefix} 远程脚本同步失败，无法启动网格划分")
             return False
 
         try:
-            command, flag_file = self._build_meshing_command(config_name)
+            command, flag_file = self._build_meshing_command(config_name, remote_config)
         except ValueError as e:
             logger.error(f"{log_prefix} 远程网格划分命令构建失败: {e}")
             return False
@@ -559,15 +772,21 @@ class RemoteExecutor:
 
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
                     command, flag_file,
-                    working_dir=str(REMOTE_CONFIG["working_dir"]),
+                    working_dir=str(remote_config["working_dir"]),
                     interactive=True,
                 )
                 if success:
-                    self._remote_tasks[config_name] = task_name
+                    self._remember_remote_task(
+                        config_name,
+                        "meshing",
+                        task_name,
+                        workstation_id,
+                    )
                     self._persist_remote_task(
+                        workstation_id=workstation_id,
                         config_name=config_name,
                         step_name="meshing",
                         task_name=task_name,
@@ -581,15 +800,25 @@ class RemoteExecutor:
                 logger.error(f"{log_prefix} 网格划分启动异常: {e}")
                 return False
 
-    def execute_meshing(self, config_name: int) -> bool:
+    def execute_meshing(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """在远程工作站启动网格划分后台任务。
 
         注意：本方法仅返回成功/失败，不设置步骤状态。
         状态由调用方（RetryManager / MeshingMonitor）统一管理。
         """
-        return self.start_meshing(config_name)
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return self.start_meshing(config_name)
+        return self.start_meshing(config_name, workstation_id=workstation_id)
 
-    def start_meshing(self, config_name: int) -> bool:
+    def start_meshing(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """启动远程网格划分后台任务（不设置状态错误，由调用方处理）。
 
         用于 MeshingMonitor，启动失败时返回 False 由调用方决定重试策略。
@@ -599,7 +828,12 @@ class RemoteExecutor:
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
-        return self._run_meshing_command(config_name)
+        if workstation_id == DEFAULT_WORKSTATION_ID:
+            return self._run_meshing_command(config_name)
+        return self._run_meshing_command(
+            config_name,
+            workstation_id=workstation_id,
+        )
 
     def check_meshing_done(self, config_name: int) -> bool:
         """检查网格划分是否已完成（标志文件是否存在）。
@@ -629,13 +863,15 @@ class RemoteExecutor:
         config_name: int,
         *,
         timeout: float | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
         """在 SSH 锁内检查 Meshing 完成标志或网格文件是否已存在。"""
+        remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._meshing_flag_file(config_name)
+            flag_file = self._meshing_flag_file(config_name, remote_config)
             mesh_name = get_step_filename("meshing", config_name)
             mesh_file = (
-                f"{str(REMOTE_CONFIG['msh_dir']).replace(chr(92), '/')}/{mesh_name}"
+                f"{str(remote_config['msh_dir']).replace(chr(92), '/')}/{mesh_name}"
                 if mesh_name
                 else None
             )
@@ -653,7 +889,7 @@ class RemoteExecutor:
 
         try:
             with self._ssh_lock:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 return _check_remote_file(ssh, flag_file) or (
                     mesh_file is not None and _check_remote_file(ssh, mesh_file)
                 )
@@ -665,20 +901,26 @@ class RemoteExecutor:
         self, config_name: int,
         paused_event: threading.Event | None = None,
         stopped_event: threading.Event | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
         """轮询等待网格划分完成（逐次短暂持 SSH 锁，不在整个等待期间持锁）。
 
         暂停期间冻结超时计时器，防止恢复运行后立即触发超时。
         """
+        remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._meshing_flag_file(config_name)
+            flag_file = self._meshing_flag_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         error_flag = f"{flag_file}.error"
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
-        start_time = self._remote_task_start_time(config_name, "meshing")
+        start_time = self._remote_task_start_time(
+            config_name,
+            "meshing",
+            workstation_id,
+        )
 
         logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
@@ -699,18 +941,28 @@ class RemoteExecutor:
 
             try:
                 with self._ssh_lock:
-                    ssh = self._get_ssh()
+                    ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
                         logger.error(
                             f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._cleanup_completed_remote_task(config_name, "meshing", ssh)
+                        self._cleanup_completed_remote_task(
+                            config_name,
+                            "meshing",
+                            ssh,
+                            workstation_id,
+                        )
                         return False
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
                         ssh.delete_remote_file(flag_file)
-                        self._cleanup_completed_remote_task(config_name, "meshing", ssh)
+                        self._cleanup_completed_remote_task(
+                            config_name,
+                            "meshing",
+                            ssh,
+                            workstation_id,
+                        )
                         return True
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
@@ -719,7 +971,7 @@ class RemoteExecutor:
 
         logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
         # 超时后终止远程进程，防止资源泄漏和重试冲突
-        self._kill_remote_task_for_config(config_name, "meshing")
+        self._kill_remote_task_for_config(config_name, "meshing", workstation_id)
         return False
 
     # ------------------------------------------------------------------
@@ -746,7 +998,11 @@ class RemoteExecutor:
             return default_count
         return processor_count
 
-    def _build_solver_command(self, config_name: int) -> tuple[str, str]:
+    def _build_solver_command(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> tuple[str, str]:
         """构建远程仿真求解命令和标志文件路径。
 
         Args:
@@ -755,10 +1011,11 @@ class RemoteExecutor:
         Returns:
             (command, flag_file) 元组
         """
-        flag_file = self._solver_flag_file(config_name)
-        conda_env = REMOTE_CONFIG["conda_env"]
-        conda_exe = REMOTE_CONFIG["conda_exe"]
-        scripts_dir = REMOTE_CONFIG["scripts_dir"]
+        config = remote_config or self._remote_config_for_workstation()
+        flag_file = self._solver_flag_file(config_name, config)
+        conda_env = config["conda_env"]
+        conda_exe = config["conda_exe"]
+        scripts_dir = config["scripts_dir"]
         processor_count = self._solver_processor_count()
         iteration_count = ENGINE_CONFIG["solver_iteration_count"]
 
@@ -766,7 +1023,7 @@ class RemoteExecutor:
         # ★ --anim-dir 使用 normpath 消除 .. 相对路径段，确保在 schtasks
         #   默认 CWD (System32) 下也能正确解析
         anim_dir = os.path.normpath(
-            os.path.join(str(REMOTE_CONFIG["working_dir"]), "..", "animation")
+            os.path.join(str(config["working_dir"]), "..", "animation")
         )
         command = " ".join([
             _cmd_arg(conda_exe, force_quote=True),
@@ -779,23 +1036,23 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/batch_solver_gen4.py", force_quote=True),
             str(config_name),
             "--mpi-bin-dir",
-            _cmd_arg(REMOTE_CONFIG["mpi_bin_dir"], force_quote=True),
+            _cmd_arg(config["mpi_bin_dir"], force_quote=True),
             "--journal-path",
             _cmd_arg(f"{scripts_dir}/solver_gen4.jou", force_quote=True),
             "--post-journal-path",
             _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
             "--msh-dir",
-            _cmd_arg(REMOTE_CONFIG["msh_dir"], force_quote=True),
+            _cmd_arg(config["msh_dir"], force_quote=True),
             "--output-dir",
-            _cmd_arg(REMOTE_CONFIG["result_dir"], force_quote=True),
+            _cmd_arg(config["result_dir"], force_quote=True),
             "--anim-dir",
             _cmd_arg(anim_dir, force_quote=True),
             "--working-dir",
-            _cmd_arg(REMOTE_CONFIG["working_dir"], force_quote=True),
+            _cmd_arg(config["working_dir"], force_quote=True),
             "--working-dir-t",
-            _cmd_arg(f"{REMOTE_CONFIG['working_dir']}/animation-t", force_quote=True),
+            _cmd_arg(f"{config['working_dir']}/animation-t", force_quote=True),
             "--working-dir-v",
-            _cmd_arg(f"{REMOTE_CONFIG['working_dir']}/animation-v", force_quote=True),
+            _cmd_arg(f"{config['working_dir']}/animation-v", force_quote=True),
             "--processor-count",
             str(processor_count),
             "--iterate-count",
@@ -803,7 +1060,11 @@ class RemoteExecutor:
         ])
         return command, flag_file
 
-    def execute_solver(self, config_name: int) -> bool:
+    def execute_solver(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """在远程工作站启动仿真求解后台任务（全局屏障后调用）。
 
         注意：本方法仅返回成功/失败，不设置步骤状态。
@@ -816,13 +1077,15 @@ class RemoteExecutor:
             logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
             return False
 
+        remote_config = self._remote_config_for_workstation(workstation_id)
+
         # 同步远程脚本（仅在文件变更时上传）
-        if not self.sync_scripts():
+        if not self.sync_scripts(workstation_id=workstation_id):
             logger.error("[Solver] 远程脚本同步失败，无法启动仿真求解")
             return False
 
         try:
-            command, flag_file = self._build_solver_command(config_name)
+            command, flag_file = self._build_solver_command(config_name, remote_config)
         except ValueError as e:
             logger.error(f"[Solver] 远程求解命令构建失败: {e}")
             return False
@@ -832,15 +1095,21 @@ class RemoteExecutor:
 
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
                     command, flag_file,
-                    working_dir=str(REMOTE_CONFIG["working_dir"]),
+                    working_dir=str(remote_config["working_dir"]),
                     interactive=True,
                 )
                 if success:
-                    self._remote_tasks[config_name] = task_name
+                    self._remember_remote_task(
+                        config_name,
+                        "solver",
+                        task_name,
+                        workstation_id,
+                    )
                     self._persist_remote_task(
+                        workstation_id=workstation_id,
                         config_name=config_name,
                         step_name="solver",
                         task_name=task_name,
@@ -859,19 +1128,21 @@ class RemoteExecutor:
         self, config_name: int,
         paused_event: threading.Event | None = None,
         stopped_event: threading.Event | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
         """轮询等待仿真求解完成（逐次短暂持 SSH 锁）。
 
         检测到标志文件后，额外验证 .cas.h5 和 .dat.h5 是否都存在。
         若仅存在一个文件，宽限 60s 等待另一个；超时则清理部分文件并返回错误。
         """
+        remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._solver_flag_file(config_name)
+            flag_file = self._solver_flag_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         error_flag = f"{flag_file}.error"
-        result_dir = str(REMOTE_CONFIG["result_dir"]).replace(chr(92), "/")
+        result_dir = str(remote_config["result_dir"]).replace(chr(92), "/")
         cas_name = get_step_filename("solver", config_name)
         dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
@@ -879,7 +1150,11 @@ class RemoteExecutor:
 
         timeout = ENGINE_CONFIG["solver_timeout"]
         poll_interval = 30
-        start_time = self._remote_task_start_time(config_name, "solver")
+        start_time = self._remote_task_start_time(
+            config_name,
+            "solver",
+            workstation_id,
+        )
         file_grace_period = 60
         first_file_seen_time: float | None = None
 
@@ -902,13 +1177,18 @@ class RemoteExecutor:
 
             try:
                 with self._ssh_lock:
-                    ssh = self._get_ssh()
+                    ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
                         logger.error(
                             f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._cleanup_completed_remote_task(config_name, "solver", ssh)
+                        self._cleanup_completed_remote_task(
+                            config_name,
+                            "solver",
+                            ssh,
+                            workstation_id,
+                        )
                         return False
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
@@ -917,7 +1197,12 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            self._cleanup_completed_remote_task(config_name, "solver", ssh)
+                            self._cleanup_completed_remote_task(
+                                config_name,
+                                "solver",
+                                ssh,
+                                workstation_id,
+                            )
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -953,7 +1238,12 @@ class RemoteExecutor:
                                 ssh.delete_remote_file(dat_file)
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
-                            self._cleanup_completed_remote_task(config_name, "solver", ssh)
+                            self._cleanup_completed_remote_task(
+                                config_name,
+                                "solver",
+                                ssh,
+                                workstation_id,
+                            )
                             return False
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
@@ -962,7 +1252,7 @@ class RemoteExecutor:
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
         # 超时后终止远程进程，防止资源泄漏和重试冲突
-        self._kill_remote_task_for_config(config_name, "solver")
+        self._kill_remote_task_for_config(config_name, "solver", workstation_id)
         return False
 
     # ------------------------------------------------------------------
@@ -973,6 +1263,7 @@ class RemoteExecutor:
         self,
         config_name: int,
         step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> None:
         """超时后终止远程后台任务。
 
@@ -983,15 +1274,15 @@ class RemoteExecutor:
             config_name: 构型编号
             step_name: 步骤名（用于日志）
         """
-        task_name = self._remote_tasks.pop(config_name, None)
-        self.state.delete_remote_task(config_name, step_name)
+        task_name = self._pop_remote_task(config_name, step_name, workstation_id)
+        self._delete_remote_task_from_state(config_name, step_name, workstation_id)
         if not task_name:
             logger.debug(f"{self._log_prefix(step_name)} 构型{config_name} 无远程任务记录，跳过终止")
             return
 
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 ssh.kill_remote_task(task_name)
                 logger.info(f"{self._log_prefix(step_name)} 构型{config_name} 已请求终止远程任务: {task_name}")
             except (OSError, ConnectionError) as e:
@@ -1002,14 +1293,15 @@ class RemoteExecutor:
         config_name: int,
         step_name: str,
         ssh: "RemoteWorkstation",
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> None:
         """清理已结束任务的计划任务条目和本地跟踪记录。"""
-        task_name = self._remote_tasks.pop(config_name, None)
-        task = self.state.get_remote_task(config_name, step_name)
+        task_name = self._pop_remote_task(config_name, step_name, workstation_id)
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
         pid_file = None
         if task is not None and task.get("pid_file"):
             pid_file = str(task["pid_file"])
-        self.state.delete_remote_task(config_name, step_name)
+        self._delete_remote_task_from_state(config_name, step_name, workstation_id)
         if not task_name:
             return
 
@@ -1028,7 +1320,7 @@ class RemoteExecutor:
     # 脚本同步
     # ------------------------------------------------------------------
 
-    def sync_scripts(self) -> bool:
+    def sync_scripts(self, workstation_id: str = DEFAULT_WORKSTATION_ID) -> bool:
         """同步远程脚本和引用文件到工作站。
 
         比较本地和远程文件的 MD5 哈希值，仅在文件变更时上传。
@@ -1041,29 +1333,35 @@ class RemoteExecutor:
             同步成功返回 True，失败返回 False
         """
         with self._sync_cache_lock:
-            return self._sync_scripts_locked()
+            return self._sync_scripts_locked(workstation_id)
 
-    def _sync_scripts_locked(self) -> bool:
+    def _sync_scripts_locked(self, workstation_id: str = DEFAULT_WORKSTATION_ID) -> bool:
         """在缓存锁保护下同步脚本和引用文件。"""
         local_scripts_dir = LOCAL_PATHS.get("remote_scripts_dir")
         if not local_scripts_dir or not os.path.isdir(local_scripts_dir):
             logger.error(f"[Sync] 本地脚本目录不存在: {local_scripts_dir}")
             return False
 
-        current_scripts_dir = str(REMOTE_CONFIG["scripts_dir"])
-        current_ref_dir = str(REMOTE_CONFIG["ref_files_dir"])
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        current_scripts_dir = str(remote_config["scripts_dir"])
+        current_ref_dir = str(remote_config["ref_files_dir"])
         ref_local_dir = os.path.join(local_scripts_dir, "fluent_chemkin_files")
 
         script_hashes = self._calculate_local_hashes(
             local_scripts_dir,
             REMOTE_SCRIPT_FILES,
+            remote_config,
         )
         if script_hashes is None:
             return False
 
         ref_hashes: dict[str, str | None] | None = None
         if os.path.isdir(ref_local_dir):
-            ref_hashes = self._calculate_local_hashes(ref_local_dir, REMOTE_REF_FILES)
+            ref_hashes = self._calculate_local_hashes(
+                ref_local_dir,
+                REMOTE_REF_FILES,
+                remote_config,
+            )
             if ref_hashes is None:
                 return False
 
@@ -1072,20 +1370,31 @@ class RemoteExecutor:
             current_ref_dir,
             script_hashes,
             ref_hashes,
+            remote_config,
         )
-        if sync_signature == self._last_successful_sync_signature:
+        if sync_signature == self._last_successful_sync_signatures.get(workstation_id):
             return True
 
         # ---- 路径变更检测：清理旧远程文件 ----
-        last_paths = self._load_last_sync_paths()
+        last_paths = self._last_sync_paths_for_workstation(workstation_id)
 
         last_scripts_dir = last_paths.get("scripts_dir")
         last_ref_dir = last_paths.get("ref_files_dir")
 
         if last_scripts_dir and last_scripts_dir != current_scripts_dir:
-            self._cleanup_remote_files(last_scripts_dir, REMOTE_SCRIPT_FILES, "脚本")
+            self._cleanup_remote_files(
+                last_scripts_dir,
+                REMOTE_SCRIPT_FILES,
+                "脚本",
+                workstation_id,
+            )
         if last_ref_dir and last_ref_dir != current_ref_dir:
-            self._cleanup_remote_files(last_ref_dir, REMOTE_REF_FILES, "引用文件")
+            self._cleanup_remote_files(
+                last_ref_dir,
+                REMOTE_REF_FILES,
+                "引用文件",
+                workstation_id,
+            )
 
         # ---- 正常同步流程 ----
 
@@ -1096,6 +1405,8 @@ class RemoteExecutor:
             filenames=REMOTE_SCRIPT_FILES,
             label="脚本",
             local_hashes=script_hashes,
+            remote_config=remote_config,
+            workstation_id=workstation_id,
         ):
             return False
 
@@ -1107,12 +1418,15 @@ class RemoteExecutor:
                 filenames=REMOTE_REF_FILES,
                 label="引用文件",
                 local_hashes=ref_hashes,
+                remote_config=remote_config,
+                workstation_id=workstation_id,
             ):
                 return False
 
         # 同步成功 → 记录当前路径供下次比对
-        self._save_last_sync_paths()
+        self._save_last_sync_paths(remote_config, workstation_id)
         self._last_successful_sync_signature = sync_signature
+        self._last_successful_sync_signatures[workstation_id] = sync_signature
         return True
 
     def _build_sync_signature(
@@ -1121,15 +1435,17 @@ class RemoteExecutor:
         ref_files_dir: str,
         script_hashes: dict[str, str | None],
         ref_hashes: dict[str, str | None] | None,
+        remote_config: dict[str, object] | None = None,
     ) -> tuple[object, ...]:
         """构建一次成功同步的本地内容和远程路径指纹。"""
+        config = remote_config or self._remote_config_for_workstation()
         placeholder_inputs = (
-            str(REMOTE_CONFIG["scripts_dir"]),
-            str(REMOTE_CONFIG["scdoc_dir"]),
-            str(REMOTE_CONFIG["working_dir"]),
-            str(REMOTE_CONFIG["ref_files_dir"]),
-            str(REMOTE_CONFIG["msh_dir"]),
-            str(REMOTE_CONFIG["result_dir"]),
+            str(config["scripts_dir"]),
+            str(config["scdoc_dir"]),
+            str(config["working_dir"]),
+            str(config["ref_files_dir"]),
+            str(config["msh_dir"]),
+            str(config["result_dir"]),
             STEP_FILE_PATTERNS.get("sc", ""),
         )
         return (
@@ -1166,6 +1482,8 @@ class RemoteExecutor:
         filenames: list[str],
         label: str,
         local_hashes: dict[str, str | None] | None = None,
+        remote_config: dict[str, object] | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
         """同步一组文件到远程目录。
 
@@ -1195,7 +1513,7 @@ class RemoteExecutor:
         local_combined = self._compute_combined_hash(local_hashes)
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_combined = ssh.get_remote_combined_file_hash(
                     remote_dir, filenames
                 )
@@ -1216,7 +1534,7 @@ class RemoteExecutor:
         # ---- 阶段 2: 第二级校验 —— 逐文件比对（N 次 SSH 调用） ----
         with self._ssh_lock:
             try:
-                ssh = self._get_ssh()
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_hashes = ssh.get_remote_file_hashes(remote_dir, filenames)
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Sync] 获取{label}文件远程哈希异常: {e}")
@@ -1258,10 +1576,11 @@ class RemoteExecutor:
             #   允许 Transfer 等操作在文件间插入执行
             with self._ssh_lock:
                 try:
-                    ssh = self._get_ssh()
+                    ssh = self._get_ssh_for_workstation(workstation_id)
                     if os.path.splitext(filename)[1] in path_aware_exts:
                         if not self._upload_text_file_with_path_replacement(
                             ssh, local_file, remote_file,
+                            remote_config=remote_config,
                             paused_event=self._paused_event,
                             stopped_event=self._stopped_event,
                         ):
@@ -1281,7 +1600,12 @@ class RemoteExecutor:
         logger.info(f"[Sync] {label}同步完成")
         return True
 
-    def _calculate_local_hashes(self, local_dir: str, filenames: list) -> dict[str, str | None] | None:
+    def _calculate_local_hashes(
+        self,
+        local_dir: str,
+        filenames: list,
+        remote_config: dict[str, object] | None = None,
+    ) -> dict[str, str | None] | None:
         """计算本地目录中指定文件的 MD5 哈希值。
 
         对于包含占位符的文件（.jou/.set/.wft/.pdf），
@@ -1312,7 +1636,7 @@ class RemoteExecutor:
                     #    远程文件（通过 SFTP 二进制上传）的哈希永久不一致。
                     with open(filepath, 'r', encoding='utf-8', newline='') as f:
                         content = f.read()
-                    content = self._apply_placeholders(content)
+                    content = self._apply_placeholders(content, remote_config)
                     file_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
                 else:
                     # 普通文件直接计算原始内容哈希
@@ -1326,18 +1650,23 @@ class RemoteExecutor:
             logger.error(f"[Sync] 计算本地文件哈希失败: {e}")
             return None
 
-    def _apply_placeholders(self, content: str) -> str:
+    def _apply_placeholders(
+        self,
+        content: str,
+        remote_config: dict[str, object] | None = None,
+    ) -> str:
         """将模板中的所有占位符替换为实际远程目录值。"""
         def fluent_path(path: object) -> str:
             return str(path).replace("\\", "/")
 
-        scripts_dir = fluent_path(REMOTE_CONFIG["scripts_dir"])
+        config = remote_config or self._remote_config_for_workstation()
+        scripts_dir = fluent_path(config["scripts_dir"])
         content = content.replace('{{REMOTE_ROOT}}', scripts_dir)
-        content = content.replace('{{REMOTE_SCDOC_DIR}}', fluent_path(REMOTE_CONFIG["scdoc_dir"]))
-        content = content.replace('{{REMOTE_WORKING_DIR}}', fluent_path(REMOTE_CONFIG["working_dir"]))
-        content = content.replace('{{REMOTE_REF_FILES_DIR}}', fluent_path(REMOTE_CONFIG["ref_files_dir"]))
-        content = content.replace('{{REMOTE_MSH_DIR}}', fluent_path(REMOTE_CONFIG["msh_dir"]))
-        content = content.replace('{{REMOTE_RESULT_DIR}}', fluent_path(REMOTE_CONFIG["result_dir"]))
+        content = content.replace('{{REMOTE_SCDOC_DIR}}', fluent_path(config["scdoc_dir"]))
+        content = content.replace('{{REMOTE_WORKING_DIR}}', fluent_path(config["working_dir"]))
+        content = content.replace('{{REMOTE_REF_FILES_DIR}}', fluent_path(config["ref_files_dir"]))
+        content = content.replace('{{REMOTE_MSH_DIR}}', fluent_path(config["msh_dir"]))
+        content = content.replace('{{REMOTE_RESULT_DIR}}', fluent_path(config["result_dir"]))
         sc_pattern = STEP_FILE_PATTERNS.get("sc", "")
         if sc_pattern:
             content = content.replace('{{SC_FILENAME}}', sc_pattern)
@@ -1348,6 +1677,7 @@ class RemoteExecutor:
         ssh: "RemoteWorkstation",
         local_file: str,
         remote_file: str,
+        remote_config: dict[str, object] | None = None,
         paused_event: threading.Event | None = None,
         stopped_event: threading.Event | None = None,
     ) -> bool:
@@ -1372,7 +1702,7 @@ class RemoteExecutor:
                 content = f.read()
 
             # 替换所有占位符
-            content = self._apply_placeholders(content)
+            content = self._apply_placeholders(content, remote_config)
 
             # ★ 写入临时文件时使用二进制模式，确保内容字节与
             #    _calculate_local_hashes 中 encode('utf-8') 的字节完全一致，

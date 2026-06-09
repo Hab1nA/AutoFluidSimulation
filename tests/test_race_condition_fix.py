@@ -67,23 +67,38 @@ class _MockRemoteExecutor:
     def _get_ssh(self):
         return None
 
-    def start_meshing(self, config_name: int) -> bool:
+    def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         self.start_meshing_call_count += 1
         return self.start_meshing_returns
 
     def check_meshing_done(self, config_name: int) -> bool:
         return self.check_meshing_done_returns
 
-    def wait_meshing_completion(self, config_name,
-                                 paused_event=None, stopped_event=None) -> bool:
+    def wait_meshing_completion(
+        self,
+        config_name,
+        paused_event=None,
+        stopped_event=None,
+        workstation_id: str = "default",
+    ) -> bool:
         self.wait_meshing_call_count += 1
         time.sleep(0.05)
         return self.wait_meshing_returns
 
-    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
+    def query_remote_task_status(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> str:
         return "lost"
 
-    def forget_remote_task(self, config_name: int, step_name: str) -> None:
+    def forget_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> None:
         pass
 
 
@@ -662,7 +677,7 @@ class TestMeshingMonitorExceptionRequeue:
         call_count = [0]
         stopped_ref = self.stopped
 
-        def failing_start(cn):
+        def failing_start(cn, workstation_id: str = "default"):
             call_count[0] += 1
             if call_count[0] >= 3:
                 stopped_ref.set()  # 停止监控，保留当前状态

@@ -62,15 +62,37 @@ class _MockRemoteExecutor:
     def _get_ssh(self):
         return None
 
-    def start_meshing(self, config_name: int) -> bool:
+    def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         return True
 
     def check_meshing_done(self, config_name: int) -> bool:
         return False
 
-    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+    def wait_meshing_completion(
+        self,
+        config_name,
+        paused_event=None,
+        stopped_event=None,
+        workstation_id: str = "default",
+    ) -> bool:
         time.sleep(0.1)
         return True
+
+    def query_remote_task_status(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> str:
+        return "lost"
+
+    def forget_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> None:
+        return None
 
 
 class _MockSWExecutor:

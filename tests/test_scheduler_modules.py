@@ -300,6 +300,105 @@ class TestTaskRunnerSWDelegates:
         assert runner._ssh is None
         assert lock.entries == 1
 
+    def test_get_ssh_uses_per_workstation_pool(self, monkeypatch):
+        """不同工作站应创建并复用独立 SSH 客户端。"""
+        import engine.task_runner as task_runner_module
+
+        created: list[tuple[str, int, str, str]] = []
+
+        class _SSH:
+            def __init__(self, host: str, port: int, username: str, password: str):
+                created.append((host, port, username, password))
+                self.connected = False
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def connect(self) -> bool:
+                self.connected = True
+                return True
+
+        monkeypatch.setattr(
+            task_runner_module,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "host": f"{workstation_id}.example",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+            },
+        )
+        monkeypatch.setattr(task_runner_module, "RemoteWorkstation", _SSH)
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh_pool = {}
+        runner._ssh_locks = {}
+        runner._ssh_lock = threading.RLock()
+        runner._ssh = None
+
+        ws_a_first = runner.get_ssh("WS-A")
+        ws_a_second = runner.get_ssh("WS-A")
+        ws_b = runner.get_ssh("WS-B")
+
+        assert ws_a_first is ws_a_second
+        assert ws_a_first is not ws_b
+        assert created == [
+            ("WS-A.example", 22, "ps", "pw"),
+            ("WS-B.example", 22, "ps", "pw"),
+        ]
+
+    def test_remote_stage_delegates_use_assigned_workstation(self):
+        """Transfer/Meshing/Solver 委托时应使用构型分配的工作站。"""
+        from engine.config import DEFAULT_WORKSTATION_ID
+
+        calls: list[tuple[str, int, str]] = []
+
+        class _State:
+            def get_config_workstation(self, config_name: int) -> str | None:
+                return "WS-A" if config_name == 1 else None
+
+        class _RemoteExecutor:
+            def execute_transfer(
+                self,
+                config_name: int,
+                workstation_id: str = DEFAULT_WORKSTATION_ID,
+            ) -> bool:
+                calls.append(("transfer", config_name, workstation_id))
+                return True
+
+            def execute_meshing(
+                self,
+                config_name: int,
+                workstation_id: str = DEFAULT_WORKSTATION_ID,
+            ) -> bool:
+                calls.append(("meshing", config_name, workstation_id))
+                return True
+
+            def execute_solver(
+                self,
+                config_name: int,
+                workstation_id: str = DEFAULT_WORKSTATION_ID,
+            ) -> bool:
+                calls.append(("solver", config_name, workstation_id))
+                return True
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner.state = _State()
+        runner._remote_executor = _RemoteExecutor()
+
+        assert runner.execute_transfer(1) is True
+        assert runner.execute_meshing(1) is True
+        assert runner.execute_solver(1) is True
+        assert runner.execute_transfer(2) is True
+
+        assert calls == [
+            ("transfer", 1, "WS-A"),
+            ("meshing", 1, "WS-A"),
+            ("solver", 1, "WS-A"),
+            ("transfer", 2, DEFAULT_WORKSTATION_ID),
+        ]
+
 
 # ====================================================================
 # Mock 辅助类
@@ -360,22 +459,30 @@ class _MockRemoteExecutor:
 
     def __init__(self, state_manager):
         self.state = state_manager
-        self._meshing_started: list[int] = []
+        self._meshing_started: list[tuple[int, str]] = []
         self._meshing_output_exists = False
-        self._meshing_output_checks: list[tuple[int, float | None]] = []
+        self._meshing_output_checks: list[tuple[int, float | None, str]] = []
         self._remote_task_status = "lost"
-        self._remote_task_status_checks: list[tuple[int, str]] = []
-        self._forgotten_remote_tasks: list[tuple[int, str]] = []
+        self._remote_task_status_checks: list[tuple[int, str, str]] = []
+        self._forgotten_remote_tasks: list[tuple[int, str, str]] = []
+        self._meshing_waits: list[tuple[int, str]] = []
 
-    def start_meshing(self, config_name: int) -> bool:
-        self._meshing_started.append(config_name)
+    def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
+        self._meshing_started.append((config_name, workstation_id))
         return True
 
     def check_meshing_done(self, config_name: int) -> bool:
         return False
 
-    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+    def wait_meshing_completion(
+        self,
+        config_name,
+        paused_event=None,
+        stopped_event=None,
+        workstation_id: str = "default",
+    ) -> bool:
         # 立即完成
+        self._meshing_waits.append((config_name, workstation_id))
         return True
 
     def get_ssh_connection(self):
@@ -386,16 +493,27 @@ class _MockRemoteExecutor:
         config_name: int,
         *,
         timeout: float | None = None,
+        workstation_id: str = "default",
     ) -> bool:
-        self._meshing_output_checks.append((config_name, timeout))
+        self._meshing_output_checks.append((config_name, timeout, workstation_id))
         return self._meshing_output_exists
 
-    def query_remote_task_status(self, config_name: int, step_name: str) -> str:
-        self._remote_task_status_checks.append((config_name, step_name))
+    def query_remote_task_status(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> str:
+        self._remote_task_status_checks.append((config_name, step_name, workstation_id))
         return self._remote_task_status
 
-    def forget_remote_task(self, config_name: int, step_name: str) -> None:
-        self._forgotten_remote_tasks.append((config_name, step_name))
+    def forget_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> None:
+        self._forgotten_remote_tasks.append((config_name, step_name, workstation_id))
 
 
 class _SpyFileMonitor:
@@ -517,9 +635,24 @@ class TestPipelineSchedulerStartRecovery:
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
-        assert self.runner._remote_executor._remote_task_status_checks == [(1, "meshing")]
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "meshing", "default")]
         assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
         assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
+        """断点恢复查询远程任务时应使用构型分配的工作站。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "meshing", "WS-A")
+        ]
 
     def test_resume_scan_keeps_running_solver_when_remote_task_unknown(self):
         """启动扫描无法确认远程 Solver 状态时保留 Running，避免重启。"""
@@ -531,7 +664,7 @@ class TestPipelineSchedulerStartRecovery:
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
-        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
 
     def test_resume_scan_resets_lost_remote_meshing_and_forgets_task(self):
@@ -546,7 +679,7 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
         assert self.scheduler.meshing_monitor.qsize() == 1
-        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "meshing")]
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "meshing", "default")]
 
     def test_resume_scan_completed_remote_solver_forgets_task(self):
         """恢复扫描确认 Solver 已完成时清理远程任务元数据。"""
@@ -559,7 +692,7 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
-        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver")]
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
 
     def test_finalize_pipeline_completed_sets_stopped_without_pausing_completed_steps(self):
         """自然完成收尾应停止后台循环，但保持 Completed 步骤不被改为 Paused。"""
@@ -750,22 +883,56 @@ class _DaemonState:
         return self.remote_tasks
 
 
+class _AssignmentState:
+    def __init__(self, configs, assignments=None):
+        self._configs = list(configs)
+        self.assignments = dict(assignments or {})
+        self.set_calls = []
+
+    def get_all_configs(self):
+        return list(self._configs)
+
+    def get_config_workstation(self, config_name):
+        return self.assignments.get(config_name)
+
+    def set_config_workstation(self, config_name, workstation_id):
+        self.assignments[config_name] = workstation_id
+        self.set_calls.append((config_name, workstation_id))
+
+
 class _DaemonRemoteExecutor:
     def __init__(self, remote_status=None):
         self.remote_status = remote_status or {}
         self.query_calls = []
         self.forgotten: list[tuple[int, str]] = []
 
-    def query_remote_task_status(self, config_name, step_name):
-        self.query_calls.append((config_name, step_name))
+    def query_remote_task_status(self, config_name, step_name, workstation_id="default"):
+        self.query_calls.append((config_name, step_name, workstation_id))
         return self.remote_status.get((config_name, step_name), "completed")
 
-    def forget_remote_task(self, config_name, step_name):
-        self.forgotten.append((config_name, step_name))
+    def forget_remote_task(self, config_name, step_name, workstation_id="default"):
+        self.forgotten.append((config_name, step_name, workstation_id))
 
 
 class TestPipelineDaemonCleanStep:
     """验证 clean_step IPC handler 与调度器文件监控接口兼容。"""
+
+    def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}],
+        )
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _AssignmentState([1, 2, 3], assignments={2: "WS-B"})
+
+        daemon._assign_config_workstations()
+
+        assert daemon.state.assignments == {1: "WS-A", 2: "WS-B", 3: "WS-A"}
+        assert daemon.state.set_calls == [(1, "WS-A"), (3, "WS-A")]
 
     def test_clean_sw_requests_scheduler_file_monitor_reset(self):
         from engine.daemon import PipelineDaemon
@@ -871,6 +1038,26 @@ class TestPipelineDaemonCleanStep:
         assert data is None
         assert "远程任务状态为 unknown" in message
         assert daemon.runner.clean_calls == []
+
+    def test_clean_remote_task_guard_uses_persisted_workstation(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[
+                {"config_name": 1, "step_name": "meshing", "workstation_id": "WS-A"}
+            ],
+        )
+        daemon.runner = _CleanStepRunner({(1, "meshing"): "completed"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, _, _ = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": 1,
+        })
+
+        assert ok is True
+        assert daemon.runner.remote_executor.query_calls == [(1, "meshing", "WS-A")]
 
 
 class TestPipelineDaemonResetStep:
@@ -1129,10 +1316,29 @@ class TestBarrierCoordinator:
         assert self.coordinator.dispatch_solver_if_ready() is True
         self.coordinator.join_solver_threads(timeout=5)
 
-        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 1
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_running_solver_remote_recovery_uses_assigned_workstation(self):
+        """Solver 恢复查询与清理应使用构型分配的工作站。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "lost"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "solver", "WS-A")
+        ]
+        assert self.runner._remote_executor._forgotten_remote_tasks == [
+            (1, "solver", "WS-A")
+        ]
 
     def test_running_solver_unknown_remote_state_does_not_restart(self):
         """远程 Solver 状态未知时保守保持 Running，不重复启动。"""
@@ -1160,8 +1366,8 @@ class TestBarrierCoordinator:
         assert self.coordinator.dispatch_solver_if_ready() is True
         self.coordinator.join_solver_threads(timeout=5)
 
-        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver")]
-        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver")]
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 
@@ -1308,7 +1514,16 @@ class TestMeshingMonitor:
         self.remote._meshing_output_exists = True
 
         assert self.monitor._check_remote_outputs_exist(3) is True
-        assert self.remote._meshing_output_checks == [(3, 120.0)]
+        assert self.remote._meshing_output_checks == [(3, 120.0, "default")]
+
+    def test_remote_output_check_uses_assigned_workstation(self):
+        """Meshing 断点输出检查应使用构型分配工作站。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        self.remote._meshing_output_exists = True
+
+        assert self.monitor._check_remote_outputs_exist(1) is True
+        assert self.remote._meshing_output_checks == [(1, 120.0, "WS-A")]
 
     def test_running_meshing_with_remote_task_keeps_running_without_restart(self):
         """Daemon 重启后远程 Meshing 仍运行时应恢复等待，不重复启动。"""
@@ -1319,7 +1534,7 @@ class TestMeshingMonitor:
 
         assert self.monitor._process_single_meshing(1) is False
 
-        assert self.remote._remote_task_status_checks == [(1, "meshing")]
+        assert self.remote._remote_task_status_checks == [(1, "meshing", "default")]
         assert self.remote._meshing_started == []
         assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
 
@@ -1344,9 +1559,27 @@ class TestMeshingMonitor:
 
         assert self.monitor._process_single_meshing(1) is False
 
-        assert self.remote._remote_task_status_checks == [(1, "meshing")]
-        assert self.remote._forgotten_remote_tasks == [(1, "meshing")]
-        assert self.remote._meshing_started == [1]
+        assert self.remote._remote_task_status_checks == [(1, "meshing", "default")]
+        assert self.remote._forgotten_remote_tasks == [(1, "meshing", "default")]
+        assert self.remote._meshing_started == [(1, "default")]
+
+    def test_assigned_workstation_used_for_meshing_lifecycle(self):
+        """Meshing 启动、等待与防重入应按构型分配工作站执行。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
+        self.state.set_step_status(2, "meshing", STATUS_RUNNING)
+
+        self.monitor._process_single_meshing(1)
+
+        assert self.remote._meshing_started == [(1, "WS-A")]
+        assert self.remote._meshing_waits == [(1, "WS-A")]
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
         assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
 
 
