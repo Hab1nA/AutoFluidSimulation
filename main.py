@@ -468,7 +468,11 @@ def main():
     elif args.all:
         _run_all_mode()
     elif args.worker or args.worker_once:
+        from engine.config import ensure_directories, reload_config_from_toml
         from engine.local_worker import LocalWorker
+
+        reload_config_from_toml()
+        ensure_directories()
         worker = LocalWorker.from_env()
         if args.worker_once:
             worker.register_once()
