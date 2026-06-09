@@ -518,7 +518,8 @@ def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
     assert script_path.startswith("C:/Windows/Temp/_af_hash_files_")
     assert script_path.endswith(".bat")
     assert deleted == [script_path]
-    assert commands == [(f'cmd /c "{script_path.replace("/", "\\")}"', 60)]
+    cmd_script_path = script_path.replace("/", "\\")
+    assert commands == [(f'cmd /c "{cmd_script_path}"', 60)]
     assert "powershell" not in commands[0][0].lower()
     assert 'certutil -hashfile "D:/remote/alpha.txt" MD5' in script_content
     assert '__AF_HASH_MISSING__1' in script_content
