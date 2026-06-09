@@ -443,7 +443,16 @@ class PipelineDaemon:
         capabilities = params.get("capabilities")
         if not isinstance(capabilities, dict):
             capabilities = {}
-        worker = self.local_worker_registry.register(worker_id, capabilities)
+        network = params.get("network")
+        if not isinstance(network, dict):
+            network = {}
+        remote_addr = params.get("remote_addr")
+        worker = self.local_worker_registry.register(
+            worker_id,
+            capabilities,
+            network=network,
+            remote_addr=str(remote_addr) if remote_addr else None,
+        )
         return True, worker, "LocalWorker 已注册"
 
     def handle_worker_heartbeat(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:

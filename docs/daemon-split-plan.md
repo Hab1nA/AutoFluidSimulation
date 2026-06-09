@@ -319,8 +319,14 @@ if self.state.all_configs_completed_at_step("meshing", workstation_id=ws_id):
     "command": "worker_register",
     "params": {
         "worker_id": "local-pc-01",
-        "capabilities": ["sw", "sc"],
-        "hostname": "DESKTOP-XYZ"
+        "capabilities": {"sw": true, "sc": true, "sc_slots": 3},
+        "network": {
+            "public_ip": "203.0.113.10",
+            "candidate_hosts": ["172.17.135.240", "100.64.1.20"],
+            "reachable_host": "100.64.1.20",
+            "connectivity_mode": "tailscale",
+            "ssh_port": 22
+        }
     },
     "request_id": "a1b2c3d4"
 }
@@ -404,6 +410,9 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
 [[workstations]]
 id = "WS-A"
 host = "WORKSTATION_A_ROUTABLE_IP"
+# 可选：保留 host 为原始诊断地址时，server 模式下实际 SSH 使用 reachable_host
+reachable_host = "OCAR_REACHABLE_WORKSTATION_A_HOST"
+connectivity_mode = "tailscale"  # public | vpn | tailscale | reverse_tunnel
 port = 22
 username = "ps"
 password = "${AUTOFLUID_WS_A_PASSWORD}"
@@ -432,7 +441,7 @@ password = "${AUTOFLUID_WS_C_PASSWORD}"
 # ... 同上路径结构
 ```
 
-> 注意：`workstations[].host` 必须填写从服务器 A（例如 ocar）所在网络位置可路由、可 SSH 访问的工作站地址，不能直接沿用仅本地 Windows PC 内网可达的 `[IP]`。部署前需在服务器 A 上逐台验证 `ssh <username>@<workstations.host>` 与端口、防火墙、NAT/公网映射可用性。
+> 注意：`workstations[].host` 必须填写从服务器 A（例如 ocar）所在网络位置可路由、可 SSH 访问的工作站地址，不能直接沿用仅本地 Windows PC 内网可达的 `[IP]`。如果需要保留原始内网地址作为诊断信息，可额外设置 `reachable_host`；`AUTOFLUID_SERVER_MODE=server` 时实际 SSH 目标会优先使用 `reachable_host`。部署前需在服务器 A 上逐台验证 `ssh <username>@<effective_host>` 与端口、防火墙、NAT/VPN/隧道可用性。
 
 ### 6.3 Python 侧 TypedDict 扩展
 
@@ -477,11 +486,15 @@ AUTOFLUID_SERVER_MODE=server
 AUTOFLUID_IPC_HOST=OCAR_REACHABLE_HOST     # TUI 连接 ocar；使用隧道时填 127.0.0.1
 AUTOFLUID_IPC_PORT=9527
 AUTOFLUID_IPC_AUTH_TOKEN=xxx
+AUTOFLUID_WORKER_ID=local-pc-01
+AUTOFLUID_WORKER_REACHABLE_HOST=OCAR_REACHABLE_WORKSTATION_HOST
+AUTOFLUID_WORKER_CONNECTIVITY_MODE=tailscale
+AUTOFLUID_WORKER_SSH_PORT=22
 ```
 
 `AUTOFLUID_SERVER_MODE=server` 时，TUI 不再尝试启动本地 `start_daemon.py`，只连接 `AUTOFLUID_IPC_HOST:AUTOFLUID_IPC_PORT`。如果 IPC 直接监听 `0.0.0.0`，必须配置 `AUTOFLUID_IPC_AUTH_TOKEN`；更推荐用 SSH 隧道或 VPN 暴露 IPC。
 
-过渡阶段注意：server 模式下 ocar 后端可以启动并响应 `check` / `get_*` 等控制面命令，也支持 `worker_register` / `worker_heartbeat` 记录 LocalWorker 在线状态。但在 LocalWorker 执行适配器接入前会拒绝 `start`，避免 Linux 后端误调用本地 Windows-only 的 SolidWorks / SpaceClaim 执行路径。
+过渡阶段注意：server 模式下 ocar 后端可以启动并响应 `check` / `get_*` 等控制面命令，也支持 `worker_register` / `worker_heartbeat` 记录 LocalWorker 在线状态。`python -m engine.local_worker --once` 可用于本地 PC 向 ocar 做一次注册/心跳联通测试。但在 LocalWorker 执行适配器接入前会拒绝 `start`，避免 Linux 后端误调用本地 Windows-only 的 SolidWorks / SpaceClaim 执行路径。
 
 ### 6.5 Rust TUI 设置适配
 

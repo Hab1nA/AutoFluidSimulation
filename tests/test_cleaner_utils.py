@@ -166,6 +166,48 @@ class TestFileCleanerSystemCheck:
             assert workstation_checks["server_mode"] is True
             assert workstation_checks["workstations"][0]["id"] == "WS-A"
             assert "ocar" in workstation_checks["workstations"][0]["warning"]
+            assert workstation_checks["workstations"][0]["severity"] == "error"
+            assert workstation_checks["workstations"][0]["effective_host"] == "172.17.135.240"
+        finally:
+            cfg.IPC_CONFIG["db_path"] = original_db_path
+            WORKSTATIONS[:] = original_workstations
+
+    def test_server_mode_accepts_explicit_ocar_reachable_workstation_host(self, tmp_path, monkeypatch):
+        """server/ocar 模式下应优先使用显式配置的 ocar 可达地址。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _DisconnectedSSH:
+            def is_connected(self):
+                return False
+
+        import engine.config as cfg
+        original_db_path = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "reachable_host": "100.64.1.20",
+                "connectivity_mode": "tailscale",
+                "port": 22,
+            }
+        ]
+        try:
+            state = StateManager(db_path=cfg.IPC_CONFIG["db_path"])
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            workstation = result["workstation_checks"]["workstations"][0]
+            assert workstation["host"] == "172.17.135.240"
+            assert workstation["effective_host"] == "100.64.1.20"
+            assert workstation["connectivity_mode"] == "tailscale"
+            assert workstation["severity"] == "ok"
+            assert workstation["warning"] == ""
         finally:
             cfg.IPC_CONFIG["db_path"] = original_db_path
             WORKSTATIONS[:] = original_workstations

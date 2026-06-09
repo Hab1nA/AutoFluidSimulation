@@ -290,6 +290,8 @@ AUTOFLUID_IPC_AUTH_TOKEN=<shared-secret>
 
 `server` 模式下 TUI 不启动本地 `start_daemon.py`，只连接远程 IPC。`auth_token` 是过渡期的最低限度保护；实际部署仍建议使用 SSH 隧道、VPN 或 TLS，避免裸露控制端口。
 
+当前过渡实现已提供最小 `LocalWorker` 注册/心跳客户端。LocalWorker 会上报 `public_ip`、`candidate_hosts`、`reachable_host`、`connectivity_mode`、`ssh_port` 等网络诊断信息；这些信息用于帮助确认 ocar 视角的可达地址，但不会自动证明 SSH 可用。真正用于服务器端 SSH 的地址必须在 `[[workstations]]` 中配置，并由 ocar 侧探测验证。
+
 **TaskRunner 本地部分替换**：
 
 原来 `TaskRunner.execute_sw_step()` 和 `TaskRunner.execute_sc_step()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。新增 `LocalWorkerAdapter` 类：
@@ -390,7 +392,7 @@ WORKSTATIONS = [
 ]
 ```
 
-> 部署到 ocar 后，`WORKSTATIONS[*].host` 必须是从 ocar 所在网络位置可路由、可 SSH 握手的地址。不要把本地 Windows PC 才能访问的内网 `[IP]` 直接写入服务器端配置；如果工作站不在 ocar 可达网络内，应先配置公网端口映射、VPN、Tailscale、反向 SSH 隧道或等价链路。
+> 部署到 ocar 后，`WORKSTATIONS[*].host` 必须是从 ocar 所在网络位置可路由、可 SSH 握手的地址。不要把本地 Windows PC 才能访问的内网 `[IP]` 直接写入服务器端配置；如果工作站不在 ocar 可达网络内，应先配置公网端口映射、VPN、Tailscale、反向 SSH 隧道或等价链路。过渡期也可以保留原始 `host` 作为诊断信息，并额外配置 `reachable_host`；`AUTOFLUID_SERVER_MODE=server` 时 Python 后端会优先使用 `reachable_host` 作为实际 SSH 目标。
 
 为保持向后兼容，可保留 `REMOTE_CONFIG` 作为默认工作站的快捷引用。
 

@@ -22,12 +22,16 @@ class LocalWorkerRegistry:
         self,
         worker_id: str,
         capabilities: dict[str, Any] | None = None,
+        network: dict[str, Any] | None = None,
+        remote_addr: str | None = None,
     ) -> dict[str, Any]:
         """Register or refresh one LocalWorker."""
         now = self._clock()
+        network_snapshot = self._network_snapshot(network, remote_addr)
         worker = {
             "worker_id": worker_id,
             "capabilities": dict(capabilities or {}),
+            "network": network_snapshot,
             "registered_at": now,
             "last_seen_at": now,
         }
@@ -42,6 +46,7 @@ class LocalWorkerRegistry:
             {
                 "worker_id": worker_id,
                 "capabilities": {},
+                "network": {},
                 "registered_at": now,
                 "last_seen_at": now,
             },
@@ -67,5 +72,21 @@ class LocalWorkerRegistry:
     def _with_online(self, worker: dict[str, Any]) -> dict[str, Any]:
         snapshot = dict(worker)
         snapshot["capabilities"] = dict(worker.get("capabilities", {}))
+        snapshot["network"] = dict(worker.get("network", {}))
         snapshot["online"] = self._is_online(worker)
+        return snapshot
+
+    @staticmethod
+    def _network_snapshot(
+        network: dict[str, Any] | None,
+        remote_addr: str | None,
+    ) -> dict[str, Any]:
+        snapshot = dict(network or {})
+        candidate_hosts = snapshot.get("candidate_hosts")
+        if isinstance(candidate_hosts, (list, tuple)):
+            snapshot["candidate_hosts"] = [str(host) for host in candidate_hosts]
+        elif candidate_hosts is not None:
+            snapshot["candidate_hosts"] = [str(candidate_hosts)]
+        if remote_addr:
+            snapshot["last_seen_remote_addr"] = remote_addr
         return snapshot

@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import AbstractContextManager, nullcontext
 import ipaddress
 import os
@@ -37,6 +38,13 @@ def _is_private_ip(host: str) -> bool:
     except ValueError:
         return False
     return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _has_explicit_reachability(workstation: Mapping[str, object]) -> bool:
+    """Return True when config declares how ocar reaches a private workstation."""
+    reachable_host = str(workstation.get("reachable_host", "")).strip()
+    connectivity_mode = str(workstation.get("connectivity_mode", "")).strip()
+    return bool(reachable_host or connectivity_mode in {"vpn", "tailscale", "reverse_tunnel"})
 
 
 class FileCleaner:
@@ -139,16 +147,24 @@ class FileCleaner:
         workstations: list[dict[str, object]] = []
         for workstation in WORKSTATIONS:
             host = str(workstation.get("host", ""))
+            reachable_host = str(workstation.get("reachable_host", "")).strip()
+            connectivity_mode = str(workstation.get("connectivity_mode", "")).strip()
+            effective_host = reachable_host or host
             warning = ""
-            if server_mode and _is_private_ip(host):
+            severity = "ok"
+            if server_mode and _is_private_ip(host) and not _has_explicit_reachability(workstation):
                 warning = (
-                    "该工作站 host 是私网地址；daemon 部署在 ocar 时必须替换为 "
-                    "从 ocar 可达的公网/VPN/隧道地址，并在 ocar 上验证 ssh 连通性"
+                    "该工作站 host 是私网地址；daemon 部署在 ocar 时不能直接使用该地址，"
+                    "必须配置从 ocar 可达的公网/VPN/隧道地址，并在 ocar 上验证 ssh 连通性"
                 )
+                severity = "error"
             workstations.append({
                 "id": str(workstation.get("id", "")),
                 "host": host,
+                "effective_host": effective_host,
+                "connectivity_mode": connectivity_mode,
                 "port": int(workstation.get("port", 22)),
+                "severity": severity,
                 "warning": warning,
             })
         return {

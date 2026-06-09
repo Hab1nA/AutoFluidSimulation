@@ -69,6 +69,8 @@ class RemoteConfig(TypedDict):
 
 class WorkstationConfig(RemoteConfig, total=False):
     id: str
+    reachable_host: str
+    connectivity_mode: str
     postprocess_script: str
     postprocess_output_dir: str
     notes: str
@@ -233,13 +235,22 @@ def get_workstation_config(
     """Return a copy of one configured remote workstation."""
     for workstation in WORKSTATIONS:
         if workstation.get("id") == workstation_id:
-            return cast(WorkstationConfig, dict(workstation))
+            return _effective_workstation_config(workstation)
     raise KeyError(f"未知工作站配置: {workstation_id}")
 
 
 def is_server_mode() -> bool:
     """Return True when daemon/TUI are running in remote-server mode."""
     return os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
+
+
+def _effective_workstation_config(workstation: WorkstationConfig) -> WorkstationConfig:
+    """Return workstation config with server-reachable host applied."""
+    result = cast(WorkstationConfig, dict(workstation))
+    reachable_host = str(result.get("reachable_host", "")).strip()
+    if is_server_mode() and reachable_host:
+        result["host"] = reachable_host
+    return result
 
 # ============================================================================
 # 步骤名称枚举（与状态表和命令系统对应）

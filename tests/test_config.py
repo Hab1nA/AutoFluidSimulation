@@ -594,6 +594,8 @@ class TestReloadConfigFromToml:
                     {
                         "id": "WS-A",
                         "host": "10.0.0.10",
+                        "reachable_host": "100.64.1.20",
+                        "connectivity_mode": "tailscale",
                         "port": 2222,
                         "username": "ps",
                         "password": "${AUTOFLUID_WS_A_PASSWORD}",
@@ -618,6 +620,8 @@ class TestReloadConfigFromToml:
                 {
                     "id": "WS-A",
                     "host": "10.0.0.10",
+                    "reachable_host": "100.64.1.20",
+                    "connectivity_mode": "tailscale",
                     "port": 2222,
                     "username": "ps",
                     "password": "secret-a",
@@ -888,6 +892,41 @@ class TestWorkstationLookup:
             workstation = cfg.get_workstation_config("WS-A")
             workstation["host"] = "changed"
             assert WORKSTATIONS[0]["host"] == "10.0.0.10"
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_get_workstation_config_uses_reachable_host_in_server_mode(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "reachable_host": "100.64.1.20",
+                "connectivity_mode": "tailscale",
+                "port": 22,
+                "username": "ps",
+                "password": "",
+                "working_dir": r"D:\work",
+                "scripts_dir": r"D:\scripts",
+                "ref_files_dir": r"D:\refs",
+                "scdoc_dir": r"D:\scdoc",
+                "msh_dir": r"D:\msh",
+                "result_dir": r"D:\case",
+                "flag_dir": r"D:\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            }
+        ]
+        try:
+            workstation = cfg.get_workstation_config("WS-A")
+
+            assert workstation["host"] == "100.64.1.20"
+            assert workstation["reachable_host"] == "100.64.1.20"
         finally:
             WORKSTATIONS[:] = original
 
