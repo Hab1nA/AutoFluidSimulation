@@ -121,6 +121,64 @@ def test_local_worker_executes_polled_task_with_injected_handler() -> None:
     assert response["params"]["result"] == {"ok": True}
 
 
+def test_local_worker_run_once_polls_and_reports_task_completion() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    sent_commands: list[str] = []
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+        ),
+        task_handlers={"sw": lambda _params: {"ok": True}},
+    )
+
+    def fake_send(request):
+        sent_commands.append(str(request["command"]))
+        if request["command"] == "worker_poll":
+            return {
+                "status": "ok",
+                "data": {"task_id": "task-1", "step": "sw", "params": {}},
+            }
+        return {"status": "ok", "data": {}}
+
+    worker._send_request = fake_send
+
+    assert worker.run_once(now=100.0) == "completed"
+    assert sent_commands == ["worker_poll", "worker_step_complete"]
+
+
+def test_local_worker_run_once_heartbeats_only_when_idle_deadline_reached() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    sent_commands: list[str] = []
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+            heartbeat_interval=30.0,
+        )
+    )
+
+    def fake_send(request):
+        sent_commands.append(str(request["command"]))
+        return {"status": "ok", "data": None}
+
+    worker._send_request = fake_send
+
+    assert worker.run_once(now=100.0) == "idle"
+    assert worker.run_once(now=129.0) == "idle"
+    assert worker.run_once(now=130.0) == "heartbeat"
+    assert sent_commands == [
+        "worker_poll",
+        "worker_poll",
+        "worker_poll",
+        "worker_heartbeat",
+    ]
+
+
 def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch) -> None:
     import engine.local_worker as local_worker_module
     from engine.local_worker import LocalWorker, LocalWorkerConfig

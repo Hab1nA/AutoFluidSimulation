@@ -40,6 +40,7 @@ class LocalWorkerConfig:
     capabilities: dict[str, Any] = field(default_factory=dict)
     network: dict[str, Any] = field(default_factory=dict)
     heartbeat_interval: float = 30.0
+    poll_interval: float = 2.0
     request_timeout: float = 10.0
 
 
@@ -57,6 +58,7 @@ class LocalWorker:
         self.config = config
         self._task_handlers = task_handlers or {}
         self._default_runner: TaskRunner | None = None
+        self._last_heartbeat_at: float | None = None
 
     @classmethod
     def from_env(cls) -> "LocalWorker":
@@ -152,15 +154,28 @@ class LocalWorker:
     def run_forever(self) -> None:
         """Register once, then keep polling tasks and heartbeating until interrupted."""
         self.register_once()
+        self._last_heartbeat_at = time.monotonic()
         while True:
-            time.sleep(self.config.heartbeat_interval)
-            response = self._send_request(self.build_poll_request())
-            task = response.get("data")
-            if isinstance(task, dict):
-                report = self.handle_polled_task(task)
-                self._send_request(report)
-            else:
-                self.heartbeat_once()
+            time.sleep(self.config.poll_interval)
+            self.run_once()
+
+    def run_once(self, now: float | None = None) -> str:
+        """Poll one task and optionally heartbeat when idle."""
+        current = time.monotonic() if now is None else now
+        response = self._send_request(self.build_poll_request())
+        task = response.get("data")
+        if isinstance(task, dict):
+            report = self.handle_polled_task(task)
+            self._send_request(report)
+            return "completed" if report["command"] == CMD_WORKER_STEP_COMPLETE else "error"
+        if self._last_heartbeat_at is None:
+            self._last_heartbeat_at = current
+            return "idle"
+        if current - self._last_heartbeat_at >= self.config.heartbeat_interval:
+            self.heartbeat_once()
+            self._last_heartbeat_at = current
+            return "heartbeat"
+        return "idle"
 
     def handle_polled_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute one polled task and return the completion/error request."""

@@ -7,6 +7,7 @@
     python main.py --all          # 同时启动 daemon + client（进程分离模式）
     python main.py --daemon       # 仅启动后台守护进程
     python main.py --client       # 仅启动 TUI 客户端
+    python main.py --worker       # 仅启动本地 LocalWorker
     python main.py --stop         # 终止所有运行中的仿真进程
     python main.py --status       # 查看运行状态
 
@@ -415,6 +416,14 @@ def main():
         help="同时启动守护进程和客户端（进程分离模式，Daemon 输出重定向到日志文件）"
     )
     parser.add_argument(
+        "--worker", action="store_true",
+        help="仅启动本地 LocalWorker（用于连接远程 ocar daemon）"
+    )
+    parser.add_argument(
+        "--worker-once", action="store_true",
+        help="LocalWorker 仅注册并发送一次心跳，用于连通性测试"
+    )
+    parser.add_argument(
         "--stop", action="store_true",
         help="终止所有运行中的仿真进程"
     )
@@ -458,6 +467,14 @@ def main():
             sys.exit(1)
     elif args.all:
         _run_all_mode()
+    elif args.worker or args.worker_once:
+        from engine.local_worker import LocalWorker
+        worker = LocalWorker.from_env()
+        if args.worker_once:
+            worker.register_once()
+            worker.heartbeat_once()
+        else:
+            worker.run_forever()
     elif args.stop:
         _stop_all_processes()
     elif args.status:
@@ -467,6 +484,7 @@ def main():
         print()
         print("推荐使用方式:")
         print("python main.py --all       # 一键启动 (Daemon + Client)")
+        print("python main.py --worker     # 启动本地 LocalWorker 连接远程 daemon")
         print("python start.bat            # Windows 快捷启动 (双窗口)")
         print("终端1: python start_daemon.py")
         print("终端2: python start_client.py")

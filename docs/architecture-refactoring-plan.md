@@ -395,6 +395,8 @@ WORKSTATIONS = [
 
 当前实现采用轮询式下发：Daemon 侧 `LocalWorkerAdapter` 将任务放入内存队列，本地 PC 的 `LocalWorker` 通过 `worker_poll` 主动领取任务，再通过 `worker_step_complete` / `worker_step_error` 上报结果。这样 ocar 不需要主动连回本地 PC，适合本地 PC 位于 NAT/内网后的部署。
 
+本地 PC 侧运行方式：`python main.py --worker-once` 仅做一次注册/心跳连通性检查；`python main.py --worker` 启动常驻 LocalWorker，按较短轮询周期领取 SW/SC 任务，并按心跳周期保活。
+
 > 部署到 ocar 后，`WORKSTATIONS[*].host` 必须是从 ocar 所在网络位置可路由、可 SSH 握手的地址。不要把本地 Windows PC 才能访问的内网 `[IP]` 直接写入服务器端配置；如果工作站不在 ocar 可达网络内，应先配置公网端口映射、VPN、Tailscale、反向 SSH 隧道或等价链路。过渡期也可以保留原始 `host` 作为诊断信息，并额外配置 `reachable_host`；`AUTOFLUID_SERVER_MODE=server` 时 Python 后端会优先使用 `reachable_host` 作为实际 SSH 目标。
 
 为保持向后兼容，可保留 `REMOTE_CONFIG` 作为默认工作站的快捷引用。
