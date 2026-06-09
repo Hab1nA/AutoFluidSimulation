@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import time
+
 
 def test_daemon_init_does_not_create_directories_before_config_load(monkeypatch) -> None:
     from engine import daemon as daemon_module
@@ -49,6 +52,7 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
     monkeypatch.setattr(PipelineDaemon, "_setup_signal_handlers", lambda self: None)
     monkeypatch.setitem(daemon_module.LOCAL_PATHS, "excel", str(tmp_path / "missing.xlsx"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
     monkeypatch.setitem(daemon_module.IPC_CONFIG, "db_path", str(tmp_path / "server-mode.db"))
 
     daemon = PipelineDaemon()
@@ -61,6 +65,59 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     assert "Excel 文件未找到" in daemon._config_load_error
     assert config_events == ["reload", "ensure"]
     assert released == [True]
+
+
+def test_server_mode_uses_latest_existing_state_db_when_excel_is_missing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from engine import daemon as daemon_module
+    from engine.daemon import PipelineDaemon
+    from engine.state_manager import StateManager
+
+    class _FakeIPCServer:
+        def __init__(self) -> None:
+            self._daemon: PipelineDaemon | None = None
+
+        def register_default_handlers(self, daemon: PipelineDaemon) -> None:
+            self._daemon = daemon
+
+        def start(self) -> None:
+            assert self._daemon is not None
+            self._daemon._stop_event.set()
+
+        def stop(self) -> None:
+            pass
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    empty_db = data_dir / "pipeline_state.db"
+    StateManager(db_path=str(empty_db))
+
+    active_db = data_dir / "pipeline_state_abc12345.db"
+    active_state = StateManager(db_path=str(active_db))
+    active_state.load_configs({0: [1.0, 2.0, 3.0, 4.0]})
+    os.utime(active_db, (time.time() + 10, time.time() + 10))
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
+    monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
+    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
+    monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
+    monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
+    monkeypatch.setattr(PipelineDaemon, "_setup_signal_handlers", lambda self: None)
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "excel", str(tmp_path / "missing.xlsx"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "data_dir", str(data_dir))
+    monkeypatch.setitem(daemon_module.IPC_CONFIG, "db_path", str(empty_db))
+
+    daemon = PipelineDaemon()
+    daemon.start()
+
+    assert daemon.state is not None
+    assert daemon.state.db_path == str(active_db)
+    assert daemon.state.get_all_configs() == [0]
+    assert daemon._config_load_error is None
 
 
 def test_server_mode_rejects_pipeline_start_when_configs_are_not_loaded() -> None:
@@ -101,6 +158,31 @@ def test_server_mode_rejects_pipeline_start_when_configs_are_not_loaded() -> Non
     assert "构型数据未就绪" in message
     assert daemon.state.set_status_calls == []
     assert daemon.scheduler.start_calls == 0
+
+
+def test_server_mode_does_not_require_worker_after_local_steps_completed(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Registry:
+        def has_online_worker(self) -> bool:
+            return False
+
+    class _State:
+        def get_all_configs(self) -> list[int]:
+            return [0, 1]
+
+        def get_step_status(self, _config_name: int, step_name: str) -> str:
+            if step_name in {"sw", "sc"}:
+                return "Completed"
+            return "Waiting"
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon.local_worker_registry = _Registry()
+    daemon.local_worker_adapter = None
+
+    assert daemon._server_mode_requires_worker() is False
 
 
 def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch, tmp_path) -> None:

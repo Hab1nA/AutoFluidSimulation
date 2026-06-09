@@ -27,6 +27,7 @@ import binascii
 import os
 import sys
 import signal
+import sqlite3
 import threading
 from typing import Any
 
@@ -54,6 +55,38 @@ logger = setup_logger("PipelineDaemon")
 # PID 文件路径（与 main.py 保持一致）
 _PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
+
+
+def _state_db_config_count(db_path: str) -> int:
+    """Return how many configs are stored in an existing state DB."""
+    uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM configs").fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row is not None else 0
+
+
+def _latest_state_db_with_configs(data_dir: str) -> str | None:
+    """Find the newest fingerprinted state DB that still has configs."""
+    try:
+        entries = list(os.scandir(data_dir))
+    except OSError:
+        return None
+
+    candidates = [
+        entry
+        for entry in entries
+        if entry.is_file()
+        and entry.name.startswith("pipeline_state_")
+        and entry.name.endswith(".db")
+    ]
+    candidates.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+    for entry in candidates:
+        if _state_db_config_count(entry.path) > 0:
+            return entry.path
+    return None
 
 
 # ------------------------------------------------------------------
@@ -191,11 +224,21 @@ class PipelineDaemon:
             return
 
         if self._config_load_error:
-            logger.warning(
-                "[ServerMode] %s；仅启动 IPC/LocalWorker 控制面，start 将拒绝启动流水线",
-                self._config_load_error,
-            )
-            db_path = IPC_CONFIG["db_path"]
+            recovered_db_path = _latest_state_db_with_configs(str(LOCAL_PATHS["data_dir"]))
+            if recovered_db_path is not None:
+                logger.warning(
+                    "[ServerMode] %s；已恢复现有状态数据库: %s",
+                    self._config_load_error,
+                    recovered_db_path,
+                )
+                db_path = recovered_db_path
+                self._config_load_error = None
+            else:
+                logger.warning(
+                    "[ServerMode] %s；仅启动 IPC/LocalWorker 控制面，start 将拒绝启动流水线",
+                    self._config_load_error,
+                )
+                db_path = IPC_CONFIG["db_path"]
             logger.info(f"状态数据库: {db_path}")
         else:
             fingerprint = compute_config_fingerprint(configs)
@@ -409,6 +452,19 @@ class PipelineDaemon:
 
     def _server_mode_requires_worker(self) -> bool:
         """Return True when server mode cannot execute local SW/SC yet."""
+        state = getattr(self, "state", None)
+        if is_server_mode() and state is not None:
+            try:
+                config_names = state.get_all_configs()
+                if config_names and all(
+                    state.get_step_status(config_name, "sw") == "Completed"
+                    and state.get_step_status(config_name, "sc") == "Completed"
+                    for config_name in config_names
+                ):
+                    return False
+            except Exception as e:
+                logger.warning(f"[ServerMode] 检查本地步骤状态失败，要求 LocalWorker 在线: {e}")
+
         registry = getattr(self, "local_worker_registry", None)
         has_worker = (
             registry is not None
