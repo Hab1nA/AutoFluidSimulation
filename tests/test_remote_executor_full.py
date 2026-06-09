@@ -99,7 +99,7 @@ class TestTransferEdgeCases:
         assert executor.execute_transfer(6) is False
 
     def test_remote_file_exists_skips_upload(self, tmp_path, monkeypatch):
-        """远程文件已存在且大小 > 0 → 跳过上传（断点续传）。"""
+        """远程文件已存在且大小一致 → 跳过上传（断点续传）。"""
         scdoc_dir = tmp_path / "scdoc"
         scdoc_dir.mkdir()
         (scdoc_dir / "model_gen4_7.scdoc").write_bytes(b"data")
@@ -109,13 +109,38 @@ class TestTransferEdgeCases:
 
         class _SSH:
             def get_remote_file_size(self, remote_path: str):
-                return 1024  # 远程文件已存在
+                return 4  # 远程文件大小与本地一致
 
             def upload_file(self, *a, **kw):
-                raise AssertionError("should skip upload when remote exists")
+                raise AssertionError("should skip upload when remote size matches")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
         assert executor.execute_transfer(7) is True
+
+    def test_remote_file_size_mismatch_uploads_again(self, tmp_path, monkeypatch):
+        """远程文件大小不一致 → 覆盖上传，避免复用陈旧 SCDOC。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        scdoc_file = scdoc_dir / "model_gen4_7.scdoc"
+        scdoc_file.write_bytes(b"data")
+
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote")
+
+        uploads: list[tuple[str, str]] = []
+
+        class _SSH:
+            def get_remote_file_size(self, remote_path: str):
+                return 1024
+
+            def upload_file(self, local_path: str, remote_path: str, **_kwargs) -> bool:
+                uploads.append((local_path, remote_path))
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+        assert executor.execute_transfer(7) is True
+        assert uploads == [(str(scdoc_file), "D:/remote/model_gen4_7.scdoc")]
 
     def test_missing_local_file_sets_error(self, tmp_path, monkeypatch):
         """本地文件不存在时标记 Error。"""

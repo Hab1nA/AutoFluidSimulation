@@ -510,8 +510,8 @@ class RemoteExecutor:
     ) -> bool:
         """通过 SFTP 将 SCDOC 文件上传到远程工作站。
 
-        内部先检查远程文件是否已存在且大小>0，若已存在则直接返回成功
-        （断点续传场景），避免重复上传。
+        内部先检查远程文件是否已存在且大小与本地文件一致，若一致则直接
+        返回成功（断点续传场景），避免重复上传。
         所有 SSH/SFTP 操作均在 _ssh_lock 保护下执行，保证线程安全。
         """
         _scdoc_name = get_step_filename("sc", config_name)
@@ -533,7 +533,8 @@ class RemoteExecutor:
             logger.error(f"[Transfer] 本地 SCDOC 文件不存在: {local_file}")
             self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "本地文件不存在")
             return False
-        if os.path.getsize(local_file) <= 0:
+        local_size = os.path.getsize(local_file)
+        if local_size <= 0:
             logger.error(f"[Transfer] 本地 SCDOC 文件为空: {local_file}")
             self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "本地 SCDOC 文件为空")
             return False
@@ -575,12 +576,18 @@ class RemoteExecutor:
                         )
                     except TypeError:
                         remote_size = ssh.get_remote_file_size(remote_file)
-                    if remote_size is not None and remote_size > 0:
+                    if remote_size == local_size:
                         logger.info(
                             f"[Transfer] 远程 SCDOC 已存在 ({remote_size} bytes)，"
                             f"构型{config_name} 跳过上传"
                         )
                         return True
+                    if remote_size is not None and remote_size > 0:
+                        logger.info(
+                            f"[Transfer] 远程 SCDOC 大小不一致 "
+                            f"(remote={remote_size}, local={local_size})，"
+                            f"构型{config_name} 将重新上传"
+                        )
                 except Exception as e:
                     # 远程检查失败不影响后续上传流程（可能是临时网络问题）
                     logger.debug(
