@@ -74,6 +74,9 @@ _EXPECTED_COMMANDS = frozenset({
     "reload_config",
     "worker_register",
     "worker_heartbeat",
+    "worker_poll",
+    "worker_step_complete",
+    "worker_step_error",
 })
 
 

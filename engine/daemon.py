@@ -37,6 +37,7 @@ from engine.config import (
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
+from engine.local_worker_adapter import LocalWorkerAdapter
 from engine.local_worker_registry import LocalWorkerRegistry
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -134,6 +135,7 @@ class PipelineDaemon:
         self.scheduler = None
         self.ipc_server = None
         self.local_worker_registry = LocalWorkerRegistry()
+        self.local_worker_adapter = LocalWorkerAdapter(self.local_worker_registry)
 
         # 运行标志
         self._running = False
@@ -199,7 +201,7 @@ class PipelineDaemon:
         self._assign_config_workstations()
         logger.info(f"已同步 {len(configs)} 个构型到状态库")
 
-        self.runner = TaskRunner(self.state)
+        self.runner = TaskRunner(self.state, local_worker_adapter=self.local_worker_adapter)
         self.scheduler = PipelineScheduler(self.state, self.runner)
 
         # ---- 2.5 启动时状态一致性检查 ----
@@ -463,6 +465,41 @@ class PipelineDaemon:
             return False, None, "缺少 worker_id"
         worker = self.local_worker_registry.heartbeat(worker_id)
         return True, worker, "LocalWorker 心跳已更新"
+
+    def handle_worker_poll(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """Handle LocalWorker task polling."""
+        params = params or {}
+        worker_id = str(params.get("worker_id") or "")
+        if not worker_id:
+            return False, None, "缺少 worker_id"
+        task = self.local_worker_registry.poll_task(worker_id)
+        if task is None:
+            return True, None, "LocalWorker 暂无任务"
+        return True, task, "LocalWorker 已领取任务"
+
+    def handle_worker_step_complete(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """Handle LocalWorker task completion."""
+        params = params or {}
+        worker_id = str(params.get("worker_id") or "")
+        task_id = str(params.get("task_id") or "")
+        if not worker_id or not task_id:
+            return False, None, "缺少 worker_id 或 task_id"
+        result = params.get("result")
+        if not isinstance(result, dict):
+            result = {}
+        task = self.local_worker_registry.complete_task(task_id, worker_id, result)
+        return True, task, "LocalWorker 任务完成"
+
+    def handle_worker_step_error(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """Handle LocalWorker task failure."""
+        params = params or {}
+        worker_id = str(params.get("worker_id") or "")
+        task_id = str(params.get("task_id") or "")
+        if not worker_id or not task_id:
+            return False, None, "缺少 worker_id 或 task_id"
+        error = str(params.get("error") or "")
+        task = self.local_worker_registry.fail_task(task_id, worker_id, error)
+        return True, task, "LocalWorker 任务失败"
 
     def handle_get_all_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取所有构型的状态。"""

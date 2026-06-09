@@ -1,5 +1,13 @@
 from ipc.server import IPCServer
-from ipc.protocol import serialize, create_request
+from ipc.protocol import (
+    CMD_WORKER_HEARTBEAT,
+    CMD_WORKER_POLL,
+    CMD_WORKER_REGISTER,
+    CMD_WORKER_STEP_COMPLETE,
+    CMD_WORKER_STEP_ERROR,
+    create_request,
+    serialize,
+)
 
 
 class DummyHandler:
@@ -88,6 +96,40 @@ def test_process_message_accepts_matching_auth_token():
 
     assert resp["status"] == "ok"
     assert resp["data"] == {"ok": True}
+
+
+def test_register_default_handlers_includes_local_worker_commands():
+    class _Daemon:
+        def handle_worker_register(self, params):
+            return True, params, ""
+
+        def handle_worker_heartbeat(self, params):
+            return True, params, ""
+
+        def handle_worker_poll(self, params):
+            return True, params, ""
+
+        def handle_worker_step_complete(self, params):
+            return True, params, ""
+
+        def handle_worker_step_error(self, params):
+            return True, params, ""
+
+        def __getattr__(self, _name):
+            return lambda params=None: (True, params, "")
+
+    srv = IPCServer(host="127.0.0.1", port=0)
+
+    srv.register_default_handlers(_Daemon())
+
+    for command in {
+        CMD_WORKER_REGISTER,
+        CMD_WORKER_HEARTBEAT,
+        CMD_WORKER_POLL,
+        CMD_WORKER_STEP_COMPLETE,
+        CMD_WORKER_STEP_ERROR,
+    }:
+        assert command in srv._handlers
 
 
 

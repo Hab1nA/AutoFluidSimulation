@@ -26,6 +26,7 @@ from engine.config import (
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
     STATUS_ERROR, get_step_filename,
     get_workstation_config,
+    is_server_mode,
 )
 from engine.sc_process_pool import SCProcessPool
 from executor.sw_executor import SWExecutor
@@ -44,7 +45,7 @@ class TaskRunner:
     保持 SSH 连接和 SCProcessPool，将具体执行逻辑委托给子模块。
     """
 
-    def __init__(self, state_manager: StateManager):
+    def __init__(self, state_manager: StateManager, local_worker_adapter=None):
         """初始化任务执行器。
 
         Args:
@@ -63,6 +64,7 @@ class TaskRunner:
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
         self._pipeline_control: PipelineControl | None = None
+        self._local_worker_adapter = local_worker_adapter
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -184,34 +186,54 @@ class TaskRunner:
 
     def execute_sw_step(self) -> bool:
         """执行 SW 步骤（委托给 SWExecutor）。"""
+        if self._should_delegate_local_steps():
+            return bool(self._local_worker_adapter.execute_sw_step())
         return self._sw_executor.execute_sw_step()
 
     def execute_sw_per_config(self, config_name: int) -> bool:
         """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
+        if self._should_delegate_local_steps():
+            return bool(self._local_worker_adapter.execute_sw_per_config(config_name))
         return self._sw_executor.export_sw_per_config(config_name)
 
     def shutdown_sw_processes(self) -> None:
         """全量清理 SolidWorks 进程。"""
+        if self._should_delegate_local_steps():
+            return
         self._sw_executor.shutdown_all()
 
     def do_sw_first_cleanup(self) -> None:
         """首次 SW 全体清理（进入 SW 阶段前调用）。"""
+        if self._should_delegate_local_steps():
+            return
         self._sw_executor.do_first_cleanup()
 
     def do_sw_final_cleanup(self) -> None:
         """末次 SW 全体清理（SW 阶段全部完成后调用）。"""
+        if self._should_delegate_local_steps():
+            return
         self._sw_executor.do_final_cleanup()
 
     def reset_sw_cleanup(self) -> None:
         """重置 SW 全量清理状态。"""
+        if self._should_delegate_local_steps():
+            return
         self._sw_executor.reset_cleanup_state()
 
     def disconnect_sw_cached(self) -> None:
         """清理 SW 单构型导出缓存连接。"""
+        if self._should_delegate_local_steps():
+            return
         self._sw_executor.disconnect_sw_cached()
 
     def verify_step_exports(self, step_dir: str) -> int:
         """执行 SW STEP 导出安全网校验。"""
+        if self._should_delegate_local_steps():
+            return sum(
+                1
+                for config_name in self.state.get_all_configs()
+                if self.state.get_step_status(config_name, "sw") == "Completed"
+            )
         return self._sw_executor._verify_step_exports(step_dir)
 
     # ------------------------------------------------------------------
@@ -220,6 +242,8 @@ class TaskRunner:
 
     def execute_sc_step(self, config_name: int) -> bool:
         """执行 SC 步骤（SCProcessPool）。"""
+        if self._should_delegate_local_steps():
+            return bool(self._local_worker_adapter.execute_sc_step(config_name))
         sw_step_name = get_step_filename("sw", config_name)
         if not sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['sw'] 未配置或格式错误")
@@ -270,6 +294,10 @@ class TaskRunner:
             config_name,
             workstation_id=self._workstation_for_config(config_name),
         )
+
+    def _should_delegate_local_steps(self) -> bool:
+        """Return True when local Windows-only steps should run via LocalWorker."""
+        return is_server_mode() and self._local_worker_adapter is not None
 
     # ------------------------------------------------------------------
     # 阶段 4: 网格划分（委托给 RemoteExecutor）

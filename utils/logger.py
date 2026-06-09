@@ -514,13 +514,30 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     global _broadcast_handler
 
     with _broadcast_handler_lock:
+        root_logger = logging.getLogger()
+        existing_handlers = [
+            handler
+            for handler in root_logger.handlers
+            if isinstance(handler, LogBroadcastHandler)
+        ]
+
         if _broadcast_handler is not None:
+            keeper = _broadcast_handler
+            for handler in existing_handlers:
+                if handler is not keeper:
+                    root_logger.removeHandler(handler)
+            if keeper not in root_logger.handlers:
+                root_logger.addHandler(keeper)
+            return keeper
+
+        if existing_handlers:
+            _broadcast_handler = existing_handlers[0]
+            for handler in existing_handlers[1:]:
+                root_logger.removeHandler(handler)
             return _broadcast_handler
 
         clamped = min(capacity, _MAX_BROADCAST_CAPACITY)
         _broadcast_handler = LogBroadcastHandler(capacity=clamped)
-
-        root_logger = logging.getLogger()
         root_logger.addHandler(_broadcast_handler)
 
         return _broadcast_handler

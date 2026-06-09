@@ -4,6 +4,7 @@ from ipc.protocol import (
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
     CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
     CMD_WORKER_REGISTER, CMD_WORKER_HEARTBEAT,
+    CMD_WORKER_POLL, CMD_WORKER_STEP_COMPLETE, CMD_WORKER_STEP_ERROR,
     create_request, create_response, serialize, deserialize,
 )
 from ipc.server import IPCServer
@@ -14,6 +15,7 @@ __all__ = [
     "CMD_GET_ALL_STATUS", "CMD_GET_STATISTICS", "CMD_GET_ENGINE_STATUS",
     "CMD_GET_LOG_ENTRIES", "CMD_RELOAD_CONFIG",
     "CMD_WORKER_REGISTER", "CMD_WORKER_HEARTBEAT",
+    "CMD_WORKER_POLL", "CMD_WORKER_STEP_COMPLETE", "CMD_WORKER_STEP_ERROR",
     "create_request", "create_response", "serialize", "deserialize",
     "IPCServer",
 ]

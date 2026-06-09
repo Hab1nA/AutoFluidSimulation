@@ -71,3 +71,23 @@ def test_register_worker_preserves_ocar_reachable_network_metadata() -> None:
         "connectivity_mode": "tailscale",
         "last_seen_remote_addr": "198.51.100.5",
     }
+
+
+def test_worker_task_queue_roundtrip() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sc": True})
+
+    queued = registry.enqueue_task("sc", {"config_name": 3})
+    polled = registry.poll_task("local-pc-01")
+
+    assert polled is not None
+    assert polled["task_id"] == queued["task_id"]
+    assert polled["status"] == "running"
+    assert polled["worker_id"] == "local-pc-01"
+
+    completed = registry.complete_task(str(polled["task_id"]), "local-pc-01", {"ok": True})
+
+    assert completed["status"] == "completed"
+    assert completed["result"] == {"ok": True}

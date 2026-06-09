@@ -23,6 +23,12 @@ pub const CMD_RELOAD_CONFIG: &str = "reload_config";
 pub const CMD_WORKER_REGISTER: &str = "worker_register";
 #[allow(dead_code)]
 pub const CMD_WORKER_HEARTBEAT: &str = "worker_heartbeat";
+#[allow(dead_code)]
+pub const CMD_WORKER_POLL: &str = "worker_poll";
+#[allow(dead_code)]
+pub const CMD_WORKER_STEP_COMPLETE: &str = "worker_step_complete";
+#[allow(dead_code)]
+pub const CMD_WORKER_STEP_ERROR: &str = "worker_step_error";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcRequest {

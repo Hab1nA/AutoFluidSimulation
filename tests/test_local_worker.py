@@ -3,7 +3,13 @@ from __future__ import annotations
 
 def test_local_worker_builds_register_and_heartbeat_requests() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
-    from ipc.protocol import CMD_WORKER_HEARTBEAT, CMD_WORKER_REGISTER
+    from ipc.protocol import (
+        CMD_WORKER_HEARTBEAT,
+        CMD_WORKER_POLL,
+        CMD_WORKER_REGISTER,
+        CMD_WORKER_STEP_COMPLETE,
+        CMD_WORKER_STEP_ERROR,
+    )
 
     worker = LocalWorker(
         LocalWorkerConfig(
@@ -40,6 +46,26 @@ def test_local_worker_builds_register_and_heartbeat_requests() -> None:
     assert heartbeat["auth_token"] == "secret"
     assert heartbeat["params"] == {"worker_id": "local-pc-01"}
 
+    poll = worker.build_poll_request()
+    assert poll["command"] == CMD_WORKER_POLL
+    assert poll["params"] == {"worker_id": "local-pc-01"}
+
+    complete = worker.build_step_complete_request("task-1", {"ok": True})
+    assert complete["command"] == CMD_WORKER_STEP_COMPLETE
+    assert complete["params"] == {
+        "worker_id": "local-pc-01",
+        "task_id": "task-1",
+        "result": {"ok": True},
+    }
+
+    error = worker.build_step_error_request("task-2", "failed")
+    assert error["command"] == CMD_WORKER_STEP_ERROR
+    assert error["params"] == {
+        "worker_id": "local-pc-01",
+        "task_id": "task-2",
+        "error": "failed",
+    }
+
 
 def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None:
     from engine.local_worker import LocalWorker
@@ -66,3 +92,64 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
         "connectivity_mode": "tailscale",
         "ssh_port": 22,
     }
+
+
+def test_local_worker_executes_polled_task_with_injected_handler() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[dict[str, object]] = []
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+        ),
+        task_handlers={
+            "sc": lambda params: calls.append(params) or {"ok": True},
+        },
+    )
+
+    response = worker.handle_polled_task({
+        "task_id": "task-1",
+        "step": "sc",
+        "params": {"config_name": 7},
+    })
+
+    assert calls == [{"config_name": 7}]
+    assert response["command"] == "worker_step_complete"
+    assert response["params"]["task_id"] == "task-1"
+    assert response["params"]["result"] == {"ok": True}
+
+
+def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[tuple[str, int | None]] = []
+
+    class _Runner:
+        def execute_sw_step(self) -> bool:
+            calls.append(("sw", None))
+            return True
+
+        def execute_sw_per_config(self, config_name: int) -> bool:
+            calls.append(("sw", config_name))
+            return True
+
+        def execute_sc_step(self, config_name: int) -> bool:
+            calls.append(("sc", config_name))
+            return True
+
+    class _State:
+        def load_configs(self, configs):
+            self.configs = configs
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    assert worker._execute_task("sw", {"config_name": 3}) == {"ok": True}
+    assert worker._execute_task("sc", {"config_name": 7}) == {"ok": True}
+    assert calls == [("sw", 3), ("sc", 7)]

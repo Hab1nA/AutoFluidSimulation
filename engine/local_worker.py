@@ -6,17 +6,24 @@ from dataclasses import dataclass, field
 import os
 import socket
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from engine.config import LOCAL_PATHS
+from engine.state_manager import StateManager
+from engine.task_runner import TaskRunner
 from ipc.protocol import (
     CMD_WORKER_HEARTBEAT,
+    CMD_WORKER_POLL,
     CMD_WORKER_REGISTER,
+    CMD_WORKER_STEP_COMPLETE,
+    CMD_WORKER_STEP_ERROR,
     create_request,
     deserialize,
     serialize,
 )
+from utils.excel_reader import read_model_configs
 
 
 DEFAULT_PUBLIC_IP_URL = "https://api.ipify.org"
@@ -36,11 +43,20 @@ class LocalWorkerConfig:
     request_timeout: float = 10.0
 
 
+TaskHandler = Callable[[dict[str, Any]], dict[str, Any]]
+
+
 class LocalWorker:
     """Minimal LocalWorker that registers with the remote daemon and heartbeats."""
 
-    def __init__(self, config: LocalWorkerConfig) -> None:
+    def __init__(
+        self,
+        config: LocalWorkerConfig,
+        task_handlers: dict[str, TaskHandler] | None = None,
+    ) -> None:
         self.config = config
+        self._task_handlers = task_handlers or {}
+        self._default_runner: TaskRunner | None = None
 
     @classmethod
     def from_env(cls) -> "LocalWorker":
@@ -89,6 +105,42 @@ class LocalWorker:
             auth_token=self.config.auth_token,
         )
 
+    def build_poll_request(self) -> dict[str, Any]:
+        """Return the IPC request used to pull one queued task."""
+        return create_request(
+            CMD_WORKER_POLL,
+            {"worker_id": self.config.worker_id},
+            auth_token=self.config.auth_token,
+        )
+
+    def build_step_complete_request(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return the IPC request used to report task completion."""
+        return create_request(
+            CMD_WORKER_STEP_COMPLETE,
+            {
+                "worker_id": self.config.worker_id,
+                "task_id": task_id,
+                "result": dict(result),
+            },
+            auth_token=self.config.auth_token,
+        )
+
+    def build_step_error_request(self, task_id: str, error: str) -> dict[str, Any]:
+        """Return the IPC request used to report task failure."""
+        return create_request(
+            CMD_WORKER_STEP_ERROR,
+            {
+                "worker_id": self.config.worker_id,
+                "task_id": task_id,
+                "error": error,
+            },
+            auth_token=self.config.auth_token,
+        )
+
     def register_once(self) -> dict[str, Any]:
         """Register this worker with the daemon once."""
         return self._send_request(self.build_register_request())
@@ -98,11 +150,69 @@ class LocalWorker:
         return self._send_request(self.build_heartbeat_request())
 
     def run_forever(self) -> None:
-        """Register once, then keep sending heartbeats until interrupted."""
+        """Register once, then keep polling tasks and heartbeating until interrupted."""
         self.register_once()
         while True:
             time.sleep(self.config.heartbeat_interval)
-            self.heartbeat_once()
+            response = self._send_request(self.build_poll_request())
+            task = response.get("data")
+            if isinstance(task, dict):
+                report = self.handle_polled_task(task)
+                self._send_request(report)
+            else:
+                self.heartbeat_once()
+
+    def handle_polled_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Execute one polled task and return the completion/error request."""
+        task_id = str(task.get("task_id") or "")
+        step = str(task.get("step") or "")
+        params = task.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        try:
+            result = self._execute_task(step, params)
+        except Exception as exc:
+            return self.build_step_error_request(task_id, f"{type(exc).__name__}: {exc}")
+        return self.build_step_complete_request(task_id, result)
+
+    def _execute_task(self, step: str, params: dict[str, Any]) -> dict[str, Any]:
+        handler = self._task_handlers.get(step)
+        if handler is None:
+            handler = self._default_task_handler(step)
+        result = handler(dict(params))
+        if "ok" not in result:
+            result = {"ok": True, **result}
+        return result
+
+    def _default_task_handler(self, step: str) -> TaskHandler:
+        if step == "sw":
+            return self._run_sw_task
+        if step == "sc":
+            return self._run_sc_task
+        raise RuntimeError(f"LocalWorker 尚未配置步骤处理器: {step}")
+
+    def _run_sw_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        runner = self._get_default_runner()
+        config_name = params.get("config_name")
+        if config_name is None:
+            ok = runner.execute_sw_step()
+        else:
+            ok = runner.execute_sw_per_config(int(config_name))
+        return {"ok": bool(ok)}
+
+    def _run_sc_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        runner = self._get_default_runner()
+        config_name = params.get("config_name")
+        if config_name is None:
+            raise RuntimeError("SC 任务缺少 config_name")
+        return {"ok": bool(runner.execute_sc_step(int(config_name)))}
+
+    def _get_default_runner(self) -> TaskRunner:
+        if self._default_runner is None:
+            state = StateManager()
+            state.load_configs(read_model_configs(LOCAL_PATHS["excel"]))
+            self._default_runner = TaskRunner(state)
+        return self._default_runner
 
     def _send_request(self, request: dict[str, Any]) -> dict[str, Any]:
         with socket.create_connection(

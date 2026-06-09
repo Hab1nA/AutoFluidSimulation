@@ -388,6 +388,29 @@ def test_install_broadcast_handler_idempotent():
     print("  ✅ 重复安装幂等性正确")
 
 
+def test_install_broadcast_handler_recovers_existing_root_handler():
+    """全局引用丢失但 root logger 已有 handler 时不应重复安装。"""
+    import utils.logger as logger_mod
+
+    original_handler = logger_mod._broadcast_handler
+    logger_mod._broadcast_handler = None
+    root_logger = logging.getLogger()
+    stale_handler = LogBroadcastHandler(capacity=50)
+    root_logger.addHandler(stale_handler)
+
+    try:
+        handler = install_broadcast_handler(capacity=50)
+
+        assert handler is stale_handler
+        assert logger_mod._broadcast_handler is stale_handler
+        handler_count = sum(1 for h in root_logger.handlers if isinstance(h, LogBroadcastHandler))
+        assert handler_count == 1
+    finally:
+        root_logger.removeHandler(stale_handler)
+        logger_mod._broadcast_handler = original_handler
+    print("  ✅ 全局 handler 引用丢失时可从 root logger 恢复")
+
+
 # ============================================================================
 # 测试 5: IPC 日志传输集成测试
 # ============================================================================

@@ -60,6 +60,9 @@ CMD_RELOAD_CONFIG = "reload_config"      # 重新加载 TOML 配置文件
 # ---- LocalWorker 命令 ----
 CMD_WORKER_REGISTER = "worker_register"    # LocalWorker 注册
 CMD_WORKER_HEARTBEAT = "worker_heartbeat"  # LocalWorker 心跳
+CMD_WORKER_POLL = "worker_poll"            # LocalWorker 拉取待执行任务
+CMD_WORKER_STEP_COMPLETE = "worker_step_complete"  # LocalWorker 上报任务完成
+CMD_WORKER_STEP_ERROR = "worker_step_error"        # LocalWorker 上报任务失败
 
 
 # ============================================================================

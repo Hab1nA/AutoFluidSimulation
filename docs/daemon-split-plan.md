@@ -303,6 +303,7 @@ if self.state.all_configs_completed_at_step("meshing", workstation_id=ws_id):
 |---------|---|------|------|
 | `CMD_WORKER_REGISTER` | `"worker_register"` | LocalWorker → Daemon | Worker 上线注册 |
 | `CMD_WORKER_HEARTBEAT` | `"worker_heartbeat"` | LocalWorker → Daemon | 心跳保活（每 30 秒） |
+| `CMD_WORKER_POLL` | `"worker_poll"` | LocalWorker → Daemon | 主动轮询领取待执行任务 |
 | `CMD_WORKER_STEP_COMPLETE` | `"worker_step_complete"` | LocalWorker → Daemon | 上报步骤完成 |
 | `CMD_WORKER_STEP_ERROR` | `"worker_step_error"` | LocalWorker → Daemon | 上报步骤失败 |
 | `CMD_WORKER_EXECUTE` | `"worker_execute"` | Daemon → LocalWorker | 下发执行指令 |
@@ -494,7 +495,7 @@ AUTOFLUID_WORKER_SSH_PORT=22
 
 `AUTOFLUID_SERVER_MODE=server` 时，TUI 不再尝试启动本地 `start_daemon.py`，只连接 `AUTOFLUID_IPC_HOST:AUTOFLUID_IPC_PORT`。如果 IPC 直接监听 `0.0.0.0`，必须配置 `AUTOFLUID_IPC_AUTH_TOKEN`；更推荐用 SSH 隧道或 VPN 暴露 IPC。
 
-过渡阶段注意：server 模式下 ocar 后端可以启动并响应 `check` / `get_*` 等控制面命令，也支持 `worker_register` / `worker_heartbeat` 记录 LocalWorker 在线状态。`python -m engine.local_worker --once` 可用于本地 PC 向 ocar 做一次注册/心跳联通测试。但在 LocalWorker 执行适配器接入前会拒绝 `start`，避免 Linux 后端误调用本地 Windows-only 的 SolidWorks / SpaceClaim 执行路径。
+过渡阶段注意：server 模式下 ocar 后端可以启动并响应 `check` / `get_*` 等控制面命令，也支持 `worker_register` / `worker_heartbeat` 记录 LocalWorker 在线状态。`python -m engine.local_worker --once` 可用于本地 PC 向 ocar 做一次注册/心跳联通测试。SW/SC 任务通过 `LocalWorkerAdapter` 入队，本地 PC 侧 LocalWorker 使用 `worker_poll` 主动领取，并通过 `worker_step_complete` / `worker_step_error` 上报结果；该路径避免 Linux 后端直接调用 Windows-only 的 SolidWorks / SpaceClaim 执行器。
 
 ### 6.5 Rust TUI 设置适配
 
