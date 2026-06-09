@@ -649,13 +649,22 @@ class TestReloadConfigFromToml:
         monkeypatch.delenv("AUTOFLUID_SSH_PASSWORD", raising=False)
 
         def _mock_load(*args, **kwargs):
-            return {"remote_config": {"host": "10.99.99.99", "password": "pw"}}
+            return {
+                "remote_config": {
+                    "host": "10.99.99.99",
+                    "reachable_host": "203.0.113.10",
+                    "connectivity_mode": "public",
+                    "password": "pw",
+                }
+            }
 
         monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
         try:
             assert cfg.reload_config_from_toml() is True
             assert WORKSTATIONS[0]["id"] == "default"
             assert WORKSTATIONS[0]["host"] == "10.99.99.99"
+            assert WORKSTATIONS[0]["reachable_host"] == "203.0.113.10"
+            assert WORKSTATIONS[0]["connectivity_mode"] == "public"
             assert WORKSTATIONS[0]["password"] == "pw"
         finally:
             REMOTE_CONFIG.update(original_remote)
