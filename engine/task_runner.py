@@ -353,11 +353,37 @@ class TaskRunner:
 
     def run_system_check(self) -> dict:
         """执行系统自检（委托给 FileCleaner）。"""
-        return self._cleaner.run_system_check()
+        result = self._cleaner.run_system_check()
+        if self._should_delegate_local_steps():
+            local_worker_result = self._local_worker_adapter.check_local_environment()
+            if local_worker_result is None:
+                result["local_worker_checks"] = {
+                    "status": {
+                        "exists": False,
+                        "message": "LocalWorker 未在线或自检失败",
+                    }
+                }
+            else:
+                result["local_worker_checks"] = dict(
+                    local_worker_result.get("local_checks", local_worker_result)
+                )
+        return result
+
+    def run_local_system_check(self) -> dict:
+        """执行 LocalWorker 本地系统自检（委托给 FileCleaner）。"""
+        return self._cleaner.run_local_system_check()
 
     def clean_step_files(self, step_name, config_name=None):
         """清理步骤文件（委托给 FileCleaner）。"""
+        if self._should_delegate_local_steps() and step_name in {"all", "sw", "sc"}:
+            ok = self._local_worker_adapter.clean_local_files(step_name, config_name)
+            if not ok:
+                raise RuntimeError("LocalWorker 本地文件清理失败")
         self._cleaner.clean_step_files(step_name, config_name)
+
+    def clean_local_step_files(self, step_name, config_name=None):
+        """清理 LocalWorker 本地步骤文件（委托给 FileCleaner）。"""
+        self._cleaner.clean_local_step_files(step_name, config_name)
 
     def clean_all_cache(self) -> None:
         """清理远程工作站缓存文件（委托给 FileCleaner）。"""

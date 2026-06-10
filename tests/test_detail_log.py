@@ -654,6 +654,21 @@ def test_polling_filter_get_engine_status():
     print("  ✅ get_engine_status 轮询命令被正确过滤")
 
 
+def test_polling_filter_worker_poll():
+    """测试 worker_poll 本地 Worker 轮询命令被过滤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    ipc_logger = logging.getLogger("ipc.server")
+    ipc_logger.addHandler(handler)
+    ipc_logger.setLevel(logging.DEBUG)
+
+    ipc_logger.debug("收到命令: worker_poll, params={'worker_id': 'Spica'}")
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, f"worker_poll 应被过滤，但缓冲区有 {result['total']} 条"
+
+    ipc_logger.removeHandler(handler)
+    print("  ✅ worker_poll 轮询命令被正确过滤")
+
+
 def test_polling_filter_mixed_with_normal():
     """测试轮询命令和 IPC 生命周期日志被过滤，手动命令/错误保留。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -732,6 +747,7 @@ def test_polling_commands_constant():
     assert "get_all_status" in POLLING_COMMANDS
     assert "get_log_entries" in POLLING_COMMANDS
     assert "get_engine_status" in POLLING_COMMANDS
+    assert "worker_poll" in POLLING_COMMANDS
     assert "get_statistics" not in POLLING_COMMANDS, "get_statistics 是手动命令，不应在过滤列表"
     assert "start" not in POLLING_COMMANDS
     assert "pause" not in POLLING_COMMANDS
@@ -755,10 +771,15 @@ def test_is_polling_log_static_method():
         name="PipelineDaemon", level=logging.INFO, pathname="", lineno=0,
         msg="调用 get_all_status 接口", args=None, exc_info=None,
     )
+    record_worker_poll = logging.LogRecord(
+        name="ipc.server", level=logging.DEBUG, pathname="", lineno=0,
+        msg="收到命令: worker_poll, params={'worker_id': 'Spica'}", args=None, exc_info=None,
+    )
 
     assert LogBroadcastHandler._is_polling_log(record_ipc_polling) is True
     assert LogBroadcastHandler._is_polling_log(record_ipc_normal) is False
     assert LogBroadcastHandler._is_polling_log(record_daemon_polling_name) is False
+    assert LogBroadcastHandler._is_polling_log(record_worker_poll) is True
 
     print("  ✅ _is_polling_log 静态方法判断正确")
 
@@ -1335,6 +1356,7 @@ def main():
         ("轮询过滤: get_all_status", test_polling_filter_get_all_status),
         ("轮询过滤: get_log_entries", test_polling_filter_get_log_entries),
         ("轮询过滤: get_engine_status", test_polling_filter_get_engine_status),
+        ("轮询过滤: worker_poll", test_polling_filter_worker_poll),
         ("轮询过滤: 混合日志", test_polling_filter_mixed_with_normal),
         ("轮询过滤: 非IPC不误过滤", test_polling_filter_non_ipc_logger_not_filtered),
         ("轮询过滤: 高频场景", test_polling_filter_high_frequency),

@@ -137,3 +137,65 @@ function Test-AutoFluidEndpoint {
         $client.Close()
     }
 }
+
+function Test-AutoFluidIpcProtocolEndpoint {
+    param(
+        [int]$TimeoutMs = 3000
+    )
+
+    $serverHost = Get-AutoFluidServerHost
+    $serverPort = Get-AutoFluidServerPort
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $async = $client.BeginConnect($serverHost, $serverPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+            Write-Warning "Daemon IPC protocol probe timed out while connecting: ${serverHost}:${serverPort}"
+            return $false
+        }
+        $client.EndConnect($async)
+
+        $stream = $client.GetStream()
+        $stream.ReadTimeout = $TimeoutMs
+        $stream.WriteTimeout = $TimeoutMs
+
+        $requestId = "probe-" + ([guid]::NewGuid().ToString("N").Substring(0, 8))
+        $request = [ordered]@{
+            command = "get_engine_status"
+            params = @{}
+            request_id = $requestId
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_IPC_AUTH_TOKEN)) {
+            $request.auth_token = $env:AUTOFLUID_IPC_AUTH_TOKEN
+        }
+
+        $payload = [System.Text.Encoding]::UTF8.GetBytes(($request | ConvertTo-Json -Compress) + "`n")
+        $stream.Write($payload, 0, $payload.Length)
+        $stream.Flush()
+
+        $buffer = New-Object byte[] 4096
+        $count = $stream.Read($buffer, 0, $buffer.Length)
+        if ($count -le 0) {
+            Write-Warning "Daemon IPC endpoint closed without a protocol response: ${serverHost}:${serverPort}"
+            return $false
+        }
+
+        $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $count).Trim()
+        $response = $text | ConvertFrom-Json
+        if ($null -eq $response.status -or $null -eq $response.request_id) {
+            Write-Warning "Daemon IPC endpoint returned an invalid protocol response: $text"
+            return $false
+        }
+        if ($response.message -eq "认证失败") {
+            Write-Warning "Daemon IPC authentication failed. Check AUTOFLUID_IPC_AUTH_TOKEN."
+            return $false
+        }
+        return $true
+    }
+    catch {
+        Write-Warning "Daemon IPC protocol probe failed: ${serverHost}:${serverPort} ($($_.Exception.Message))"
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
+}

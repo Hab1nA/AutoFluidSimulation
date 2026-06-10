@@ -73,3 +73,21 @@ def test_daemon_worker_step_complete_persists_scdoc_payload(tmp_path, monkeypatc
         "server_path": str(tmp_path / "model_gen4_7.scdoc"),
     }
     assert (tmp_path / "model_gen4_7.scdoc").read_bytes() == b"server payload"
+
+
+def test_daemon_worker_poll_returns_local_clean_task() -> None:
+    from engine.daemon import PipelineDaemon
+
+    daemon = PipelineDaemon()
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"clean": True}})
+    daemon.local_worker_registry.enqueue_task(
+        "clean_local_files",
+        {"step_name": "sw", "config_name": 3},
+    )
+
+    ok, task, message = daemon.handle_worker_poll({"worker_id": "local-pc-01"})
+
+    assert ok is True
+    assert message == "LocalWorker 已领取任务"
+    assert task["step"] == "clean_local_files"
+    assert task["params"] == {"step_name": "sw", "config_name": 3}

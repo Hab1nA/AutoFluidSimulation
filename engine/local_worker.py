@@ -6,12 +6,13 @@ import base64
 from dataclasses import dataclass, field
 import os
 import socket
+import sys
 import time
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from engine.config import LOCAL_PATHS, get_step_filename
+from engine.config import LOCAL_PATHS, get_step_filename, reload_config_from_toml
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from ipc.protocol import (
@@ -42,6 +43,7 @@ class LocalWorkerConfig:
     network: dict[str, Any] = field(default_factory=dict)
     heartbeat_interval: float = 30.0
     poll_interval: float = 2.0
+    register_retry_interval: float = 2.0
     request_timeout: float = 10.0
 
 
@@ -64,6 +66,7 @@ class LocalWorker:
     @classmethod
     def from_env(cls) -> "LocalWorker":
         """Build a LocalWorker from environment variables."""
+        reload_config_from_toml()
         worker_id = os.environ.get("AUTOFLUID_WORKER_ID") or socket.gethostname()
         server_host = (
             os.environ.get("AUTOFLUID_SERVER_HOST")
@@ -75,6 +78,8 @@ class LocalWorker:
         capabilities = {
             "sw": True,
             "sc": True,
+            "clean": True,
+            "check": True,
             "sc_slots": int(os.environ.get("AUTOFLUID_WORKER_SC_SLOTS", "3")),
         }
         return cls(
@@ -158,11 +163,26 @@ class LocalWorker:
 
     def run_forever(self) -> None:
         """Register once, then keep polling tasks and heartbeating until interrupted."""
-        self.register_once()
+        self._register_until_available()
         self._last_heartbeat_at = time.monotonic()
         while True:
             time.sleep(self.config.poll_interval)
-            self.run_once()
+            try:
+                self.run_once()
+            except RuntimeError as exc:
+                print(f"[WARN] {exc}", file=sys.stderr)
+                self._register_until_available()
+                self._last_heartbeat_at = time.monotonic()
+
+    def _register_until_available(self) -> None:
+        """Keep the worker alive while the remote daemon is still starting."""
+        while True:
+            try:
+                self.register_once()
+                return
+            except RuntimeError as exc:
+                print(f"[WARN] {exc}", file=sys.stderr)
+                time.sleep(self.config.register_retry_interval)
 
     def run_once(self, now: float | None = None) -> str:
         """Poll one task and optionally heartbeat when idle."""
@@ -209,6 +229,10 @@ class LocalWorker:
             return self._run_sw_task
         if step == "sc":
             return self._run_sc_task
+        if step == "check_local_environment":
+            return self._run_check_local_environment_task
+        if step == "clean_local_files":
+            return self._run_clean_local_files_task
         raise RuntimeError(f"LocalWorker 尚未配置步骤处理器: {step}")
 
     def _run_sw_task(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -231,6 +255,22 @@ class LocalWorker:
         if ok:
             result["scdoc_file"] = self._build_scdoc_payload(config_id)
         return result
+
+    def _run_check_local_environment_task(self, _params: dict[str, Any]) -> dict[str, Any]:
+        runner = self._get_default_runner()
+        result = runner.run_local_system_check()
+        if isinstance(result, dict) and "local_checks" in result:
+            return {"ok": True, **result}
+        return {"ok": True, "local_checks": result}
+
+    def _run_clean_local_files_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        step_name = str(params.get("step_name") or "")
+        if not step_name:
+            raise RuntimeError("本地清理任务缺少 step_name")
+        config_name = params.get("config_name")
+        runner = self._get_default_runner()
+        runner.clean_local_step_files(step_name, config_name)
+        return {"ok": True}
 
     def _build_scdoc_payload(self, config_name: int) -> dict[str, Any]:
         """Read the generated SCDOC so the server daemon can continue transfer."""
@@ -270,15 +310,29 @@ class LocalWorker:
         }
 
     def _send_request(self, request: dict[str, Any]) -> dict[str, Any]:
-        with socket.create_connection(
-            (self.config.server_host, self.config.server_port),
-            timeout=self.config.request_timeout,
-        ) as sock:
-            sock.sendall(serialize(request))
-            response = sock.recv(1024 * 1024)
+        endpoint = f"{self.config.server_host}:{self.config.server_port}"
+        try:
+            with socket.create_connection(
+                (self.config.server_host, self.config.server_port),
+                timeout=self.config.request_timeout,
+            ) as sock:
+                sock.sendall(serialize(request))
+                response = sock.recv(1024 * 1024)
+        except (ConnectionError, OSError) as exc:
+            raise RuntimeError(
+                "LocalWorker 无法连接 daemon IPC "
+                f"({endpoint}): {exc}. "
+                "请确认 AutoFluid daemon 正在运行，且 AUTOFLUID_SERVER_HOST/AUTOFLUID_IPC_HOST/AUTOFLUID_IPC_PORT 指向正确的 IPC 端点。"
+            ) from exc
+        if not response:
+            raise RuntimeError(f"LocalWorker 未收到 daemon IPC 响应 ({endpoint})")
         decoded = deserialize(response)
         if decoded is None:
             raise RuntimeError("LocalWorker 收到无法解析的 IPC 响应")
+        if decoded.get("status") == "error":
+            command = str(request.get("command") or "unknown")
+            message = str(decoded.get("message") or "未知错误")
+            raise RuntimeError(f"LocalWorker IPC 请求失败 [{command}]: {message}")
         return decoded
 
 
@@ -345,13 +399,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run AutoFluid LocalWorker heartbeat client")
     parser.add_argument("--once", action="store_true", help="register once and send one heartbeat")
     args = parser.parse_args()
-    worker = LocalWorker.from_env()
-    worker.register_once()
-    if args.once:
-        worker.heartbeat_once()
+    try:
+        worker = LocalWorker.from_env()
+        worker.register_once()
+        if args.once:
+            worker.heartbeat_once()
+            return 0
+        worker.run_forever()
         return 0
-    worker.run_forever()
-    return 0
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

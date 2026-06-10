@@ -12,6 +12,9 @@ Import-AutoFluidEnv -ProjectDir $ProjectDir
 Assert-AutoFluidServerEndpoint
 
 function Resolve-SshExe {
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SSH_EXE)) {
+        return $env:AUTOFLUID_SSH_EXE
+    }
     $command = Get-Command ssh.exe -ErrorAction SilentlyContinue
     if ($null -eq $command) {
         throw "ssh.exe was not found in PATH."
@@ -20,8 +23,15 @@ function Resolve-SshExe {
 }
 
 function Get-TunnelSshTarget {
-    if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SERVER_TUNNEL_HOST)) {
-        return $env:AUTOFLUID_SERVER_TUNNEL_HOST
+    foreach ($candidate in @(
+        $env:AUTOFLUID_SERVER_TUNNEL_HOST,
+        $env:AUTOFLUID_SERVER_DAEMON_SSH_TARGET,
+        $env:AUTOFLUID_SERVER_HOST,
+        $env:AUTOFLUID_IPC_HOST
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            return $candidate
+        }
     }
     return "ocar"
 }
@@ -162,4 +172,4 @@ $process = Start-ServerTunnel `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort
 
-Write-Host "Started AutoFluid server IPC tunnel with ssh.exe (PID $($process.Id))."
+Write-Host "Started AutoFluid server IPC tunnel with $sshExe (PID $($process.Id))."

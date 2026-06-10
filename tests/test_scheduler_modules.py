@@ -15,6 +15,7 @@ import sys
 import tempfile
 import shutil
 import logging
+import pytest
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
@@ -1014,17 +1015,109 @@ def test_task_runner_restores_remote_tasks_from_db_on_init(monkeypatch):
     assert runner.get_remote_executor() is remote_instances[0]
 
 
+def test_task_runner_server_mode_merges_local_worker_check(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def run_system_check(self):
+            return {
+                "local_checks": {},
+                "remote_checks": {},
+                "daemon_checks": {},
+                "workstation_checks": {},
+            }
+
+    class _LocalWorkerAdapter:
+        def check_local_environment(self):
+            return {"local_checks": {"SW可执行文件": {"exists": True}}}
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._cleaner = _Cleaner()
+    runner._local_worker_adapter = _LocalWorkerAdapter()
+
+    result = runner.run_system_check()
+
+    assert result["local_checks"] == {}
+    assert result["local_worker_checks"] == {"SW可执行文件": {"exists": True}}
+
+
+def test_task_runner_server_mode_delegates_local_file_clean(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def __init__(self):
+            self.clean_calls = []
+
+        def clean_step_files(self, step_name, config_name):
+            self.clean_calls.append((step_name, config_name))
+
+    class _LocalWorkerAdapter:
+        def __init__(self):
+            self.clean_calls = []
+
+        def clean_local_files(self, step_name, config_name):
+            self.clean_calls.append((step_name, config_name))
+            return True
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    cleaner = _Cleaner()
+    adapter = _LocalWorkerAdapter()
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._cleaner = cleaner
+    runner._local_worker_adapter = adapter
+
+    runner.clean_step_files("sw", 1)
+
+    assert adapter.clean_calls == [("sw", 1)]
+    assert cleaner.clean_calls == [("sw", 1)]
+
+
+def test_task_runner_server_mode_rejects_failed_local_file_clean(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def __init__(self):
+            self.clean_calls = []
+
+        def clean_step_files(self, step_name, config_name):
+            self.clean_calls.append((step_name, config_name))
+
+    class _LocalWorkerAdapter:
+        def clean_local_files(self, step_name, config_name):
+            return False
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    cleaner = _Cleaner()
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._cleaner = cleaner
+    runner._local_worker_adapter = _LocalWorkerAdapter()
+
+    with pytest.raises(RuntimeError, match="LocalWorker 本地文件清理失败"):
+        runner.clean_step_files("sw", 1)
+
+    assert cleaner.clean_calls == []
+
+
 class _CleanStepRunner:
     def __init__(self, remote_status=None):
         self.clean_calls = []
         self.clean_all_cache_count = 0
         self.remote_executor = _DaemonRemoteExecutor(remote_status)
+        self.system_check_result = {
+            "local_checks": {},
+            "remote_checks": {},
+            "workstation_checks": {},
+        }
 
     def clean_step_files(self, step_name, config_name):
         self.clean_calls.append((step_name, config_name))
 
     def clean_all_cache(self):
         self.clean_all_cache_count += 1
+
+    def run_system_check(self):
+        return self.system_check_result
 
     def get_remote_executor(self):
         return self.remote_executor
@@ -1283,6 +1376,29 @@ class TestPipelineDaemonCleanStep:
         assert data is None
         assert "clean all cache" in message
         assert daemon.runner.clean_all_cache_count == 0
+
+    def test_check_returns_runner_schema(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        expected = {
+            "local_checks": {},
+            "remote_checks": {},
+            "daemon_checks": {"server_mode": {"ok": True}},
+            "local_worker_checks": {"SW可执行文件": {"exists": True}},
+            "workstation_checks": {
+                "server_mode": True,
+                "workstations": [{"id": "WS-A", "severity": "ok"}],
+            },
+        }
+        daemon.runner.system_check_result = expected
+
+        ok, data, message = daemon.handle_check({})
+
+        assert ok is True
+        assert data is expected
+        assert message == "系统自检完成"
 
     def test_clean_rejects_when_pipeline_running(self):
         from engine.daemon import PipelineDaemon

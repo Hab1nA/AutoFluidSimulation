@@ -194,12 +194,24 @@ fn build_check_content_lines(
     let mut raw_lines: Vec<Line> = Vec::new();
 
     // ---- 本地环境检查 ----
+    let daemon_header = "─── Daemon 检查 ──";
     let local_header = "─── 本地环境检查 ──";
+    let local_worker_header = "─── LocalWorker 本地环境检查 ──";
+    let workstation_header = "─── 工作站配置检查 ──";
     let remote_header = "─── 远程工作站检查 ──";
     let target_header_w = {
-        let w1 = unicode_width::UnicodeWidthStr::width(local_header);
-        let w2 = unicode_width::UnicodeWidthStr::width(remote_header);
-        w1.max(w2) + 2
+        [
+            daemon_header,
+            local_header,
+            local_worker_header,
+            workstation_header,
+            remote_header,
+        ]
+        .iter()
+        .map(|header| unicode_width::UnicodeWidthStr::width(*header))
+        .max()
+        .unwrap_or(0)
+            + 2
     };
 
     let local_items: Vec<CheckItem> =
@@ -385,6 +397,151 @@ fn build_check_content_lines(
         }
     }
 
+    fn json_value_to_display(value: &serde_json::Value) -> String {
+        if let Some(text) = value.as_str() {
+            text.to_string()
+        } else if let Some(flag) = value.as_bool() {
+            if flag {
+                "是".to_string()
+            } else {
+                "否".to_string()
+            }
+        } else if value.is_number() {
+            value.to_string()
+        } else if value.is_null() {
+            "未设置".to_string()
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn object_entry_to_check_item(label: &str, info: &serde_json::Value) -> CheckItem {
+        let exists = info
+            .get("exists")
+            .and_then(|v| v.as_bool())
+            .or_else(|| info.get("ok").and_then(|v| v.as_bool()));
+        let value = info
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                info.get("message")
+                    .and_then(|v| v.as_str())
+                    .filter(|message| !message.is_empty())
+                    .map(str::to_string)
+            })
+            .or_else(|| info.get("value").map(json_value_to_display))
+            .unwrap_or_else(|| match exists {
+                Some(true) => "正常".to_string(),
+                Some(false) => "异常".to_string(),
+                None => json_value_to_display(info),
+            });
+        CheckItem {
+            label: label.to_string(),
+            value,
+            exists,
+        }
+    }
+
+    fn object_to_check_items(
+        object: &serde_json::Map<String, serde_json::Value>,
+    ) -> Vec<CheckItem> {
+        object
+            .iter()
+            .map(|(label, info)| object_entry_to_check_item(label, info))
+            .collect()
+    }
+
+    let daemon_items: Vec<CheckItem> = data
+        .get("daemon_checks")
+        .and_then(|v| v.as_object())
+        .map(object_to_check_items)
+        .unwrap_or_default();
+
+    let local_worker_items: Vec<CheckItem> = data
+        .get("local_worker_checks")
+        .and_then(|v| v.as_object())
+        .map(object_to_check_items)
+        .unwrap_or_default();
+
+    let mut workstation_items: Vec<CheckItem> = Vec::new();
+    if let Some(workstation_checks) = data.get("workstation_checks").and_then(|v| v.as_object()) {
+        if let Some(server_mode) = workstation_checks
+            .get("server_mode")
+            .and_then(|v| v.as_bool())
+        {
+            workstation_items.push(CheckItem {
+                label: "server_mode".to_string(),
+                value: if server_mode {
+                    "启用".to_string()
+                } else {
+                    "关闭".to_string()
+                },
+                exists: Some(true),
+            });
+        }
+        if let Some(workstations) = workstation_checks
+            .get("workstations")
+            .and_then(|v| v.as_array())
+        {
+            for workstation in workstations {
+                let workstation_id = workstation
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let host = workstation
+                    .get("effective_host")
+                    .or_else(|| workstation.get("host"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let port = workstation
+                    .get("port")
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "22".to_string());
+                let mode = workstation
+                    .get("connectivity_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let severity = workstation
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ok");
+                let exists = match severity {
+                    "ok" => Some(true),
+                    "warning" | "error" => Some(false),
+                    _ => None,
+                };
+                let mut value = if host.is_empty() {
+                    "(未设置)".to_string()
+                } else {
+                    format!("{host}:{port}")
+                };
+                if !mode.is_empty() {
+                    value.push_str(&format!(" ({mode})"));
+                }
+                workstation_items.push(CheckItem {
+                    label: format!("工作站 {workstation_id}"),
+                    value,
+                    exists,
+                });
+
+                if let Some(warning) = workstation
+                    .get("warning")
+                    .and_then(|v| v.as_str())
+                    .filter(|warning| !warning.is_empty())
+                {
+                    workstation_items.push(CheckItem {
+                        label: format!("告警 {workstation_id}"),
+                        value: warning.to_string(),
+                        exists: Some(false),
+                    });
+                }
+            }
+        }
+    }
+
     // ---- 渲染辅助函数 ----
     fn render_items(
         raw_lines: &mut Vec<Line>,
@@ -463,6 +620,17 @@ fn build_check_content_lines(
         )));
     }
 
+    if !daemon_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            daemon_header,
+            target_header_w,
+            &daemon_items,
+            label_width,
+            theme,
+        );
+    }
+
     // ---- 渲染本地检查 ----
     if !local_items.is_empty() {
         render_section(
@@ -470,6 +638,28 @@ fn build_check_content_lines(
             local_header,
             target_header_w,
             &local_items,
+            label_width,
+            theme,
+        );
+    }
+
+    if !local_worker_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            local_worker_header,
+            target_header_w,
+            &local_worker_items,
+            label_width,
+            theme,
+        );
+    }
+
+    if !workstation_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            workstation_header,
+            target_header_w,
+            &workstation_items,
             label_width,
             theme,
         );
@@ -739,7 +929,19 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::symbol_is_wide;
+    use super::{build_check_content_lines, symbol_is_wide};
+    use crate::theme::AppTheme;
+    use ratatui::text::Line;
+    use serde_json::json;
+
+    fn line_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("")
+    }
 
     #[test]
     fn wide_symbol_detection_handles_composite_emoji() {
@@ -752,5 +954,86 @@ mod tests {
     fn wide_symbol_detection_keeps_ascii_narrow() {
         assert!(!symbol_is_wide("A"));
         assert!(!symbol_is_wide("?"));
+    }
+
+    #[test]
+    fn check_content_lines_supports_daemon_and_local_worker_schema() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "daemon_checks": {
+                "server_mode": {"ok": true, "message": "server mode enabled"}
+            },
+            "local_worker_checks": {
+                "SW可执行文件": {
+                    "path": "C:\\SW\\SLDWORKS.exe",
+                    "exists": true
+                }
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 80, &theme));
+
+        assert!(text.contains("Daemon"));
+        assert!(text.contains("server_mode"));
+        assert!(text.contains("LocalWorker"));
+        assert!(text.contains("SW可执行文件"));
+        assert!(text.contains("C:\\SW\\SLDWORKS.exe"));
+        assert!(text.contains("✅"));
+    }
+
+    #[test]
+    fn check_content_lines_supports_workstation_schema() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "workstation_checks": {
+                "server_mode": true,
+                "workstations": [{
+                    "id": "WS-A",
+                    "host": "172.17.135.240",
+                    "effective_host": "100.64.1.20",
+                    "port": 22,
+                    "connectivity_mode": "tailscale",
+                    "severity": "error",
+                    "warning": "私网地址不可达"
+                }]
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 80, &theme));
+
+        assert!(text.contains("工作站"));
+        assert!(text.contains("WS-A"));
+        assert!(text.contains("100.64.1.20"));
+        assert!(text.contains("私网地址不可达"));
+        assert!(text.contains("❌"));
+    }
+
+    #[test]
+    fn check_content_lines_keeps_legacy_local_remote_schema() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "local_checks": {
+                "Excel参数表": {
+                    "path": "C:\\models\\params.xlsx",
+                    "exists": true
+                }
+            },
+            "remote_checks": {
+                "ssh": "连接成功",
+                "scripts_status": {
+                    "total": 1,
+                    "deployed": 1,
+                    "missing": []
+                }
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 80, &theme));
+
+        assert!(text.contains("本地环境检查"));
+        assert!(text.contains("远程工作站检查"));
+        assert!(text.contains("SSH连接"));
+        assert!(text.contains("Excel参数表"));
+        assert!(text.contains("远程脚本文件"));
     }
 }

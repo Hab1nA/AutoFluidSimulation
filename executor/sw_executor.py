@@ -876,30 +876,12 @@ class SWExecutor:
         return warnings
 
     def _model_has_design_table(self, doc: Any) -> bool:  # noqa: ANN401  COM 动态对象
-        """检测模型是否已存在设计表（链接或内嵌）。"""
+        """检测模型是否已存在设计表（链接或内嵌），避免进入 Excel OLE 编辑态。"""
         try:
-            doc.InsertFamilyTableEdit()
-            logger.info("[SW-DesignTable] 检测到模型已有设计表（InsertFamilyTableEdit 成功）")
-            try:
-                doc.CloseFamilyTable()
-            except Exception:
-                pass
-            return True
-        except Exception:
-            pass
-
-        try:
-            dt = doc.GetDesignTable
+            getter = getattr(doc, "GetDesignTable", None)
+            dt = getter() if callable(getter) else getter
             if dt is not None:
                 logger.info("[SW-DesignTable] 检测到模型已有设计表（GetDesignTable 返回非空）")
-                return True
-        except Exception:
-            pass
-
-        try:
-            dt = doc.GetDesignTable()
-            if dt is not None:
-                logger.info("[SW-DesignTable] 检测到模型已有设计表（GetDesignTable() 返回非空）")
                 return True
         except Exception:
             pass

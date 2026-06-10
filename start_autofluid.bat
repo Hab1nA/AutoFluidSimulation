@@ -66,7 +66,7 @@ if /I "%~1"=="--client-only" (
     echo.
     echo Notes:
     echo   - The daemon runs on the server in current mode.
-    echo   - Local launch will auto-start the SSH IPC tunnel defined in .env.
+    echo   - Local launch will auto-start SSH tunnels for IPC and workstation access.
     exit /b 0
 ) else (
     echo [ERROR] Unknown argument: %~1

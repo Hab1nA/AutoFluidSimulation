@@ -172,6 +172,32 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = original_db_path
             WORKSTATIONS[:] = original_workstations
 
+    def test_server_mode_separates_daemon_and_local_worker_checks(self, tmp_path, monkeypatch):
+        """server/ocar 模式下 daemon 自检不应把 Windows 本地路径当作本机失败项。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _DisconnectedSSH:
+            def is_connected(self):
+                return False
+
+        import engine.config as cfg
+        original_db_path = cfg.IPC_CONFIG["db_path"]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        try:
+            state = StateManager(db_path=cfg.IPC_CONFIG["db_path"])
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            assert result["local_checks"] == {}
+            assert result["daemon_checks"]["server_mode"]["value"] is True
+            assert "scdoc_dir" in result["daemon_checks"]
+            assert "workstation_checks" in result
+        finally:
+            cfg.IPC_CONFIG["db_path"] = original_db_path
+
     def test_server_mode_accepts_explicit_ocar_reachable_workstation_host(self, tmp_path, monkeypatch):
         """server/ocar 模式下应优先使用显式配置的 ocar 可达地址。"""
         from executor.cleaner import FileCleaner
@@ -269,7 +295,7 @@ class TestFileCleanerCleanStepFiles:
                     return False
 
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
-            cleaner.clean_step_files("sc", config_name=2)
+            cleaner.clean_local_step_files("sc", config_name=2)
 
             assert not scdoc_file.exists()
         finally:
@@ -331,6 +357,88 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_clean_all_cache_clears_all_configured_workstations(self, tmp_path, monkeypatch):
+        """clean all cache 应按工作站配置清理所有远程缓存目录。"""
+        workstations = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\ws_a\working",
+                "scripts_dir": r"D:\ws_a\scripts",
+                "ref_files_dir": r"D:\ws_a\refs",
+                "scdoc_dir": r"D:\ws_a\scdoc",
+                "msh_dir": r"D:\ws_a\msh",
+                "result_dir": r"D:\ws_a\case",
+                "flag_dir": r"D:\ws_a\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+            {
+                "id": "WS-B",
+                "host": "10.0.0.2",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"E:\ws_b\working",
+                "scripts_dir": r"E:\ws_b\scripts",
+                "ref_files_dir": r"E:\ws_b\refs",
+                "scdoc_dir": r"E:\ws_b\scdoc",
+                "msh_dir": r"E:\ws_b\msh",
+                "result_dir": r"E:\ws_b\case",
+                "flag_dir": r"E:\ws_b\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+        ]
+        monkeypatch.setattr("engine.config.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.WORKSTATIONS", workstations)
+
+        class _ConnectedSSH:
+            def __init__(self, workstation_id: str) -> None:
+                self.workstation_id = workstation_id
+                self.cleared_dirs: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared_dirs.append(remote_dir)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            ssh_by_id = {ws["id"]: _ConnectedSSH(str(ws["id"])) for ws in workstations}
+
+            def get_ssh(workstation_id: str = "default") -> _ConnectedSSH:
+                return ssh_by_id[workstation_id]
+
+            cleaner = FileCleaner(state, get_ssh)
+
+            cleaner.clean_all_cache()
+
+            assert ssh_by_id["WS-A"].cleared_dirs == [
+                "D:/ws_a/working",
+                "D:/ws_a/flags",
+            ]
+            assert ssh_by_id["WS-B"].cleared_dirs == [
+                "E:/ws_b/working",
+                "E:/ws_b/flags",
+            ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
     def test_clean_all_cache_holds_ssh_lock(self, tmp_path, monkeypatch):
         """远程缓存清理应在共享 SSH 锁内执行。"""
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\xkz_1020\workingdir")
@@ -365,6 +473,29 @@ class TestFileCleanerCleanStepFiles:
 
             assert ssh.clear_calls_saw_lock == [True, True]
             assert lock.entries == 1
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_cache_fails_when_workstation_ssh_disconnected(self, tmp_path):
+        """clean all cache 不应在远程工作站不可达时静默成功。"""
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            with pytest.raises(RuntimeError, match="远程缓存清理未完成"):
+                cleaner.clean_all_cache()
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
@@ -407,6 +538,89 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_remote_step_file_cleanup_fails_when_ssh_disconnected(self, tmp_path):
+        """远程步骤文件清理不可达时应失败，避免 clean 指令误报成功。"""
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            with pytest.raises(RuntimeError, match="远程文件清理未完成"):
+                cleaner.clean_step_files("meshing", config_name=2)
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_remote_step_file_cleanup_uses_config_workstation(self, tmp_path, monkeypatch):
+        """按构型清理远程步骤时应路由到该构型分配的工作站。"""
+        ws_b = {
+            "id": "WS-B",
+            "host": "10.0.0.2",
+            "port": 22,
+            "username": "ps",
+            "password": "pw",
+            "working_dir": r"E:\ws_b\working",
+            "scripts_dir": r"E:\ws_b\scripts",
+            "ref_files_dir": r"E:\ws_b\refs",
+            "scdoc_dir": r"E:\ws_b\scdoc",
+            "msh_dir": r"E:\ws_b\msh",
+            "result_dir": r"E:\ws_b\case",
+            "flag_dir": r"E:\ws_b\flags",
+            "conda_env": "pyfluent",
+            "conda_exe": r"C:\conda.exe",
+            "mpi_bin_dir": r"C:\mpi",
+        }
+        monkeypatch.setattr("executor.cleaner.get_workstation_config", lambda _wid: dict(ws_b))
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            state.set_config_workstation(2, "WS-B")
+            ssh = _ConnectedSSH()
+            requested_ids: list[str] = []
+
+            def get_ssh(workstation_id: str = "default") -> _ConnectedSSH:
+                requested_ids.append(workstation_id)
+                return ssh
+
+            cleaner = FileCleaner(state, get_ssh)
+
+            cleaner.clean_step_files("meshing", config_name=2)
+
+            assert requested_ids == ["WS-B"]
+            assert ssh.deleted == ["E:/ws_b/msh/model_gen4_2.msh.h5"]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
     def test_clean_all_cache_rejects_remote_root_dirs(self, tmp_path, monkeypatch):
         """clean all cache 不应清理远程根目录。"""
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\\")
@@ -435,7 +649,8 @@ class TestFileCleanerCleanStepFiles:
             ssh = _ConnectedSSH()
             cleaner = FileCleaner(state, lambda: ssh)
 
-            cleaner.clean_all_cache()
+            with pytest.raises(RuntimeError, match="远程缓存清理未完成"):
+                cleaner.clean_all_cache()
 
             assert ssh.cleared_dirs == []
         finally:

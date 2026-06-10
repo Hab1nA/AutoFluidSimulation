@@ -102,6 +102,24 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
     }
 
 
+def test_local_worker_from_env_reloads_toml_config(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "engine.local_worker.reload_config_from_toml",
+        lambda: calls.append("reload"),
+        raising=False,
+    )
+    monkeypatch.setenv("AUTOFLUID_DISCOVER_PUBLIC_IP", "0")
+    monkeypatch.setattr("engine.local_worker.detect_candidate_hosts", lambda: [])
+
+    LocalWorker.from_env()
+
+    assert calls == ["reload"]
+
+
 def test_local_worker_register_includes_local_excel_configs(monkeypatch) -> None:
     import engine.local_worker as local_worker_module
     from engine.local_worker import LocalWorker, LocalWorkerConfig
@@ -206,6 +224,101 @@ def test_local_worker_run_once_heartbeats_only_when_idle_deadline_reached() -> N
     ]
 
 
+def test_local_worker_run_forever_retries_initial_register(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+    sleeps: list[float] = []
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "127.0.0.1", 19527))
+
+    def fake_register() -> dict[str, object]:
+        calls.append("register")
+        if len(calls) == 1:
+            raise RuntimeError("daemon is not ready")
+        return {"status": "ok"}
+
+    def fake_run_once() -> str:
+        calls.append("run_once")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker, "register_once", fake_register)
+    monkeypatch.setattr(worker, "run_once", fake_run_once)
+    monkeypatch.setattr("engine.local_worker.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    try:
+        worker.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == ["register", "register", "run_once"]
+    assert sleeps == [2.0, worker.config.poll_interval]
+
+
+def test_local_worker_run_forever_recovers_after_runtime_ipc_error(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+    sleeps: list[float] = []
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "127.0.0.1", 19527))
+
+    def fake_register() -> dict[str, object]:
+        calls.append("register")
+        return {"status": "ok"}
+
+    def fake_run_once() -> str:
+        calls.append("run_once")
+        if calls.count("run_once") == 1:
+            raise RuntimeError("daemon connection reset")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker, "register_once", fake_register)
+    monkeypatch.setattr(worker, "run_once", fake_run_once)
+    monkeypatch.setattr("engine.local_worker.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    try:
+        worker.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == ["register", "run_once", "register", "run_once"]
+    assert sleeps == [worker.config.poll_interval, worker.config.poll_interval]
+
+
+def test_local_worker_send_request_reports_reset_as_runtime_error(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    class _Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def sendall(self, _payload: bytes) -> None:
+            pass
+
+        def recv(self, _size: int) -> bytes:
+            raise ConnectionResetError(10054, "远程主机强迫关闭了一个现有的连接。")
+
+    monkeypatch.setattr(
+        local_worker_module.socket,
+        "create_connection",
+        lambda _endpoint, timeout: _Socket(),
+    )
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "127.0.0.1", 19527))
+
+    try:
+        worker.register_once()
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("register_once should fail when the IPC connection is reset")
+
+    assert "LocalWorker 无法连接 daemon IPC" in message
+    assert "127.0.0.1:19527" in message
+
+
 def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch) -> None:
     import engine.local_worker as local_worker_module
     from engine.local_worker import LocalWorker, LocalWorkerConfig
@@ -246,6 +359,40 @@ def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch
         "scdoc_file": {"config_name": 7},
     }
     assert calls == [("sw", 3), ("sc", 7)]
+
+
+def test_local_worker_default_handlers_support_check_and_local_clean(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[tuple[str, object]] = []
+
+    class _Runner:
+        def run_local_system_check(self) -> dict[str, object]:
+            calls.append(("check", None))
+            return {"local_checks": {"Excel参数表": {"path": "model.xlsx", "exists": True}}}
+
+        def clean_local_step_files(self, step_name: str, config_name=None) -> None:
+            calls.append((step_name, config_name))
+
+    class _State:
+        def load_configs(self, configs):
+            self.configs = configs
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    assert worker._execute_task("check_local_environment", {}) == {
+        "ok": True,
+        "local_checks": {"Excel参数表": {"path": "model.xlsx", "exists": True}},
+    }
+    assert worker._execute_task("clean_local_files", {"step_name": "sw", "config_name": 3}) == {
+        "ok": True,
+    }
+    assert calls == [("check", None), ("sw", 3)]
 
 
 def test_local_worker_sc_task_includes_scdoc_payload(tmp_path, monkeypatch) -> None:

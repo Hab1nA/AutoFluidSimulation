@@ -776,6 +776,7 @@ class TestErrorHandling(unittest.TestCase):
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
+        mock_doc.InsertFamilyTableEdit.assert_not_called()
         mock_app.CloseDoc.assert_not_called()
 
     @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
@@ -910,6 +911,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
+        mock_doc.InsertFamilyTableEdit.assert_not_called()
         mock_app.CloseDoc.assert_not_called()
 
 

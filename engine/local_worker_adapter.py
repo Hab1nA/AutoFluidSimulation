@@ -40,15 +40,43 @@ class LocalWorkerAdapter:
         """Delegate one SC conversion to a LocalWorker."""
         return self._execute("sc", {"config_name": config_name}, timeout_seconds)
 
+    def check_local_environment(self, timeout_seconds: float = 120.0) -> dict[str, Any] | None:
+        """Delegate a LocalWorker-side environment check."""
+        result = self._execute_for_result("check_local_environment", {}, timeout_seconds)
+        if result is None:
+            return None
+        return dict(result)
+
+    def clean_local_files(
+        self,
+        step_name: str,
+        config_name: int | str | None = None,
+        timeout_seconds: float = 300.0,
+    ) -> bool:
+        """Delegate LocalWorker-side file cleanup."""
+        params: dict[str, Any] = {"step_name": step_name}
+        if config_name is not None and config_name != "all":
+            params["config_name"] = config_name
+        return self._execute("clean_local_files", params, timeout_seconds)
+
     def _execute(
         self,
         step: str,
         params: dict[str, Any],
         timeout_seconds: float,
     ) -> bool:
+        result = self._execute_for_result(step, params, timeout_seconds)
+        return result is not None and bool(result.get("ok", True))
+
+    def _execute_for_result(
+        self,
+        step: str,
+        params: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any] | None:
         if not self._registry.has_online_worker():
             logger.error("[LocalWorker] 没有在线 LocalWorker，无法执行 %s", step)
-            return False
+            return None
         task = self._registry.enqueue_task(step, params)
         finished = self._registry.wait_for_task(
             str(task["task_id"]),
@@ -62,5 +90,8 @@ class LocalWorkerAdapter:
                 finished["task_id"],
                 finished.get("error", ""),
             )
-            return False
-        return bool(finished.get("result", {}).get("ok", True))
+            return None
+        result = finished.get("result", {})
+        if not isinstance(result, dict):
+            return {"ok": False}
+        return dict(result)
