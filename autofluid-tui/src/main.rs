@@ -19,7 +19,6 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use daemon_mgr::DaemonManager;
 use event_handler::command;
 use event_handler::key_handler;
 use ipc::client::IpcClient;
@@ -414,22 +413,7 @@ fn handle_command_result_refs(
             state.should_quit = true;
         }
         command::CommandResult::StartDaemon => {
-            if ipc.is_connected() {
-                log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
-            } else {
-                match daemon.launch(project_dir) {
-                    Ok(pid) => {
-                        log_buffer.push_info(format!(
-                            "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
-                            pid
-                        ));
-                        DaemonManager::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
-                    }
-                    Err(e) => {
-                        log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
-                    }
-                }
-            }
+            daemon.start_with_ipc(ipc, rt, state, log_buffer, project_dir);
         }
         command::CommandResult::RestartDaemon => {
             daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);

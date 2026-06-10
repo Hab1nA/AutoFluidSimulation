@@ -9,6 +9,7 @@ use crate::state::{AppState, LogBuffer};
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
 const DAEMON_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
+const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
     process: Option<Child>,
@@ -21,10 +22,7 @@ impl DaemonManager {
 
     pub fn launch(&mut self, project_dir: &str) -> Result<u32, String> {
         if is_server_mode() {
-            return Err(
-                "server 模式下不会启动本地 Daemon；请确认 ocar 后端已运行并连接远程 IPC"
-                    .to_string(),
-            );
+            return self.launch_server_daemon(project_dir);
         }
 
         let daemon_script = PathBuf::from(project_dir).join("start_daemon.py");
@@ -92,6 +90,12 @@ impl DaemonManager {
     }
 
     pub fn stop(&mut self, project_dir: &str) -> Result<(), String> {
+        if is_server_mode() {
+            self.process = None;
+            log::info!("[Daemon] server 模式下跳过本地 daemon 进程等待");
+            return Ok(());
+        }
+
         // full_quit IPC 命令已在主循环中发送，daemon 的 shutdown() 正在执行。
         // 仅等待进程自行退出，不做额外干预——与 Ctrl+C 行为一致。
         log::info!("[Daemon] 等待后台引擎退出");
@@ -219,11 +223,14 @@ impl DaemonManager {
         state: &mut AppState,
         log_buffer: &mut LogBuffer,
         project_dir: &str,
-    ) {
+    ) -> bool {
+        let server_mode = is_server_mode();
+        let mut stop_sent_over_ipc = false;
         if ipc.is_connected() {
             log::info!("[Daemon] 发送后台引擎停止请求");
             match rt.block_on(ipc.full_quit()) {
                 Ok(resp) if resp.is_ok() => {
+                    stop_sent_over_ipc = true;
                     log_buffer.push_info(format!("✅ {}", resp.message));
                 }
                 Ok(resp) => {
@@ -235,13 +242,34 @@ impl DaemonManager {
             }
             rt.block_on(ipc.disconnect());
         }
+
+        if server_mode {
+            if !stop_sent_over_ipc {
+                match self.stop_server_daemon() {
+                    Ok(()) => {
+                        log_buffer.push_info("✅ 已向服务器发送 daemon 停止命令".to_string());
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 停止服务器 daemon 失败: {}", e));
+                        state.connected = ipc.is_connected();
+                        return false;
+                    }
+                }
+            }
+            state.connected = false;
+            log_buffer.push_info("✅ 服务器后台引擎已停止或正在停止".to_string());
+            return true;
+        }
+
         match self.stop(project_dir) {
             Ok(()) => {
                 state.connected = false;
                 log_buffer.push_info("✅ 后台引擎已停止".to_string());
+                true
             }
             Err(e) => {
                 log_buffer.push_info(format!("⚠️ {}", e));
+                false
             }
         }
     }
@@ -256,12 +284,22 @@ impl DaemonManager {
         project_dir: &str,
     ) {
         if is_server_mode() {
-            log::warn!("[Daemon] server 模式下拒绝从 TUI 重启远程 ocar 后端");
-            log_buffer.push_info(
-                "server 模式下不会从 TUI 重启 ocar 后端；请在服务器上重启 daemon 后重新连接"
-                    .to_string(),
-            );
-            state.connected = ipc.is_connected();
+            log::info!("[Daemon] server 模式下重启服务器 daemon");
+            if !self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir) {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            match self.launch(project_dir) {
+                Ok(_) => {
+                    log_buffer.push_info(
+                        "⚠️ 已向服务器发送 daemon 启动命令，等待 IPC 就绪...".to_string(),
+                    );
+                    Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ 重启服务器 daemon 失败: {}", e));
+                }
+            }
             return;
         }
         log::info!("[Daemon] 开始重启后台引擎");
@@ -279,12 +317,178 @@ impl DaemonManager {
             }
         }
     }
+
+    pub fn start_with_ipc(
+        &mut self,
+        ipc: &mut IpcClient,
+        rt: &tokio::runtime::Runtime,
+        state: &mut AppState,
+        log_buffer: &mut LogBuffer,
+        project_dir: &str,
+    ) {
+        if ipc.is_connected() {
+            log_buffer.push_info("⚠️ 已连接到后台引擎，无需重复启动".to_string());
+            state.connected = true;
+            return;
+        }
+
+        match self.launch(project_dir) {
+            Ok(0) => {
+                log_buffer
+                    .push_info("⚠️ 已向服务器发送 daemon 启动命令，等待 IPC 就绪...".to_string());
+                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+            }
+            Ok(pid) => {
+                log_buffer.push_info(format!(
+                    "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
+                    pid
+                ));
+                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+            }
+            Err(e) => {
+                log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+            }
+        }
+    }
+
+    fn launch_server_daemon(&mut self, _project_dir: &str) -> Result<u32, String> {
+        Self::run_server_daemon_command(ServerDaemonAction::Start)?;
+        Ok(0)
+    }
+
+    fn stop_server_daemon(&mut self) -> Result<(), String> {
+        Self::run_server_daemon_command(ServerDaemonAction::Stop)
+    }
+
+    fn run_server_daemon_command(action: ServerDaemonAction) -> Result<(), String> {
+        let command = ServerDaemonSshCommand::from_env(action)?;
+        let args = command.args();
+        log::info!(
+            "[Daemon] 通过 SSH 控制服务器 daemon: action={}, target={}",
+            action.label(),
+            command.target
+        );
+        let output = Command::new(&command.ssh_exe)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("执行 ssh 失败: {}", e))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        if detail.is_empty() {
+            Err(format!("ssh 退出状态: {}", output.status))
+        } else {
+            Err(format!("ssh 退出状态: {}, {}", output.status, detail))
+        }
+    }
 }
 
 fn is_server_mode() -> bool {
     std::env::var("AUTOFLUID_SERVER_MODE")
         .map(|mode| mode.eq_ignore_ascii_case("server"))
         .unwrap_or(false)
+}
+
+#[derive(Clone, Copy)]
+enum ServerDaemonAction {
+    Start,
+    Stop,
+}
+
+impl ServerDaemonAction {
+    fn label(self) -> &'static str {
+        match self {
+            ServerDaemonAction::Start => "start",
+            ServerDaemonAction::Stop => "stop",
+        }
+    }
+
+    fn command_env(self) -> &'static str {
+        match self {
+            ServerDaemonAction::Start => "AUTOFLUID_SERVER_DAEMON_START_CMD",
+            ServerDaemonAction::Stop => "AUTOFLUID_SERVER_DAEMON_STOP_CMD",
+        }
+    }
+}
+
+struct ServerDaemonSshCommand {
+    ssh_exe: String,
+    target: String,
+    remote_command: String,
+}
+
+impl ServerDaemonSshCommand {
+    fn from_env(action: ServerDaemonAction) -> Result<Self, String> {
+        let ssh_exe = env_non_empty("AUTOFLUID_SSH_EXE").unwrap_or_else(|| "ssh".to_string());
+        let target = first_env_non_empty(&[
+            "AUTOFLUID_SERVER_DAEMON_SSH_TARGET",
+            "AUTOFLUID_SERVER_TUNNEL_HOST",
+            "AUTOFLUID_SERVER_HOST",
+            "AUTOFLUID_IPC_HOST",
+        ])
+        .unwrap_or_else(|| "ocar".to_string());
+        let remote_command = match env_non_empty(action.command_env()) {
+            Some(command) => command,
+            None if matches!(action, ServerDaemonAction::Start) => default_server_start_command(),
+            None => {
+                return Err(format!(
+                    "{} 未配置，且当前 IPC 未连接，无法停止服务器 daemon",
+                    action.command_env()
+                ));
+            }
+        };
+
+        Ok(Self {
+            ssh_exe,
+            target,
+            remote_command,
+        })
+    }
+
+    fn args(&self) -> Vec<String> {
+        vec![
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
+            self.target.clone(),
+            self.remote_command.clone(),
+        ]
+    }
+}
+
+fn first_env_non_empty(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| env_non_empty(key))
+}
+
+fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn default_server_start_command() -> String {
+    let project_dir = env_non_empty("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
+        .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
+        .map(|path| shell_single_quote(&path))
+        .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string());
+    format!(
+        "cd {project_dir} && mkdir -p logs && env AUTOFLUID_SERVER_MODE=server setsid -f .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null"
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -337,23 +541,63 @@ mod tests {
     }
 
     #[test]
-    fn launch_rejects_local_daemon_start_in_server_mode() {
+    fn server_daemon_start_command_uses_configured_ssh_target() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        std::env::set_var("AUTOFLUID_SSH_EXE", "ssh-test");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var(
+            "AUTOFLUID_SERVER_DAEMON_START_CMD",
+            "systemctl --user start autofluid-daemon",
+        );
+
+        let command = ServerDaemonSshCommand::from_env(ServerDaemonAction::Start)
+            .expect("server daemon command");
+        let args = command.args();
+
+        assert_eq!(command.ssh_exe, "ssh-test");
+        assert_eq!(
+            args,
+            vec![
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "ConnectTimeout=10".to_string(),
+                "ocar-prod".to_string(),
+                "systemctl --user start autofluid-daemon".to_string(),
+            ]
+        );
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+    }
+
+    #[test]
+    fn launch_uses_server_daemon_start_command_in_server_mode() {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
+        let ssh_exe = fake_success_ssh_exe(&project_dir);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
         let mut daemon = DaemonManager::new();
 
         let result = daemon.launch(project_dir.to_str().expect("utf8 temp path"));
 
-        assert!(result.is_err());
-        assert!(result.expect_err("launch should fail").contains("ocar"));
+        assert_eq!(result, Ok(0));
 
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
     }
 
     #[test]
-    fn restart_rejects_before_sending_stop_in_server_mode() {
+    fn restart_stops_remote_daemon_over_ipc_then_starts_server_daemon() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::sync::mpsc;
@@ -361,6 +605,12 @@ mod tests {
 
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+
+        let project_dir = unique_temp_project_dir();
+        let ssh_exe = fake_success_ssh_exe(&project_dir);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ipc");
         let port = listener.local_addr().expect("listener addr").port();
@@ -383,6 +633,12 @@ mod tests {
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
                 Err(e) => panic!("read ipc request: {e}"),
             };
+            if bytes > 0 {
+                let _ = stream.write_all(
+                    br#"{"status":"ok","data":{},"message":"daemon stopping","request_id":"test"}"#,
+                );
+                let _ = stream.write_all(b"\n");
+            }
             tx.send(bytes).expect("send byte count");
         });
 
@@ -395,7 +651,6 @@ mod tests {
         let mut state = AppState::new();
         state.connected = true;
         let mut log_buffer = LogBuffer::new();
-        let project_dir = unique_temp_project_dir();
         let mut daemon = DaemonManager::new();
 
         daemon.restart_with_ipc(
@@ -409,19 +664,83 @@ mod tests {
         let bytes = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("server byte count");
-        assert_eq!(
-            bytes, 0,
-            "restart must not send stop/full_quit in server mode"
-        );
-        assert!(state.connected);
+        assert!(bytes > 0, "restart must send full_quit in server mode");
         assert!(log_buffer
             .info_messages
             .iter()
-            .any(|message| message.contains("不会从 TUI 重启 ocar 后端")));
+            .any(|message| message.contains("已向服务器发送 daemon 启动命令")));
 
         rt.block_on(ipc.disconnect());
         server.join().expect("server thread");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn restart_does_not_start_server_daemon_when_stop_fails() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let ssh_exe = fake_success_ssh_exe(&project_dir);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = DaemonManager::new();
+
+        daemon.restart_with_ipc(
+            &mut ipc,
+            &rt,
+            &mut state,
+            &mut log_buffer,
+            project_dir.to_str().expect("utf8 temp path"),
+        );
+
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("停止服务器 daemon 失败")));
+        assert!(!log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("已向服务器发送 daemon 启动命令")));
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    fn fake_success_ssh_exe(project_dir: &std::path::Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_ssh.cmd");
+            fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake ssh cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_ssh.sh");
+            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake ssh sh");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake ssh metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake ssh");
+            path
+        }
     }
 }
