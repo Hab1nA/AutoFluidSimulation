@@ -43,9 +43,18 @@ impl IpcClient {
         match tokio::time::timeout(DEFAULT_TIMEOUT, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 self.stream = Some(stream);
-                self.last_reconnect = None; // 连接成功，清除冷却
-                log::info!("[IPC] 已连接后台引擎: {}", addr);
-                Ok(())
+                match self.verify_connection().await {
+                    Ok(()) => {
+                        self.last_reconnect = None; // 连接成功，清除冷却
+                        log::info!("[IPC] 已连接后台引擎: {}", addr);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        self.disconnect().await;
+                        log::warn!("[IPC] 连接握手失败: {}, error={}", addr, e);
+                        Err(format!("连接握手失败: {}", e))
+                    }
+                }
             }
             Ok(Err(e)) => {
                 log::warn!("[IPC] 连接失败: {}, error={}", addr, e);
@@ -62,6 +71,58 @@ impl IpcClient {
         if let Some(mut stream) = self.stream.take() {
             let _ = stream.shutdown().await;
             log::info!("[IPC] 已断开后台引擎连接");
+        }
+    }
+
+    async fn verify_connection(&mut self) -> Result<(), String> {
+        let request = IpcRequest::new(super::protocol::CMD_GET_ENGINE_STATUS);
+        let mut stream = self.stream.take().ok_or_else(|| "未连接".to_string())?;
+
+        let data = request.serialize();
+        stream
+            .write_all(&data)
+            .await
+            .map_err(|e| format!("发送失败: {}", e))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut buffer = Vec::new();
+        let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+            loop {
+                let mut byte = [0u8; 1];
+                match reader.read(&mut byte).await {
+                    Ok(0) => return Ok(false),
+                    Ok(_) => {
+                        buffer.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            return Ok(true);
+                        }
+                        if buffer.len() > MAX_RESPONSE_BYTES {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+        .await;
+
+        let response = match read_result {
+            Ok(Ok(true)) => {
+                IpcResponse::deserialize(&buffer).ok_or_else(|| "无效响应格式".to_string())?
+            }
+            Ok(Ok(false)) => return Err("连接已断开".to_string()),
+            Ok(Err(e)) => return Err(format!("读取失败: {}", e)),
+            Err(_) => return Err("请求超时".to_string()),
+        };
+
+        self.stream = Some(reader.into_inner());
+        if response.is_ok() {
+            Ok(())
+        } else {
+            Err(response.message)
         }
     }
 
@@ -454,6 +515,9 @@ fn is_polling_command(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::IpcClient;
+    use serde_json::Value;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -486,5 +550,65 @@ mod tests {
 
         std::env::remove_var("AUTOFLUID_IPC_HOST");
         std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
+
+    #[test]
+    fn connect_rejects_tcp_accept_without_ipc_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept client");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        let result = rt.block_on(client.connect());
+
+        assert!(result.is_err());
+        assert!(!client.is_connected());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn connect_succeeds_after_engine_status_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut line)
+                .expect("read handshake");
+            let request: Value = serde_json::from_str(line.trim()).expect("handshake json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_GET_ENGINE_STATUS)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            let response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        let result = rt.block_on(client.connect());
+
+        assert!(result.is_ok());
+        assert!(client.is_connected());
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
     }
 }

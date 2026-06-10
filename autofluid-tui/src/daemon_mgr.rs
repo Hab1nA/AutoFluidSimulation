@@ -371,18 +371,18 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_millis(300)))
                 .expect("set read timeout");
             let mut buf = [0_u8; 1024];
+            let handshake_bytes = stream.read(&mut buf).expect("read handshake");
+            assert!(handshake_bytes > 0, "connect should send handshake");
+            let _ = stream.write_all(
+                br#"{"status":"ok","data":{"engine_status":"stopped"},"message":"","request_id":"test"}"#,
+            );
+            let _ = stream.write_all(b"\n");
             let bytes = match stream.read(&mut buf) {
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
                 Err(e) => panic!("read ipc request: {e}"),
             };
-            if bytes > 0 {
-                let _ = stream.write_all(
-                    br#"{"status":"ok","data":null,"message":"stopping","request_id":"test"}"#,
-                );
-                let _ = stream.write_all(b"\n");
-            }
             tx.send(bytes).expect("send byte count");
         });
 

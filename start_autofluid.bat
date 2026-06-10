@@ -5,7 +5,8 @@ set "PROJECT_DIR=%~dp0"
 if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
 set "PYTHON_EXE=%PROJECT_DIR%\.venv\Scripts\python.exe"
-set "DAEMON_PS1=%PROJECT_DIR%\scripts\start_daemon_window.ps1"
+set "PREFLIGHT_PS1=%PROJECT_DIR%\scripts\start_autofluid_preflight.ps1"
+set "WORKER_PS1=%PROJECT_DIR%\scripts\start_local_worker_window.ps1"
 set "CLIENT_PS1=%PROJECT_DIR%\scripts\start_client_window.ps1"
 
 if not exist "%PYTHON_EXE%" (
@@ -41,32 +42,89 @@ where "%PS_EXE%" >nul 2>nul
 if errorlevel 1 set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 set "PYTHON=%PYTHON_EXE%"
+set "START_CLIENT=1"
+set "START_WORKER=1"
+set "RUN_CHECK=0"
 
-if /I "%~1"=="--check" (
+:parse_args
+if "%~1"=="" goto args_done
+
+if /I "%~1"=="--client-only" (
+    set "START_WORKER=0"
+) else if /I "%~1"=="--worker-only" (
+    set "START_CLIENT=0"
+) else if /I "%~1"=="--check" (
+    set "RUN_CHECK=1"
+) else if /I "%~1"=="--help" (
+    echo Usage:
+    echo   start_autofluid.bat
+    echo   start_autofluid.bat --client-only
+    echo   start_autofluid.bat --worker-only
+    echo   start_autofluid.bat --check
+    echo   start_autofluid.bat --client-only --check
+    echo   start_autofluid.bat --worker-only --check
+    echo.
+    echo Notes:
+    echo   - The daemon runs on the server in current mode.
+    echo   - Local launch will auto-start the SSH IPC tunnel defined in .env.
+    exit /b 0
+) else (
+    echo [ERROR] Unknown argument: %~1
+    echo Run start_autofluid.bat --help for usage.
+    exit /b 1
+)
+shift
+goto parse_args
+
+:args_done
+if "%START_CLIENT%"=="0" if "%START_WORKER%"=="0" (
+    echo [ERROR] Nothing to start. Choose at least one of client or worker.
+    exit /b 1
+)
+
+if "%RUN_CHECK%"=="1" (
     echo PROJECT_DIR=%PROJECT_DIR%
     echo PYTHON_EXE=%PYTHON_EXE%
     echo PS_EXE=%PS_EXE%
     echo wt.exe is available.
-    "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%DAEMON_PS1%" -Check
+    "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PREFLIGHT_PS1%" -Check
     if errorlevel 1 exit /b 1
-    "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%CLIENT_PS1%" -Check
-    if errorlevel 1 exit /b 1
+    if "%START_WORKER%"=="1" (
+        "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%WORKER_PS1%" -Check
+        if errorlevel 1 exit /b 1
+    )
+    if "%START_CLIENT%"=="1" (
+        "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%CLIENT_PS1%" -Check
+        if errorlevel 1 exit /b 1
+    )
     exit /b 0
 )
 
-wt.exe -w new new-tab --title "AutoFluid Daemon" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%DAEMON_PS1%"
+echo [INFO] Validating AutoFluid remote-daemon startup configuration...
+"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PREFLIGHT_PS1%"
 if errorlevel 1 (
-    echo [ERROR] Failed to start the AutoFluid Daemon Windows Terminal window.
+    echo [ERROR] AutoFluid startup preflight failed.
     pause
     exit /b 1
 )
 
-timeout /t 2 /nobreak >nul
-wt.exe -w new new-tab --title "AutoFluid Client" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%CLIENT_PS1%"
-if errorlevel 1 (
-    echo [ERROR] Failed to start the AutoFluid Client Windows Terminal window.
-    pause
-    exit /b 1
+if "%START_WORKER%"=="1" (
+    wt.exe -w new new-tab --title "AutoFluid LocalWorker" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%WORKER_PS1%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to start the AutoFluid LocalWorker Windows Terminal window.
+        pause
+        exit /b 1
+    )
+)
+
+if "%START_CLIENT%"=="1" (
+    if "%START_WORKER%"=="1" timeout /t 2 /nobreak >nul
+    wt.exe -w new new-tab --title "AutoFluid Client" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%CLIENT_PS1%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to start the AutoFluid Client Windows Terminal window.
+        pause
+        exit /b 1
+    )
 )
 
 endlocal

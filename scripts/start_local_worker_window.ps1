@@ -1,12 +1,12 @@
 param(
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Once
 )
 
 $ErrorActionPreference = "Stop"
 
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 $PythonExe = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-$ClientScript = Join-Path $ProjectDir "start_client.py"
 $EnvScript = Join-Path $PSScriptRoot "autofluid_env.ps1"
 
 . $EnvScript
@@ -19,18 +19,24 @@ if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
 
 if ($Check) {
     & $PythonExe --version
-    Write-AutoFluidEndpointSummary
-    [void](Test-AutoFluidEndpoint)
-    Write-Host "Client launcher check passed."
+    & $PythonExe -c "import engine.local_worker"
+    Write-Host "LocalWorker launcher check passed."
     Write-Host "ProjectDir: $ProjectDir"
     Write-Host "PythonExe: $PythonExe"
+    Write-AutoFluidEndpointSummary
+    [void](Test-AutoFluidEndpoint)
     exit 0
 }
 
-$Host.UI.RawUI.WindowTitle = "AutoFluid Client"
+$Host.UI.RawUI.WindowTitle = "AutoFluid LocalWorker"
 Set-Location -LiteralPath $ProjectDir
 $env:PYTHON = $PythonExe
 
 Write-AutoFluidEndpointSummary
-& $PythonExe $ClientScript
+if ($Once) {
+    & $PythonExe -m engine.local_worker --once
+}
+else {
+    & $PythonExe -m engine.local_worker
+}
 exit $LASTEXITCODE

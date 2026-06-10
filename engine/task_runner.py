@@ -297,7 +297,7 @@ class TaskRunner:
 
     def _should_delegate_local_steps(self) -> bool:
         """Return True when local Windows-only steps should run via LocalWorker."""
-        return is_server_mode() and self._local_worker_adapter is not None
+        return is_server_mode() and getattr(self, "_local_worker_adapter", None) is not None
 
     # ------------------------------------------------------------------
     # 阶段 4: 网格划分（委托给 RemoteExecutor）

@@ -267,6 +267,12 @@ POLLING_COMMANDS = frozenset({
     "get_engine_status",
 })
 
+_IPC_LIFECYCLE_LOG_MARKERS = (
+    "IPC 客户端连接",
+    "IPC 客户端断开",
+    "客户端主动断开",
+)
+
 _CONFIG_SCOPED_LOG_PATTERNS = (
     re.compile(r"构型\s*\d+"),
     re.compile(r"仍有\s*\d+\s*个构型"),
@@ -360,6 +366,8 @@ class LogBroadcastHandler(logging.Handler):
                 return
             if self._is_polling_log(record):
                 return
+            if self._is_ipc_lifecycle_log(record):
+                return
             if self._is_config_scoped_log(record):
                 return
             entry = self._entry_from_record(record)
@@ -395,6 +403,14 @@ class LogBroadcastHandler(logging.Handler):
             return False
         message = record.getMessage()
         return any(pattern.search(message) for pattern in _CONFIG_SCOPED_LOG_PATTERNS)
+
+    @staticmethod
+    def _is_ipc_lifecycle_log(record: logging.LogRecord) -> bool:
+        """过滤 IPC 连接生命周期噪音，保留真正的 IPC 错误和命令日志。"""
+        if "ipc" not in record.name.lower():
+            return False
+        message = record.getMessage()
+        return any(marker in message for marker in _IPC_LIFECYCLE_LOG_MARKERS)
 
     @staticmethod
     def _is_polling_log(record: logging.LogRecord) -> bool:

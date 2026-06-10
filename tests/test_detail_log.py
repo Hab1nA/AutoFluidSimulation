@@ -655,7 +655,7 @@ def test_polling_filter_get_engine_status():
 
 
 def test_polling_filter_mixed_with_normal():
-    """测试轮询命令与正常日志混合时，仅轮询命令被过滤。"""
+    """测试轮询命令和 IPC 生命周期日志被过滤，手动命令/错误保留。"""
     handler = LogBroadcastHandler(capacity=100)
     ipc_logger = logging.getLogger("ipc.server")
     ipc_logger.addHandler(handler)
@@ -669,17 +669,17 @@ def test_polling_filter_mixed_with_normal():
 
     result = handler.get_entries(since_id=0, limit=10)
     entries = result["entries"]
-    assert result["total"] == 3, f"期望3条日志（2条轮询被过滤），实际{result['total']}"
+    assert result["total"] == 2, f"期望2条日志（轮询和连接生命周期被过滤），实际{result['total']}"
 
     messages = [e["message"] for e in entries]
-    assert any("客户端连接" in m for m in messages), "正常日志'客户端连接'应保留"
+    assert not any("客户端连接" in m for m in messages), "IPC 客户端连接日志不应刷屏"
     assert any("收到命令: start" in m for m in messages), "手动命令'start'应保留"
     assert any("处理客户端消息异常" in m for m in messages), "错误日志应保留"
     assert not any("get_all_status" in m for m in messages), "轮询命令 get_all_status 不应出现"
     assert not any("get_log_entries" in m for m in messages), "轮询命令 get_log_entries 不应出现"
 
     ipc_logger.removeHandler(handler)
-    print("  ✅ 混合日志中轮询命令被正确过滤，正常日志保留")
+    print("  ✅ 混合日志中轮询和 IPC 生命周期日志被正确过滤，正常日志保留")
 
 
 def test_polling_filter_non_ipc_logger_not_filtered():
@@ -781,6 +781,30 @@ def test_broadcast_false_record_is_suppressed():
 
     test_logger.removeHandler(handler)
     print("  ✅ broadcast=False 日志不会进入详细日志")
+
+
+def test_ipc_lifecycle_logs_are_suppressed():
+    """测试 IPC 连接/断开生命周期日志不会进入详细日志广播。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("ipc.server")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info("[IPC] IPC 客户端连接: ('127.0.0.1', 53318)")
+    test_logger.info("[IPC] IPC 客户端断开: ('127.0.0.1', 53318)")
+    test_logger.debug("[IPC] 客户端主动断开: [WinError 10054]")
+    test_logger.warning("[IPC] IPC 连接数已达上限 (10)，拒绝新连接")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    messages = [e["message"] for e in result["entries"]]
+
+    assert result["total"] == 1
+    assert any("连接数已达上限" in m for m in messages), "异常连接告警应保留"
+    assert not any("客户端连接" in m for m in messages)
+    assert not any("客户端断开" in m for m in messages)
+
+    test_logger.removeHandler(handler)
+    print("  ✅ IPC 连接生命周期日志不会进入详细日志")
 
 
 # ============================================================================
@@ -1317,6 +1341,7 @@ def main():
         ("轮询过滤: 常量完整性", test_polling_commands_constant),
         ("轮询过滤: _is_polling_log", test_is_polling_log_static_method),
         ("广播过滤: broadcast=False", test_broadcast_false_record_is_suppressed),
+        ("广播过滤: IPC生命周期", test_ipc_lifecycle_logs_are_suppressed),
         ("逐构型过滤: 构型N", test_config_scoped_logs_are_suppressed),
         ("逐构型过滤: config=N", test_config_scoped_log_suppression_matches_config_equals),
         ("逐构型过滤: 操作上下文", test_config_scoped_log_suppression_matches_operation_context),

@@ -231,7 +231,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
         Err(_) => {
             state.connected = false;
-            log_buffer.push_info("❌ 无法连接到后台引擎，请先启动 start_daemon.py".to_string());
+            log_buffer.push_info(
+                "❌ 无法连接到后台引擎，请检查远端 daemon 是否运行以及 AUTOFLUID_IPC_HOST 配置"
+                    .to_string(),
+            );
             log_buffer
                 .push_info("提示: 界面将在无后台连接的情况下运行，部分功能不可用".to_string());
         }
