@@ -576,6 +576,7 @@ class PipelineScheduler:
                 if status == STATUS_PAUSED:
                     if self._check_step_output_exists(cn, step, step_dir, scdoc_dir):
                         self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                        self._forget_completed_remote_task_if_tracked(cn, step)
                         continue
                     else:
                         priority_enqueue.append((cn, step))
@@ -598,6 +599,7 @@ class PipelineScheduler:
                 break  # 未知状态，跳过
 
             else:
+                self._forget_completed_config_remote_tasks(cn)
                 logger.info(f"{log_prefix} 构型{cn} 所有步骤已完成，跳过恢复")
 
         # ---- 统一入队（PAUSED 优先）----
@@ -641,6 +643,27 @@ class PipelineScheduler:
                 pass
         return check_step_output_exists(
             cn, step, step_dir, scdoc_dir, remote_config, ssh
+        )
+
+    def _forget_completed_config_remote_tasks(self, cn: int) -> None:
+        """清理已完成构型残留的远程任务元数据。"""
+        for step in ("meshing", "solver"):
+            self._forget_completed_remote_task_if_tracked(cn, step)
+
+    def _forget_completed_remote_task_if_tracked(self, cn: int, step: str) -> None:
+        """只在状态库仍跟踪远程任务时清理完成步骤的元数据。"""
+        if step not in {"meshing", "solver"}:
+            return
+        workstation_id = self._workstation_for_config(cn)
+        get_remote_task = getattr(self.state, "get_remote_task", None)
+        if callable(get_remote_task):
+            task = get_remote_task(cn, step, workstation_id=workstation_id)
+            if task is None:
+                return
+        self.runner.get_remote_executor().forget_remote_task(
+            cn,
+            step,
+            workstation_id=workstation_id,
         )
 
     def _is_step_in_flight(self, cn: int, step: str) -> bool:

@@ -597,6 +597,9 @@ class _MockRemoteExecutor:
         workstation_id: str = "default",
     ) -> None:
         self._forgotten_remote_tasks.append((config_name, step_name, workstation_id))
+        delete_remote_task = getattr(self.state, "delete_remote_task", None)
+        if callable(delete_remote_task):
+            delete_remote_task(config_name, step_name, workstation_id=workstation_id)
 
 
 class _SpyFileMonitor:
@@ -819,6 +822,47 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
+
+    def test_resume_scan_paused_remote_solver_with_outputs_forgets_task(self):
+        """Paused Solver 输出已存在时也应清理远程任务元数据。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_PAUSED)
+        self.state.save_remote_task(
+            workstation_id="default",
+            config_name=1,
+            step_name="solver",
+            task_name="AutoFluid_paused_solver",
+            flag_file="D:/flags/solver_done_1.txt",
+            error_flag_file="D:/flags/solver_done_1.txt.error",
+            started_at=time.time(),
+        )
+        self.scheduler._check_step_output_exists = lambda *_args: True
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
+
+    def test_resume_scan_completed_config_forgets_stale_remote_tasks(self):
+        """全步骤 Completed 但仍有远程任务元数据时应清理残留记录。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.save_remote_task(
+            workstation_id="default",
+            config_name=1,
+            step_name="solver",
+            task_name="AutoFluid_old_solver",
+            flag_file="D:/flags/solver_done_1.txt",
+            error_flag_file="D:/flags/solver_done_1.txt.error",
+            started_at=time.time(),
+        )
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
         assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
 
     def test_finalize_pipeline_completed_sets_stopped_without_pausing_completed_steps(self):
