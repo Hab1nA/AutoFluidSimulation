@@ -311,6 +311,12 @@ class SWPhaseHandler:
             return False  # 需要外部递归调用 start_pipeline
 
         self._call_runner_cleanup("do_sw_final_cleanup")
+        sw_completed = [
+            cn for cn in all_configs
+            if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
+        ]
+        if sw_completed:
+            self._enqueue_server_mode_completed_sw(sw_completed)
 
         return True
 

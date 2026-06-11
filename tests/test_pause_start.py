@@ -260,6 +260,7 @@ class MockStepFileMonitor:
         self.on_file_ready = on_file_ready
         self._processed_files = set()
         self._known_files = set()
+        self._owns_paused_event = shared_paused_event is None
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
@@ -286,7 +287,8 @@ class MockStepFileMonitor:
 
     def resume_only(self):
         """仅恢复监控，不重置已处理文件集合。"""
-        self._paused.clear()
+        if self._owns_paused_event:
+            self._paused.clear()
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（仅清除暂停标志）")
 
@@ -305,7 +307,8 @@ class MockStepFileMonitor:
 
     def resume_and_reset(self):
         self._need_reset = True
-        self._paused.clear()
+        if self._owns_paused_event:
+            self._paused.clear()
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（将执行重置和立即扫描）")
 

@@ -91,3 +91,40 @@ def test_worker_task_queue_roundtrip() -> None:
 
     assert completed["status"] == "completed"
     assert completed["result"] == {"ok": True}
+
+
+def test_has_active_step_task_tracks_pending_and_running_config_tasks() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sw": True})
+
+    queued = registry.enqueue_task("sw", {"config_name": 3})
+
+    assert registry.has_active_step_task("sw", 3) is True
+    assert registry.has_active_step_task("sw", 4) is False
+
+    polled = registry.poll_task("local-pc-01")
+    assert polled is not None
+    assert polled["task_id"] == queued["task_id"]
+    assert registry.has_active_step_task("sw", 3) is True
+
+    registry.complete_task(str(polled["task_id"]), "local-pc-01", {"ok": True})
+
+    assert registry.has_active_step_task("sw", 3) is False
+
+
+def test_has_active_step_task_treats_batch_task_as_matching_any_config() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sw": True})
+
+    task = registry.enqueue_task("sw", {})
+
+    assert registry.has_active_step_task("sw", 1) is True
+    assert registry.has_active_step_task("sw", None) is True
+
+    registry.fail_task(str(task["task_id"]), "local-pc-01", "cancelled")
+
+    assert registry.has_active_step_task("sw", 1) is False

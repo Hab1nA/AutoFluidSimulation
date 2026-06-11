@@ -319,6 +319,60 @@ class TestSWPhaseHandlerFallback:
         assert config_name == 1
         assert step_file.endswith("model_gen4.SLDPRT_1.step")
 
+    def test_server_mode_breakpoint_resume_enqueues_completed_sw(self, monkeypatch):
+        """server 模式断点续传时，已完成 SW 的构型仍应恢复 SC 队列。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            def __init__(self):
+                self.sw_macro_started = True
+
+            def get_all_configs(self) -> list[int]:
+                return [1]
+
+            def get_step_status(self, config_name: int, step_name: str) -> str:
+                if step_name == "sw":
+                    return STATUS_COMPLETED
+                return STATUS_WAITING
+
+            def is_sw_macro_started(self) -> bool:
+                return self.sw_macro_started
+
+            def set_sw_macro_started(self, value: bool) -> None:
+                self.sw_macro_started = value
+
+        class _Runner:
+            def __init__(self):
+                self.final_cleanup_count = 0
+
+            def do_sw_final_cleanup(self) -> None:
+                self.final_cleanup_count += 1
+
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        runner = _Runner()
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=runner,
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        assert handler.execute_sw_phase() is True
+
+        assert runner.final_cleanup_count == 1
+        assert sc_queue.qsize() == 1
+        assert sc_queue.get(timeout=1) == (
+            1,
+            r"C:\AutoFluid\steps\model_gen4.SLDPRT_1.step",
+        )
+
     def test_server_mode_sw_phase_does_not_start_step_file_monitor(self, monkeypatch):
         """server 模式下 SW/SC 由 LocalWorker 执行，daemon 不应启动本地 STEP 监控。"""
         from engine.scheduler.sw_phase import SWPhaseHandler
@@ -572,6 +626,7 @@ class _MockTaskRunner:
         self._solver_wait_result = True
         self._solver_wait_count = 0
         self._remote_executor = _MockRemoteExecutor(self.state)
+        self._sw_in_flight = False
 
     def set_control_events(self, paused_event, stopped_event):
         self._paused_event = paused_event
@@ -606,6 +661,9 @@ class _MockTaskRunner:
             for cn in self.state.get_all_configs()
             if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
         )
+
+    def is_sw_in_flight(self, config_name: int | None = None) -> bool:
+        return self._sw_in_flight
 
     def execute_solver(self, config_name: int) -> bool:
         self._solver_dispatched.append(config_name)
@@ -868,6 +926,17 @@ class TestPipelineSchedulerStartRecovery:
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "meshing", "default")]
         assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
         assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_resume_scan_keeps_running_sw_when_local_worker_task_in_flight(self):
+        """LocalWorker 仍在执行 SW 时，resume 扫描不能把 Running 改回 Waiting。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_RUNNING)
+        self.runner._sw_in_flight = True
+        self.scheduler._check_step_output_exists = lambda *_args: False
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "sw") == STATUS_RUNNING
 
     def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
         """断点恢复查询远程任务时应使用构型分配的工作站。"""
@@ -1299,6 +1368,7 @@ class _CleanStepScheduler:
         self.file_monitor_reset_count = 0
         self.reset_calls = []
         self.start_calls = 0
+        self.resume_calls = 0
         self.is_paused = False
         self.pipeline_alive = False
 
@@ -1311,14 +1381,19 @@ class _CleanStepScheduler:
     def start_pipeline(self):
         self.start_calls += 1
 
+    def resume(self):
+        self.resume_calls += 1
+        self.is_paused = False
+
     def set_pipeline_thread(self, thread):
         self.thread = thread
 
 
 class _DaemonState:
-    def __init__(self, engine_status="stopped", remote_tasks=None):
+    def __init__(self, engine_status="stopped", remote_tasks=None, statuses=None):
         self.engine_status = engine_status
         self.remote_tasks = remote_tasks or []
+        self.statuses = statuses or {}
         self.set_status_calls = []
 
     def get_engine_status(self):
@@ -1330,6 +1405,15 @@ class _DaemonState:
 
     def get_all_remote_tasks(self):
         return self.remote_tasks
+
+    def get_all_statuses(self):
+        return self.statuses
+
+    def get_all_configs(self):
+        return list(self.statuses)
+
+    def get_step_status(self, config_name, step_name):
+        return self.statuses.get(config_name, {}).get(step_name, STATUS_WAITING)
 
 
 class _AssignmentState:
@@ -1459,6 +1543,32 @@ class TestPipelineDaemonCleanStep:
         assert data is None
         assert "LocalWorker" in message
         assert popen_calls == []
+        assert daemon.scheduler.start_calls == 0
+
+    def test_server_mode_paused_resume_allows_active_local_step_without_online_worker(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            statuses={1: {"sw": STATUS_RUNNING, "sc": STATUS_WAITING}},
+        )
+        daemon.scheduler = _CleanStepScheduler()
+        daemon.scheduler.is_paused = True
+        daemon.scheduler.pipeline_alive = True
+        daemon._pipeline_ever_started = True
+        daemon.local_worker_registry = LocalWorkerRegistry(timeout_seconds=0.0)
+        daemon.local_worker_adapter = object()
+        daemon._ensure_local_worker_autostarted = lambda: None
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert data is None
+        assert message == "流水线已恢复运行"
+        assert daemon.scheduler.resume_calls == 1
         assert daemon.scheduler.start_calls == 0
 
     def test_start_running_with_dead_pipeline_thread_restarts_scheduler(self, monkeypatch):
@@ -1683,6 +1793,28 @@ class TestPipelineDaemonCleanStep:
         assert daemon.runner.clean_calls == []
         assert daemon.scheduler.file_monitor_reset_count == 0
 
+    def test_clean_rejects_when_paused_step_still_running(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            statuses={1: {"sw": STATUS_RUNNING, "sc": STATUS_WAITING}},
+        )
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": 1,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "仍在执行" in message
+        assert daemon.runner.clean_calls == []
+        assert daemon.scheduler.file_monitor_reset_count == 0
+
     def test_clean_rejects_remote_task_with_unknown_status(self):
         from engine.daemon import PipelineDaemon
 
@@ -1741,6 +1873,27 @@ class TestPipelineDaemonResetStep:
         assert ok is False
         assert data is None
         assert "pause 或 stop" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_rejects_when_paused_downstream_step_still_running(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            statuses={1: {"sw": STATUS_COMPLETED, "sc": STATUS_RUNNING}},
+        )
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": 1,
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "仍在执行" in message
         assert daemon.scheduler.reset_calls == []
 
     def test_reset_rejects_downstream_remote_task_still_running(self):

@@ -275,15 +275,21 @@ class PipelineScheduler:
         if not self.worker_pool.is_running():
             self.worker_pool.start_if_needed()
 
-        # 更新引擎状态：仅在未被暂停时设为 running（pause() 已将其设为 paused）
-        if not self._paused.is_set():
+        # ---- 步骤 4: 写回运行态并收口屏障 ----
+        # 与 pause() 共用控制锁，避免 pause() 返回后后台启动线程再写回 running
+        # 或继续触发 Solver 分发。
+        with self._control.external_start() as can_finalize:
+            if not can_finalize:
+                logger.info("流水线组件已就绪，但暂停/停止标志已置位，跳过后续启动")
+                if self._paused.is_set():
+                    self.state.set_engine_status("paused")
+                return
+
             if self.state.get_engine_status() != "running":
                 self.state.set_engine_status("running")
-        else:
-            logger.info("流水线组件已就绪，但暂停标志仍置位，等待继续指令...")
 
-        # ---- 步骤 4: 屏障已满足时直接分发 Solver，否则启动全局屏障监控 ----
-        self._finalize_barrier_after_downstream_start()
+            # 屏障已满足时直接分发 Solver，否则启动全局屏障监控。
+            self._finalize_barrier_after_downstream_start()
 
         logger.info("流水线调度器已启动，等待 STEP 文件...")
 
@@ -758,6 +764,9 @@ class PipelineScheduler:
         用于 _resume_paused_steps() 区分"孤儿 Running"与"活跃 Running"，
         避免将正在执行的步骤误重置为 Waiting。
         """
+        if step == "sw":
+            is_sw_in_flight = getattr(self.runner, "is_sw_in_flight", None)
+            return bool(callable(is_sw_in_flight) and is_sw_in_flight(cn))
         if step == "sc":
             return self.worker_pool.is_sc_in_flight(cn)
         elif step == "transfer":
@@ -767,7 +776,7 @@ class PipelineScheduler:
                 self.meshing_monitor is not None
                 and self.meshing_monitor.get_in_flight_config() == cn
             )
-        return False  # sw/solver 由 start_pipeline/屏障统一管理
+        return False  # solver 由屏障统一管理
 
     def _enqueue_sc(self, cn: int, step_dir: str) -> None:
         """将构型的 SC 步骤推入处理队列（带去重）。
@@ -811,14 +820,23 @@ class PipelineScheduler:
             logger.info("resume WorkerPool 启动后收到 stop 指令，跳过线程创建")
             return
 
-        # ★ 仅清除文件监控器的暂停标志，不重置已处理文件集合。
+        # ★ 仅唤醒文件监控器，不重置已处理文件集合。
         #   _resume_paused_steps() 已完成断点续传扫描并入队，
         #   文件监控器只需继续检测新写入的 STEP 文件，无需重新扫描旧文件
         #   （resume_and_reset 会清空 _processed_files 导致重复入队）。
-        if self._file_monitor is not None:
-            self._file_monitor.resume_only()
+        # 与 pause() 共用控制锁，避免新的 pause() 到达后 resume() 继续唤醒
+        # 或分发 Solver。
+        with self._control.external_start() as can_finalize:
+            if not can_finalize:
+                logger.info("resume 组件启动后收到 pause/stop 指令，跳过后续启动")
+                if self._paused.is_set():
+                    self.state.set_engine_status("paused")
+                return
 
-        self._finalize_barrier_after_downstream_start()
+            if self._file_monitor is not None:
+                self._file_monitor.resume_only()
+
+            self._finalize_barrier_after_downstream_start()
 
         if self._stopped.is_set():
             logger.info("resume 屏障处理后收到 stop 指令，跳过 pipeline 线程创建")

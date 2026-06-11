@@ -196,6 +196,13 @@ class TaskRunner:
             return bool(self._local_worker_adapter.execute_sw_per_config(config_name))
         return self._sw_executor.export_sw_per_config(config_name)
 
+    def is_sw_in_flight(self, config_name: int | None = None) -> bool:
+        """Return True while a delegated SW LocalWorker task is pending or running."""
+        if not self._should_delegate_local_steps():
+            return False
+        has_active_task = getattr(self._local_worker_adapter, "has_active_task", None)
+        return bool(callable(has_active_task) and has_active_task("sw", config_name))
+
     def shutdown_sw_processes(self) -> None:
         """全量清理 SolidWorks 进程。"""
         if self._should_delegate_local_steps():

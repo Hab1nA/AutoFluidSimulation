@@ -102,3 +102,21 @@ def test_local_worker_adapter_times_out_when_no_worker_reports() -> None:
     assert adapter.execute_sw_step(timeout_seconds=0.03) is False
     assert time.monotonic() - started < 1.0
     assert registry.poll_task("local-pc-01") is None
+
+
+def test_local_worker_adapter_reports_active_registry_task() -> None:
+    from engine.local_worker_adapter import LocalWorkerAdapter
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sw": True})
+    adapter = LocalWorkerAdapter(registry, result_poll_interval=0.01)
+
+    task = registry.enqueue_task("sw", {"config_name": 7})
+
+    assert adapter.has_active_task("sw", 7) is True
+    assert adapter.has_active_task("sw", 8) is False
+
+    registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
+
+    assert adapter.has_active_task("sw", 7) is False

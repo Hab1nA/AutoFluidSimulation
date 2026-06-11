@@ -59,6 +59,14 @@ class LocalWorkerAdapter:
             params["config_name"] = config_name
         return self._execute("clean_local_files", params, timeout_seconds)
 
+    def has_active_task(
+        self,
+        step: str,
+        config_name: int | None = None,
+    ) -> bool:
+        """Return True when a matching delegated task has not reached terminal state."""
+        return self._registry.has_active_step_task(step, config_name)
+
     def _execute(
         self,
         step: str,

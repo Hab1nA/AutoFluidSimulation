@@ -4,6 +4,20 @@ This file adapts the existing Copilot instructions in `.github/` for Codex.
 Before editing code, use this file as the entry point and load the
 language-specific instruction file(s) needed for the files being changed.
 
+## Copilot CLI Subagents
+
+When complex work benefits from subagents, create and manage them through the
+`copilot-orchestrator` skill rather than through ad hoc prompts or local wrapper
+scripts. In Copilot CLI, load that workflow with the `skill` tool before
+launching workers; in Codex, follow the installed skill instructions for
+worker prompts, instruction routing, timeouts, and safety constraints.
+
+Use the canonical `copilot` CLI spelling only. When Codex launches Copilot CLI
+workers from PowerShell, use a login shell so the user's profile-provided
+Copilot provider, model, authentication, and environment defaults are loaded.
+Codex remains responsible for task breakdown, worker result review, integration,
+workspace cleanliness, and final verification.
+
 ## Environment
 
 Use the project virtual environment for all Python commands:

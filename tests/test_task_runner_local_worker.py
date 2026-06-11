@@ -57,3 +57,38 @@ def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeyp
     runner.reset_sw_cleanup()
     runner.disconnect_sw_cached()
     assert runner.verify_step_exports("C:/not-on-ocar") == 2
+
+
+def test_task_runner_reports_delegated_sw_task_in_flight_in_server_mode(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    calls: list[tuple[str, int | None]] = []
+
+    class _Adapter:
+        def has_active_task(self, step: str, config_name: int | None = None) -> bool:
+            calls.append((step, config_name))
+            return step == "sw" and config_name == 3
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = _Adapter()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+    assert runner.is_sw_in_flight(3) is True
+    assert runner.is_sw_in_flight(4) is False
+    assert calls == [("sw", 3), ("sw", 4)]
+
+
+def test_task_runner_reports_no_delegated_sw_task_in_local_mode(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    class _Adapter:
+        def has_active_task(self, _step: str, _config_name: int | None = None) -> bool:
+            raise AssertionError("local mode should not inspect LocalWorker tasks")
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = _Adapter()
+
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
+    assert runner.is_sw_in_flight(3) is False
