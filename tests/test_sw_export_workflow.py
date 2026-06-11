@@ -79,6 +79,7 @@ def create_mock_sw_app(config_names: list[str] | None = None,
         ext_mock.SaveAs.return_value = True
     else:
         ext_mock.SaveAs.return_value = False
+    ext_mock.HasDesignTable.return_value = True
     mock_doc.Extension = ext_mock
 
     # OpenDoc6
@@ -88,8 +89,6 @@ def create_mock_sw_app(config_names: list[str] | None = None,
         mock_app.OpenDoc6.return_value = None
 
     # 设计表
-    # InsertFamilyTableEdit 模拟"无设计表"场景（抛出异常使 _model_has_design_table 返回 False）
-    mock_doc.InsertFamilyTableEdit.side_effect = Exception("No design table")
     if insert_dt_succeeds:
         mock_doc.InsertFamilyTableOpen.return_value = True
     else:
@@ -776,7 +775,7 @@ class TestErrorHandling(unittest.TestCase):
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
-        mock_doc.InsertFamilyTableEdit.assert_not_called()
+        mock_doc.InsertFamilyTableOpen.assert_not_called()
         mock_app.CloseDoc.assert_not_called()
 
     @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
@@ -883,11 +882,35 @@ class TestEndToEndWorkflow(unittest.TestCase):
             config_names=["0", "1", "2"],
             insert_dt_succeeds=False,
         )
+        mock_doc.Extension.HasDesignTable.return_value = False
+        mock_doc.GetDesignTable.return_value = None
 
         result = self.runner._sw_executor._import_design_table_with_retry(
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "COM fallback should succeed when InsertFamilyTableOpen fails")
+        self.assertEqual(mock_doc.InsertFamilyTableOpen.call_count, 2)
+        self.assertGreater(mock_doc.Parameter.call_count, 0)
+
+    def test_linked_design_table_skip_import_when_get_design_table_returns_none(self):
+        """链接设计表存在但 GetDesignTable 未返回对象时，应跳过重复导入。"""
+        excel_path = self._create_e2e_excel(num_configs=3)
+
+        mock_app, mock_doc = create_mock_sw_app(
+            config_names=["0", "1", "2"],
+            insert_dt_succeeds=False,
+        )
+        mock_doc.GetDesignTable.return_value = None
+        mock_doc.Extension.HasDesignTable.return_value = True
+
+        result = self.runner._sw_executor._import_design_table_with_retry(
+            mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
+        )
+
+        self.assertTrue(result, "Should skip import when extension reports an existing design table")
+        mock_doc.Extension.HasDesignTable.assert_called_once()
+        mock_doc.InsertFamilyTableOpen.assert_not_called()
+        mock_doc.Parameter.assert_not_called()
 
     def test_workflow_existing_design_table_skip_import(self):
         """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
@@ -911,7 +934,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
             mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
         )
         self.assertTrue(result, "Should return True when model has design table (skip import)")
-        mock_doc.InsertFamilyTableEdit.assert_not_called()
+        mock_doc.InsertFamilyTableOpen.assert_not_called()
         mock_app.CloseDoc.assert_not_called()
 
 

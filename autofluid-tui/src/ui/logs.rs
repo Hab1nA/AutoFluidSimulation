@@ -338,3 +338,37 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::log_buffer::LogEntry;
+
+    #[test]
+    fn detail_lines_omit_timestamp_prefix() {
+        let mut log_buffer = LogBuffer::new();
+        log_buffer.push_detail(LogEntry {
+            id: 1,
+            timestamp: "2026-06-10 12:34:56".to_string(),
+            level: "WARNING".to_string(),
+            source: "scheduler".to_string(),
+            logger_name: "engine.scheduler.main".to_string(),
+            message: "step directory missing".to_string(),
+            raw_message: "[engine.scheduler.main] step directory missing".to_string(),
+            category: "general".to_string(),
+            config_name: None,
+            step_name: None,
+            worker_id: None,
+            is_polling: false,
+        });
+
+        let (lines, _) = compute_detail_lines_no_wrap(&log_buffer, &None, &None);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "[WARNING] ");
+        assert!(!lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("2026-06-10 12:34:56")));
+    }
+}

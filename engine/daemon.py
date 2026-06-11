@@ -28,7 +28,9 @@ import os
 import sys
 import signal
 import sqlite3
+import subprocess
 import threading
+import time
 from typing import Any
 
 # 将项目根目录加入 Python 路径
@@ -55,6 +57,8 @@ logger = setup_logger("PipelineDaemon")
 # PID 文件路径（与 main.py 保持一致）
 _PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS = 30.0
 
 
 def _state_db_config_count(db_path: str) -> int:
@@ -170,6 +174,8 @@ class PipelineDaemon:
         self.local_worker_adapter = LocalWorkerAdapter(self.local_worker_registry)
         self._config_load_error: str | None = None
         self._worker_config_fingerprint: str | None = None
+        self._local_worker_process: subprocess.Popen | None = None
+        self._local_worker_last_start_attempt = 0.0
 
         # 运行标志
         self._running = False
@@ -390,6 +396,8 @@ class PipelineDaemon:
             raise RuntimeError("Daemon 组件未初始化，请先调用 start()")
         config_load_error = getattr(self, "_config_load_error", None)
         if config_load_error:
+            if is_server_mode():
+                self._ensure_local_worker_autostarted()
             return (
                 False,
                 None,
@@ -404,10 +412,23 @@ class PipelineDaemon:
                 logger.warning("检测到引擎状态为 running 但调度器暂停标志已置位，执行恢复")
                 self.scheduler.resume()
                 return True, None, "流水线已恢复运行（修正不一致状态）"
+            if not self.scheduler.pipeline_alive:
+                logger.warning("检测到引擎状态为 running 但调度器线程已退出，重新启动流水线")
+                self.state.set_engine_status("running")
+                self._pipeline_ever_started = True
+                scheduler_thread = threading.Thread(
+                    target=self.scheduler.start_pipeline,
+                    daemon=True,
+                    name="SchedulerMain",
+                )
+                scheduler_thread.start()
+                self.scheduler.set_pipeline_thread(scheduler_thread)
+                return True, None, "流水线已重新启动（调度线程恢复）"
             return True, None, "流水线已在运行中"
 
         if engine_status == "paused":
             if self._server_mode_requires_worker():
+                self._ensure_local_worker_autostarted()
                 return self._server_mode_worker_missing_response()
             auth_error = self._server_mode_remote_auth_error()
             if auth_error:
@@ -435,6 +456,7 @@ class PipelineDaemon:
 
         # 全新启动（engine_status 为 stopped 或其他）
         if self._server_mode_requires_worker():
+            self._ensure_local_worker_autostarted()
             return self._server_mode_worker_missing_response()
         auth_error = self._server_mode_remote_auth_error()
         if auth_error:
@@ -500,8 +522,80 @@ class PipelineDaemon:
         return (
             False,
             None,
-            "server 模式下后端运行在 ocar，必须先接入 LocalWorker 才能启动流水线",
+            "server 模式下必须先接入 LocalWorker 才能启动流水线；已尝试自动唤起本机 LocalWorker",
         )
+
+    def _ensure_local_worker_autostarted(self) -> None:
+        """Start the local worker process once when server mode needs one."""
+        if not is_server_mode():
+            return
+        autostart_override = os.environ.get("AUTOFLUID_LOCAL_WORKER_AUTOSTART", "").lower()
+        if sys.platform != "win32" and autostart_override not in {"1", "true", "yes"}:
+            logger.debug("[LocalWorker] 非 Windows 环境跳过本机 LocalWorker 自动唤起")
+            return
+        if getattr(self, "local_worker_adapter", None) is None:
+            return
+        registry = getattr(self, "local_worker_registry", None)
+        if registry is not None and registry.has_online_worker():
+            return
+
+        existing_process = getattr(self, "_local_worker_process", None)
+        if existing_process is not None and existing_process.poll() is None:
+            return
+
+        now = time.monotonic()
+        last_attempt = float(getattr(self, "_local_worker_last_start_attempt", 0.0))
+        if now - last_attempt < _LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS:
+            return
+        self._local_worker_last_start_attempt = now
+
+        worker_script = os.path.join(_PROJECT_ROOT, "main.py")
+        if not os.path.isfile(worker_script):
+            logger.warning("[LocalWorker] 自动唤起失败，启动脚本不存在: %s", worker_script)
+            return
+
+        python_exe = self._local_worker_python_executable()
+        env = os.environ.copy()
+        env.setdefault("AUTOFLUID_IPC_HOST", str(IPC_CONFIG["host"]))
+        env.setdefault("AUTOFLUID_IPC_PORT", str(IPC_CONFIG["port"]))
+
+        log_dir = str(LOCAL_PATHS.get("log_dir") or os.path.join(_PROJECT_ROOT, "logs"))
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "local_worker_autostart.log")
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        try:
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                process = subprocess.Popen(
+                    [python_exe, worker_script, "--worker"],
+                    cwd=_PROJECT_ROOT,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=creationflags,
+                )
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("[LocalWorker] 自动唤起失败: %s", e)
+            return
+
+        self._local_worker_process = process
+        logger.info(
+            "[LocalWorker] 已自动唤起本机 LocalWorker: pid=%s, log=%s",
+            process.pid,
+            log_path,
+        )
+
+    @staticmethod
+    def _local_worker_python_executable() -> str:
+        if sys.platform == "win32":
+            candidate = os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe")
+        else:
+            candidate = os.path.join(_PROJECT_ROOT, ".venv", "bin", "python")
+        if os.path.isfile(candidate):
+            return candidate
+        return sys.executable
 
     def handle_pause(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 pause 命令。

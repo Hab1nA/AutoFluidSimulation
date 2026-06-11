@@ -218,6 +218,9 @@ class StepFileMonitor:
             logger.warning("文件监控已在运行")
             return
 
+        if not self._ensure_step_dir():
+            return
+
         # 扫描目录中已存在的文件（断点续传场景）
         self._scan_existing_files()
 
@@ -321,8 +324,7 @@ class StepFileMonitor:
 
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""
-        if not os.path.isdir(self.step_dir):
-            logger.debug(f"STEP 目录不存在: {self.step_dir}")
+        if not self._ensure_step_dir():
             return
 
         try:
@@ -366,7 +368,7 @@ class StepFileMonitor:
 
     def _scan_existing_files(self):
         """扫描目录中已存在的文件，将其加入 known_files 以便后续稳定性检测。"""
-        if not os.path.isdir(self.step_dir):
+        if not self._ensure_step_dir():
             return
 
         try:
@@ -381,6 +383,21 @@ class StepFileMonitor:
                         logger.info(f"发现已存在的 STEP 文件: {filename} (构型{config_name})")
         except OSError as e:
             logger.warning(f"扫描已存在文件时出错: {e}")
+
+    def _ensure_step_dir(self) -> bool:
+        """确保 STEP 目录存在；监控器启动早于 SW 导出时不会持续报告目录缺失。"""
+        if not self.step_dir:
+            logger.error("STEP 输出目录未配置")
+            return False
+        if os.path.isdir(self.step_dir):
+            return True
+        try:
+            os.makedirs(self.step_dir, exist_ok=True)
+            logger.info(f"已创建 STEP 目录: {self.step_dir}")
+            return True
+        except OSError as e:
+            logger.warning(f"无法创建/访问 STEP 目录: {self.step_dir}: {e}")
+            return False
 
     # ------------------------------------------------------------------
     # 已处理文件查询

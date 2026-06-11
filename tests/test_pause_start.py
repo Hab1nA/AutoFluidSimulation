@@ -786,6 +786,41 @@ def test_pause_blocks_step_file_callback():
         ctx.cleanup()
 
 
+def test_step_file_ready_after_stop_does_not_enqueue_sc():
+    print("\n" + "=" * 60)
+    print("测试 9.1: stop 后 STEP 回调不重新入队")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        ctx.scheduler.stop()
+        ctx.assert_engine_status("stopped", "stop 后")
+        assert ctx.scheduler._stopped.is_set(), "调度器应处于 stopped 状态"
+        assert not ctx.scheduler._paused.is_set(), "stop 后 paused 标志应清除"
+
+        initial_qsize = ctx.scheduler._sc_queue.qsize()
+        ctx.scheduler._on_step_file_ready(1, "/fake/path/config_1.step")
+
+        assert ctx.scheduler._sc_queue.qsize() == initial_qsize, (
+            "stopped 状态下 STEP 回调不应推入 SC 队列"
+        )
+
+        print("[PASS] 测试 9.1 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
 def test_resume_triggers_immediate_scan():
     print("\n" + "=" * 60)
     print("测试 10: 恢复后立即触发完整轮询")

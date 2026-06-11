@@ -14,6 +14,7 @@
 import queue
 import threading
 import time
+from typing import Callable
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
@@ -44,17 +45,70 @@ class MeshingMonitor:
         remote_executor: RemoteExecutor,
         paused_event: threading.Event,
         stopped_event: threading.Event,
+        get_reset_generation: Callable[[int, str], int] | None = None,
     ):
         self.state = state_manager
         self._remote_executor = remote_executor
         self._paused = paused_event
         self._stopped = stopped_event
+        self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
 
         self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: threading.Thread | None = None
         self._in_flight_config: int | None = None  # 当前正在执行 Meshing 的构型
 
         logger.info("[MeshingMonitor] 初始化完成")
+
+    def _step_generation(self, config_name: int, step_name: str) -> int:
+        """Return the reset generation for a config step."""
+        return int(self._get_reset_generation(config_name, step_name))
+
+    def _is_stale_step_result(
+        self,
+        config_name: int,
+        step_name: str,
+        generation: int,
+    ) -> bool:
+        """Whether reset touched this step while Meshing was running."""
+        return generation != self._step_generation(config_name, step_name)
+
+    def _discard_stale_step_result(self, config_name: int, step_name: str) -> None:
+        """Restore reset state after an old Meshing result wrote back."""
+        logger.warning(
+            "[MeshingMonitor] 构型%s [%s] 结果已过期，丢弃旧执行结果并恢复 reset 状态",
+            config_name,
+            step_name,
+        )
+        self.state.reset_config_steps(config_name, step_name)
+
+    def _record_unknown_remote_status(self, config_name: int, step_name: str) -> bool:
+        """
+        Count unknown remote probes and surface an error once retry budget is exhausted.
+
+        Returns True when the queue item should be retried later.
+        """
+        retry_count = self.state.increment_retry(config_name, step_name)
+        max_retries = int(ENGINE_CONFIG["max_retries"])
+        if retry_count >= max_retries:
+            self.state.set_step_status(
+                config_name,
+                step_name,
+                STATUS_ERROR,
+                f"远程 {step_name} 状态连续 {retry_count} 次未知，停止等待",
+            )
+            logger.error(
+                "[MeshingMonitor] 构型%s 远程状态 unknown 达到重试上限，标记为 Error",
+                config_name,
+            )
+            return False
+        logger.warning(
+            "[MeshingMonitor] 构型%s 远程状态未知，保留 Running 状态并重新排队 "
+            "(%s/%s)",
+            config_name,
+            retry_count,
+            max_retries,
+        )
+        return True
 
     def _workstation_for_config(self, config_name: int) -> str:
         """Return assigned workstation for a config, preserving legacy default."""
@@ -190,11 +244,15 @@ class MeshingMonitor:
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return False
 
+        generation = self._step_generation(config_name, "meshing")
         workstation_id = self._workstation_for_config(config_name)
 
         # ---- 断点续传：检查远程输出是否已存在（复用共享工具函数） ----
         if self._check_remote_outputs_exist(config_name, workstation_id):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
+            if self._is_stale_step_result(config_name, "meshing", generation):
+                self._discard_stale_step_result(config_name, "meshing")
+                return False
             logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 远程输出已存在，标记完成")
             return False
 
@@ -208,6 +266,9 @@ class MeshingMonitor:
             )
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
                 self._remote_executor.forget_remote_task(
                     config_name,
                     "meshing",
@@ -222,6 +283,9 @@ class MeshingMonitor:
                     STATUS_ERROR,
                     "远程网格划分任务失败",
                 )
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
                 self._remote_executor.forget_remote_task(
                     config_name,
                     "meshing",
@@ -232,13 +296,13 @@ class MeshingMonitor:
                 logger.info(
                     f"[MeshingMonitor] 构型{config_name} Meshing 远程任务仍在运行，恢复轮询"
                 )
-                return self._wait_for_meshing_completion(config_name)
+                should_requeue = self._wait_for_meshing_completion(config_name)
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
+                return should_requeue
             if remote_status == "unknown":
-                logger.warning(
-                    f"[MeshingMonitor] 构型{config_name} Meshing 远程状态未知，"
-                    "保留 Running 状态并跳过重启"
-                )
-                return False
+                return self._record_unknown_remote_status(config_name, "meshing")
 
             # lost：确认无远程任务且无产物后，清除孤儿 Running 并重新启动。
             self.state.set_step_status(config_name, "meshing", STATUS_WAITING)
@@ -303,7 +367,11 @@ class MeshingMonitor:
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
                 return False
 
-        return self._wait_for_meshing_completion(config_name, workstation_id)
+        should_requeue = self._wait_for_meshing_completion(config_name, workstation_id)
+        if self._is_stale_step_result(config_name, "meshing", generation):
+            self._discard_stale_step_result(config_name, "meshing")
+            return False
+        return should_requeue
 
     def _wait_for_meshing_completion(
         self,

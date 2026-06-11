@@ -878,13 +878,22 @@ class SWExecutor:
     def _model_has_design_table(self, doc: Any) -> bool:  # noqa: ANN401  COM 动态对象
         """检测模型是否已存在设计表（链接或内嵌），避免进入 Excel OLE 编辑态。"""
         try:
+            extension = getattr(doc, "Extension", None)
+            checker = getattr(extension, "HasDesignTable", None)
+            if callable(checker) and bool(checker()):
+                logger.info("[SW-DesignTable] 检测到模型已有设计表（HasDesignTable=True）")
+                return True
+        except Exception as e:
+            logger.debug(f"[SW-DesignTable] HasDesignTable 检测异常: {e}")
+
+        try:
             getter = getattr(doc, "GetDesignTable", None)
             dt = getter() if callable(getter) else getter
             if dt is not None:
                 logger.info("[SW-DesignTable] 检测到模型已有设计表（GetDesignTable 返回非空）")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[SW-DesignTable] GetDesignTable 检测异常: {e}")
 
         logger.info("[SW-DesignTable] 模型无设计表，将进行导入")
         return False

@@ -69,6 +69,8 @@ class PipelineScheduler:
         self._paused = self._control.paused_event
         self._stopped = self._control.stopped_event
         self._barrier_passed = threading.Event() # 全局屏障通过事件
+        self._reset_generation_lock = threading.Lock()
+        self._reset_generation_by_step: dict[tuple[int, str], int] = {}
 
         # 将控制事件注入 TaskRunner，使长时间阻塞操作（如 SC 的 process.communicate）
         # 能够响应暂停/停止指令
@@ -98,6 +100,7 @@ class PipelineScheduler:
             stopped_event=self._stopped,
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
+            get_reset_generation=self._current_reset_generation,
         )
         self.barrier_coordinator = BarrierCoordinator(
             state_manager=self.state,
@@ -107,12 +110,14 @@ class PipelineScheduler:
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
             on_solver_terminal=self.finalize_pipeline,
+            get_reset_generation=self._current_reset_generation,
         )
         self.meshing_monitor = MeshingMonitor(
             state_manager=self.state,
             remote_executor=self.runner.get_remote_executor(),
             paused_event=self._paused,
             stopped_event=self._stopped,
+            get_reset_generation=self._current_reset_generation,
         )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
@@ -144,6 +149,28 @@ class PipelineScheduler:
             self._barrier_passed.set()
 
         logger.info("流水线调度器初始化完成")
+
+    def _current_reset_generation(self, config_name: int, step_name: str) -> int:
+        """Return reset generation for a config step."""
+        with self._reset_generation_lock:
+            return self._reset_generation_by_step.get((int(config_name), step_name), 0)
+
+    def _mark_reset_generation(self, config_name, step_name: str | None) -> None:
+        """Bump reset generation for every config step affected by reset."""
+        if config_name == "all":
+            config_names = [int(cn) for cn in self.state.get_all_configs()]
+        else:
+            config_names = [int(config_name)]
+
+        start_idx = STEP_INDEX.get(step_name, 0) if step_name else 0
+        affected_steps = STEP_NAMES[start_idx:]
+        with self._reset_generation_lock:
+            for cn in config_names:
+                for affected_step in affected_steps:
+                    key = (cn, affected_step)
+                    self._reset_generation_by_step[key] = (
+                        self._reset_generation_by_step.get(key, 0) + 1
+                    )
 
     # ------------------------------------------------------------------
     # 主调度入口
@@ -398,6 +425,9 @@ class PipelineScheduler:
     # ------------------------------------------------------------------
 
     def _on_step_file_ready(self, config_name: int, filepath: str):
+        if self._stopped.is_set():
+            logger.info(f"构型{config_name} STEP 文件就绪，但系统已停止，跳过入队")
+            return
         if self._paused.is_set():
             logger.info(f"构型{config_name} STEP 文件就绪，但系统已暂停，跳过入队")
             return
@@ -498,7 +528,21 @@ class PipelineScheduler:
                 status = self.state.get_step_status(cn, step)
 
                 if status == STATUS_COMPLETED:
-                    continue
+                    if (
+                        not is_server_mode()
+                        and step in ("sw", "sc")
+                        and not self._check_step_output_exists(
+                            cn, step, step_dir, scdoc_dir
+                        )
+                    ):
+                        logger.warning(
+                            f"{log_prefix} 构型{cn} [{step}] 状态为 Completed "
+                            "但输出文件缺失，重置为 Waiting"
+                        )
+                        self.state.reset_config_steps(cn, step)
+                        status = STATUS_WAITING
+                    else:
+                        continue
 
                 # ★ 全局 in-flight 保护：无论步骤处于何种非 COMPLETED 状态，
                 #   只要队列中有该构型的 claim 或 MeshingMonitor 正在处理，
@@ -542,11 +586,14 @@ class PipelineScheduler:
                                 workstation_id=workstation_id,
                             )
                             break
-                        if remote_status in ("running", "unknown"):
+                        if remote_status == "running":
                             logger.warning(
                                 f"{log_prefix} 构型{cn} [{step}] 状态={status}，"
-                                f"远程状态={remote_status}，保留 Running 并跳过重启"
+                                "远程状态=running，保留 Running 并跳过重启"
                             )
+                            break
+                        if remote_status == "unknown":
+                            self._record_unknown_remote_status(cn, step, log_prefix)
                             break
 
                     # ★ 孤立 RUNNING 检测：Daemon 重启或 stop() 后，
@@ -631,6 +678,43 @@ class PipelineScheduler:
             elif step == "solver":
                 pass
 
+    def _record_unknown_remote_status(
+        self,
+        config_name: int,
+        step_name: str,
+        log_prefix: str,
+    ) -> bool:
+        """
+        Count unknown remote probes and surface an error once retry budget is exhausted.
+
+        Returns True when the step has been marked Error.
+        """
+        retry_count = self.state.increment_retry(config_name, step_name)
+        max_retries = int(ENGINE_CONFIG["max_retries"])
+        if retry_count >= max_retries:
+            self.state.set_step_status(
+                config_name,
+                step_name,
+                STATUS_ERROR,
+                f"远程 {step_name} 状态连续 {retry_count} 次未知，停止等待",
+            )
+            logger.error(
+                "%s 构型%s [%s] 远程状态 unknown 达到重试上限，标记为 Error",
+                log_prefix,
+                config_name,
+                step_name,
+            )
+            return True
+        logger.warning(
+            "%s 构型%s [%s] 远程状态 unknown，保留 Running 等待后续重试 (%s/%s)",
+            log_prefix,
+            config_name,
+            step_name,
+            retry_count,
+            max_retries,
+        )
+        return False
+
     def _check_step_output_exists(
         self, cn: int, step: str, step_dir: str, scdoc_dir: str
     ) -> bool:
@@ -709,10 +793,23 @@ class PipelineScheduler:
             self._resume_paused_steps()
             self.state.set_engine_status("running")
 
+        if self._stopped.is_set():
+            logger.info("resume 组件启动前收到 stop 指令，跳过组件启动")
+            return
+
         # 确保各组件线程存活（start_if_needed 内部已是幂等的，不会重复创建）
         self._ensure_file_monitor_running()
+        if self._stopped.is_set():
+            logger.info("resume 文件监控启动后收到 stop 指令，跳过后续组件启动")
+            return
         self.meshing_monitor.start_if_needed()   # 先启动 MeshingMonitor
+        if self._stopped.is_set():
+            logger.info("resume MeshingMonitor 启动后收到 stop 指令，跳过后续组件启动")
+            return
         self.worker_pool.start_if_needed()        # 再启动 Worker Pool
+        if self._stopped.is_set():
+            logger.info("resume WorkerPool 启动后收到 stop 指令，跳过线程创建")
+            return
 
         # ★ 仅清除文件监控器的暂停标志，不重置已处理文件集合。
         #   _resume_paused_steps() 已完成断点续传扫描并入队，
@@ -722,6 +819,10 @@ class PipelineScheduler:
             self._file_monitor.resume_only()
 
         self._finalize_barrier_after_downstream_start()
+
+        if self._stopped.is_set():
+            logger.info("resume 屏障处理后收到 stop 指令，跳过 pipeline 线程创建")
+            return
 
         # ★ 若 pipeline 线程已退出（如 SW 失败+暂停后 start_pipeline 返回），
         #   重启 pipeline 使 _resume_paused_steps 中已重置的 Error→Waiting 构型能被
@@ -761,19 +862,19 @@ class PipelineScheduler:
         except Exception as e:
             logger.debug(f"SCPool 停止清理异常: {e}")
 
-        # 清空尚未执行的 SC 任务；正在执行的 claim 会在 worker 退出前释放。
-        self._sc_queue.clear()
-
         try:
+            # 停止文件监控，避免 stop 清队列期间 STEP 回调重新入队。
+            if self._file_monitor:
+                self._file_monitor.stop()
+
+            # 清空尚未执行的 SC 任务；正在执行的 claim 会在 worker 退出前释放。
+            self._sc_queue.clear()
+
             # 等待关键线程退出
             self.worker_pool.join_worker_threads(timeout=3)
             if self._barrier_thread and self._barrier_thread.is_alive():
                 self._barrier_thread.join(timeout=3)
             self.barrier_coordinator.join_solver_threads(timeout=3)
-
-            # 停止文件监控
-            if self._file_monitor:
-                self._file_monitor.stop()
         except Exception as e:
             logger.warning(f"停止清理过程中出现异常（已忽略）: {e}")
 
@@ -831,6 +932,11 @@ class PipelineScheduler:
             or step_name == "sw"
             or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("sw", 99)
         )
+        need_solver_terminal_reset = (
+            step_name is None
+            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("solver", 99)
+        )
+        self._mark_reset_generation(config_name, step_name)
 
         # ★ 暂停感知：reset 操作不应越过暂停标志恢复文件监控。
         #    若当前处于暂停状态，使用 reset_only() 仅清理内部状态；
@@ -845,6 +951,8 @@ class PipelineScheduler:
             self.state.reset_all()
             self._barrier_passed.clear()
             self.barrier_coordinator.clear_all_workstation_barriers()
+            if need_solver_terminal_reset:
+                self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             self.runner.reset_sc_pool()
             if need_monitor_reset and _monitor_reset_method:
@@ -858,6 +966,8 @@ class PipelineScheduler:
                 self.barrier_coordinator.clear_all_workstation_barriers()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            if need_solver_terminal_reset:
+                self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()
@@ -870,6 +980,8 @@ class PipelineScheduler:
                 self.barrier_coordinator.clear_workstation_barrier(reset_workstation_id)
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
+            if need_solver_terminal_reset:
+                self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:
                 _monitor_reset_method()

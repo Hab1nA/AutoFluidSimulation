@@ -84,11 +84,7 @@ impl LogEntry {
     }
 
     pub fn detail_prefix(&self) -> String {
-        if self.timestamp.is_empty() {
-            format!("[{}] ", self.level)
-        } else {
-            format!("[{}] [{}] ", self.timestamp, self.level)
-        }
+        format!("[{}] ", self.level)
     }
 
     pub fn display_message(&self) -> String {
@@ -119,6 +115,19 @@ impl LogEntry {
             base
         } else {
             format!("{} ({})", base, context.join(", "))
+        }
+    }
+
+    pub fn export_message(&self) -> String {
+        if !self.message.is_empty() {
+            return self.message.clone();
+        }
+
+        let message = self.display_message();
+        if self.timestamp.is_empty() {
+            message
+        } else {
+            format!("[{}] [{}] {}", self.timestamp, self.level, message)
         }
     }
 }
@@ -198,7 +207,7 @@ impl LogBuffer {
         source_filter: &Option<String>,
     ) -> Vec<String> {
         self.filtered_entries(level_filter, source_filter)
-            .map(|e| e.message.clone())
+            .map(LogEntry::export_message)
             .collect()
     }
 

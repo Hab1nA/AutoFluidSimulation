@@ -19,7 +19,7 @@ import pytest
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    IPC_CONFIG,
+    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
 )
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
@@ -589,6 +589,14 @@ class _MockTaskRunner:
     def reset_sc_pool(self):
         return None
 
+    def execute_sc_step(self, config_name: int) -> bool:
+        self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
+        return True
+
+    def execute_transfer(self, config_name: int) -> bool:
+        self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
+        return True
+
     def disconnect_sw_cached(self):
         return None
 
@@ -817,6 +825,15 @@ class TestPipelineSchedulerStartRecovery:
         assert cleared_workstations == ["WS-A"]
         assert cleared_all is False
 
+    def test_reset_solver_clears_terminal_report_gate(self):
+        """reset 触及 Solver 后应允许下一轮自然终态再次上报。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.scheduler.barrier_coordinator._solver_terminal_reported = True
+
+        self.scheduler.reset_config(1, "solver")
+
+        assert self.scheduler.barrier_coordinator._solver_terminal_reported is False
+
     def test_reset_all_clears_all_workstation_barriers(self):
         """全量 reset 应清理所有工作站屏障缓存。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -879,6 +896,78 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+
+    def test_resume_scan_unknown_remote_solver_surfaces_after_retry_budget(self, monkeypatch):
+        """远程 unknown 连续达到重试上限后应暴露 Error，不能无限保留 Running。"""
+        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "unknown"
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+
+    def test_stale_sc_completion_after_reset_does_not_submit_transfer(self):
+        """reset 期间完成的旧 SC 结果不应覆盖 reset 后状态或推进 Transfer。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_WAITING)
+
+        def complete_after_reset(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "sc"
+            self.scheduler.reset_config(config_name, "sc")
+            self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_after_reset
+
+        self.scheduler.worker_pool._process_sc_step(1)
+
+        assert self.state.get_step_status(1, "sc") == STATUS_WAITING
+        assert self.scheduler.worker_pool._transfer_queue.qsize() == 0
+
+    def test_stale_transfer_completion_after_reset_does_not_submit_meshing(self):
+        """reset 期间完成的旧 Transfer 结果不应覆盖 reset 后状态或推进 Meshing。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "transfer", STATUS_WAITING)
+
+        def complete_after_reset(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "transfer"
+            self.scheduler.reset_config(config_name, "transfer")
+            self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_after_reset
+
+        self.scheduler.worker_pool._process_transfer_step(1)
+
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):
+        """clean 删除本地产物后，resume 不应继续信任 Completed 状态。"""
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        step_dir = tmp_path / "steps"
+        scdoc_dir = tmp_path / "scdocs"
+        step_dir.mkdir()
+        scdoc_dir.mkdir()
+        monkeypatch.setitem(LOCAL_PATHS, "step_dir", str(step_dir))
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_WAITING)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "sw") == STATUS_WAITING
+        assert self.scheduler._sc_queue.qsize() == 0
 
     def test_resume_scan_resets_lost_remote_meshing_and_forgets_task(self):
         """远程 Meshing 确认丢失时才允许回到 Waiting 并重新入队。"""
@@ -1295,6 +1384,99 @@ class TestPipelineDaemonCleanStep:
         assert "LocalWorker" in message
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
+
+    def test_server_mode_start_autostarts_local_worker_when_missing(self, monkeypatch, tmp_path):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        class _Proc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        popen_calls = []
+
+        def fake_popen(args, **kwargs):
+            popen_calls.append((args, kwargs))
+            return _Proc()
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(daemon_module.sys, "platform", "win32")
+        monkeypatch.setattr(daemon_module.subprocess, "Popen", fake_popen)
+        monkeypatch.setitem(daemon_module.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon.local_worker_adapter = object()
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "LocalWorker" in message
+        assert len(popen_calls) == 1
+        assert os.path.basename(popen_calls[0][0][-2]) == "main.py"
+        assert popen_calls[0][0][-1] == "--worker"
+        assert daemon.scheduler.start_calls == 0
+
+    def test_server_mode_start_does_not_autostart_duplicate_worker(self, monkeypatch, tmp_path):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        class _Proc:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        popen_calls = []
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(daemon_module.sys, "platform", "win32")
+        monkeypatch.setattr(
+            daemon_module.subprocess,
+            "Popen",
+            lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+        )
+        monkeypatch.setitem(daemon_module.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon.local_worker_adapter = object()
+        daemon._local_worker_process = _Proc()
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "LocalWorker" in message
+        assert popen_calls == []
+        assert daemon.scheduler.start_calls == 0
+
+    def test_start_running_with_dead_pipeline_thread_restarts_scheduler(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="running")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = True
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert data is None
+        assert "重新启动" in message
+        assert daemon.scheduler.start_calls == 1
+        assert daemon.state.get_engine_status() == "running"
 
     def test_worker_register_and_heartbeat_handlers_update_registry(self):
         from engine.daemon import PipelineDaemon
@@ -1887,6 +2069,23 @@ class TestBarrierCoordinator:
         assert self.runner._solver_wait_count == 0
         assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
 
+    def test_running_solver_unknown_remote_state_errors_after_retry_budget(self, monkeypatch):
+        """远程 unknown 达到重试上限后应标 Error，避免调度循环永久空转。"""
+        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "unknown"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert self.runner._solver_wait_count == 0
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.solver_terminal_outcomes == ["failed"]
+
     def test_running_solver_lost_remote_task_restarts_once_and_forgets_task(self):
         """远程 Solver 确认丢失后才重启，且清理旧元数据。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -1902,6 +2101,32 @@ class TestBarrierCoordinator:
         assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_stale_solver_completion_after_reset_does_not_overwrite_reset(self):
+        """reset 期间完成的旧 Solver 结果不应覆盖 reset 后状态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        generation = {"value": 0}
+
+        def get_reset_generation(config_name: int, step_name: str) -> int:
+            assert config_name == 1
+            assert step_name == "solver"
+            return generation["value"]
+
+        def execute_after_reset(config_name: int) -> bool:
+            generation["value"] += 1
+            self.state.reset_config_steps(config_name, "solver")
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+            return True
+
+        self.coordinator._get_reset_generation = get_reset_generation
+        self.runner.execute_solver = execute_after_reset
+
+        self.coordinator._execute_solver_for_config(1)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
 
 # ====================================================================
@@ -2071,7 +2296,20 @@ class TestMeshingMonitor:
         assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
 
     def test_running_meshing_unknown_remote_state_does_not_restart(self):
-        """远程状态未知时保守保持 Running，避免重复启动 Fluent。"""
+        """远程状态未知时保守保持 Running，并重新排队等待后续探测。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_RUNNING)
+        self.remote._remote_task_status = "unknown"
+
+        assert self.monitor._process_single_meshing(1) is True
+
+        assert self.remote._meshing_started == []
+        assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
+
+    def test_running_meshing_unknown_remote_state_errors_after_retry_budget(self, monkeypatch):
+        """远程 unknown 达到重试上限后应标 Error，不能从队列中无声消失。"""
+        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
@@ -2080,7 +2318,7 @@ class TestMeshingMonitor:
         assert self.monitor._process_single_meshing(1) is False
 
         assert self.remote._meshing_started == []
-        assert self.state.get_step_status(1, "meshing") == STATUS_RUNNING
+        assert self.state.get_step_status(1, "meshing") == STATUS_ERROR
 
     def test_running_meshing_lost_remote_task_restarts_once_and_forgets_task(self):
         """远程 Meshing 确认丢失后才重启，且清理旧元数据。"""

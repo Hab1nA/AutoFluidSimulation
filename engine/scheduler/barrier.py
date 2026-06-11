@@ -10,7 +10,7 @@ from typing import Callable
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    STATUS_RETRYING,
+    STATUS_RETRYING, ENGINE_CONFIG,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -38,6 +38,7 @@ class BarrierCoordinator:
         barrier_passed_event: threading.Event,
         retry_manager: RetryManager,
         on_solver_terminal: Callable[[str], None] | None = None,
+        get_reset_generation: Callable[[int, str], int] | None = None,
     ):
         """
         初始化全局屏障协调器。
@@ -57,6 +58,7 @@ class BarrierCoordinator:
         self._barrier_passed = barrier_passed_event
         self._retry_manager = retry_manager
         self._on_solver_terminal = on_solver_terminal
+        self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
         self._solver_terminal_reported = False
         self._guard = PauseGuard(paused_event, stopped_event)
 
@@ -104,6 +106,61 @@ class BarrierCoordinator:
     def clear_all_workstation_barriers(self) -> None:
         """Clear all workstation barrier caches after broad reset."""
         self._workstation_barriers_passed.clear()
+
+    def reset_solver_terminal_reported(self) -> None:
+        """Allow a new natural terminal report after reset touches Solver."""
+        self._solver_terminal_reported = False
+
+    def _step_generation(self, config_name: int, step_name: str) -> int:
+        """Return the reset generation for a config step."""
+        return int(self._get_reset_generation(config_name, step_name))
+
+    def _is_stale_step_result(
+        self,
+        config_name: int,
+        step_name: str,
+        generation: int,
+    ) -> bool:
+        """Whether reset touched this step while Solver was running."""
+        return generation != self._step_generation(config_name, step_name)
+
+    def _discard_stale_step_result(self, config_name: int, step_name: str) -> None:
+        """Restore reset state after an old Solver result wrote back."""
+        logger.warning(
+            "[Solver] 构型%s [%s] 结果已过期，丢弃旧执行结果并恢复 reset 状态",
+            config_name,
+            step_name,
+        )
+        self.state.reset_config_steps(config_name, step_name)
+
+    def _record_unknown_remote_status(self, config_name: int, step_name: str) -> bool:
+        """
+        Count unknown remote probes and surface an error once retry budget is exhausted.
+
+        Returns True when the step has been marked Error.
+        """
+        retry_count = self.state.increment_retry(config_name, step_name)
+        max_retries = int(ENGINE_CONFIG["max_retries"])
+        if retry_count >= max_retries:
+            self.state.set_step_status(
+                config_name,
+                step_name,
+                STATUS_ERROR,
+                f"远程 {step_name} 状态连续 {retry_count} 次未知，停止等待",
+            )
+            logger.error(
+                "[Solver] 构型%s 远程状态 unknown 达到重试上限，标记为 Error",
+                config_name,
+            )
+            return True
+        logger.warning(
+            "[Solver] 构型%s 远程状态未知，保留 Running 状态等待后续重试 "
+            "(%s/%s)",
+            config_name,
+            retry_count,
+            max_retries,
+        )
+        return False
 
     def join_solver_threads(self, timeout: float = 3.0) -> None:
         """等待所有 Solver 线程退出并清空列表。
@@ -349,7 +406,8 @@ class BarrierCoordinator:
                 with self._solver_dispatch_lock:
                     self._solver_active_config = config_name
                 try:
-                    self._execute_solver_for_config(config_name)
+                    if not self._execute_solver_for_config(config_name):
+                        break
                 finally:
                     with self._solver_dispatch_lock:
                         self._solver_active_config = None
@@ -357,7 +415,7 @@ class BarrierCoordinator:
             self._report_solver_terminal_if_ready()
             logger.info("[Solver] 串行调度循环退出")
 
-    def _execute_solver_for_config(self, config_name: int):
+    def _execute_solver_for_config(self, config_name: int) -> bool:
         """
         执行单个构型的仿真求解（在独立线程中运行）。
 
@@ -366,8 +424,9 @@ class BarrierCoordinator:
         """
         # ★ 执行前检查暂停标志（统一使用 PauseGuard）
         if self._guard.check_should_abort():
-            return
+            return False
 
+        generation = self._step_generation(config_name, "solver")
         if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
@@ -378,13 +437,16 @@ class BarrierCoordinator:
             )
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+                if self._is_stale_step_result(config_name, "solver", generation):
+                    self._discard_stale_step_result(config_name, "solver")
+                    return False
                 remote_executor.forget_remote_task(
                     config_name,
                     "solver",
                     workstation_id=workstation_id,
                 )
                 logger.info(f"[Solver] 构型{config_name} 重启后检测到完成标志")
-                return
+                return True
             if remote_status == "failed":
                 self.state.set_step_status(
                     config_name,
@@ -392,21 +454,25 @@ class BarrierCoordinator:
                     STATUS_ERROR,
                     "远程求解任务失败",
                 )
+                if self._is_stale_step_result(config_name, "solver", generation):
+                    self._discard_stale_step_result(config_name, "solver")
+                    return False
                 remote_executor.forget_remote_task(
                     config_name,
                     "solver",
                     workstation_id=workstation_id,
                 )
-                return
+                return True
             if remote_status == "running":
                 logger.info(f"[Solver] 构型{config_name} 远程任务仍在运行，恢复轮询")
                 self._wait_for_solver_completion(config_name)
-                return
+                if self._is_stale_step_result(config_name, "solver", generation):
+                    self._discard_stale_step_result(config_name, "solver")
+                    return False
+                return True
             if remote_status == "unknown":
-                logger.warning(
-                    f"[Solver] 构型{config_name} 远程状态未知，保留 Running 状态并跳过重启"
-                )
-                return
+                self._record_unknown_remote_status(config_name, "solver")
+                return False
             self.state.set_step_status(config_name, "solver", STATUS_WAITING)
             remote_executor.forget_remote_task(
                 config_name,
@@ -424,9 +490,13 @@ class BarrierCoordinator:
                                      self.runner.execute_solver):
             # ★ 启动远程求解后检查暂停标志（统一使用 PauseGuard）
             if self._guard.check_should_abort():
-                return
+                return False
 
             self._wait_for_solver_completion(config_name)
+            if self._is_stale_step_result(config_name, "solver", generation):
+                self._discard_stale_step_result(config_name, "solver")
+                return False
+        return True
 
     def _wait_for_solver_completion(self, config_name: int) -> None:
         """轮询等待 Solver 完成，并按控制状态更新数据库。"""

@@ -210,6 +210,17 @@ class TestStepFileMonitorLifecycle:
         monitor = StepFileMonitor(step_dir=str(tmp_path))
         monitor.stop()  # 不应报错
 
+    def test_start_creates_missing_step_directory(self, tmp_path):
+        """监控启动时应确保 STEP 目录存在，避免启动后持续报告目录缺失。"""
+        step_dir = tmp_path / "missing" / "step"
+        monitor = StepFileMonitor(step_dir=str(step_dir))
+
+        try:
+            monitor.start()
+            assert step_dir.is_dir()
+        finally:
+            monitor.stop()
+
 
 # ====================================================================
 # StepFileMonitor._scan_directory 回调测试
@@ -300,12 +311,11 @@ class TestScanDirectoryCallback:
         step_file = tmp_path / "model_gen4.SLDPRT_1.step"
         step_file.write_bytes(b"content")
 
-        # 多次扫描：回调异常不应阻止后续扫描
-        monitor._scan_directory()
-        time.sleep(0.08)
-        monitor._scan_directory()
-        time.sleep(0.1)
-        monitor._scan_directory()
+        # 多次扫描：回调异常不应阻止后续扫描；使用 deadline 避免平台调度抖动。
+        deadline = time.time() + 1.0
+        while time.time() < deadline and call_count == 0:
+            monitor._scan_directory()
+            time.sleep(0.05)
 
         assert call_count >= 1  # 回调至少被调用一次
 
