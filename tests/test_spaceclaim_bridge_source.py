@@ -14,6 +14,11 @@ SC_PROCESS_POOL_SOURCE = (
     / "engine"
     / "sc_process_pool.py"
 )
+SPACECLAIM_TRANSIT_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "executor"
+    / "spaceclaim_transit.py"
+)
 
 
 def _source() -> str:
@@ -29,6 +34,22 @@ def test_persistent_bridge_uses_shared_ready_timeout_env() -> None:
     assert "DefaultPersistentReadyTimeoutSeconds = 180" in source
     assert 'sc_env["AUTOFLUID_SC_PERSISTENT_READY_TIMEOUT"]' in pool_source
     assert 'ENGINE_CONFIG.get("sc_persistent_ready_timeout", 180)' in pool_source
+
+
+def test_persistent_bridge_passes_session_log_dir_to_transit() -> None:
+    pool_source = SC_PROCESS_POOL_SOURCE.read_text(encoding="utf-8")
+
+    assert 'sc_env["AUTOFLUID_SC_LOG_DIR"]' in pool_source
+    assert "_build_bridge_log_dir" in pool_source
+
+
+def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    assert 'os.environ.get("AUTOFLUID_SC_LOG_DIR"' in source
+    assert 'os.environ.get("AUTOFLUID_SC_SLOT_ID"' in source
+    assert "spaceclaim_transit_slot{}_{}.log" in source
+    assert "spaceclaim_transit_{}.log" in source
 
 
 def test_persistent_loop_reports_abnormal_exit_codes_and_statuses() -> None:

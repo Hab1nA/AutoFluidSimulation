@@ -1,5 +1,6 @@
 from ipc.server import IPCServer
 from ipc.protocol import (
+    CMD_GET_DASHBOARD,
     CMD_WORKER_HEARTBEAT,
     CMD_WORKER_POLL,
     CMD_WORKER_REGISTER,
@@ -130,6 +131,21 @@ def test_register_default_handlers_includes_local_worker_commands():
         CMD_WORKER_STEP_ERROR,
     }:
         assert command in srv._handlers
+
+
+def test_register_default_handlers_includes_dashboard_query():
+    class _Daemon:
+        def handle_get_dashboard(self, params):
+            return True, params, ""
+
+        def __getattr__(self, _name):
+            return lambda params=None: (True, params, "")
+
+    srv = IPCServer(host="127.0.0.1", port=0)
+
+    srv.register_default_handlers(_Daemon())
+
+    assert CMD_GET_DASHBOARD in srv._handlers
 
 
 

@@ -724,6 +724,29 @@ class PipelineDaemon:
         }
         return True, status, ""
 
+    def handle_get_dashboard(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """批量获取 TUI 仪表盘所需的状态、引擎信息和日志增量。"""
+        if self.state is None:
+            raise RuntimeError("StateManager 未初始化，请先调用 start()")
+        params = params or {}
+        log_params = {
+            "since_id": params.get("since_log_id", params.get("since_id", 0)),
+            "limit": params.get("log_limit", params.get("limit", 50)),
+            "level_filter": params.get("level_filter"),
+            "source_filter": params.get("source_filter"),
+            "include_polling": bool(params.get("include_polling", False)),
+            "include_lifecycle": bool(params.get("include_lifecycle", False)),
+            "include_config_scoped": bool(params.get("include_config_scoped", False)),
+        }
+        _, statuses, _ = self.handle_get_all_status(None)
+        _, engine, _ = self.handle_get_engine_status(None)
+        _, logs, _ = self.handle_get_log_entries(log_params)
+        return True, {
+            "statuses": statuses,
+            "engine": engine,
+            "logs": logs,
+        }, ""
+
     def handle_reset_step(self, params: dict) -> tuple[bool, Any, str]:
         """
         处理 reset 命令，config_name 和 step_name 均支持 "all"。
@@ -970,12 +993,18 @@ class PipelineDaemon:
         limit = params.get("limit", 50)
         level_filter = params.get("level_filter")
         source_filter = params.get("source_filter")
+        include_polling = bool(params.get("include_polling", False))
+        include_lifecycle = bool(params.get("include_lifecycle", False))
+        include_config_scoped = bool(params.get("include_config_scoped", False))
 
         result = handler.get_entries(
             since_id=since_id,
             limit=limit,
             level_filter=level_filter,
             source_filter=source_filter,
+            include_polling=include_polling,
+            include_lifecycle=include_lifecycle,
+            include_config_scoped=include_config_scoped,
         )
         return True, result, ""
 

@@ -93,6 +93,18 @@ class SCProcessPool:
         os.makedirs(self._persistent_cmd_dir, exist_ok=True)
         self._next_slot_id = 1  # 自增槽位 ID 计数器
 
+    @staticmethod
+    def _sc_log_extra(config_name: int, slot: PersistentSlot | None = None) -> dict[str, str]:
+        """构造 SC 步骤日志的结构化上下文。"""
+        extra = {
+            "log_category": "step",
+            "config_name": str(config_name),
+            "step_name": "sc",
+        }
+        if slot is not None:
+            extra["worker_id"] = f"sc-slot-{slot.slot_id}"
+        return extra
+
     # ==================================================================
     # 执行入口
     # ==================================================================
@@ -104,7 +116,10 @@ class SCProcessPool:
         """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未启动槽位）")
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未启动槽位）",
+                    extra=self._sc_log_extra(config_name),
+                )
                 return False
             with self._lock:
                 # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
@@ -133,10 +148,16 @@ class SCProcessPool:
                 logger.error(f"[SC-Pool] 槽位{slot.slot_id} 在等待期间被清理")
                 return False
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因停止取消（未发送 SC 命令）")
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} 因停止取消（未发送 SC 命令）",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 return False
             if paused_event is not None and paused_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停暂缓（未发送 SC 命令）")
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} 因暂停暂缓（未发送 SC 命令）",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 return False
             slot.status = "busy"
             slot.current_config = config_name
@@ -303,6 +324,8 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_PERSISTENT"] = "1"
         sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
         sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
+        bridge_log_dir = self._build_bridge_log_dir()
+        sc_env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
 
         # 传递 SC 启动超时配置给 Bridge
         sc_env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
@@ -336,7 +359,7 @@ class SCProcessPool:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            bridge_log_path = self._build_bridge_log_path(slot.slot_id)
+            bridge_log_path = self._build_bridge_log_path(slot.slot_id, bridge_log_dir)
             slot.bridge_log_path = bridge_log_path
             logger.info(f"[SC-Pool] Bridge stdout/stderr 日志: {bridge_log_path}")
             with open(bridge_log_path, "a", encoding="utf-8", errors="replace") as log_file:
@@ -435,7 +458,10 @@ class SCProcessPool:
         scdoc_name = get_step_filename("sc", config_name)
 
         if not scdoc_name:
-            logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
+            logger.error(
+                f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名",
+                extra=self._sc_log_extra(config_name, slot),
+            )
             return False
 
         scdoc_file = os.path.join(scdoc_dir, scdoc_name)
@@ -456,7 +482,10 @@ class SCProcessPool:
         }
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未发送 SC 命令）")
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未发送 SC 命令）",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 return False
             # 仅接受命令发送后创建或修改的 SCDOC 文件。
             command_sent_at = time.time()
@@ -464,10 +493,16 @@ class SCProcessPool:
                 with open(cmd_file, "w") as f:
                     json.dump(cmd_data, f)
             except OSError as e:
-                logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
+                logger.error(
+                    f"[SC-Pool] 写入命令文件失败: {e}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 return False
 
-        logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})")
+        logger.info(
+            f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})",
+            extra=self._sc_log_extra(config_name, slot),
+        )
 
         timeout = ENGINE_CONFIG["sc_timeout"]
         deadline = time.time() + timeout
@@ -494,12 +529,16 @@ class SCProcessPool:
                 if not pause_logged:
                     logger.info(
                         f"[SC-Pool] 构型{config_name} (run={run_id}) 已收到暂停，"
-                        "等待当前 SpaceClaim 命令自然完成（不中断进行中的转换）"
+                        "等待当前 SpaceClaim 命令自然完成（不中断进行中的转换）",
+                        extra=self._sc_log_extra(config_name, slot),
                     )
                     pause_logged = True
 
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消")
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
@@ -515,7 +554,10 @@ class SCProcessPool:
                     except OSError:
                         pass
                     if not success:
-                        logger.error(f"[SC-Pool] FAIL 构型{config_name} 脚本报错: {message}")
+                        logger.error(
+                            f"[SC-Pool] FAIL 构型{config_name} 脚本报错: {message}",
+                            extra=self._sc_log_extra(config_name, slot),
+                        )
                         return False
                 except (ValueError, IOError, OSError):
                     try:
@@ -548,8 +590,11 @@ class SCProcessPool:
                     last_size_stable_since = now
                 elif now - last_size_stable_since >= scdoc_stable_seconds:
                     # SCDOC 文件大小已稳定 → SaveAs 完成
-                    logger.info(f"[SC-Pool] OK 构型{config_name} SCDOC: "
-                                f"{os.path.basename(scdoc_file)} ({file_size} bytes)")
+                    logger.info(
+                        f"[SC-Pool] OK 构型{config_name} SCDOC: "
+                        f"{os.path.basename(scdoc_file)} ({file_size} bytes)",
+                        extra=self._sc_log_extra(config_name, slot),
+                    )
                     self._cleanup_run_files(slot.slot_id, run_id)
                     return True
 
@@ -563,12 +608,17 @@ class SCProcessPool:
                         if mt >= command_sent_at - 1.0 and sz > 0:
                             logger.warning(
                                 f"[SC-Pool] 构型{config_name} 超时但 SCDOC 已存在，接受 "
-                                f"({sz} bytes)")
+                                f"({sz} bytes)",
+                                extra=self._sc_log_extra(config_name, slot),
+                            )
                             self._cleanup_run_files(slot.slot_id, run_id)
                             return True
                     except OSError:
                         pass
-                logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}")
+                logger.error(
+                    f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 self._cleanup_run_files(slot.slot_id, run_id)
                 return False
 
@@ -589,11 +639,17 @@ class SCProcessPool:
             except OSError:
                 pass
 
-    def _build_bridge_log_path(self, slot_id: int) -> str:
-        """构建 Bridge stdout/stderr 捕获日志路径。"""
+    def _build_bridge_log_dir(self) -> str:
+        """构建 Bridge 与 transit 共用的会话日志目录。"""
         base_log_dir = get_session_log_dir() or LOCAL_PATHS.get("log_dir", "logs")
         bridge_log_dir = os.path.join(base_log_dir, "bridge")
         os.makedirs(bridge_log_dir, exist_ok=True)
+        return bridge_log_dir
+
+    def _build_bridge_log_path(self, slot_id: int, bridge_log_dir: str | None = None) -> str:
+        """构建 Bridge stdout/stderr 捕获日志路径。"""
+        if bridge_log_dir is None:
+            bridge_log_dir = self._build_bridge_log_dir()
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         return os.path.join(
             bridge_log_dir,

@@ -148,17 +148,52 @@ pub(crate) fn initial_ipc_poll_timestamp(interval: Duration) -> Instant {
         .unwrap_or_else(Instant::now)
 }
 
-pub(crate) fn initial_engine_status_poll_counter() -> u64 {
-    4
+pub(crate) fn apply_log_entries_response(
+    data_obj: &serde_json::Map<String, serde_json::Value>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    if data_obj
+        .get("reset")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        state.last_log_id = 0;
+        log_buffer.clear_detail();
+    }
+    if data_obj
+        .get("has_gap")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        log_buffer.push_info("⚠ 详细日志存在缺口，部分较早 daemon 日志已被丢弃".to_string());
+    }
+    if let Some(entries) = data_obj.get("entries").and_then(|v| v.as_array()) {
+        for entry_val in entries {
+            if let Some(entry) = LogEntry::from_dict(entry_val) {
+                state.last_log_id = state.last_log_id.max(entry.id);
+                log_buffer.push_detail(entry);
+            }
+        }
+    }
+    if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64()) {
+        state.last_log_id = state.last_log_id.max(latest);
+    }
 }
 
-pub(crate) fn should_poll_engine_status(poll_counter: &mut u64) -> bool {
-    *poll_counter += 1;
-    if *poll_counter >= 5 {
-        *poll_counter = 0;
-        true
-    } else {
-        false
+pub(crate) fn apply_dashboard_response(
+    data_obj: &serde_json::Map<String, serde_json::Value>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    if let Some(statuses) = data_obj.get("statuses") {
+        state.update_status_data(statuses);
+    }
+    if let Some(engine) = data_obj.get("engine") {
+        state.update_engine_info(engine);
+    }
+    if let Some(logs) = data_obj.get("logs").and_then(|v| v.as_object()) {
+        apply_log_entries_response(logs, state, log_buffer);
     }
 }
 
@@ -244,7 +279,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = initial_ipc_poll_timestamp(ipc_poll_interval);
     let mut last_clock_refresh = Instant::now();
-    let mut poll_counter: u64 = initial_engine_status_poll_counter();
 
     let mut ctx = EventContext {
         state: &mut state,
@@ -287,46 +321,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
-            // 拉取所有构型状态
-            if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_all_status()) {
-                if resp.is_ok() {
-                    ctx.state.update_status_data(&resp.data);
-                }
-            }
-
             if ctx.ipc.is_connected() {
-                // 首轮立即拉取引擎状态，之后每 5 轮刷新一次。
-                if should_poll_engine_status(&mut poll_counter) {
-                    if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_engine_status()) {
-                        if resp.is_ok() {
-                            ctx.state.update_engine_info(&resp.data);
-                        }
-                    }
-                }
-
-                // 增量拉取日志
-                if let Ok(resp) = ctx.rt.block_on(ctx.ipc.get_log_entries(
-                    ctx.state.last_log_id,
-                    50,
-                    ctx.state.log_filter_level.as_deref(),
-                    ctx.state.log_filter_source.as_deref(),
-                )) {
+                // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
+                if let Ok(resp) = ctx
+                    .rt
+                    .block_on(ctx.ipc.get_dashboard(ctx.state.last_log_id, 50))
+                {
                     if resp.is_ok() {
                         if let Some(data_obj) = resp.data.as_object() {
-                            if let Some(entries) =
-                                data_obj.get("entries").and_then(|v| v.as_array())
-                            {
-                                for entry_val in entries {
-                                    if let Some(entry) = LogEntry::from_dict(entry_val) {
-                                        ctx.state.last_log_id = ctx.state.last_log_id.max(entry.id);
-                                        ctx.log_buffer.push_detail(entry);
-                                    }
-                                }
-                            }
-                            if let Some(latest) = data_obj.get("latest_id").and_then(|v| v.as_u64())
-                            {
-                                ctx.state.last_log_id = ctx.state.last_log_id.max(latest);
-                            }
+                            apply_dashboard_response(data_obj, ctx.state, ctx.log_buffer);
                         }
                     }
                 }
@@ -939,22 +942,93 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_engine_status_poll_counter_refreshes_immediately() {
-        let mut poll_counter = initial_engine_status_poll_counter();
+    fn test_apply_log_entries_response_handles_reset_and_gap() {
+        let mut state = AppState {
+            last_log_id: 99,
+            ..Default::default()
+        };
+        let mut log_buffer = LogBuffer::new();
+        log_buffer.push_detail(LogEntry {
+            id: 90,
+            timestamp: "2026-06-10 12:00:00".to_string(),
+            level: "INFO".to_string(),
+            source: "system".to_string(),
+            logger_name: "old".to_string(),
+            message: "old".to_string(),
+            raw_message: "old".to_string(),
+            category: "general".to_string(),
+            config_name: None,
+            step_name: None,
+            worker_id: None,
+            is_polling: false,
+        });
+        let data = serde_json::json!({
+            "reset": true,
+            "has_gap": true,
+            "latest_id": 5,
+            "entries": [{
+                "id": 5,
+                "timestamp": "2026-06-10 12:00:01",
+                "level": "ERROR",
+                "source": "scheduler",
+                "logger_name": "engine.scheduler.main",
+                "message": "new",
+                "raw_message": "new",
+                "category": "step"
+            }]
+        });
+        let obj = data.as_object().expect("object response");
 
-        assert!(should_poll_engine_status(&mut poll_counter));
-        assert_eq!(poll_counter, 0);
+        apply_log_entries_response(obj, &mut state, &mut log_buffer);
+
+        assert_eq!(state.last_log_id, 5);
+        assert_eq!(log_buffer.detail_buffer.len(), 1);
+        assert_eq!(log_buffer.detail_buffer[0].id, 5);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("详细日志存在缺口")));
     }
 
     #[test]
-    fn test_engine_status_poll_counter_refreshes_every_five_polls() {
-        let mut poll_counter = 0;
+    fn test_apply_dashboard_response_updates_state_engine_and_logs() {
+        let mut state = AppState::default();
+        let mut log_buffer = LogBuffer::new();
+        let data = serde_json::json!({
+            "statuses": {
+                "2": {"sw": "Running"}
+            },
+            "engine": {
+                "engine_status": "running",
+                "sw_macro_started": true,
+                "barrier_passed": false,
+                "pipeline_started": true
+            },
+            "logs": {
+                "entries": [{
+                    "id": 8,
+                    "timestamp": "2026-06-10 12:00:01",
+                    "level": "INFO",
+                    "source": "scheduler",
+                    "logger_name": "engine.scheduler.main",
+                    "message": "new",
+                    "raw_message": "new",
+                    "category": "step"
+                }],
+                "latest_id": 8,
+                "has_gap": false,
+                "reset": false
+            }
+        });
+        let obj = data.as_object().expect("object response");
 
-        for _ in 0..4 {
-            assert!(!should_poll_engine_status(&mut poll_counter));
-        }
-        assert!(should_poll_engine_status(&mut poll_counter));
-        assert_eq!(poll_counter, 0);
+        apply_dashboard_response(obj, &mut state, &mut log_buffer);
+
+        assert_eq!(state.get_step_status("2", "sw"), "Running");
+        assert_eq!(state.engine_info.engine_status, "running");
+        assert!(state.engine_info.sw_macro_started);
+        assert_eq!(state.last_log_id, 8);
+        assert_eq!(log_buffer.detail_buffer.len(), 1);
     }
 
     #[test]

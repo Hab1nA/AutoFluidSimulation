@@ -18,6 +18,7 @@ pub const CMD_GET_ALL_STATUS: &str = "get_all_status";
 pub const CMD_GET_STATISTICS: &str = "get_statistics";
 pub const CMD_GET_ENGINE_STATUS: &str = "get_engine_status";
 pub const CMD_GET_LOG_ENTRIES: &str = "get_log_entries";
+pub const CMD_GET_DASHBOARD: &str = "get_dashboard";
 pub const CMD_RELOAD_CONFIG: &str = "reload_config";
 #[allow(dead_code)]
 pub const CMD_WORKER_REGISTER: &str = "worker_register";
@@ -119,7 +120,7 @@ impl IpcResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::IpcRequest;
+    use super::{IpcRequest, CMD_GET_DASHBOARD};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -148,5 +149,10 @@ mod tests {
         assert!(json.contains(r#""auth_token":"secret-token""#));
 
         std::env::remove_var("AUTOFLUID_IPC_AUTH_TOKEN");
+    }
+
+    #[test]
+    fn dashboard_command_constant_matches_python_protocol() {
+        assert_eq!(CMD_GET_DASHBOARD, "get_dashboard");
     }
 }

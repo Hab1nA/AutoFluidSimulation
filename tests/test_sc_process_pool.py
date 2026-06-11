@@ -38,6 +38,28 @@ def test_format_bridge_exit_handles_unknown_and_missing_code():
     assert _format_bridge_exit(None) == "exit=unknown"
 
 
+def test_sc_log_extra_marks_step_context(tmp_path, monkeypatch):
+    """SC 构型日志应带结构化步骤上下文，供详细日志栏过滤/展示。"""
+    monkeypatch.setitem(LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+    monkeypatch.setitem(LOCAL_PATHS, "sc_bridge", "")
+    monkeypatch.setitem(LOCAL_PATHS, "sc_script", "")
+
+    from engine.sc_process_pool import PersistentSlot, SCProcessPool
+
+    pool = SCProcessPool()
+    assert pool._sc_log_extra(7) == {
+        "log_category": "step",
+        "config_name": "7",
+        "step_name": "sc",
+    }
+    assert pool._sc_log_extra(7, PersistentSlot(slot_id=3)) == {
+        "log_category": "step",
+        "config_name": "7",
+        "step_name": "sc",
+        "worker_id": "sc-slot-3",
+    }
+
+
 # ====================================================================
 # PersistentSlot 测试
 # ====================================================================
@@ -191,6 +213,43 @@ class TestMaxSlots:
         with pool._lock:
             result = pool._get_or_create_persistent_slot()
         assert result is None
+
+    def test_launch_persistent_process_passes_bridge_log_dir_to_transit(
+        self, tmp_path, monkeypatch
+    ):
+        """启动 Bridge 时应把会话 bridge 日志目录传给 transit 脚本。"""
+        data_dir = str(tmp_path / "data")
+        bridge_exe = tmp_path / "SpaceClaimBridge.exe"
+        bridge_exe.write_text("fake bridge", encoding="utf-8")
+
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "sc_bridge", str(bridge_exe))
+        monkeypatch.setitem(LOCAL_PATHS, "sc_script", str(tmp_path / "spaceclaim_transit.py"))
+        monkeypatch.setattr("engine.sc_process_pool.get_session_log_dir", lambda: str(tmp_path / "session_logs"))
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, stdout=None, stderr=None, creationflags=0, env=None):
+                captured["cmd"] = cmd
+                captured["env"] = env or {}
+                self.pid = 4242
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr("engine.sc_process_pool.subprocess.Popen", _FakePopen)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=2, cmd_dir=pool._persistent_cmd_dir)
+
+        assert pool._launch_persistent_process(slot)
+        expected_log_dir = os.path.join(str(tmp_path / "session_logs"), "bridge")
+        assert captured["env"]["AUTOFLUID_SC_LOG_DIR"] == expected_log_dir
+        assert slot.bridge_log_path is not None
+        assert os.path.dirname(slot.bridge_log_path) == expected_log_dir
 
     def test_get_slot_balances_ready_slots_and_cleans_dead_idle_slot(
         self, tmp_path, monkeypatch

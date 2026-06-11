@@ -126,10 +126,14 @@ def _get_script_dir():
 _SCRIPT_DIR = _get_script_dir()
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)  # executor/ 的父目录即项目根
 # 验证：项目根下应存在 logs/ 目录或 executor/ 目录
-_candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
-if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
-    # 回退：在脚本所在目录下创建
-    _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
+_env_log_dir = os.environ.get("AUTOFLUID_SC_LOG_DIR", "")
+if _env_log_dir:
+    _candidate_log_dir = _env_log_dir
+else:
+    _candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
+    if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
+        # 回退：在脚本所在目录下创建
+        _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
 
 try:
     if not os.path.isdir(_candidate_log_dir):
@@ -137,7 +141,12 @@ try:
 except (OSError, IOError):
     _candidate_log_dir = os.environ.get("TEMP", _SCRIPT_DIR)
 
-_log_path = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
+_slot_id = os.environ.get("AUTOFLUID_SC_SLOT_ID", "")
+if _slot_id:
+    _log_file_name = "spaceclaim_transit_slot{}_{}.log".format(_slot_id, os.getpid())
+else:
+    _log_file_name = "spaceclaim_transit_{}.log".format(os.getpid())
+_log_path = os.path.join(_candidate_log_dir, _log_file_name)
 logger = _SpaceClaimLogger("spaceclaim_transit", _log_path)
 
 # --------------------------------------------------------------------------

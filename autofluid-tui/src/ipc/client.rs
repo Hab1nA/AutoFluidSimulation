@@ -316,19 +316,30 @@ impl IpcClient {
             .await
     }
 
-    pub async fn get_all_status(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ALL_STATUS))
-            .await
-    }
-
     pub async fn get_statistics(&mut self) -> Result<IpcResponse, String> {
         self.send_request(&IpcRequest::new(super::protocol::CMD_GET_STATISTICS))
             .await
     }
 
-    pub async fn get_engine_status(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_GET_ENGINE_STATUS))
-            .await
+    pub async fn get_dashboard(
+        &mut self,
+        since_log_id: u64,
+        log_limit: u64,
+    ) -> Result<IpcResponse, String> {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "since_log_id".to_string(),
+            serde_json::Value::Number(since_log_id.into()),
+        );
+        params.insert(
+            "log_limit".to_string(),
+            serde_json::Value::Number(log_limit.into()),
+        );
+        self.send_request(&IpcRequest::with_params(
+            super::protocol::CMD_GET_DASHBOARD,
+            serde_json::Value::Object(params),
+        ))
+        .await
     }
 
     pub async fn reset_step(
@@ -408,38 +419,6 @@ impl IpcClient {
         ))
         .await
     }
-
-    pub async fn get_log_entries(
-        &mut self,
-        since_id: u64,
-        limit: u64,
-        level_filter: Option<&str>,
-        source_filter: Option<&str>,
-    ) -> Result<IpcResponse, String> {
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "since_id".to_string(),
-            serde_json::Value::Number(since_id.into()),
-        );
-        params.insert("limit".to_string(), serde_json::Value::Number(limit.into()));
-        if let Some(lf) = level_filter {
-            params.insert(
-                "level_filter".to_string(),
-                serde_json::Value::String(lf.to_string()),
-            );
-        }
-        if let Some(sf) = source_filter {
-            params.insert(
-                "source_filter".to_string(),
-                serde_json::Value::String(sf.to_string()),
-            );
-        }
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_GET_LOG_ENTRIES,
-            serde_json::Value::Object(params),
-        ))
-        .await
-    }
 }
 
 fn default_host() -> String {
@@ -509,6 +488,7 @@ fn is_polling_command(command: &str) -> bool {
         super::protocol::CMD_GET_ALL_STATUS
             | super::protocol::CMD_GET_ENGINE_STATUS
             | super::protocol::CMD_GET_LOG_ENTRIES
+            | super::protocol::CMD_GET_DASHBOARD
     )
 }
 
@@ -608,6 +588,75 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(client.is_connected());
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn get_dashboard_sends_log_cursor_and_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut dashboard = String::new();
+            reader.read_line(&mut dashboard).expect("read dashboard");
+            let request: Value = serde_json::from_str(dashboard.trim()).expect("dashboard json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_GET_DASHBOARD)
+            );
+            assert_eq!(
+                request
+                    .get("params")
+                    .and_then(|params| params.get("since_log_id"))
+                    .and_then(Value::as_u64),
+                Some(17)
+            );
+            assert_eq!(
+                request
+                    .get("params")
+                    .and_then(|params| params.get("log_limit"))
+                    .and_then(Value::as_u64),
+                Some(75)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            let response = format!(
+                r#"{{"status":"ok","data":{{"statuses":{{}},"engine":{{}},"logs":{{"entries":[],"latest_id":17}}}},"message":"","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write dashboard response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.get_dashboard(17, 75));
+
+        assert!(result.is_ok());
         rt.block_on(client.disconnect());
         server.join().expect("server thread");
     }

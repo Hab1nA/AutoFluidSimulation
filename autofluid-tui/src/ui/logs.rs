@@ -68,9 +68,8 @@ pub fn compute_detail_lines_no_wrap(
     let mut max_width: usize = 0;
     for entry in log_buffer.filtered_entries(level_filter, source_filter) {
         let color = entry.level_color();
-        let level = entry.level.clone();
-        let prefix = format!("[{}] ", level);
-        let msg = entry.raw_message.clone();
+        let prefix = entry.detail_prefix();
+        let msg = entry.display_message();
         let full = format!("{}{}", prefix, msg);
         let w = unicode_width::UnicodeWidthStr::width(full.as_str());
         if w > max_width {
@@ -206,7 +205,7 @@ pub fn get_raw_message_at_visual_line(
         .filtered_entries(level_filter, source_filter)
         .collect();
     if visual_line < entries.len() {
-        Some(entries[visual_line].raw_message.clone())
+        Some(entries[visual_line].display_message())
     } else {
         None
     }

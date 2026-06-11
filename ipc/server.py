@@ -17,7 +17,7 @@ from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
-    CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
+    CMD_GET_LOG_ENTRIES, CMD_GET_DASHBOARD, CMD_RELOAD_CONFIG,
     CMD_WORKER_REGISTER, CMD_WORKER_HEARTBEAT,
     CMD_WORKER_POLL, CMD_WORKER_STEP_COMPLETE, CMD_WORKER_STEP_ERROR,
 )
@@ -96,6 +96,7 @@ class IPCServer:
         self.register_handler(CMD_GET_STATISTICS, daemon.handle_get_statistics)
         self.register_handler(CMD_GET_ENGINE_STATUS, daemon.handle_get_engine_status)
         self.register_handler(CMD_GET_LOG_ENTRIES, daemon.handle_get_log_entries)
+        self.register_handler(CMD_GET_DASHBOARD, daemon.handle_get_dashboard)
 
         # 重置
         self.register_handler(CMD_RESET_STEP, daemon.handle_reset_step)
