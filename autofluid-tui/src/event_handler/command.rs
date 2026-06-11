@@ -13,6 +13,9 @@ pub enum CommandResult {
     StartDaemon,
     StopDaemon,
     RestartDaemon,
+    StartWorkers,
+    StopWorkers,
+    RestartWorkers,
 }
 
 pub async fn dispatch_command(
@@ -41,6 +44,7 @@ pub async fn dispatch_command(
         "clean" => cmd_clean(&parts, state, log_buffer),
         "quit" => cmd_quit(&parts, state, log_buffer),
         "daemon" => cmd_daemon(&parts, state, log_buffer),
+        "worker" => cmd_worker(&parts, ipc, state, log_buffer).await,
         "settings" => {
             if state.engine_info.pipeline_started {
                 log_buffer.push_info(
@@ -325,6 +329,65 @@ fn cmd_daemon(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     }
 }
 
+async fn cmd_worker(
+    parts: &[&str],
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> CommandResult {
+    if parts.len() < 2 {
+        log_buffer.push_info("用法: worker start | worker stop | worker restart".to_string());
+        return CommandResult::None;
+    }
+    match parts[1].to_lowercase().as_str() {
+        "start" => cmd_worker_start(ipc, log_buffer).await,
+        "stop" => {
+            state.confirm_message = Some(
+                "确定要【停止所有 Worker】吗？\n本地 Worker 进程和工作站 SSH 隧道将被关闭！"
+                    .to_string(),
+            );
+            state.confirm_callback = Some(ConfirmAction::StopWorkers);
+            state.dialog_scroll = 0;
+            state.ui_mode = UiMode::ConfirmDialog;
+            CommandResult::None
+        }
+        "restart" => {
+            state.confirm_message = Some(
+                "确定要【重启所有 Worker】吗？\n将先停止再启动本地 Worker 和工作站连接。"
+                    .to_string(),
+            );
+            state.confirm_callback = Some(ConfirmAction::RestartWorkers);
+            state.dialog_scroll = 0;
+            state.ui_mode = UiMode::ConfirmDialog;
+            CommandResult::None
+        }
+        _ => {
+            log_buffer.push_info("用法: worker start | worker stop | worker restart".to_string());
+            CommandResult::None
+        }
+    }
+}
+
+async fn cmd_worker_start(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandResult {
+    if !ipc.is_connected() {
+        log_buffer.push_info("❌ 未连接到后台引擎".to_string());
+        return CommandResult::None;
+    }
+    log_buffer.push_info("🔧 正在启动 Worker（验证 SSH 连通性、准备注册表）...".to_string());
+    match ipc.worker_start().await {
+        Ok(resp) if resp.is_ok() => {
+            log_buffer.push_info(format!("✅ {}", resp.message));
+        }
+        Ok(resp) => {
+            log_buffer.push_info(format!("❌ {}", resp.message));
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 通信失败: {}", e));
+        }
+    }
+    CommandResult::StartWorkers
+}
+
 fn cmd_filter(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
     if parts.len() < 2 {
         log_buffer.push_info("用法: filter <error|warning|info|debug|remote|local|com|scheduler|system|clear|status>".to_string());
@@ -488,6 +551,14 @@ pub async fn execute_confirm_action(
             log::info!("[TUI] 确认停止后台引擎");
             CommandResult::StopDaemon
         }
+        ConfirmAction::StopWorkers => {
+            log::info!("[TUI] 确认停止所有 Worker");
+            CommandResult::StopWorkers
+        }
+        ConfirmAction::RestartWorkers => {
+            log::info!("[TUI] 确认重启所有 Worker");
+            CommandResult::RestartWorkers
+        }
     }
 }
 
@@ -505,6 +576,9 @@ const HELP_LINES: &[&str] = &[
     "  daemon start               - 按当前模式启动本地/服务器后台引擎并自动连接",
     "  daemon stop                - 按当前模式停止本地/服务器后台引擎（TUI 继续运行）",
     "  daemon restart             - 按当前模式重启后台引擎（等同于 stop + start）",
+    "  worker start               - 启动所有 Worker（建立 SSH 隧道、启动本地 Worker）",
+    "  worker stop                - 停止所有 Worker（关闭进程和 SSH 隧道）",
+    "  worker restart             - 重启所有 Worker（等同于 stop + start）",
     "  quit                       - 退出界面（引擎继续运行）",
     "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
     "",

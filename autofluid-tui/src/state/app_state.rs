@@ -176,6 +176,10 @@ pub struct AppState {
     pub hovered_daemon_menu_item: Option<u8>,
     pub clicked_daemon_menu_item: Option<u8>,
     pub daemon_menu_click_time: Option<std::time::Instant>,
+    pub worker_menu_open: bool,
+    pub hovered_worker_menu_item: Option<u8>,
+    pub clicked_worker_menu_item: Option<u8>,
+    pub worker_menu_click_time: Option<std::time::Instant>,
     pub clicked_dialog_button: Option<u8>,
     pub click_time: Option<std::time::Instant>,
     pub dialog_click_time: Option<std::time::Instant>,
@@ -212,6 +216,8 @@ pub enum ConfirmAction {
     },
     FullQuit,
     StopDaemon,
+    StopWorkers,
+    RestartWorkers,
 }
 
 impl AppState {

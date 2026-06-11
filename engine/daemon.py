@@ -37,8 +37,8 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, ensure_directories,
-    get_step_filename, is_server_mode, validate_config,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING,
+    ensure_directories, get_step_filename, is_server_mode, validate_config,
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
@@ -427,7 +427,15 @@ class PipelineDaemon:
             return True, None, "流水线已在运行中"
 
         if engine_status == "paused":
-            if self._server_mode_requires_worker():
+            has_active_running_step = (
+                self._find_blocking_running_step(
+                    config_name="all",
+                    step_name="all",
+                    include_downstream=False,
+                )
+                is not None
+            )
+            if self._server_mode_requires_worker() and not has_active_running_step:
                 self._ensure_local_worker_autostarted()
                 return self._server_mode_worker_missing_response()
             auth_error = self._server_mode_remote_auth_error()
@@ -799,6 +807,71 @@ class PipelineDaemon:
         task = self.local_worker_registry.fail_task(task_id, worker_id, error)
         return True, task, "LocalWorker 任务失败"
 
+    # ------------------------------------------------------------------
+    # Worker 生命周期管理命令
+    # ------------------------------------------------------------------
+
+    def handle_worker_start(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """启动所有 worker：验证工作站 SSH 连通性，准备 Registry 接受注册。"""
+        params = params or {}
+        results: dict[str, Any] = {
+            "ssh_checks": {},
+            "registry_ready": False,
+        }
+
+        # 检查并验证到各工作站的 SSH 连通性
+        if self.runner is not None:
+            for ws in WORKSTATIONS:
+                ws_id = str(ws.get("id", "default"))
+                try:
+                    ssh = self.runner.get_ssh(ws_id)
+                    connected = ssh.is_connected()
+                    results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
+                except Exception as e:
+                    results["ssh_checks"][ws_id] = f"error: {e}"
+                    logger.warning("[Worker] 工作站 %s SSH 连通检查失败: %s", ws_id, e)
+
+        # 清除旧的在线 worker 标记（允许重新注册）
+        self.local_worker_registry.clear_online_workers()
+        results["registry_ready"] = True
+
+        logger.info("[Worker] worker_start 完成: %s", results)
+        return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+
+    def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """停止所有 worker：断开工作站 SSH 连接，清理 Registry 任务队列。"""
+        params = params or {}
+        results: dict[str, Any] = {
+            "ssh_disconnected": [],
+            "registry_cleared": False,
+        }
+
+        # 断开 TaskRunner 的所有 SSH 连接
+        if self.runner is not None:
+            try:
+                self.runner.disconnect_ssh()
+                results["ssh_disconnected"] = [str(ws.get("id", "default")) for ws in WORKSTATIONS]
+            except Exception as e:
+                logger.warning("[Worker] SSH 断开异常: %s", e)
+
+        # 清理 Registry 中的在线 worker 标记和待处理任务
+        self.local_worker_registry.clear_online_workers()
+        self.local_worker_registry.clear_pending_tasks()
+        results["registry_cleared"] = True
+
+        logger.info("[Worker] worker_stop 完成: %s", results)
+        return True, results, "所有 Worker 已停止"
+
+    def handle_worker_restart(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
+        """重启所有 worker：先停止再启动。"""
+        ok_stop, data_stop, msg_stop = self.handle_worker_stop(params)
+        if not ok_stop:
+            return False, data_stop, f"Worker 重启失败（停止阶段）: {msg_stop}"
+        ok_start, data_start, msg_start = self.handle_worker_start(params)
+        if not ok_start:
+            return False, data_start, f"Worker 重启失败（启动阶段）: {msg_start}"
+        return True, {"stop": data_stop, "start": data_start}, "所有 Worker 已重启"
+
     def handle_get_all_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取所有构型的状态。"""
         if self.state is None:
@@ -984,6 +1057,18 @@ class PipelineDaemon:
         state = getattr(self, "state", None)
         if state is not None and state.get_engine_status() == "running":
             return False, f"流水线运行中，{action_name}前请先 pause 或 stop"
+        blocking_local = self._find_blocking_running_step(
+            config_name=config_name,
+            step_name=step_name,
+            include_downstream=include_downstream,
+        )
+        if blocking_local is not None:
+            cfg, step = blocking_local
+            return (
+                False,
+                f"构型{cfg}的 {step} 步骤仍在执行，"
+                f"{action_name}前请先等待该步骤结束或 stop 后再操作",
+            )
 
         blocking = self._find_blocking_remote_task(
             config_name=config_name,
@@ -999,6 +1084,40 @@ class PipelineDaemon:
             f"构型{cfg}的 {step} 远程任务状态为 {status}，"
             f"{action_name}前请先确认任务结束或停止后台任务",
         )
+
+    def _find_blocking_running_step(
+        self,
+        *,
+        config_name: int | str | None,
+        step_name: str | None,
+        include_downstream: bool,
+    ) -> tuple[int, str] | None:
+        state = getattr(self, "state", None)
+        if state is None or state.get_engine_status() != "paused":
+            return None
+
+        get_all_statuses = getattr(state, "get_all_statuses", None)
+        if not callable(get_all_statuses):
+            return None
+
+        affected_steps = self._affected_steps(step_name, include_downstream)
+        if not affected_steps:
+            return None
+
+        statuses = get_all_statuses()
+        for raw_config, step_statuses in statuses.items():
+            try:
+                task_config = int(raw_config)
+            except (TypeError, ValueError):
+                task_config = raw_config
+            if not isinstance(task_config, int) or not self._config_matches(config_name, task_config):
+                continue
+            if not isinstance(step_statuses, dict):
+                continue
+            for step in STEP_NAMES:
+                if step in affected_steps and step_statuses.get(step) == STATUS_RUNNING:
+                    return task_config, step
+        return None
 
     def _find_blocking_remote_task(
         self,
@@ -1047,6 +1166,20 @@ class PipelineDaemon:
                 return task_config, task_step, status
 
         return None
+
+    @staticmethod
+    def _affected_steps(step_name: str | None, include_downstream: bool) -> set[str]:
+        if step_name == "cache":
+            return set(STEP_NAMES)
+        if step_name in (None, "all"):
+            return set(STEP_NAMES)
+        if step_name not in STEP_NAMES:
+            return set()
+        if not include_downstream:
+            return {step_name}
+
+        step_index = STEP_NAMES.index(step_name)
+        return set(STEP_NAMES[step_index:])
 
     @staticmethod
     def _affected_remote_steps(step_name: str | None, include_downstream: bool) -> set[str]:

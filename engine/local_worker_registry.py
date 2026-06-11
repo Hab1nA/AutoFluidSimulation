@@ -75,6 +75,50 @@ class LocalWorkerRegistry:
         with self._lock:
             return any(self._is_online(worker) for worker in self._workers.values())
 
+    def has_active_step_task(
+        self,
+        step: str,
+        config_name: int | None = None,
+    ) -> bool:
+        """Return True when a matching LocalWorker task is pending or running."""
+        with self._lock:
+            for task in self._tasks.values():
+                if task.get("step") != step:
+                    continue
+                if task.get("status") not in {"pending", "running"}:
+                    continue
+                params = task.get("params", {})
+                if config_name is None or "config_name" not in params:
+                    return True
+                try:
+                    if int(params["config_name"]) == int(config_name):
+                        return True
+                except (TypeError, ValueError):
+                    continue
+            return False
+
+    def clear_online_workers(self) -> None:
+        """Clear all registered workers so they must re-register."""
+        with self._lock:
+            self._workers.clear()
+            # _task_condition 的 notify 唤醒可能在等待 worker 的线程
+            self._task_condition.notify_all()
+
+    def clear_pending_tasks(self) -> int:
+        """Cancel all pending tasks and return the count of cancelled tasks."""
+        with self._task_condition:
+            cancelled = 0
+            for task_id in list(self._pending_task_ids):
+                task = self._tasks.get(task_id)
+                if task is not None and task.get("status") == "pending":
+                    task["status"] = "error"
+                    task["error"] = "Worker 停止时取消"
+                    task["finished_at"] = self._clock()
+                    cancelled += 1
+            self._pending_task_ids.clear()
+            self._task_condition.notify_all()
+            return cancelled
+
     def enqueue_task(
         self,
         step: str,

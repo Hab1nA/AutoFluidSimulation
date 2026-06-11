@@ -419,6 +419,21 @@ impl IpcClient {
         ))
         .await
     }
+
+    pub async fn worker_start(&mut self) -> Result<IpcResponse, String> {
+        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_START))
+            .await
+    }
+
+    pub async fn worker_stop(&mut self) -> Result<IpcResponse, String> {
+        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_STOP))
+            .await
+    }
+
+    pub async fn worker_restart(&mut self) -> Result<IpcResponse, String> {
+        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_RESTART))
+            .await
+    }
 }
 
 fn default_host() -> String {

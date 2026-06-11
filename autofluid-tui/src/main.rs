@@ -7,6 +7,7 @@ mod text_buffer;
 mod theme;
 mod ui;
 mod utils;
+mod worker_mgr;
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -228,6 +229,7 @@ struct EventContext<'a> {
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
     daemon: &'a mut daemon_mgr::DaemonManager,
+    worker: &'a mut worker_mgr::WorkerManager,
     rt: &'a tokio::runtime::Runtime,
     project_dir: &'a str,
     full_quit: &'a mut bool,
@@ -247,6 +249,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut state = AppState::new();
     let mut log_buffer = LogBuffer::new();
     let mut daemon = daemon_mgr::DaemonManager::new();
+    let mut worker = worker_mgr::WorkerManager::new();
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
@@ -285,6 +288,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         log_buffer: &mut log_buffer,
         ipc: &mut ipc,
         daemon: &mut daemon,
+        worker: &mut worker,
         rt: &rt,
         project_dir: &project_dir,
         full_quit: &mut full_quit,
@@ -376,6 +380,7 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
         ctx.state,
         ctx.log_buffer,
         ctx.daemon,
+        ctx.worker,
         ctx.project_dir,
         ctx.full_quit,
     );
@@ -389,6 +394,7 @@ fn handle_command_result_refs(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
     daemon: &mut daemon_mgr::DaemonManager,
+    worker: &mut worker_mgr::WorkerManager,
     project_dir: &str,
     full_quit: &mut bool,
 ) {
@@ -424,6 +430,44 @@ fn handle_command_result_refs(
         command::CommandResult::StopDaemon => {
             daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
         }
+        command::CommandResult::StartWorkers => {
+            // worker start：启动本地 Worker 进程和 SSH 隧道
+            worker.start_workers(project_dir, log_buffer);
+        }
+        command::CommandResult::StopWorkers => {
+            // worker stop：发送 IPC 停止命令后停止本地进程
+            if ipc.is_connected() {
+                match rt.block_on(ipc.worker_stop()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            worker.stop_workers(log_buffer);
+        }
+        command::CommandResult::RestartWorkers => {
+            // worker restart：先停止再启动
+            if ipc.is_connected() {
+                match rt.block_on(ipc.worker_restart()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            worker.restart_workers(project_dir, log_buffer);
+        }
         command::CommandResult::None => {}
     }
 }
@@ -434,6 +478,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
         log_buffer,
         ipc,
         daemon,
+        worker,
         rt,
         project_dir,
         full_quit,
@@ -454,6 +499,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                         state,
                         log_buffer,
                         daemon,
+                        worker,
                         project_dir,
                         full_quit,
                     );
@@ -469,6 +515,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                             state,
                             log_buffer,
                             daemon,
+                            worker,
                             project_dir,
                             full_quit,
                         );
@@ -493,6 +540,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     ipc,
                     rt,
                     daemon,
+                    worker,
                     project_dir,
                     full_quit,
                 },

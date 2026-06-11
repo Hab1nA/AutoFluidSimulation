@@ -2,6 +2,7 @@ use crate::daemon_mgr::DaemonManager;
 use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
+use crate::worker_mgr::WorkerManager;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_confirm_result(
@@ -11,6 +12,7 @@ pub fn handle_confirm_result(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
     daemon: &mut DaemonManager,
+    worker: &mut WorkerManager,
     project_dir: &str,
     full_quit: &mut bool,
 ) {
@@ -35,6 +37,38 @@ pub fn handle_confirm_result(
         }
         command::CommandResult::StopDaemon => {
             daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
+        }
+        command::CommandResult::StopWorkers => {
+            if ipc.is_connected() {
+                match rt.block_on(ipc.worker_stop()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            worker.stop_workers(log_buffer);
+        }
+        command::CommandResult::RestartWorkers => {
+            if ipc.is_connected() {
+                match rt.block_on(ipc.worker_restart()) {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            worker.restart_workers(project_dir, log_buffer);
         }
         _ => {}
     }

@@ -16,6 +16,7 @@ use crate::ui::command_bar;
 use crate::ui::command_bar::BUTTON_DEFS;
 use crate::ui::layout::AppLayout;
 use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
+use crate::worker_mgr::WorkerManager;
 
 use crate::point_in_rect;
 
@@ -23,6 +24,7 @@ pub struct MouseRuntime<'a> {
     pub ipc: &'a mut IpcClient,
     pub rt: &'a tokio::runtime::Runtime,
     pub daemon: &'a mut DaemonManager,
+    pub worker: &'a mut WorkerManager,
     pub project_dir: &'a str,
     pub full_quit: &'a mut bool,
 }
@@ -150,11 +152,26 @@ fn handle_mouse_moved(
             state.hovered_detail_row = None;
         }
 
-        // 按钮 / Daemon 菜单 hover
+        // 按钮 / Daemon 菜单 / Worker 菜单 hover
         if state.daemon_menu_open {
             state.hovered_daemon_menu_item =
                 command_bar::detect_daemon_menu_item(col, row, layout.quick_buttons);
             if let Some(btn_idx) = command_bar::daemon_button_index() {
+                state.hovered_button = command_bar::button_bounds(layout.quick_buttons, btn_idx)
+                    .and_then(|rect| {
+                        if point_in_rect(col, row, rect) {
+                            Some(btn_idx as u8)
+                        } else {
+                            None
+                        }
+                    });
+            } else {
+                state.hovered_button = None;
+            }
+        } else if state.worker_menu_open {
+            state.hovered_worker_menu_item =
+                command_bar::detect_worker_menu_item(col, row, layout.quick_buttons);
+            if let Some(btn_idx) = command_bar::worker_button_index() {
                 state.hovered_button = command_bar::button_bounds(layout.quick_buttons, btn_idx)
                     .and_then(|rect| {
                         if point_in_rect(col, row, rect) {
@@ -580,6 +597,31 @@ fn handle_mouse_down(
         return;
     }
 
+    // Worker 菜单打开时的点击处理
+    if state.ui_mode == UiMode::Normal && state.worker_menu_open {
+        if let Some(menu_idx) = command_bar::detect_worker_menu_item(col, row, layout.quick_buttons)
+        {
+            state.clicked_worker_menu_item = Some(menu_idx);
+            state.worker_menu_click_time = Some(std::time::Instant::now());
+            state.needs_redraw = true;
+            return;
+        }
+
+        if let Some(btn_idx) = command_bar::worker_button_index() {
+            if let Some(button_rect) = command_bar::button_bounds(layout.quick_buttons, btn_idx) {
+                if point_in_rect(col, row, button_rect) {
+                    close_worker_menu(state);
+                    state.needs_redraw = true;
+                    return;
+                }
+            }
+        }
+
+        close_worker_menu(state);
+        state.needs_redraw = true;
+        return;
+    }
+
     // 当对话框覆盖层激活时，阻止鼠标事件穿透到背景面板
     if state.ui_mode != UiMode::Normal {
         return;
@@ -890,6 +932,28 @@ fn handle_mouse_up(
         return;
     }
 
+    // Worker 菜单项释放
+    if let Some(menu_idx) = state.clicked_worker_menu_item {
+        if state.worker_menu_open {
+            if let Some(hover_idx) =
+                command_bar::detect_worker_menu_item(col, row, layout.quick_buttons)
+            {
+                if hover_idx == menu_idx {
+                    if let Some(cmd) = command_bar::worker_menu_command(menu_idx) {
+                        state.pending_command = Some(cmd.to_string());
+                        state.pending_command_source = Some("mouse");
+                        state.focus_zone = FocusZone::CommandInput;
+                    }
+                }
+            }
+        }
+        close_worker_menu(state);
+        state.clicked_worker_menu_item = None;
+        state.worker_menu_click_time = None;
+        state.needs_redraw = true;
+        return;
+    }
+
     // 快捷按钮释放
     if let Some(btn_idx) = state.clicked_button {
         if in_buttons {
@@ -897,13 +961,24 @@ fn handle_mouse_up(
                 if hover_idx == btn_idx {
                     let cmd = BUTTON_DEFS[btn_idx as usize].1;
                     if cmd == "daemon" {
+                        close_worker_menu(state);
                         state.daemon_menu_open = !state.daemon_menu_open;
                         if state.daemon_menu_open {
                             state.hovered_daemon_menu_item = None;
                         } else {
                             close_daemon_menu(state);
                         }
+                    } else if cmd == "worker" {
+                        close_daemon_menu(state);
+                        state.worker_menu_open = !state.worker_menu_open;
+                        if state.worker_menu_open {
+                            state.hovered_worker_menu_item = None;
+                        } else {
+                            close_worker_menu(state);
+                        }
                     } else {
+                        close_daemon_menu(state);
+                        close_worker_menu(state);
                         state.pending_command = Some(cmd.to_string());
                         state.pending_command_source = Some("mouse");
                         state.focus_zone = FocusZone::CommandInput;
@@ -1095,6 +1170,7 @@ pub fn handle_dialog_button_click(
                         state,
                         log_buffer,
                         &mut *runtime.daemon,
+                        &mut *runtime.worker,
                         runtime.project_dir,
                         &mut *runtime.full_quit,
                     );
@@ -1139,6 +1215,13 @@ fn close_daemon_menu(state: &mut AppState) {
     state.hovered_daemon_menu_item = None;
     state.clicked_daemon_menu_item = None;
     state.daemon_menu_click_time = None;
+}
+
+fn close_worker_menu(state: &mut AppState) {
+    state.worker_menu_open = false;
+    state.hovered_worker_menu_item = None;
+    state.clicked_worker_menu_item = None;
+    state.worker_menu_click_time = None;
 }
 
 // ====================================================================

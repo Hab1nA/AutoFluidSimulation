@@ -65,6 +65,11 @@ CMD_WORKER_POLL = "worker_poll"            # LocalWorker 拉取待执行任务
 CMD_WORKER_STEP_COMPLETE = "worker_step_complete"  # LocalWorker 上报任务完成
 CMD_WORKER_STEP_ERROR = "worker_step_error"        # LocalWorker 上报任务失败
 
+# ---- Worker 生命周期管理命令 ----
+CMD_WORKER_START = "worker_start"          # 启动所有 worker（本地 + 工作站）
+CMD_WORKER_STOP = "worker_stop"            # 停止所有 worker 并关闭 SSH 隧道
+CMD_WORKER_RESTART = "worker_restart"      # 重启所有 worker
+
 
 # ============================================================================
 # 消息构造与解析
