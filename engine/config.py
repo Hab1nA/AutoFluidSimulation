@@ -423,17 +423,22 @@ def get_step_filename(step_name: str, config_name: int) -> str | None:
 # 确保必要目录存在 & 配置验证（由 daemon 启动时调用）
 # ============================================================================
 
-def ensure_directories():
+def ensure_directories() -> None:
     """创建必要的本地目录。"""
-    for key in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]:
-        path = LOCAL_PATHS.get(key, "")
-        if path:
-            try:
-                os.makedirs(path, exist_ok=True)
-            except PermissionError as e:
-                print(f"[WARNING] 权限不足，无法创建目录: {path}: {e}", file=sys.stderr)
-            except OSError as e:
-                print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
+    directory_keys = ["scdoc_dir", "log_dir", "data_dir"] if is_server_mode() else [
+        "step_dir", "scdoc_dir", "log_dir", "data_dir",
+    ]
+    for key in directory_keys:
+        path_value = LOCAL_PATHS.get(key, "")
+        if not path_value:
+            continue
+        path = str(path_value)
+        try:
+            os.makedirs(path, exist_ok=True)
+        except PermissionError as e:
+            print(f"[WARNING] 权限不足，无法创建目录: {path}: {e}", file=sys.stderr)
+        except OSError as e:
+            print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
 
 
 def _apply_env_overrides():
@@ -656,6 +661,9 @@ def validate_config() -> list[str]:
             "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
             "或在 config.py 中配置 password 字段"
         )
+
+    if is_server_mode():
+        return warnings
 
     if not os.path.exists(LOCAL_PATHS["sw_model"]):
         warnings.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")

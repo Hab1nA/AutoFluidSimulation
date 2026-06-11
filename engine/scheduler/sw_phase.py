@@ -348,6 +348,8 @@ class SWPhaseHandler:
         优先使用由 PipelineScheduler 注入的共享实例（通过 set_file_monitor()），
         仅在未注入时回退为自行创建（独立测试场景）。
         """
+        if is_server_mode():
+            return
         if self._file_monitor is None:
             # 防御性回退：未注入时自行创建（独立测试场景）
             # 注意：回退创建的监控器使用简化的回退回调，生产环境应始终由

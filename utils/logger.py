@@ -559,9 +559,15 @@ class LogBroadcastHandler(logging.Handler):
 
         visible.sort(key=lambda e: e.id)
         total = len(visible)
+        if limit <= 0:
+            limited = []
+        elif since_id == 0:
+            limited = visible[-limit:]
+        else:
+            limited = visible[:limit]
 
         return {
-            "entries": [e.to_dict() for e in visible[:limit]],
+            "entries": [e.to_dict() for e in limited],
             "latest_id": latest_id,
             "total": total,
             "has_gap": has_gap,

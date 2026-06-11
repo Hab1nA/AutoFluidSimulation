@@ -207,6 +207,8 @@ class TestSWPhaseHandlerFallback:
         from engine.scheduler.sw_phase import SWPhaseHandler
         from engine.scheduler.work_queue import UniqueWorkQueue
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
         class _State:
             @staticmethod
             def get_step_status(config_name: int, step_name: str) -> str:
@@ -316,6 +318,78 @@ class TestSWPhaseHandlerFallback:
         config_name, step_file = sc_queue.get(timeout=1)
         assert config_name == 1
         assert step_file.endswith("model_gen4.SLDPRT_1.step")
+
+    def test_server_mode_sw_phase_does_not_start_step_file_monitor(self, monkeypatch):
+        """server 模式下 SW/SC 由 LocalWorker 执行，daemon 不应启动本地 STEP 监控。"""
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+        class _State:
+            def __init__(self):
+                self.status = {
+                    (1, "sw"): STATUS_WAITING,
+                    (1, "sc"): STATUS_WAITING,
+                }
+                self.engine_status = "stopped"
+                self.sw_macro_started = False
+
+            def get_all_configs(self) -> list[int]:
+                return [1]
+
+            def get_step_status(self, config_name: int, step_name: str) -> str:
+                return self.status.get((config_name, step_name), STATUS_WAITING)
+
+            def set_step_status(
+                self,
+                config_name: int,
+                step_name: str,
+                status: str,
+                message: str | None = None,
+            ) -> None:
+                self.status[(config_name, step_name)] = status
+
+            def set_engine_status(self, status: str) -> None:
+                self.engine_status = status
+
+            def set_sw_macro_started(self, value: bool) -> None:
+                self.sw_macro_started = value
+
+        class _Runner:
+            def __init__(self, state: _State):
+                self.state = state
+
+            def execute_sw_per_config(self, config_name: int) -> bool:
+                self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
+                return True
+
+            def disconnect_sw_cached(self) -> None:
+                return None
+
+            def verify_step_exports(self, _step_dir: str) -> int:
+                return 1
+
+        class _RetryManager:
+            @staticmethod
+            def execute_with_retry(config_name: int, step_name: str, func):
+                return func(config_name)
+
+        state = _State()
+        file_monitor = _SpyFileMonitor()
+        handler = SWPhaseHandler(
+            state_manager=state,
+            task_runner=_Runner(state),
+            sc_queue=UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0]),
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=_RetryManager(),
+        )
+        handler.set_file_monitor(file_monitor)
+
+        assert handler._execute_sw_macro([1]) is True
+
+        assert file_monitor.start_count == 0
 
 
 # ====================================================================
@@ -701,6 +775,14 @@ class TestPipelineSchedulerStartRecovery:
         messages = [record.getMessage() for record in caplog.records]
         assert any("构型1 已推入 Transfer 队列" in msg for msg in messages)
         assert not any("个 Transfer 入队" in msg for msg in messages)
+
+    def test_server_mode_never_needs_daemon_step_file_monitor(self, monkeypatch):
+        """server 模式下 daemon 不监控 LocalWorker 机器上的 STEP 目录。"""
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_WAITING)
+
+        assert self.scheduler._needs_step_file_monitor() is False
 
     def test_request_file_monitor_reset_preserves_scheduler_pause(self):
         """clean SW 后只重置监控器追踪状态，不解除调度器暂停。"""

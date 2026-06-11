@@ -709,11 +709,12 @@ def test_pause_when_stopped():
         ctx.cleanup()
 
 
-def test_file_monitor_paused_on_pause():
+def test_file_monitor_paused_on_pause(monkeypatch):
     print("\n" + "=" * 60)
     print("测试 8: 暂停后文件监控停止扫描")
     print("=" * 60)
 
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
     ctx = TestContext(num_configs=3)
     try:
         ctx.runner._sw_delay = 0.0

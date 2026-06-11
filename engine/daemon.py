@@ -169,6 +169,7 @@ class PipelineDaemon:
         self.local_worker_registry = LocalWorkerRegistry()
         self.local_worker_adapter = LocalWorkerAdapter(self.local_worker_registry)
         self._config_load_error: str | None = None
+        self._worker_config_fingerprint: str | None = None
 
         # 运行标志
         self._running = False
@@ -207,12 +208,15 @@ class PipelineDaemon:
         excel_path = LOCAL_PATHS["excel"]
         configs: dict[int, list[float]] = {}
         fingerprint: str | None = None
-        try:
-            configs = read_model_configs(excel_path)
-        except FileNotFoundError as e:
-            self._config_load_error = f"Excel 文件未找到: {e}"
-        except (ValueError, OSError) as e:
-            self._config_load_error = f"Excel 读取失败: {e}"
+        if is_server_mode():
+            self._config_load_error = "ServerMode 等待 LocalWorker 提供构型数据"
+        else:
+            try:
+                configs = read_model_configs(excel_path)
+            except FileNotFoundError as e:
+                self._config_load_error = f"Excel 文件未找到: {e}"
+            except (ValueError, OSError) as e:
+                self._config_load_error = f"Excel 读取失败: {e}"
 
         if self._config_load_error is None and not configs:
             self._config_load_error = "Excel 中未读取到任何构型数据"
@@ -566,6 +570,12 @@ class PipelineDaemon:
         configs = self._coerce_worker_configs(raw_configs)
         fingerprint = compute_config_fingerprint(configs)
         db_path = get_db_path_for_fingerprint(fingerprint)
+        if (
+            getattr(self, "_worker_config_fingerprint", None) == fingerprint
+            and self.state is not None
+            and getattr(self.state, "db_path", None) == db_path
+        ):
+            return
         if self.state is None or getattr(self.state, "db_path", None) != db_path:
             self.state = StateManager(db_path=db_path)
             self.runner = TaskRunner(
@@ -576,6 +586,7 @@ class PipelineDaemon:
         self.state.load_configs(configs)
         self._assign_config_workstations()
         self._config_load_error = None
+        self._worker_config_fingerprint = fingerprint
         logger.info(
             "[LocalWorker] 已从 worker 注册信息同步 %d 个构型，状态数据库: %s",
             len(configs),

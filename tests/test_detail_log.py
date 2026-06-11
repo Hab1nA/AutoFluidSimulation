@@ -304,6 +304,30 @@ def test_handler_limit_parameter():
     print("  ✅ limit 参数正确")
 
 
+def test_handler_initial_query_returns_latest_window():
+    """测试首次查询返回最新窗口，而不是 daemon 启动时的最旧日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("test.handler.initial_window")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for i in range(1, 6):
+        test_logger.info(f"消息{i}")
+
+    result = handler.get_entries(since_id=0, limit=2)
+    entries = result["entries"]
+
+    assert [entry["raw_message"] for entry in entries] == [
+        "[test.handler.initial_window] 消息4",
+        "[test.handler.initial_window] 消息5",
+    ]
+    assert result["latest_id"] == 5
+    assert result["total"] == 5
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 首次查询返回最新日志窗口")
+
+
 def test_handler_stats():
     """测试统计信息。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -1483,6 +1507,7 @@ def main():
         ("Handler 来源过滤", test_handler_source_filter),
         ("Handler 容量限制", test_handler_capacity_limit),
         ("Handler limit参数", test_handler_limit_parameter),
+        ("Handler 首次查询最新窗口", test_handler_initial_query_returns_latest_window),
         ("Handler 统计信息", test_handler_stats),
         ("Handler 多线程安全", test_handler_thread_safety),
         ("Handler 空缓冲区", test_handler_empty_buffer),

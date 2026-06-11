@@ -61,6 +61,7 @@ class LocalWorker:
         self.config = config
         self._task_handlers = task_handlers or {}
         self._default_runner: TaskRunner | None = None
+        self._config_payload: dict[str, list[float]] | None = None
         self._last_heartbeat_at: float | None = None
 
     @classmethod
@@ -292,21 +293,37 @@ class LocalWorker:
     def _get_default_runner(self) -> TaskRunner:
         if self._default_runner is None:
             state = StateManager()
-            state.load_configs(read_model_configs(LOCAL_PATHS["excel"]))
+            if self._config_payload is not None:
+                configs = {
+                    int(config_name): list(values)
+                    for config_name, values in self._config_payload.items()
+                }
+            else:
+                configs = read_model_configs(LOCAL_PATHS["excel"])
+            state.load_configs(configs)
             self._default_runner = TaskRunner(state)
         return self._default_runner
 
     def _load_config_payload(self) -> dict[str, list[float]] | None:
         """Best-effort local Excel payload for server-side state initialization."""
+        if self._config_payload is not None:
+            return {
+                config_name: list(values)
+                for config_name, values in self._config_payload.items()
+            }
         try:
             configs = read_model_configs(LOCAL_PATHS["excel"])
         except (FileNotFoundError, OSError, ValueError):
             return None
         if not configs:
             return None
-        return {
+        self._config_payload = {
             str(config_name): list(values)
             for config_name, values in configs.items()
+        }
+        return {
+            config_name: list(values)
+            for config_name, values in self._config_payload.items()
         }
 
     def _send_request(self, request: dict[str, Any]) -> dict[str, Any]:

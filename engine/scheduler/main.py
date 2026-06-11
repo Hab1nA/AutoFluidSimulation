@@ -22,7 +22,7 @@ import os
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, get_step_filename, get_workstation_config,
+    LOCAL_PATHS, get_step_filename, get_workstation_config, is_server_mode,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -351,6 +351,8 @@ class PipelineScheduler:
         STEP 的构型，断点恢复应由数据库状态扫描直接入队，避免旧 STEP
         文件被再次稳定性检测并触发无效回调。
         """
+        if is_server_mode():
+            return False
         if self._file_monitor is None:
             return False
         if self._file_monitor.is_running:

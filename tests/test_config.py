@@ -208,6 +208,7 @@ class TestEnsureDirectories:
     def test_creates_missing_directories(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         # 临时替换路径到 tmp_path 下
         original = {k: LOCAL_PATHS[k] for k in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]}
         try:
@@ -225,6 +226,7 @@ class TestEnsureDirectories:
     def test_existing_directories_no_error(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         original = {k: LOCAL_PATHS[k] for k in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]}
         try:
             for key in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]:
@@ -248,6 +250,7 @@ class TestValidateConfig:
     def test_returns_empty_when_all_valid(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         # 创建假文件使路径"存在"
         sw_model = tmp_path / "model.SLDPRT"
         sw_model.touch()
@@ -292,6 +295,7 @@ class TestValidateConfig:
     def test_warns_missing_sw_model(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sw_model", str(tmp_path / "nonexistent.SLDPRT"))
         for key, name in [("excel", "t.xlsx"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -306,6 +310,7 @@ class TestValidateConfig:
     def test_warns_missing_excel(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "excel", str(tmp_path / "nonexistent.xlsx"))
         for key, name in [("sw_model", "m.SLDPRT"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -320,6 +325,7 @@ class TestValidateConfig:
     def test_warns_missing_sc_exe(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(tmp_path / "nonexistent.exe"))
         for key, name in [("sw_model", "m.SLDPRT"), ("excel", "t.xlsx"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -334,6 +340,7 @@ class TestValidateConfig:
     def test_warns_missing_sw_exe(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sw_exe", str(tmp_path / "nonexistent.exe"))
         for key, name in [("sw_model", "m.SLDPRT"), ("excel", "t.xlsx"), ("sc_exe", "sc.exe")]:
             f = tmp_path / name
@@ -344,6 +351,21 @@ class TestValidateConfig:
         from engine.config import validate_config
         warnings = validate_config()
         assert any("SolidWorks 可执行文件不存在" in w for w in warnings)
+
+    def test_server_mode_skips_local_windows_path_validation(self, tmp_path, monkeypatch):
+        from engine.config import LOCAL_PATHS, REMOTE_CONFIG, validate_config
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        for key in ["sw_model", "excel", "sc_exe", "sw_exe"]:
+            monkeypatch.setitem(LOCAL_PATHS, key, str(tmp_path / f"missing-{key}"))
+
+        warnings = validate_config()
+
+        assert not any("SW 模型文件不存在" in w for w in warnings)
+        assert not any("Excel 参数表不存在" in w for w in warnings)
+        assert not any("SpaceClaim 可执行文件不存在" in w for w in warnings)
+        assert not any("SolidWorks 可执行文件不存在" in w for w in warnings)
 
 
 # ====================================================================
@@ -1054,3 +1076,30 @@ class TestServerModeLocalPaths:
             cfg.REMOTE_CONFIG.clear()
             cfg.REMOTE_CONFIG.update(original_remote)
             cfg.WORKSTATIONS[:] = original_workstations
+
+    def test_ensure_directories_skips_local_worker_step_dir_in_server_mode(
+        self, monkeypatch, tmp_path
+    ):
+        import engine.config as cfg
+
+        created_paths: list[str] = []
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "step_dir", r"C:\local-worker\step")
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "scdoc_dir", str(tmp_path / "scdoc"))
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+        monkeypatch.setattr(
+            cfg.os,
+            "makedirs",
+            lambda path, exist_ok=True: created_paths.append(path),
+        )
+
+        cfg.ensure_directories()
+
+        assert r"C:\local-worker\step" not in created_paths
+        assert created_paths == [
+            str(tmp_path / "scdoc"),
+            str(tmp_path / "logs"),
+            str(tmp_path / "data"),
+        ]

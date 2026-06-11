@@ -139,6 +139,59 @@ def test_local_worker_register_includes_local_excel_configs(monkeypatch) -> None
     }
 
 
+def test_local_worker_register_reuses_cached_local_excel_configs(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+
+    def fake_read_model_configs(path: str):
+        calls.append(path)
+        return {1: [1.0, 2.0, 3.0, 4.0]}
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", fake_read_model_configs)
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    first = worker.build_register_request()
+    second = worker.build_register_request()
+
+    assert calls == [local_worker_module.LOCAL_PATHS["excel"]]
+    assert first["params"]["configs"] == second["params"]["configs"]
+
+
+def test_local_worker_task_runner_reuses_registered_excel_configs(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+    loaded_configs: list[dict[int, list[float]]] = []
+
+    def fake_read_model_configs(path: str):
+        calls.append(path)
+        return {1: [1.0, 2.0, 3.0, 4.0]}
+
+    class _State:
+        def load_configs(self, configs):
+            loaded_configs.append(configs)
+
+    class _Runner:
+        def execute_sw_per_config(self, config_name: int) -> bool:
+            assert config_name == 1
+            return True
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", fake_read_model_configs)
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    worker.build_register_request()
+    assert worker._execute_task("sw", {"config_name": 1}) == {"ok": True}
+
+    assert calls == [local_worker_module.LOCAL_PATHS["excel"]]
+    assert loaded_configs == [{1: [1.0, 2.0, 3.0, 4.0]}]
+
+
 def test_local_worker_executes_polled_task_with_injected_handler() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
