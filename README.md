@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.8.0** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.8.1** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -188,12 +188,18 @@ AutoFluidSimulation/
 │       ├── main.rs          # 异步主循环
 │       ├── daemon_mgr.rs    # Daemon 进程管理
 │       ├── worker_mgr.rs    # Worker 进程管理（本地 Worker + SSH 隧道）
+│       ├── event_handler.rs # 事件处理模块入口
+│       ├── event_handler/   # 事件处理（command / key_handler / mouse / actions）
+│       ├── ipc.rs           # IPC 通信模块入口
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
-│       ├── state/           # 应用状态
-│       ├── event_handler/   # 事件处理（command.rs / key_handler.rs）
+│       ├── state.rs         # 应用状态模块入口
+│       ├── state/           # 应用状态（app_state / filter / log_buffer）
 │       ├── settings/        # 设置页面（9 分类 48 字段）
-│   ├── ui/              # UI 渲染
-│   └── worker_mgr.rs    # Worker 进程管理器（本地 Worker + SSH 隧道）
+│       ├── text_buffer.rs   # 文本缓冲区
+│       ├── theme.rs         # 主题配色
+│       ├── ui.rs            # UI 渲染模块入口
+│       ├── ui/              # UI 渲染（header / table / logs / dialogs / command_bar / scrollbar / layout）
+│       └── utils.rs         # 工具函数
 │
 ├── scripts/                 # 环境检查与部署脚本
 │   ├── autofluid_env.ps1    # 环境变量加载库
@@ -206,14 +212,16 @@ AutoFluidSimulation/
 │   ├── start_daemon_window.ps1     # Daemon 启动窗口
 │   ├── start_local_worker_window.ps1 # 本地 Worker 启动窗口
 │   ├── start_server_ipc_tunnel.ps1 # 服务器 IPC 隧道
-│   └── start_workstation_reverse_tunnel.ps1 # 工作站反向 SSH 隧道
+│   ├── start_workstation_reverse_tunnel.ps1 # 工作站反向 SSH 隧道
+│   └── deploy_linux_server.sh # Linux 服务器部署脚本
 │
 ├── docs/                    # 项目文档
 │   ├── code-style-guide.md  # 代码规范
 │   ├── architecture-refactoring-plan.md # 远期架构改进计划
 │   ├── current-daemon-architecture.md # 当前 Daemon 架构说明
 │   ├── pause-start-reset-clean-precheck-issues.md # 暂停/启动/重置问题记录
-│   └── solver-remaining-time-design.md # 求解器剩余时间估算
+│   ├── solver-remaining-time-design.md # 求解器剩余时间估算
+│   └── Fluent仿真数据采集与五项研究指标计算报告.docx # 仿真数据采集报告
 │
 └── tests/                   # 测试（35 个测试文件）
 ```
@@ -866,4 +874,4 @@ compile_noref.bat    # 免引用版本
 
 ---
 
-> **版本**: v2.8.0 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.8.1 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
