@@ -67,6 +67,129 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     assert released == [True]
 
 
+def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path) -> None:
+    from engine import daemon as daemon_module
+    from engine.daemon import PipelineDaemon
+
+    class _FakeIPCServer:
+        def __init__(self) -> None:
+            self._daemon: PipelineDaemon | None = None
+
+        def register_default_handlers(self, daemon: PipelineDaemon) -> None:
+            self._daemon = daemon
+
+        def start(self) -> None:
+            assert self._daemon is not None
+
+        def stop(self) -> None:
+            assert self._daemon is not None
+            self._daemon._stop_event.set()
+
+    class _FakeProcess:
+        pid = 12345
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> None:
+            pass
+
+    class _FakeTaskRunner:
+        def __init__(self, _state, local_worker_adapter) -> None:
+            self.local_worker_adapter = local_worker_adapter
+
+    class _FakeScheduler:
+        def __init__(self, _state, _runner) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    popen_calls = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return _FakeProcess()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setenv("AUTOFLUID_OPENCLAW_WEBHOOK_URL", "http://127.0.0.1/webhook")
+    monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
+    monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
+    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
+    monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
+    monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
+    monkeypatch.setattr(daemon_module, "TaskRunner", _FakeTaskRunner)
+    monkeypatch.setattr(daemon_module, "PipelineScheduler", _FakeScheduler)
+    monkeypatch.setattr(daemon_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(PipelineDaemon, "_setup_signal_handlers", lambda self: None)
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+    monkeypatch.setitem(daemon_module.IPC_CONFIG, "db_path", str(tmp_path / "server-mode.db"))
+
+    daemon = PipelineDaemon()
+    daemon._stop_event.set()
+    daemon.start()
+
+    assert len(popen_calls) == 1
+    command, kwargs = popen_calls[0]
+    assert command == [
+        daemon_module.PipelineDaemon._daemon_python_executable(),
+        "-m",
+        "tools.autofluid_cli",
+        "alerts",
+        "watch",
+    ]
+    assert kwargs["cwd"] == daemon_module._PROJECT_ROOT
+    assert kwargs["env"]["AUTOFLUID_IPC_HOST"] == str(daemon_module.IPC_CONFIG["host"])
+    assert kwargs["env"]["AUTOFLUID_IPC_PORT"] == str(daemon_module.IPC_CONFIG["port"])
+    assert daemon._alert_watcher_process is None
+
+
+def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _FakeProcess:
+        pid = 12345
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.calls.append("terminate")
+
+        def wait(self, timeout: float | None = None) -> None:
+            self.calls.append(f"wait:{timeout}")
+
+    class _FakeIPCServer:
+        def __init__(self, events: list[str]) -> None:
+            self._events = events
+
+        def stop(self) -> None:
+            self._events.append("ipc_stop")
+
+    events: list[str] = []
+    process = _FakeProcess()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.scheduler = None
+    daemon.runner = None
+    daemon.ipc_server = _FakeIPCServer(events)
+    daemon._alert_watcher_process = process
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
+
+    daemon.shutdown()
+
+    assert process.calls == ["terminate", "wait:5.0"]
+    assert events == ["ipc_stop"]
+    assert daemon._alert_watcher_process is None
+
+
 def test_server_mode_uses_latest_existing_state_db_when_excel_is_missing(
     monkeypatch,
     tmp_path,

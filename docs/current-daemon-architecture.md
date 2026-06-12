@@ -278,11 +278,13 @@ systemd 服务 `autofluid-daemon`，可用 `AUTOFLUID_DAEMON_SERVICE` 覆盖。
 SpaceClaim 本地状态或文件。服务器 CLI 只允许远程侧步骤，例如
 `transfer`、`meshing`、`solver` 和远程缓存清理。
 
-OpenClaw 告警通过独立 watcher 运行，不嵌入 daemon 主流程：
+OpenClaw 告警 watcher 由 server-mode daemon 拥有生命周期：daemon 在 IPC
+启动成功后拉起 watcher，关闭时先终止 watcher 再关闭 IPC，避免服务器侧留下
+孤立告警进程。生产环境通过 `.env` 配置 webhook：
 
 ```bash
-AUTOFLUID_OPENCLAW_WEBHOOK_URL=http://127.0.0.1:8080/autofluid \
-  .venv/bin/python -m tools.autofluid_cli alerts watch
+AUTOFLUID_OPENCLAW_WEBHOOK_URL=http://127.0.0.1:8080/autofluid
+AUTOFLUID_OPENCLAW_WEBHOOK_TOKEN=
 ```
 
 watcher 通过 IPC 拉取 `WARNING` 及以上日志，按 `level + source + raw_message`

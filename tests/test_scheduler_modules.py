@@ -1752,6 +1752,55 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_worker_start_reloads_config_and_drops_stale_ssh(self, monkeypatch):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        reload_calls: list[str] = []
+
+        def _reload_config() -> bool:
+            reload_calls.append("reload")
+            return True
+
+        class _SSH:
+            def __init__(self, connected: bool) -> None:
+                self._connected = connected
+
+            def is_connected(self) -> bool:
+                return self._connected
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.disconnect_calls = 0
+
+            def disconnect_ssh(self) -> None:
+                self.disconnect_calls += 1
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH(self.disconnect_calls > 0)
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "default"}],
+        )
+
+        runner = _Runner()
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = runner
+        daemon.local_worker_registry = LocalWorkerRegistry()
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is True
+        assert message == "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+        assert reload_calls == ["reload"]
+        assert runner.disconnect_calls == 1
+        assert data["ssh_checks"] == {"default": "ok"}
+
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon

@@ -59,6 +59,7 @@ _PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS = 30.0
+_ALERT_WATCHER_STOP_TIMEOUT_SECONDS = 5.0
 
 
 def _state_db_config_count(db_path: str) -> int:
@@ -176,6 +177,7 @@ class PipelineDaemon:
         self._worker_config_fingerprint: str | None = None
         self._local_worker_process: subprocess.Popen | None = None
         self._local_worker_last_start_attempt = 0.0
+        self._alert_watcher_process: subprocess.Popen | None = None
 
         # 运行标志
         self._running = False
@@ -291,6 +293,8 @@ class PipelineDaemon:
             release_process_lock()
             return
 
+        self._start_alert_watcher()
+
         # ---- 4. 注册信号处理 ----
         self._setup_signal_handlers()
 
@@ -332,6 +336,9 @@ class PipelineDaemon:
             except Exception as e:
                 logger.warning(f"SSH 断开异常: {e}")
 
+        # 停止 daemon 拥有的告警 watcher，避免 IPC 关闭后子进程残留
+        self._stop_alert_watcher()
+
         # 停止 IPC 服务器
         if self.ipc_server:
             try:
@@ -365,6 +372,74 @@ class PipelineDaemon:
             assigned_count += 1
         if assigned_count:
             logger.info("[Config] 已持久化 %d 个构型的工作站分配", assigned_count)
+
+    def _start_alert_watcher(self) -> None:
+        """Start the server-side alert watcher as a daemon-owned child process."""
+        if not is_server_mode():
+            return
+        webhook_url = os.environ.get("AUTOFLUID_OPENCLAW_WEBHOOK_URL", "").strip()
+        if not webhook_url:
+            logger.warning("[AlertWatcher] 未配置 AUTOFLUID_OPENCLAW_WEBHOOK_URL，跳过启动")
+            return
+
+        existing_process = getattr(self, "_alert_watcher_process", None)
+        if existing_process is not None and existing_process.poll() is None:
+            return
+
+        env = os.environ.copy()
+        env["AUTOFLUID_IPC_HOST"] = str(IPC_CONFIG["host"])
+        env["AUTOFLUID_IPC_PORT"] = str(IPC_CONFIG["port"])
+        auth_token = str(IPC_CONFIG.get("auth_token", "") or "")
+        if auth_token:
+            env["AUTOFLUID_IPC_AUTH_TOKEN"] = auth_token
+
+        log_dir = str(LOCAL_PATHS.get("log_dir") or os.path.join(_PROJECT_ROOT, "logs"))
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "alert_watcher.log")
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NO_WINDOW
+
+        try:
+            with open(log_path, "a", encoding="utf-8") as log_file:
+                process = subprocess.Popen(
+                    [
+                        self._daemon_python_executable(),
+                        "-m",
+                        "tools.autofluid_cli",
+                        "alerts",
+                        "watch",
+                    ],
+                    cwd=_PROJECT_ROOT,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    creationflags=creationflags,
+                )
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("[AlertWatcher] 启动失败: %s", e)
+            return
+
+        self._alert_watcher_process = process
+        logger.info("[AlertWatcher] 已启动: pid=%s, log=%s", process.pid, log_path)
+
+    def _stop_alert_watcher(self) -> None:
+        """Stop the daemon-owned alert watcher child process if it is still alive."""
+        process = getattr(self, "_alert_watcher_process", None)
+        self._alert_watcher_process = None
+        if process is None or process.poll() is not None:
+            return
+
+        try:
+            process.terminate()
+            process.wait(timeout=_ALERT_WATCHER_STOP_TIMEOUT_SECONDS)
+            logger.info("[AlertWatcher] 已停止: pid=%s", process.pid)
+        except subprocess.TimeoutExpired:
+            logger.warning("[AlertWatcher] 停止超时，强制结束: pid=%s", process.pid)
+            process.kill()
+            process.wait(timeout=_ALERT_WATCHER_STOP_TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("[AlertWatcher] 停止异常: %s", e)
 
     def _setup_signal_handlers(self):
         """设置系统信号处理器。"""
@@ -597,6 +672,10 @@ class PipelineDaemon:
 
     @staticmethod
     def _local_worker_python_executable() -> str:
+        return PipelineDaemon._daemon_python_executable()
+
+    @staticmethod
+    def _daemon_python_executable() -> str:
         if sys.platform == "win32":
             candidate = os.path.join(_PROJECT_ROOT, ".venv", "Scripts", "python.exe")
         else:
@@ -818,6 +897,13 @@ class PipelineDaemon:
             "ssh_checks": {},
             "registry_ready": False,
         }
+        from engine.config import reload_config_from_toml
+
+        if reload_config_from_toml() and self.runner is not None:
+            try:
+                self.runner.disconnect_ssh()
+            except Exception as e:
+                logger.warning("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)
 
         # 检查并验证到各工作站的 SSH 连通性
         if self.runner is not None:

@@ -292,7 +292,7 @@ cat <<EOF
 Deployment complete.
 
 Next checks:
-  1. Edit ${PROJECT_DIR}/.env and set AUTOFLUID_IPC_AUTH_TOKEN and AUTOFLUID_SSH_PASSWORD.
+  1. Edit ${PROJECT_DIR}/.env and set AUTOFLUID_IPC_AUTH_TOKEN, AUTOFLUID_SSH_PASSWORD, and optional AUTOFLUID_OPENCLAW_WEBHOOK_URL.
   2. Verify the server can reach the workstation SSH endpoint from this Linux host.
   3. Start daemon:
        sudo systemctl restart ${SERVICE_NAME}
@@ -302,7 +302,7 @@ Next checks:
   5. Use the server CLI:
        .venv/bin/python -m tools.autofluid_cli status
        .venv/bin/python -m tools.autofluid_cli start
-       .venv/bin/python -m tools.autofluid_cli alerts watch
+     The alert watcher is started and stopped by the server-mode daemon when AUTOFLUID_OPENCLAW_WEBHOOK_URL is set.
 
 Manual foreground start:
   cd ${PROJECT_DIR}
