@@ -25,7 +25,7 @@ class DummyHandler:
 
 
 def test_process_message_unknown_command():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     # do not start socket; test _process_message directly
     req = create_request("no_such_cmd", {})
     raw = serialize(req)
@@ -35,7 +35,7 @@ def test_process_message_unknown_command():
 
 
 def test_process_message_handler_returns_false():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     srv.register_handler("test_cmd", DummyHandler(raise_exc=False, ok=False))
     req = create_request("test_cmd", {"x": 1})
     raw = serialize(req)
@@ -46,7 +46,7 @@ def test_process_message_handler_returns_false():
 
 
 def test_process_message_handler_raises_exception():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     srv.register_handler("test_cmd", DummyHandler(raise_exc=True))
     req = create_request("test_cmd", {})
     raw = serialize(req)
@@ -57,7 +57,7 @@ def test_process_message_handler_raises_exception():
 
 
 def test_process_message_bad_payload():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     # send non-json / invalid payload
     resp = srv._process_message(b"not a json\n")
     assert resp["status"] == "error"
@@ -119,7 +119,7 @@ def test_register_default_handlers_includes_local_worker_commands():
         def __getattr__(self, _name):
             return lambda params=None: (True, params, "")
 
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
 
     srv.register_default_handlers(_Daemon())
 
@@ -141,7 +141,7 @@ def test_register_default_handlers_includes_dashboard_query():
         def __getattr__(self, _name):
             return lambda params=None: (True, params, "")
 
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
 
     srv.register_default_handlers(_Daemon())
 

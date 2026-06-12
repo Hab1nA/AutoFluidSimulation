@@ -4,9 +4,12 @@ from __future__ import annotations
 import argparse
 import base64
 from dataclasses import dataclass, field
+import json
 import os
 import socket
+import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable
 from urllib.error import URLError
@@ -211,10 +214,123 @@ class LocalWorker:
         if not isinstance(params, dict):
             params = {}
         try:
-            result = self._execute_task(step, params)
+            timeout_seconds = self._task_timeout_seconds(task)
+            if self._should_isolate_task(step, timeout_seconds):
+                result = self._execute_task_in_subprocess(
+                    step,
+                    dict(params),
+                    timeout_seconds,
+                )
+            else:
+                result = self._execute_task(step, params)
+        except TimeoutError as exc:
+            self._cleanup_after_task_timeout(step)
+            return self.build_step_error_request(task_id, str(exc))
         except Exception as exc:
             return self.build_step_error_request(task_id, f"{type(exc).__name__}: {exc}")
         return self.build_step_complete_request(task_id, result)
+
+    @staticmethod
+    def _task_timeout_seconds(task: dict[str, Any]) -> float:
+        raw_timeout = task.get("timeout_seconds")
+        if raw_timeout is None:
+            return 0.0
+        if not isinstance(raw_timeout, (int, float, str)):
+            return 0.0
+        try:
+            return float(raw_timeout)
+        except ValueError:
+            return 0.0
+
+    def _should_isolate_task(self, step: str, timeout_seconds: float) -> bool:
+        if timeout_seconds <= 0:
+            return False
+        if step in self._task_handlers:
+            return False
+        return step in {"sw", "sc"}
+
+    def _execute_task_in_subprocess(
+        self,
+        step: str,
+        params: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="autofluid_worker_task_") as tmp_dir:
+            task_path = os.path.join(tmp_dir, "task.json")
+            result_path = os.path.join(tmp_dir, "result.json")
+            with open(task_path, "w", encoding="utf-8") as handle:
+                json.dump({"step": step, "params": params}, handle)
+
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "engine.local_worker",
+                    "--run-task-file",
+                    task_path,
+                    "--result-file",
+                    result_path,
+                ],
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                env=os.environ.copy(),
+                creationflags=creationflags,
+            )
+            try:
+                process.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_task_process(process)
+                raise TimeoutError(
+                    f"LocalWorker 子任务超时: step={step}, timeout={timeout_seconds:g}s"
+                ) from exc
+
+            if not os.path.exists(result_path):
+                raise RuntimeError(
+                    f"LocalWorker 子任务未生成结果: step={step}, exit_code={process.returncode}"
+                )
+            with open(result_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise RuntimeError("LocalWorker 子任务结果格式无效")
+            if not payload.get("ok"):
+                raise RuntimeError(str(payload.get("error") or "LocalWorker 子任务失败"))
+            result = payload.get("result", {})
+            if not isinstance(result, dict):
+                raise RuntimeError("LocalWorker 子任务 result 格式无效")
+            return dict(result)
+
+    @staticmethod
+    def _terminate_task_process(process: subprocess.Popen) -> None:
+        pid = getattr(process, "pid", None)
+        if os.name == "nt" and pid:
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                return
+            except (OSError, subprocess.SubprocessError):
+                pass
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def _cleanup_after_task_timeout(self, step: str) -> None:
+        try:
+            runner = self._get_default_runner()
+            if step == "sw":
+                runner.shutdown_sw_processes()
+            elif step == "sc":
+                runner.shutdown_sc_pool()
+        except Exception as exc:
+            print(f"[WARN] LocalWorker 超时清理失败: {exc}", file=sys.stderr)
 
     def _execute_task(self, step: str, params: dict[str, Any]) -> dict[str, Any]:
         handler = self._task_handlers.get(step)
@@ -415,11 +531,15 @@ def main() -> int:
     """Run the LocalWorker registration client."""
     parser = argparse.ArgumentParser(description="Run AutoFluid LocalWorker heartbeat client")
     parser.add_argument("--once", action="store_true", help="register once and send one heartbeat")
+    parser.add_argument("--run-task-file", help=argparse.SUPPRESS)
+    parser.add_argument("--result-file", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.run_task_file and args.result_file:
+        return _run_task_file(args.run_task_file, args.result_file)
     try:
         worker = LocalWorker.from_env()
-        worker.register_once()
         if args.once:
+            worker.register_once()
             worker.heartbeat_once()
             return 0
         worker.run_forever()
@@ -427,6 +547,28 @@ def main() -> int:
     except RuntimeError as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
+
+
+def _run_task_file(task_file: str, result_file: str) -> int:
+    try:
+        with open(task_file, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise RuntimeError("任务文件格式无效")
+        step = str(payload.get("step") or "")
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        worker = LocalWorker.from_env()
+        result = worker._execute_task(step, params)
+        output = {"ok": True, "result": result}
+        exit_code = 0
+    except Exception as exc:
+        output = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        exit_code = 1
+    with open(result_file, "w", encoding="utf-8") as handle:
+        json.dump(output, handle, ensure_ascii=False)
+    return exit_code
 
 
 if __name__ == "__main__":

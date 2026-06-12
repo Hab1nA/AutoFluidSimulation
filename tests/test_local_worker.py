@@ -219,6 +219,55 @@ def test_local_worker_executes_polled_task_with_injected_handler() -> None:
     assert response["params"]["result"] == {"ok": True}
 
 
+def test_local_worker_reports_timed_out_isolated_sw_task(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+        )
+    )
+
+    calls: list[tuple[str, dict[str, object], float]] = []
+    cleanup_steps: list[str] = []
+
+    def fake_execute_in_subprocess(
+        step: str,
+        params: dict[str, object],
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        calls.append((step, params, timeout_seconds))
+        raise TimeoutError("LocalWorker 子任务超时")
+
+    monkeypatch.setattr(
+        worker,
+        "_execute_task_in_subprocess",
+        fake_execute_in_subprocess,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_cleanup_after_task_timeout",
+        lambda step: cleanup_steps.append(step),
+        raising=False,
+    )
+
+    response = worker.handle_polled_task({
+        "task_id": "task-timeout",
+        "step": "sw",
+        "params": {"config_name": 7},
+        "timeout_seconds": 0.25,
+    })
+
+    assert calls == [("sw", {"config_name": 7}, 0.25)]
+    assert cleanup_steps == ["sw"]
+    assert response["command"] == "worker_step_error"
+    assert response["params"]["task_id"] == "task-timeout"
+    assert "超时" in response["params"]["error"]
+
+
 def test_local_worker_run_once_polls_and_reports_task_completion() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
@@ -335,6 +384,57 @@ def test_local_worker_run_forever_recovers_after_runtime_ipc_error(monkeypatch) 
 
     assert calls == ["register", "run_once", "register", "run_once"]
     assert sleeps == [worker.config.poll_interval, worker.config.poll_interval]
+
+
+def test_local_worker_main_persistent_mode_does_not_pre_register(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+
+    calls: list[str] = []
+
+    class _Worker:
+        @classmethod
+        def from_env(cls):
+            calls.append("from_env")
+            return cls()
+
+        def register_once(self):
+            calls.append("register")
+            return {"status": "ok"}
+
+        def run_forever(self):
+            calls.append("run_forever")
+
+    monkeypatch.setattr("sys.argv", ["engine.local_worker"])
+    monkeypatch.setattr(local_worker_module.LocalWorker, "from_env", _Worker.from_env)
+
+    assert local_worker_module.main() == 0
+    assert calls == ["from_env", "run_forever"]
+
+
+def test_local_worker_main_once_mode_registers_and_heartbeats(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+
+    calls: list[str] = []
+
+    class _Worker:
+        @classmethod
+        def from_env(cls):
+            calls.append("from_env")
+            return cls()
+
+        def register_once(self):
+            calls.append("register")
+            return {"status": "ok"}
+
+        def heartbeat_once(self):
+            calls.append("heartbeat")
+            return {"status": "ok"}
+
+    monkeypatch.setattr("sys.argv", ["engine.local_worker", "--once"])
+    monkeypatch.setattr(local_worker_module.LocalWorker, "from_env", _Worker.from_env)
+
+    assert local_worker_module.main() == 0
+    assert calls == ["from_env", "register", "heartbeat"]
 
 
 def test_local_worker_send_request_reports_reset_as_runtime_error(monkeypatch) -> None:

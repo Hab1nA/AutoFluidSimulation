@@ -2,32 +2,43 @@ from __future__ import annotations
 
 
 def test_task_runner_delegates_sw_and_sc_to_local_worker_in_server_mode(monkeypatch) -> None:
+    from engine.config import ENGINE_CONFIG
     from engine.task_runner import TaskRunner
 
-    calls: list[tuple[str, int | None]] = []
+    calls: list[tuple[str, int | None, float | None]] = []
 
     class _Adapter:
-        def execute_sw_step(self) -> bool:
-            calls.append(("sw", None))
+        def execute_sw_step(self, timeout_seconds: float = 3600.0) -> bool:
+            calls.append(("sw", None, timeout_seconds))
             return True
 
-        def execute_sw_per_config(self, config_name: int) -> bool:
-            calls.append(("sw_config", config_name))
+        def execute_sw_per_config(
+            self,
+            config_name: int,
+            timeout_seconds: float = 3600.0,
+        ) -> bool:
+            calls.append(("sw_config", config_name, timeout_seconds))
             return True
 
-        def execute_sc_step(self, config_name: int) -> bool:
-            calls.append(("sc", config_name))
+        def execute_sc_step(
+            self,
+            config_name: int,
+            timeout_seconds: float = 3600.0,
+        ) -> bool:
+            calls.append(("sc", config_name, timeout_seconds))
             return True
 
     runner = TaskRunner.__new__(TaskRunner)
     runner._local_worker_adapter = _Adapter()
 
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setitem(ENGINE_CONFIG, "sw_macro_timeout", 123)
+    monkeypatch.setitem(ENGINE_CONFIG, "sc_timeout", 45)
 
     assert runner.execute_sw_step() is True
     assert runner.execute_sw_per_config(3) is True
     assert runner.execute_sc_step(7) is True
-    assert calls == [("sw", None), ("sw_config", 3), ("sc", 7)]
+    assert calls == [("sw", None, 123), ("sw_config", 3, 123), ("sc", 7, 45)]
 
 
 def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeypatch) -> None:

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from engine.state_manager import StateManager
 
 from engine.config import (
+    ENGINE_CONFIG,
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
     STATUS_ERROR, get_step_filename,
     get_workstation_config,
@@ -187,13 +188,22 @@ class TaskRunner:
     def execute_sw_step(self) -> bool:
         """执行 SW 步骤（委托给 SWExecutor）。"""
         if self._should_delegate_local_steps():
-            return bool(self._local_worker_adapter.execute_sw_step())
+            return bool(
+                self._local_worker_adapter.execute_sw_step(
+                    timeout_seconds=float(ENGINE_CONFIG["sw_macro_timeout"]),
+                )
+            )
         return self._sw_executor.execute_sw_step()
 
     def execute_sw_per_config(self, config_name: int) -> bool:
         """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
         if self._should_delegate_local_steps():
-            return bool(self._local_worker_adapter.execute_sw_per_config(config_name))
+            return bool(
+                self._local_worker_adapter.execute_sw_per_config(
+                    config_name,
+                    timeout_seconds=float(ENGINE_CONFIG["sw_macro_timeout"]),
+                )
+            )
         return self._sw_executor.export_sw_per_config(config_name)
 
     def is_sw_in_flight(self, config_name: int | None = None) -> bool:
@@ -250,7 +260,12 @@ class TaskRunner:
     def execute_sc_step(self, config_name: int) -> bool:
         """执行 SC 步骤（SCProcessPool）。"""
         if self._should_delegate_local_steps():
-            return bool(self._local_worker_adapter.execute_sc_step(config_name))
+            return bool(
+                self._local_worker_adapter.execute_sc_step(
+                    config_name,
+                    timeout_seconds=float(ENGINE_CONFIG["sc_timeout"]),
+                )
+            )
         sw_step_name = get_step_filename("sw", config_name)
         if not sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['sw'] 未配置或格式错误")

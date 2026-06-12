@@ -24,6 +24,7 @@ def test_local_worker_adapter_waits_for_worker_completion() -> None:
     assert task is not None
     assert task["step"] == "sw"
     assert task["params"] == {}
+    assert task["timeout_seconds"] == 2.0
 
     registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
     thread.join(timeout=2.0)
@@ -51,6 +52,7 @@ def test_local_worker_adapter_returns_false_on_worker_error() -> None:
     assert task is not None
     assert task["step"] == "sc"
     assert task["params"] == {"config_name": 7}
+    assert task["timeout_seconds"] == 2.0
 
     registry.fail_task(str(task["task_id"]), "local-pc-01", "SC failed")
     thread.join(timeout=2.0)
@@ -82,6 +84,7 @@ def test_local_worker_adapter_delegates_local_clean_files() -> None:
     assert task is not None
     assert task["step"] == "clean_local_files"
     assert task["params"] == {"step_name": "sw", "config_name": 7}
+    assert task["timeout_seconds"] == 2.0
 
     registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
     thread.join(timeout=2.0)

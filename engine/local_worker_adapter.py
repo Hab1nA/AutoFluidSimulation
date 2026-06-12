@@ -85,7 +85,11 @@ class LocalWorkerAdapter:
         if not self._registry.has_online_worker():
             logger.error("[LocalWorker] 没有在线 LocalWorker，无法执行 %s", step)
             return None
-        task = self._registry.enqueue_task(step, params)
+        task = self._registry.enqueue_task(
+            step,
+            params,
+            timeout_seconds=timeout_seconds,
+        )
         finished = self._registry.wait_for_task(
             str(task["task_id"]),
             timeout_seconds=timeout_seconds,

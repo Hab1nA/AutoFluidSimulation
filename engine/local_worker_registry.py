@@ -123,6 +123,7 @@ class LocalWorkerRegistry:
         self,
         step: str,
         params: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Queue one LocalWorker task."""
         with self._task_condition:
@@ -136,6 +137,8 @@ class LocalWorkerRegistry:
                 "created_at": self._clock(),
                 "worker_id": None,
             }
+            if timeout_seconds is not None:
+                task["timeout_seconds"] = float(timeout_seconds)
             self._tasks[task_id] = task
             self._pending_task_ids.append(task_id)
             self._task_condition.notify_all()
