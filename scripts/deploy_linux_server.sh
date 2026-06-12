@@ -204,6 +204,10 @@ AUTOFLUID_IPC_AUTH_TOKEN=
 # Required before transfer/meshing/solver can connect to the Windows workstation.
 AUTOFLUID_SSH_PASSWORD=
 
+# Optional: server-side alert watcher posts WARNING+ daemon logs to OpenClaw.
+AUTOFLUID_OPENCLAW_WEBHOOK_URL=
+AUTOFLUID_OPENCLAW_WEBHOOK_TOKEN=
+
 # If the Linux server reaches the workstation through a tunnel/VPN/public route,
 # set these to the server-reachable endpoint.
 AUTOFLUID_SSH_REACHABLE_HOST=
@@ -295,6 +299,10 @@ Next checks:
   4. Inspect status/logs:
        systemctl status ${SERVICE_NAME} --no-pager
        journalctl -u ${SERVICE_NAME} -f
+  5. Use the server CLI:
+       .venv/bin/python -m tools.autofluid_cli status
+       .venv/bin/python -m tools.autofluid_cli start
+       .venv/bin/python -m tools.autofluid_cli alerts watch
 
 Manual foreground start:
   cd ${PROJECT_DIR}

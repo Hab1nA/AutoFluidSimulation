@@ -256,7 +256,42 @@ server mode 部署时建议：
 - 工作站 SSH 密码只放在 ocar 的 `.env` 或运行环境中，不写入文档和仓库。
 - ocar 到工作站的 SSH route 必须从 ocar 机器上验证，不以本地 PC 可连通作为依据。
 
-## 12. 当前未完成的远期项
+## 12. 服务器 CLI 与 OpenClaw 告警
+
+ocar 上提供轻量服务器 CLI，用于无图形环境和 OpenClaw 调用：
+
+```bash
+.venv/bin/python -m tools.autofluid_cli status
+.venv/bin/python -m tools.autofluid_cli start
+.venv/bin/python -m tools.autofluid_cli pause
+.venv/bin/python -m tools.autofluid_cli check
+.venv/bin/python -m tools.autofluid_cli worker restart
+.venv/bin/python -m tools.autofluid_cli daemon restart
+```
+
+CLI 默认输出 JSON，并复用 `AUTOFLUID_IPC_HOST`、`AUTOFLUID_IPC_PORT` 和
+`AUTOFLUID_IPC_AUTH_TOKEN`。`daemon start|stop|restart|status` 默认控制
+systemd 服务 `autofluid-daemon`，可用 `AUTOFLUID_DAEMON_SERVICE` 覆盖。
+
+服务器 CLI 的 `clean/reset` 权限比 TUI 更窄：它会拒绝任何影响 `sw`、`sc`
+或 `all` 的操作，避免 ocar 侧命令改写 LocalWorker 持有的 SolidWorks /
+SpaceClaim 本地状态或文件。服务器 CLI 只允许远程侧步骤，例如
+`transfer`、`meshing`、`solver` 和远程缓存清理。
+
+OpenClaw 告警通过独立 watcher 运行，不嵌入 daemon 主流程：
+
+```bash
+AUTOFLUID_OPENCLAW_WEBHOOK_URL=http://127.0.0.1:8080/autofluid \
+  .venv/bin/python -m tools.autofluid_cli alerts watch
+```
+
+watcher 通过 IPC 拉取 `WARNING` 及以上日志，按 `level + source + raw_message`
+生成指纹，默认 10 分钟内同一指纹只通知一次。Webhook 使用 `POST` JSON，
+字段包括 `title`、`level`、`message`、`source`、`timestamp`、`log_id`
+和 `fingerprint`；如设置 `AUTOFLUID_OPENCLAW_WEBHOOK_TOKEN`，请求会携带
+`Authorization: Bearer <token>`。
+
+## 13. 当前未完成的远期项
 
 以下内容属于 `architecture-refactoring-plan.md` 中的远期规划，不应误认为当前已经完整落地：
 
@@ -268,7 +303,7 @@ server mode 部署时建议：
 
 当前已经落地的是：daemon 迁移到 ocar 后，可以通过 `LocalWorker` 获得本地 SW/SC 能力，并在本地 PC 离线后继续通过 ocar 与工作站推进远程阶段。
 
-## 13. 运维检查要点
+## 14. 运维检查要点
 
 排障时优先确认以下状态：
 
