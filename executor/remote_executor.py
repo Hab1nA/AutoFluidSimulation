@@ -878,7 +878,7 @@ class RemoteExecutor:
             flag_file = self._meshing_flag_file(config_name, remote_config)
             mesh_name = get_step_filename("meshing", config_name)
             mesh_file = (
-                f"{str(remote_config['msh_dir']).replace(chr(92), '/')}/{mesh_name}"
+                f"{str(remote_config['msh_dir']).replace('\\', '/')}/{mesh_name}"
                 if mesh_name
                 else None
             )
@@ -1149,7 +1149,7 @@ class RemoteExecutor:
             logger.error(f"[Solver] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         error_flag = f"{flag_file}.error"
-        result_dir = str(remote_config["result_dir"]).replace(chr(92), "/")
+        result_dir = str(remote_config["result_dir"]).replace('\\', '/')
         cas_name = get_step_filename("solver", config_name)
         dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None

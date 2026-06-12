@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 工作线程池管理模块。
 

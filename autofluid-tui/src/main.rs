@@ -103,9 +103,16 @@ fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+/// 全局请求 ID 计数器。
+/// 注意：此代码仅在 current_thread tokio runtime 下安全。
+/// 若切换到 multi_thread runtime，需改用 Ordering::SeqCst。
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 static REQUEST_PREFIX: OnceLock<u64> = OnceLock::new();
 
+/// 生成唯一的请求 ID。
+///
+/// 使用时间戳前缀 + 原子计数器确保唯一性。
+/// 仅在 current_thread tokio runtime 下安全使用。
 pub fn generate_request_id() -> String {
     use std::time::SystemTime;
     let prefix = *REQUEST_PREFIX.get_or_init(|| {

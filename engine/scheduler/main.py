@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 DAG 任务调度器 (Pipeline Scheduler)
@@ -430,7 +432,7 @@ class PipelineScheduler:
     # 文件就绪回调（Producer 端）
     # ------------------------------------------------------------------
 
-    def _on_step_file_ready(self, config_name: int, filepath: str):
+    def _on_step_file_ready(self, config_name: int, filepath: str) -> None:
         if self._stopped.is_set():
             logger.info(f"构型{config_name} STEP 文件就绪，但系统已停止，跳过入队")
             return
@@ -853,7 +855,7 @@ class PipelineScheduler:
 
         logger.info("流水线已恢复运行")
 
-    def stop(self):
+    def stop(self) -> None:
         """停止流水线。"""
         logger.info("收到停止指令")
         self._control.stop()

@@ -291,7 +291,7 @@ def check_step_output_exists(
         if not filename:
             return False
         remote_scdoc = (
-            f"{remote_config['scdoc_dir'].replace(chr(92), '/')}"
+            f"{remote_config['scdoc_dir'].replace('\\', '/')}"
             f"/{filename}"
         )
         try:
@@ -313,7 +313,7 @@ def check_step_output_exists(
 
     if step_name == "meshing":
         flag_file = (
-            f"{remote_config['flag_dir'].replace(chr(92), '/')}"
+            f"{remote_config['flag_dir'].replace('\\', '/')}"
             f"/meshing_done_{config_name}.txt"
         )
         error_flag = f"{flag_file}.error"
@@ -321,7 +321,7 @@ def check_step_output_exists(
         mesh_file = None
         if mesh_name:
             mesh_file = (
-                f"{remote_config['msh_dir'].replace(chr(92), '/')}"
+                f"{remote_config['msh_dir'].replace('\\', '/')}"
                 f"/{mesh_name}"
             )
         try:
@@ -333,11 +333,11 @@ def check_step_output_exists(
 
     if step_name == "solver":
         flag_file = (
-            f"{remote_config['flag_dir'].replace(chr(92), '/')}"
+            f"{remote_config['flag_dir'].replace('\\', '/')}"
             f"/solver_done_{config_name}.txt"
         )
         error_flag = f"{flag_file}.error"
-        result_dir = remote_config['result_dir'].replace(chr(92), '/')
+        result_dir = remote_config['result_dir'].replace('\\', '/')
         cas_name = get_step_filename("solver", config_name)
         dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None

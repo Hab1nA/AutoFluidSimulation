@@ -831,8 +831,8 @@ class RemoteWorkstation:
         flag_file: str,
         timeout: int = 3600,
         poll_interval: int = 10,
-        paused_event=None,
-        stopped_event=None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """
         轮询等待远程标志文件出现（表示任务完成）。
@@ -889,12 +889,12 @@ class RemoteWorkstation:
     # ------------------------------------------------------------------
 
     def check_system(self, conda_exe: str = "", conda_env: str = "",
-                     remote_dirs: dict | None = None,
+                     remote_dirs: dict[str, str] | None = None,
                      mpi_bin_dir: str = "",
                      scripts_dir: str = "",
-                     script_files: list | None = None,
+                     script_files: list[str] | None = None,
                      ref_files_dir: str = "",
-                     ref_files: list | None = None) -> dict:
+                     ref_files: list[str] | None = None) -> dict[str, object]:
         """
         执行远程工作站系统自检。
 

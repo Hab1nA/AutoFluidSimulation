@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 全局屏障监控模块。
 

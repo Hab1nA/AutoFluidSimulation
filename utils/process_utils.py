@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 进程管理工具模块 (Process Management Utilities)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 网格划分监控模块 (Meshing Monitor)
 

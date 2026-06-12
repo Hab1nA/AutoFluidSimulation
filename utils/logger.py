@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """日志工具模块 (Logger Utility)
 提供统一的日志记录功能，同时输出到文件和控制台。
 支持会话管理：每次进程启动时通过 init_session() 创建独立的日志存放目录，

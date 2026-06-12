@@ -11,6 +11,10 @@ import hmac
 import socket
 import threading
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from engine.daemon import PipelineDaemon
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
@@ -79,7 +83,7 @@ class IPCServer:
         self._handlers[command] = handler
         logger.debug(f"[IPC] 注册命令处理器: {command}")
 
-    def register_default_handlers(self, daemon):
+    def register_default_handlers(self, daemon: PipelineDaemon) -> None:
         """
         注册所有默认命令处理器，绑定到 daemon 实例。
 
@@ -210,7 +214,7 @@ class IPCServer:
                     logger.error("[IPC] IPC 服务器 accept 异常")
                 break
 
-    def _handle_client(self, client_sock: socket.socket, addr: tuple):
+    def _handle_client(self, client_sock: socket.socket, addr: tuple[str, int]) -> None:
         """
         处理单个客户端连接。
 
@@ -272,7 +276,7 @@ class IPCServer:
                     extra={"broadcast": False},
                 )
 
-    def _process_message(self, data: bytes) -> dict | None:
+    def _process_message(self, data: bytes) -> dict[str, Any] | None:
         """
         处理单条消息。
 

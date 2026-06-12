@@ -398,7 +398,7 @@ class FileCleaner:
                         target_dir = str(remote_config.get(dir_key, ""))
                         for file_template in file_templates:
                             filename = str(file_template).format(config=cn)
-                            remote_path = f"{target_dir.replace(chr(92), '/')}/{filename}"
+                            remote_path = f"{target_dir.replace('\\', '/')}/{filename}"
                             if ssh.delete_remote_file(remote_path):
                                 processed_count += 1
                                 logger.info(

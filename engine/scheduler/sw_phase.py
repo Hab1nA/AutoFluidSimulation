@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 SW 阶段处理模块。
 
@@ -486,10 +488,7 @@ class SWPhaseHandler:
         if self._paused.is_set():
             logger.info("[SW] 重试准备中检测到暂停标志，跳过进程清理")
             if self._file_monitor is not None:
-                self._file_monitor._processed_files.clear()
-                self._file_monitor._known_files.clear()
-                self._file_monitor._detector._history.clear()
-                self._file_monitor._detector._first_seen.clear()
+                self._file_monitor.clear_tracking()
                 logger.info("[SW] 文件监控器状态已重置（暂停期间仍清理，确保恢复后可检测新文件）")
             return
 
@@ -505,8 +504,5 @@ class SWPhaseHandler:
 
         # 重置文件监控器状态，避免重试时同名文件被跳过
         if self._file_monitor is not None:
-            self._file_monitor._processed_files.clear()
-            self._file_monitor._known_files.clear()
-            self._file_monitor._detector._history.clear()
-            self._file_monitor._detector._first_seen.clear()
+            self._file_monitor.clear_tracking()
             logger.info("[SW] 文件监控器状态已重置（准备 SW 步骤重试）")

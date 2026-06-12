@@ -16,7 +16,7 @@ echo.
 
 call "%~dp0find_msbuild.bat"
 if errorlevel 1 (
-    echo [ERROR] ??? MSBuild
+    echo [ERROR] MSBuild not found
     echo.
     echo Please install Visual Studio 2019+ or VS Build Tools 2022
     popd

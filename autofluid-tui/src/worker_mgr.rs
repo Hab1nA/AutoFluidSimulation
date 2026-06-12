@@ -25,6 +25,15 @@ impl WorkerManager {
         }
     }
 
+    /// 检查进程是否仍在运行。
+    ///
+    /// `None` → 没有进程 → 返回 `false`。
+    /// `Some(child)` 且 `try_wait()` 返回 `Ok(None)` → 仍在运行 → `true`。
+    fn is_process_running(proc: &mut Option<Child>) -> bool {
+        proc.as_mut()
+            .is_some_and(|p| p.try_wait().ok().flatten().is_none())
+    }
+
     /// 启动所有 worker：建立 SSH 隧道 + 启动本地 LocalWorker。
     pub fn start_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
         log::info!("[Worker] 开始启动 Worker 进程");
@@ -75,20 +84,12 @@ impl WorkerManager {
 
     /// 本地 LocalWorker 是否正在运行。
     pub fn is_worker_running(&mut self) -> bool {
-        if let Some(ref mut proc) = self.worker_process {
-            proc.try_wait().ok().flatten().is_none()
-        } else {
-            false
-        }
+        Self::is_process_running(&mut self.worker_process)
     }
 
     /// SSH 隧道是否正在运行。
     pub fn is_tunnel_running(&mut self) -> bool {
-        if let Some(ref mut proc) = self.tunnel_process {
-            proc.try_wait().ok().flatten().is_none()
-        } else {
-            false
-        }
+        Self::is_process_running(&mut self.tunnel_process)
     }
 
     // ------------------------------------------------------------------
@@ -165,15 +166,27 @@ impl WorkerManager {
                         log_buffer.push_info(format!("⚠️ 终止本地 Worker 失败: {}", e));
                         return false;
                     }
-                    // 等待进程退出
-                    match proc.wait() {
-                        Ok(status) => {
-                            log::info!("[Worker] 本地 Worker 已终止: {}", status);
-                            log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
+                    // 使用 try_wait 轮询替代 wait()，避免阻塞主循环
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    let mut terminated = false;
+                    while std::time::Instant::now() < deadline {
+                        match proc.try_wait() {
+                            Ok(Some(status)) => {
+                                log::info!("[Worker] 本地 Worker 已终止: {}", status);
+                                log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
+                                terminated = true;
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                            Err(e) => {
+                                log::warn!("[Worker] 检查本地 Worker 退出状态失败: {}", e);
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("[Worker] 等待本地 Worker 退出失败: {}", e);
-                        }
+                    }
+                    if !terminated {
+                        log::warn!("[Worker] 等待本地 Worker 退出超时 (5s)");
+                        log_buffer.push_info("⚠️ 等待本地 Worker 退出超时".to_string());
                     }
                     self.worker_process = None;
                     return true;
@@ -263,14 +276,27 @@ impl WorkerManager {
                         log_buffer.push_info(format!("⚠️ 终止 SSH 隧道失败: {}", e));
                         return false;
                     }
-                    match proc.wait() {
-                        Ok(status) => {
-                            log::info!("[Worker] SSH 隧道已终止: {}", status);
-                            log_buffer.push_info("✅ SSH 隧道已终止".to_string());
+                    // 使用 try_wait 轮询替代 wait()，避免阻塞主循环
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    let mut terminated = false;
+                    while std::time::Instant::now() < deadline {
+                        match proc.try_wait() {
+                            Ok(Some(status)) => {
+                                log::info!("[Worker] SSH 隧道已终止: {}", status);
+                                log_buffer.push_info("✅ SSH 隧道已终止".to_string());
+                                terminated = true;
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                            Err(e) => {
+                                log::warn!("[Worker] 检查 SSH 隧道退出状态失败: {}", e);
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("[Worker] 等待 SSH 隧道退出失败: {}", e);
-                        }
+                    }
+                    if !terminated {
+                        log::warn!("[Worker] 等待 SSH 隧道退出超时 (5s)");
+                        log_buffer.push_info("⚠️ 等待 SSH 隧道退出超时".to_string());
                     }
                     self.tunnel_process = None;
                     return true;
@@ -297,5 +323,76 @@ impl Drop for WorkerManager {
             let _ = proc.kill();
             let _ = proc.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_process_running_returns_false_for_none() {
+        let mut proc: Option<Child> = None;
+        assert!(!WorkerManager::is_process_running(&mut proc));
+    }
+
+    #[test]
+    fn is_process_running_returns_true_for_running_process() {
+        // Spawn a long-running process
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/C", "timeout /t 30 /nobreak >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn test process");
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn test process");
+
+        let mut proc: Option<Child> = Some(child);
+        assert!(WorkerManager::is_process_running(&mut proc));
+
+        // Cleanup
+        if let Some(ref mut p) = proc {
+            let _ = p.kill();
+            let _ = p.wait();
+        }
+    }
+
+    #[test]
+    fn is_process_running_returns_false_for_exited_process() {
+        // Spawn a process that exits immediately
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/C", "echo done"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn test process");
+
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn test process");
+
+        let mut proc: Option<Child> = Some(child);
+        // Wait a bit for the process to exit
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!WorkerManager::is_process_running(&mut proc));
+    }
+
+    #[test]
+    fn worker_manager_initial_state_has_no_processes() {
+        let mut wm = WorkerManager::new();
+        assert!(!wm.is_worker_running());
+        assert!(!wm.is_tunnel_running());
     }
 }

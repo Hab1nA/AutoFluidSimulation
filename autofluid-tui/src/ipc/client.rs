@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 use super::protocol::{IpcRequest, IpcResponse};
@@ -19,6 +19,8 @@ pub struct IpcClient {
     stream: Option<TcpStream>,
     /// 上次重连尝试时间，用于冷却。
     last_reconnect: Option<Instant>,
+    /// 连续重连失败次数，用于分级冷却。
+    consecutive_failures: u32,
 }
 
 impl IpcClient {
@@ -28,6 +30,7 @@ impl IpcClient {
             port: port.unwrap_or_else(default_port),
             stream: None,
             last_reconnect: None,
+            consecutive_failures: 0,
         }
     }
 
@@ -46,6 +49,7 @@ impl IpcClient {
                 match self.verify_connection().await {
                     Ok(()) => {
                         self.last_reconnect = None; // 连接成功，清除冷却
+                        self.consecutive_failures = 0; // 连接成功，重置失败计数
                         log::info!("[IPC] 已连接后台引擎: {}", addr);
                         Ok(())
                     }
@@ -87,24 +91,21 @@ impl IpcClient {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
         let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
-            loop {
-                let mut byte = [0u8; 1];
-                match reader.read(&mut byte).await {
-                    Ok(0) => return Ok(false),
-                    Ok(_) => {
-                        buffer.push(byte[0]);
-                        if byte[0] == b'\n' {
-                            return Ok(true);
-                        }
-                        if buffer.len() > MAX_RESPONSE_BYTES {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
-                            ));
-                        }
+            // 使用 read_until 替代逐字节读取，提高效率
+            match reader.read_until(b'\n', &mut buffer).await {
+                Ok(0) => Ok(false), // EOF
+                Ok(_) => {
+                    // 检查响应长度
+                    if buffer.len() > MAX_RESPONSE_BYTES {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
+                        ))
+                    } else {
+                        Ok(true)
                     }
-                    Err(e) => return Err(e),
                 }
+                Err(e) => Err(e),
             }
         })
         .await;
@@ -177,26 +178,22 @@ impl IpcClient {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
 
-        // 带长度限制的行读取：防止异常长响应导致内存溢出
+        // 使用 read_until 替代逐字节读取，提高效率
         let read_result = tokio::time::timeout(timeout, async {
-            loop {
-                let mut byte = [0u8; 1];
-                match reader.read(&mut byte).await {
-                    Ok(0) => return Ok(false), // EOF
-                    Ok(_) => {
-                        buffer.push(byte[0]);
-                        if byte[0] == b'\n' {
-                            return Ok(true); // 行结束
-                        }
-                        if buffer.len() > MAX_RESPONSE_BYTES {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
-                            ));
-                        }
+            match reader.read_until(b'\n', &mut buffer).await {
+                Ok(0) => Ok(false), // EOF
+                Ok(_) => {
+                    // 检查响应长度
+                    if buffer.len() > MAX_RESPONSE_BYTES {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("IPC 响应超过 {} 字节上限", MAX_RESPONSE_BYTES),
+                        ))
+                    } else {
+                        Ok(true)
                     }
-                    Err(e) => return Err(e),
                 }
+                Err(e) => Err(e),
             }
         })
         .await;
@@ -273,16 +270,19 @@ impl IpcClient {
     ///
     /// 静默执行——成功时恢复 `self.stream`，失败时仅记录日志。
     /// 调用方无需感知重连结果，下次 `is_connected()` 即可反映真实状态。
-    /// 冷却机制：连续重连间隔不少于 RECONNECT_COOLDOWN，防止 daemon 不可用时频繁重连。
+    /// 分级冷却机制：仅在连续失败时增加冷却间隔，成功重连后立即重置。
     ///
     /// 注意：此方法通常在 `send_request_with_timeout` 内部调用，此时 `self.stream`
     /// 已被 `take()` 取出放入 `BufReader`。重连会创建全新连接，旧连接的清理
     /// 依赖 `BufReader` 的 drop——短暂窗口内服务端可能看到两个活跃连接。
     async fn auto_reconnect(&mut self, reason: &str) {
-        if let Some(last) = self.last_reconnect {
-            if last.elapsed() < RECONNECT_COOLDOWN {
-                log::debug!("[IPC] {}，重连冷却中，跳过", reason);
-                return;
+        // 仅当存在连续失败时才应用冷却
+        if self.consecutive_failures > 0 {
+            if let Some(last) = self.last_reconnect {
+                if last.elapsed() < RECONNECT_COOLDOWN {
+                    log::debug!("[IPC] {}，重连冷却中，跳过", reason);
+                    return;
+                }
             }
         }
         self.last_reconnect = Some(Instant::now());
@@ -291,8 +291,14 @@ impl IpcClient {
         // 注意：send_request_with_timeout 中 take() 取出的 stream 不受此影响，
         // 旧 stream 的关闭由 BufReader 的 drop 保证。
         match self.connect().await {
-            Ok(()) => log::info!("[IPC] 自动重连成功"),
-            Err(e) => log::warn!("[IPC] 自动重连失败: {}", e),
+            Ok(()) => {
+                self.consecutive_failures = 0; // 成功重连，重置失败计数
+                log::info!("[IPC] 自动重连成功")
+            }
+            Err(e) => {
+                self.consecutive_failures += 1;
+                log::warn!("[IPC] 自动重连失败: {}", e)
+            }
         }
     }
 
@@ -674,5 +680,63 @@ mod tests {
         assert!(result.is_ok());
         rt.block_on(client.disconnect());
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn consecutive_failures_resets_on_successful_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut line)
+                .expect("read handshake");
+            let request: Value = serde_json::from_str(line.trim()).expect("handshake json");
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            let response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        // Simulate consecutive failures
+        client.consecutive_failures = 3;
+
+        // Successful connect should reset failures
+        let result = rt.block_on(client.connect());
+        assert!(result.is_ok());
+        assert_eq!(client.consecutive_failures, 0);
+
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn connect_failure_does_not_affect_consecutive_failures() {
+        // connect() failure does NOT increment consecutive_failures —
+        // only auto_reconnect() does that. Manual connect attempts are
+        // independent of the auto-reconnect cooldown tracking.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(1)); // port 1 should fail
+
+        assert_eq!(client.consecutive_failures, 0);
+
+        let result = rt.block_on(client.connect());
+        assert!(result.is_err());
+        assert_eq!(client.consecutive_failures, 0); // unchanged by manual connect failure
     }
 }

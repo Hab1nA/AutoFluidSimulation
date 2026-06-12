@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ipc.protocol import (
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,

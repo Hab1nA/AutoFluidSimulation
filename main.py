@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 总控程序入口 (Main Entry)
@@ -40,7 +42,7 @@ IPC_READY_TIMEOUT = PROCESS_MANAGEMENT["ipc_ready_timeout"]
 
 
 
-def _ensure_dirs():
+def _ensure_dirs() -> None:
     """创建必要的目录结构。"""
     os.makedirs(PID_DIR, exist_ok=True)
 
@@ -116,7 +118,7 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
         return None
 
 
-def _stop_daemon_subprocess():
+def _stop_daemon_subprocess() -> None:
     """终止后台守护进程。"""
     pid = read_pid_file(DAEMON_PID_FILE)
     if pid is None:
@@ -144,7 +146,7 @@ def _stop_daemon_subprocess():
     remove_pid_file(DAEMON_PID_FILE)
 
 
-def _stop_all_processes():
+def _stop_all_processes() -> None:
     print("=" * 60)
     print("正在停止所有仿真进程...")
     print("=" * 60)
@@ -206,7 +208,7 @@ def _find_latest_session_dir(process_type: str) -> str | None:
     return None
 
 
-def _show_status():
+def _show_status() -> None:
     print("=" * 60)
     print("仿真程序运行状态")
     print("=" * 60)
@@ -251,7 +253,7 @@ def _show_status():
     print()
 
 
-def _run_all_mode():
+def _run_all_mode() -> None:
     from utils.logger import init_session, build_session_log_dir
 
     _ensure_dirs()
@@ -399,7 +401,7 @@ def _run_all_mode():
         print("如需后台引擎继续运行，请使用 start_daemon.py 单独启动。")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="液氧甲烷火箭发动机仿真总控程序"
     )

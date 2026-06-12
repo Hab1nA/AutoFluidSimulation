@@ -143,9 +143,9 @@ def deserialize(data: bytes) -> dict[str, Any] | None:
             return None
         obj = json.loads(text)
         if not isinstance(obj, dict):
-            logger.warning(f"消息反序列化后不是对象: {type(obj).__name__}")
+            logger.warning(f"[IPC] 消息反序列化后不是对象: {type(obj).__name__}")
             return None
         return obj
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.warning(f"消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
+        logger.warning(f"[IPC] 消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
         return None

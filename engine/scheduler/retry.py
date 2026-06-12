@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 重试机制模块。
 
