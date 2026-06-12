@@ -1,5 +1,8 @@
 param(
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Monitor,
+    [int]$RestartDelaySeconds = 5,
+    [int]$MonitorRemotePort = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +23,21 @@ function Resolve-SshExe {
         throw "ssh.exe was not found in PATH."
     }
     return $command.Source
+}
+
+function Resolve-PowerShellExe {
+    $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if ($null -ne $currentProcess -and -not [string]::IsNullOrWhiteSpace($currentProcess.Path)) {
+        return $currentProcess.Path
+    }
+
+    foreach ($candidate in @("pwsh.exe", "powershell.exe")) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -ne $command) {
+            return $command.Source
+        }
+    }
+    throw "PowerShell executable was not found."
 }
 
 function Get-TunnelSshTarget {
@@ -130,11 +148,63 @@ function Test-RemoteTunnelEndpoint {
 
     $hostBytes = (($RemoteHost.ToCharArray() | ForEach-Object { [int][char]$_ }) -join ",")
     $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((bytes([$hostBytes]).decode(),$RemotePort)); s.close()'"
-    & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand | Out-Null
+    & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 2>$null | Out-Null
     return $LASTEXITCODE -eq 0
 }
 
-function Start-ReverseTunnel {
+function Get-TunnelLogPaths {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    return @{
+        Stdout = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.out.log"
+        Stderr = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.err.log"
+        Supervisor = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.supervisor.log"
+    }
+}
+
+function Write-TunnelSupervisorLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -LiteralPath $LogPath -Value "[$timestamp] $Message"
+}
+
+function Get-ReverseTunnelArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TunnelTarget,
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteHost,
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$TargetHost,
+        [Parameter(Mandatory = $true)]
+        [int]$TargetPort
+    )
+
+    $forwardSpec = "${RemoteHost}:${RemotePort}:${TargetHost}:${TargetPort}"
+    return @(
+        "-o", "BatchMode=yes",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=4",
+        "-o", "TCPKeepAlive=yes",
+        "-N",
+        "-R", $forwardSpec,
+        $TunnelTarget
+    )
+}
+
+function Start-ReverseTunnelMonitor {
     param(
         [Parameter(Mandatory = $true)]
         [string]$SshExe,
@@ -150,49 +220,127 @@ function Start-ReverseTunnel {
         [int]$TargetPort
     )
 
-    $forwardSpec = "${RemoteHost}:${RemotePort}:${TargetHost}:${TargetPort}"
-    $stdoutLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.out.log"
-    $stderrLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.err.log"
-    foreach ($logPath in @($stdoutLogPath, $stderrLogPath)) {
-        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-            Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $logs = Get-TunnelLogPaths -RemotePort $RemotePort
+    Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Supervisor starting for ${RemoteHost}:${RemotePort} -> ${TargetHost}:${TargetPort} via ${TunnelTarget}."
 
-    $argumentList = @(
-        "-o", "BatchMode=yes",
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=30",
-        "-o", "ServerAliveCountMax=3",
-        "-N",
-        "-R", $forwardSpec,
-        $TunnelTarget
+    while ($true) {
+        if (Test-RemoteTunnelEndpoint `
+                -SshExe $SshExe `
+                -TunnelTarget $TunnelTarget `
+                -RemoteHost $RemoteHost `
+                -RemotePort $RemotePort) {
+            Start-Sleep -Seconds 30
+            continue
+        }
+
+        if (-not (Test-TcpEndpoint -HostName $TargetHost -Port $TargetPort)) {
+            Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Target endpoint is unreachable: ${TargetHost}:${TargetPort}; retrying in ${RestartDelaySeconds}s."
+            Start-Sleep -Seconds $RestartDelaySeconds
+            continue
+        }
+
+        $argumentList = Get-ReverseTunnelArguments `
+            -TunnelTarget $TunnelTarget `
+            -RemoteHost $RemoteHost `
+            -RemotePort $RemotePort `
+            -TargetHost $TargetHost `
+            -TargetPort $TargetPort
+
+        Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Starting ssh reverse tunnel: $SshExe $($argumentList -join ' ')"
+        & $SshExe @argumentList 1>> $logs.Stdout 2>> $logs.Stderr
+        $exitCode = $LASTEXITCODE
+        Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "ssh reverse tunnel exited with code ${exitCode}; restarting in ${RestartDelaySeconds}s."
+        Start-Sleep -Seconds $RestartDelaySeconds
+    }
+}
+
+function Get-ExistingTunnelMonitorProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
     )
 
-    $process = Start-Process -FilePath $SshExe `
-        -ArgumentList $argumentList `
-        -WindowStyle Hidden `
-        -PassThru `
-        -RedirectStandardOutput $stdoutLogPath `
-        -RedirectStandardError $stderrLogPath
+    $scriptPattern = [regex]::Escape($PSCommandPath)
+    Get-CimInstance Win32_Process |
+        Where-Object {
+            $_.ProcessId -ne $PID `
+                -and $_.CommandLine -match $scriptPattern `
+                -and $_.CommandLine -match '(^|\s)-Monitor(\s|$)' `
+                -and $_.CommandLine -match "(^|\s)$RemotePort(\s|$)"
+        } |
+        Select-Object -First 1
+}
 
-    Start-Sleep -Seconds 2
+function Start-ReverseTunnelSupervisor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
 
-    if ($process.HasExited) {
-        $detail = ""
-        $logLines = @()
-        foreach ($logPath in @($stdoutLogPath, $stderrLogPath)) {
-            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-                $logLines += Get-Content -LiteralPath $logPath -TotalCount 40
-            }
-        }
-        if ($logLines.Count -gt 0) {
-            $detail = $logLines -join [Environment]::NewLine
-        }
-        throw "Failed to start AutoFluid workstation reverse SSH tunnel. $detail"
+    $existing = Get-ExistingTunnelMonitorProcess -RemotePort $RemotePort
+    if ($null -ne $existing) {
+        return $existing
     }
 
-    return $process
+    $powerShellExe = Resolve-PowerShellExe
+    $scriptPath = '"' + $PSCommandPath.Replace('"', '\"') + '"'
+    $argumentList = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $scriptPath,
+        "-Monitor",
+        "-MonitorRemotePort", $RemotePort,
+        "-RestartDelaySeconds", $RestartDelaySeconds
+    )
+
+    return Start-Process -FilePath $powerShellExe `
+        -ArgumentList $argumentList `
+        -WindowStyle Hidden `
+        -PassThru
+}
+
+function Wait-RemoteTunnelEndpoint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SshExe,
+        [Parameter(Mandatory = $true)]
+        [string]$TunnelTarget,
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteHost,
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-RemoteTunnelEndpoint `
+                -SshExe $SshExe `
+                -TunnelTarget $TunnelTarget `
+                -RemoteHost $RemoteHost `
+                -RemotePort $RemotePort) {
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Get-TunnelStartupDetail {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $logs = Get-TunnelLogPaths -RemotePort $RemotePort
+    $logLines = @()
+    foreach ($logPath in @($logs.Supervisor, $logs.Stderr, $logs.Stdout)) {
+        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+            $logLines += "[$logPath]"
+            $logLines += Get-Content -LiteralPath $logPath -Tail 40
+        }
+    }
+    return $logLines -join [Environment]::NewLine
 }
 
 $sshExe = Resolve-SshExe
@@ -205,6 +353,17 @@ $targetPort = Get-TargetPort
 Write-Host "Workstation tunnel SSH target: $tunnelTarget"
 Write-Host "Workstation tunnel remote endpoint: ${remoteHost}:${remotePort}"
 Write-Host "Workstation tunnel target endpoint: ${targetHost}:${targetPort}"
+
+if ($Monitor) {
+    Start-ReverseTunnelMonitor `
+        -SshExe $sshExe `
+        -TunnelTarget $tunnelTarget `
+        -RemoteHost $remoteHost `
+        -RemotePort $remotePort `
+        -TargetHost $targetHost `
+        -TargetPort $targetPort
+    exit 0
+}
 
 if (-not (Test-TcpEndpoint -HostName $targetHost -Port $targetPort)) {
     throw "Workstation SSH target is not reachable from this machine: ${targetHost}:${targetPort}"
@@ -223,20 +382,19 @@ if ($Check) {
     throw "AutoFluid workstation reverse SSH tunnel is not reachable on ${remoteHost}:${remotePort}."
 }
 
-$process = Start-ReverseTunnel `
-    -SshExe $sshExe `
-    -TunnelTarget $tunnelTarget `
-    -RemoteHost $remoteHost `
-    -RemotePort $remotePort `
-    -TargetHost $targetHost `
-    -TargetPort $targetPort
+$process = Start-ReverseTunnelSupervisor -RemotePort $remotePort
 
-if (-not (Test-RemoteTunnelEndpoint `
+if (-not (Wait-RemoteTunnelEndpoint `
     -SshExe $sshExe `
     -TunnelTarget $tunnelTarget `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort)) {
-    throw "AutoFluid workstation reverse SSH tunnel started but did not become reachable."
+    $detail = Get-TunnelStartupDetail -RemotePort $remotePort
+    throw "AutoFluid workstation reverse SSH tunnel supervisor started but did not become reachable. $detail"
 }
 
-Write-Host "Started AutoFluid workstation reverse SSH tunnel with $sshExe (PID $($process.Id))."
+$processId = $process.ProcessId
+if ($null -eq $processId) {
+    $processId = $process.Id
+}
+Write-Host "Started AutoFluid workstation reverse SSH tunnel supervisor with PID $processId."
