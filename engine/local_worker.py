@@ -455,9 +455,11 @@ class LocalWorker:
         runner = self._get_default_runner()
         config_name = params.get("config_name")
         if config_name is None:
-            ok = runner.execute_sw_step()
-        else:
-            ok = runner.execute_sw_per_config(int(config_name))
+            raise RuntimeError(
+                "SW 任务缺少 config_name——批量导出已废弃，"
+                "请使用逐构型模式（通过 RetryManager 调度）"
+            )
+        ok = runner.execute_sw_per_config(int(config_name))
         return {"ok": bool(ok)}
 
     def _run_sc_task(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -66,10 +66,6 @@ class _E2ETaskRunner:
                     return False
         return self._step_results.get(step, True)
 
-    def execute_sw_step(self) -> bool:
-        self._call_log.append(("SW_bulk", 0))
-        return self._step_results.get("sw", True)
-
     def execute_sw_per_config(self, config_name: int) -> bool:
         return self._execute_step("sw", config_name)
 

@@ -582,10 +582,6 @@ def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch
     calls: list[tuple[str, int | None]] = []
 
     class _Runner:
-        def execute_sw_step(self) -> bool:
-            calls.append(("sw", None))
-            return True
-
         def execute_sw_per_config(self, config_name: int) -> bool:
             calls.append(("sw", config_name))
             return True

@@ -20,10 +20,6 @@ class LocalWorkerAdapter:
         self._registry = registry
         self._result_poll_interval = result_poll_interval
 
-    def execute_sw_step(self, timeout_seconds: float = 3600.0) -> bool:
-        """Delegate the batch SW step to a LocalWorker."""
-        return self._execute("sw", {}, timeout_seconds)
-
     def execute_sw_per_config(
         self,
         config_name: int,

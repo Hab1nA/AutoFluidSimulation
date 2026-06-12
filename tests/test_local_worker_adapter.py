@@ -15,7 +15,7 @@ def test_local_worker_adapter_waits_for_worker_completion() -> None:
     result_holder: dict[str, bool] = {}
 
     def wait_for_result() -> None:
-        result_holder["ok"] = adapter.execute_sw_step(timeout_seconds=2.0)
+        result_holder["ok"] = adapter.execute_sw_per_config(1, timeout_seconds=2.0)
 
     thread = threading.Thread(target=wait_for_result)
     thread.start()
@@ -23,7 +23,7 @@ def test_local_worker_adapter_waits_for_worker_completion() -> None:
     task = registry.poll_task("local-pc-01")
     assert task is not None
     assert task["step"] == "sw"
-    assert task["params"] == {}
+    assert task["params"] == {"config_name": 1}
     assert task["timeout_seconds"] == 2.0
 
     registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
@@ -102,7 +102,7 @@ def test_local_worker_adapter_times_out_when_no_worker_reports() -> None:
 
     started = time.monotonic()
 
-    assert adapter.execute_sw_step(timeout_seconds=0.03) is False
+    assert adapter.execute_sw_per_config(1, timeout_seconds=0.03) is False
     assert time.monotonic() - started < 1.0
     assert registry.poll_task("local-pc-01") is None
 

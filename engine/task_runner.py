@@ -185,18 +185,6 @@ class TaskRunner:
     # 阶段 1: SolidWorks STEP 导出（委托给 SWExecutor）
     # ------------------------------------------------------------------
 
-    def execute_sw_step(self) -> bool:
-        """执行 SW 步骤（委托给 SWExecutor）。"""
-        if self._should_delegate_local_steps():
-            return bool(
-                self._local_worker_adapter.execute_sw_step(
-                    timeout_seconds=float(
-                        config_module.ENGINE_CONFIG["sw_macro_timeout"],
-                    ),
-                )
-            )
-        return self._sw_executor.execute_sw_step()
-
     def execute_sw_per_config(self, config_name: int) -> bool:
         """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
         if self._should_delegate_local_steps():

@@ -128,15 +128,6 @@ class MockTaskRunner:
         self._solver_dispatched: list[int] = []
         self._solver_lock = threading.Lock()
 
-    def execute_sw_step(self) -> bool:
-        if self._sw_should_fail:
-            for cn in self.state.get_all_configs():
-                self.state.set_step_status(cn, "sw", STATUS_ERROR, "模拟失败")
-            return False
-        for cn in self.state.get_all_configs():
-            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
-        return True
-
     def execute_sw_per_config(self, config_name: int) -> bool:
         if self._sw_should_fail:
             return False

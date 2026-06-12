@@ -39,7 +39,7 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
     ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
@@ -130,23 +130,6 @@ class MockTaskRunner:
         self._sc_pool = _MockSCPool()
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_executor = _MockSWExecutor(state_manager)
-
-    def execute_sw_step(self) -> bool:
-        """旧的批量方法（保留兼容性）。"""
-        self._sw_call_count += 1
-        print(f"  [MockTaskRunner] execute_sw_step() 第{self._sw_call_count}次调用"
-              f" (delay={self._sw_delay}s, fail={self._sw_should_fail})")
-
-        if self._sw_should_fail:
-            all_configs = self.state.get_all_configs()
-            for cn in all_configs:
-                self.state.set_step_status(cn, "sw", STATUS_ERROR, "模拟 SW 失败")
-            return False
-
-        all_configs = self.state.get_all_configs()
-        for cn in all_configs:
-            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
-        return True
 
     def execute_sw_per_config(self, config_name: int) -> bool:
         """单构型 SW 导出（供 RetryManager 调用）。"""

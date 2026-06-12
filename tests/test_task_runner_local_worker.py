@@ -8,10 +8,6 @@ def test_task_runner_delegates_sw_and_sc_to_local_worker_in_server_mode(monkeypa
     calls: list[tuple[str, int | None, float | None]] = []
 
     class _Adapter:
-        def execute_sw_step(self, timeout_seconds: float = 3600.0) -> bool:
-            calls.append(("sw", None, timeout_seconds))
-            return True
-
         def execute_sw_per_config(
             self,
             config_name: int,
@@ -35,10 +31,9 @@ def test_task_runner_delegates_sw_and_sc_to_local_worker_in_server_mode(monkeypa
     monkeypatch.setitem(ENGINE_CONFIG, "sw_macro_timeout", 123)
     monkeypatch.setitem(ENGINE_CONFIG, "sc_timeout", 45)
 
-    assert runner.execute_sw_step() is True
     assert runner.execute_sw_per_config(3) is True
     assert runner.execute_sc_step(7) is True
-    assert calls == [("sw", None, 123), ("sw_config", 3, 123), ("sc", 7, 45)]
+    assert calls == [("sw_config", 3, 123), ("sc", 7, 45)]
 
 
 def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeypatch) -> None:
