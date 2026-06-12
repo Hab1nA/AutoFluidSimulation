@@ -319,6 +319,90 @@ class TestSWPhaseHandlerFallback:
         assert config_name == 1
         assert step_file.endswith("model_gen4.SLDPRT_1.step")
 
+    def test_server_mode_enqueues_sc_before_next_sw_config_starts(self, monkeypatch):
+        """server 模式下单构型 SW 完成后应立即释放给 SC，而非等全部 SW 结束。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            def __init__(self):
+                self.status = {
+                    (1, "sw"): STATUS_WAITING,
+                    (1, "sc"): STATUS_WAITING,
+                    (2, "sw"): STATUS_WAITING,
+                    (2, "sc"): STATUS_WAITING,
+                }
+                self.engine_status = "stopped"
+                self.sw_macro_started = False
+
+            def get_all_configs(self) -> list[int]:
+                return [1, 2]
+
+            def get_step_status(self, config_name: int, step_name: str) -> str:
+                return self.status.get((config_name, step_name), STATUS_WAITING)
+
+            def set_step_status(
+                self,
+                config_name: int,
+                step_name: str,
+                status: str,
+                message: str | None = None,
+            ) -> None:
+                self.status[(config_name, step_name)] = status
+
+            def set_engine_status(self, status: str) -> None:
+                self.engine_status = status
+
+            def set_sw_macro_started(self, value: bool) -> None:
+                self.sw_macro_started = value
+
+        class _Runner:
+            def __init__(self, state: _State, sc_queue: UniqueWorkQueue[tuple[int, str]]):
+                self.state = state
+                self.sc_queue = sc_queue
+                self.second_sw_started_after_first_sc_enqueued = False
+
+            def execute_sw_per_config(self, config_name: int) -> bool:
+                if config_name == 2:
+                    self.second_sw_started_after_first_sc_enqueued = (
+                        self.sc_queue.has_claim(1)
+                    )
+                self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
+                return True
+
+            def disconnect_sw_cached(self) -> None:
+                return None
+
+            def verify_step_exports(self, step_dir: str) -> int:
+                return 2
+
+        class _RetryManager:
+            @staticmethod
+            def execute_with_retry(config_name: int, step_name: str, func):
+                return func(config_name)
+
+        state = _State()
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        runner = _Runner(state, sc_queue)
+        handler = SWPhaseHandler(
+            state_manager=state,
+            task_runner=runner,
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=_RetryManager(),
+        )
+
+        assert handler._execute_sw_macro([1, 2]) is True
+
+        assert runner.second_sw_started_after_first_sc_enqueued is True
+        assert sc_queue.has_claim(1) is True
+        assert sc_queue.has_claim(2) is True
+
     def test_server_mode_breakpoint_resume_enqueues_completed_sw(self, monkeypatch):
         """server 模式断点续传时，已完成 SW 的构型仍应恢复 SC 队列。"""
         from engine import config as config_module

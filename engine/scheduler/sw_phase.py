@@ -178,6 +178,8 @@ class SWPhaseHandler:
             ok = self._retry_manager.execute_with_retry(
                 cn, "sw", self.runner.execute_sw_per_config,
             )
+            if ok and not self._paused.is_set() and not self._stopped.is_set():
+                self._enqueue_server_mode_completed_sw([cn])
             if not ok and not self._paused.is_set() and not self._stopped.is_set():
                 # 构型所有重试均失败（非暂停/停止导致）→ 断开缓存连接，
                 # 使下一个构型重新建立连接（若 SW 进程已崩溃可快速失败）

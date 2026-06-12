@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
     from engine.state_manager import StateManager
 
+from engine import config as config_module
 from engine.config import (
-    ENGINE_CONFIG,
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
     STATUS_ERROR, get_step_filename,
     get_workstation_config,
@@ -190,7 +190,9 @@ class TaskRunner:
         if self._should_delegate_local_steps():
             return bool(
                 self._local_worker_adapter.execute_sw_step(
-                    timeout_seconds=float(ENGINE_CONFIG["sw_macro_timeout"]),
+                    timeout_seconds=float(
+                        config_module.ENGINE_CONFIG["sw_macro_timeout"],
+                    ),
                 )
             )
         return self._sw_executor.execute_sw_step()
@@ -201,7 +203,9 @@ class TaskRunner:
             return bool(
                 self._local_worker_adapter.execute_sw_per_config(
                     config_name,
-                    timeout_seconds=float(ENGINE_CONFIG["sw_macro_timeout"]),
+                    timeout_seconds=float(
+                        config_module.ENGINE_CONFIG["sw_macro_timeout"],
+                    ),
                 )
             )
         return self._sw_executor.export_sw_per_config(config_name)
@@ -263,7 +267,7 @@ class TaskRunner:
             return bool(
                 self._local_worker_adapter.execute_sc_step(
                     config_name,
-                    timeout_seconds=float(ENGINE_CONFIG["sc_timeout"]),
+                    timeout_seconds=float(config_module.ENGINE_CONFIG["sc_timeout"]),
                 )
             )
         sw_step_name = get_step_filename("sw", config_name)

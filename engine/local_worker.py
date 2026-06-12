@@ -6,10 +6,12 @@ import base64
 from dataclasses import dataclass, field
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable
 from urllib.error import URLError
@@ -66,6 +68,11 @@ class LocalWorker:
         self._default_runner: TaskRunner | None = None
         self._config_payload: dict[str, list[float]] | None = None
         self._last_heartbeat_at: float | None = None
+        self._finished_reports: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._pending_reports: list[dict[str, Any]] = []
+        self._deferred_tasks: list[dict[str, Any]] = []
+        self._active_lane_counts: dict[str, int] = {"sw": 0, "sc": 0, "other": 0}
+        self._lane_lock = threading.Lock()
 
     @classmethod
     def from_env(cls) -> "LocalWorker":
@@ -189,14 +196,29 @@ class LocalWorker:
                 time.sleep(self.config.register_retry_interval)
 
     def run_once(self, now: float | None = None) -> str:
-        """Poll one task and optionally heartbeat when idle."""
+        """Advance the LocalWorker scheduler by one non-blocking tick."""
         current = time.monotonic() if now is None else now
+        report_status = self._send_next_finished_report()
+        if report_status is not None:
+            return report_status
+
+        if self._start_deferred_task_if_possible():
+            return "dispatched"
+
+        if not self._has_available_lane():
+            return self._heartbeat_if_due(current)
+
         response = self._send_request(self.build_poll_request())
         task = response.get("data")
         if isinstance(task, dict):
-            report = self.handle_polled_task(task)
-            self._send_request(report)
-            return "completed" if report["command"] == CMD_WORKER_STEP_COMPLETE else "error"
+            if self._try_start_task(task):
+                return "dispatched"
+            self._deferred_tasks.append(dict(task))
+            return "deferred"
+        return self._heartbeat_if_due(current)
+
+    def _heartbeat_if_due(self, current: float) -> str:
+        """Send a heartbeat when no report or dispatch work was performed."""
         if self._last_heartbeat_at is None:
             self._last_heartbeat_at = current
             return "idle"
@@ -205,6 +227,83 @@ class LocalWorker:
             self._last_heartbeat_at = current
             return "heartbeat"
         return "idle"
+
+    def _send_next_finished_report(self) -> str | None:
+        """Send one completed task report, preserving it for retry on IPC failure."""
+        while True:
+            try:
+                self._pending_reports.append(self._finished_reports.get_nowait())
+            except queue.Empty:
+                break
+
+        if not self._pending_reports:
+            return None
+
+        report = self._pending_reports[0]
+        self._send_request(report)
+        self._pending_reports.pop(0)
+        return "completed" if report["command"] == CMD_WORKER_STEP_COMPLETE else "error"
+
+    def _start_deferred_task_if_possible(self) -> bool:
+        """Start the first deferred task whose execution lane has capacity."""
+        for index, task in enumerate(list(self._deferred_tasks)):
+            if self._try_start_task(task):
+                del self._deferred_tasks[index]
+                return True
+        return False
+
+    def _has_available_lane(self) -> bool:
+        """Return True if any LocalWorker lane can accept more work."""
+        with self._lane_lock:
+            return any(
+                self._active_lane_counts.get(lane, 0) < self._lane_limit(lane)
+                for lane in ("sw", "sc", "other")
+            )
+
+    def _try_start_task(self, task: dict[str, Any]) -> bool:
+        """Start one polled task in its lane without blocking the main poll loop."""
+        lane = self._task_lane(str(task.get("step") or ""))
+        with self._lane_lock:
+            if self._active_lane_counts.get(lane, 0) >= self._lane_limit(lane):
+                return False
+            self._active_lane_counts[lane] = self._active_lane_counts.get(lane, 0) + 1
+
+        thread = threading.Thread(
+            target=self._run_polled_task_in_lane,
+            args=(dict(task), lane),
+            name=f"LocalWorker-{lane}-{task.get('task_id')}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _run_polled_task_in_lane(self, task: dict[str, Any], lane: str) -> None:
+        """Execute one task and hand its report back to the main IPC loop."""
+        try:
+            self._finished_reports.put(self.handle_polled_task(task))
+        finally:
+            with self._lane_lock:
+                self._active_lane_counts[lane] = max(
+                    0,
+                    self._active_lane_counts.get(lane, 0) - 1,
+                )
+
+    @staticmethod
+    def _task_lane(step: str) -> str:
+        if step == "sw":
+            return "sw"
+        if step == "sc":
+            return "sc"
+        return "other"
+
+    def _lane_limit(self, lane: str) -> int:
+        if lane == "sc":
+            raw_slots = self.config.capabilities.get("sc_slots", 3)
+            try:
+                return max(1, int(raw_slots))
+            except (TypeError, ValueError):
+                return 3
+        return 1
 
     def handle_polled_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute one polled task and return the completion/error request."""

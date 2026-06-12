@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
+import threading
+import time
 
 
 def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> None:
@@ -292,8 +295,108 @@ def test_local_worker_run_once_polls_and_reports_task_completion() -> None:
 
     worker._send_request = fake_send
 
-    assert worker.run_once(now=100.0) == "completed"
+    assert worker.run_once(now=100.0) == "dispatched"
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and len(sent_commands) == 1:
+        time.sleep(0.01)
+    assert worker.run_once(now=101.0) == "completed"
     assert sent_commands == ["worker_poll", "worker_step_complete"]
+
+
+def test_local_worker_run_once_overlaps_sc_with_next_sw_without_parallel_sw() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    tasks = deque([
+        {"task_id": "sw-1", "step": "sw", "params": {"config_name": 1}},
+        {"task_id": "sc-1", "step": "sc", "params": {"config_name": 1}},
+        {"task_id": "sw-2", "step": "sw", "params": {"config_name": 2}},
+        {"task_id": "sw-3", "step": "sw", "params": {"config_name": 3}},
+    ])
+    reports: list[str] = []
+    active_sw = 0
+    max_active_sw = 0
+    lock = threading.Lock()
+    sc_started = threading.Event()
+    sw2_started = threading.Event()
+    sw3_started = threading.Event()
+    sc_release = threading.Event()
+    sw2_release = threading.Event()
+
+    def sw_handler(params: dict[str, object]) -> dict[str, object]:
+        nonlocal active_sw, max_active_sw
+        config_name = int(params["config_name"])
+        with lock:
+            active_sw += 1
+            max_active_sw = max(max_active_sw, active_sw)
+        try:
+            if config_name == 2:
+                sw2_started.set()
+                assert sc_started.wait(timeout=1.0)
+                assert sw2_release.wait(timeout=1.0)
+            elif config_name == 3:
+                sw3_started.set()
+            return {"ok": True}
+        finally:
+            with lock:
+                active_sw -= 1
+
+    def sc_handler(params: dict[str, object]) -> dict[str, object]:
+        assert int(params["config_name"]) == 1
+        sc_started.set()
+        assert sc_release.wait(timeout=1.0)
+        return {"ok": True}
+
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+            capabilities={"sc_slots": 3},
+        ),
+        task_handlers={
+            "sw": sw_handler,
+            "sc": sc_handler,
+        },
+    )
+
+    def fake_send(request):
+        command = str(request["command"])
+        if command == "worker_poll":
+            if tasks:
+                return {"status": "ok", "data": tasks.popleft()}
+            return {"status": "ok", "data": None}
+        reports.append(str(request["params"]["task_id"]))
+        return {"status": "ok", "data": {}}
+
+    worker._send_request = fake_send
+
+    assert worker.run_once(now=100.0) == "dispatched"
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and "sw-1" not in reports:
+        worker.run_once(now=100.1)
+        time.sleep(0.01)
+
+    assert "sw-1" in reports
+    assert worker.run_once(now=101.0) == "dispatched"
+    assert sc_started.wait(timeout=1.0)
+    assert worker.run_once(now=102.0) == "dispatched"
+    assert sw2_started.wait(timeout=1.0)
+
+    assert sc_started.is_set()
+    assert sw2_started.is_set()
+    assert worker.run_once(now=103.0) == "deferred"
+    assert sw3_started.is_set() is False
+    assert max_active_sw == 1
+
+    sw2_release.set()
+    sc_release.set()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and not {"sc-1", "sw-2"}.issubset(reports):
+        worker.run_once(now=104.0)
+        time.sleep(0.01)
+
+    assert {"sc-1", "sw-2"}.issubset(reports)
+    assert max_active_sw == 1
 
 
 def test_local_worker_run_once_heartbeats_only_when_idle_deadline_reached() -> None:
