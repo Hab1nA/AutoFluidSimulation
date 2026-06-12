@@ -111,6 +111,7 @@ fn handle_mouse_moved(
     let prev_hover_row = state.hovered_table_row;
     let prev_hover_btn = state.hovered_button;
     let prev_hover_daemon_menu = state.hovered_daemon_menu_item;
+    let prev_hover_worker_menu = state.hovered_worker_menu_item;
     let prev_hover_detail = state.hovered_detail_row;
     let prev_hover_dialog_btn = state.hovered_dialog_button;
 
@@ -221,6 +222,7 @@ fn handle_mouse_moved(
     if state.hovered_table_row != prev_hover_row
         || state.hovered_button != prev_hover_btn
         || state.hovered_daemon_menu_item != prev_hover_daemon_menu
+        || state.hovered_worker_menu_item != prev_hover_worker_menu
         || state.hovered_detail_row != prev_hover_detail
         || state.hovered_dialog_button != prev_hover_dialog_btn
         || prev_hovered_field != new_hovered_field
