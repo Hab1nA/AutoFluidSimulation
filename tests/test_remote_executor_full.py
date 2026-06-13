@@ -213,6 +213,8 @@ class TestBuildMeshingCommand:
         assert "--workflow-path" in command
         assert "--journal-path" in command
         assert "--scdoc-dir" in command
+        assert "--scdoc-name" in command
+        assert "model_gen4_1.scdoc" in command
         assert "--output-dir" in command
         assert '--working-dir "D:\\working"' in command
         assert "--processor-count 4" in command

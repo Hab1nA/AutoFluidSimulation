@@ -140,9 +140,9 @@ class TestStepFilePatterns:
         filename = pattern.format(config=12)
         assert filename == "model_gen4_12.scdoc"
 
-    def test_transfer_pattern_is_none(self):
+    def test_transfer_pattern_is_not_configured(self):
         from engine.config import STEP_FILE_PATTERNS
-        assert STEP_FILE_PATTERNS["transfer"] is None
+        assert "transfer" not in STEP_FILE_PATTERNS
 
     def test_meshing_pattern(self):
         from engine.config import STEP_FILE_PATTERNS
@@ -1011,13 +1011,14 @@ class TestWorkstationLookup:
 class TestServerModeLocalPaths:
     """验证 server 模式下 daemon 本地产物路径不会落到 Windows 默认路径。"""
 
-    def test_reload_config_uses_server_local_scdoc_dir(self, monkeypatch, tmp_path):
+    def test_reload_config_keeps_toml_scdoc_dir_in_server_mode(self, monkeypatch, tmp_path):
         import engine.config as cfg
 
         original_local = dict(cfg.LOCAL_PATHS)
         original_remote = dict(cfg.REMOTE_CONFIG)
         original_workstations = [dict(ws) for ws in cfg.WORKSTATIONS]
         data_dir = tmp_path / "server-data"
+        toml_scdoc_dir = tmp_path / "toml-scdoc"
 
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
         monkeypatch.delenv("AUTOFLUID_SCDOC_DIR", raising=False)
@@ -1028,7 +1029,7 @@ class TestServerModeLocalPaths:
             lambda: {
                 "local_paths": {
                     "data_dir": str(data_dir),
-                    "scdoc_dir": r"C:\Users\XKZ\Documents\000ansys_data\scdoc",
+                    "scdoc_dir": str(toml_scdoc_dir),
                 }
             },
         )
@@ -1037,7 +1038,7 @@ class TestServerModeLocalPaths:
             assert cfg.reload_config_from_toml() is True
 
             assert cfg.LOCAL_PATHS["data_dir"] == str(data_dir)
-            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(data_dir / "scdoc")
+            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(toml_scdoc_dir)
         finally:
             cfg.LOCAL_PATHS.clear()
             cfg.LOCAL_PATHS.update(original_local)

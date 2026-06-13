@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     # 目录路径参数（必需）
     parser.add_argument('--scdoc-dir', type=str, required=True,
                         help='SCDOC 输入目录')
+    parser.add_argument('--scdoc-name', type=str, required=True,
+                        help='SCDOC 输入文件名')
     parser.add_argument('--output-dir', type=str, required=True,
                         help='网格输出目录')
     parser.add_argument('--working-dir', type=str, required=True,
@@ -102,9 +104,11 @@ def main() -> None:
         raise ValueError("参数 config_id 必须是大于等于0的整数。")
     if args.processor_count <= 0:
         raise ValueError("参数 --processor-count 必须是大于0的整数。")
+    if os.path.basename(args.scdoc_name) != args.scdoc_name:
+        raise ValueError("参数 --scdoc-name 必须是文件名，不能包含路径")
 
     # 在占用 Fluent 许可证和启动 GUI 前完成输入文件校验。
-    import_file_name = os.path.join(args.scdoc_dir, f"model_gen4_{config_id}.scdoc")
+    import_file_name = os.path.join(args.scdoc_dir, args.scdoc_name)
     _require_file(args.workflow_path, "工作流文件")
     _require_file(args.journal_path, "Journal 文件")
     _require_file(import_file_name, "SCDOC 输入文件")

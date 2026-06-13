@@ -479,6 +479,7 @@ class SCProcessPool:
             "config": config_name,
             "stepdir": step_dir,
             "scdocdir": scdoc_dir,
+            "scdocname": scdoc_name,
         }
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:

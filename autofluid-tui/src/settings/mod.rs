@@ -63,8 +63,6 @@ pub struct StepFilePatterns {
     pub sw: String,
     #[serde(rename = "sc")]
     pub sc: String,
-    #[serde(rename = "transfer")]
-    pub transfer: Option<String>,
     #[serde(rename = "meshing")]
     pub meshing: String,
     #[serde(rename = "solver")]
@@ -78,7 +76,6 @@ impl Default for StepFilePatterns {
         Self {
             sw: "model_gen4.SLDPRT_{config}.step".to_string(),
             sc: "model_gen4_{config}.scdoc".to_string(),
-            transfer: None,
             meshing: "model_gen4_{config}.msh.h5".to_string(),
             solver: "model_gen4_{config}.cas.h5".to_string(),
             solver_dat: "model_gen4_{config}.dat.h5".to_string(),
@@ -250,7 +247,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
-            SettingCategory::StepPatterns => 6,
+            SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 5,
             SettingCategory::Meshing => 2,
@@ -293,10 +290,9 @@ impl SettingCategory {
             SettingCategory::StepPatterns => match idx {
                 0 => "sw",
                 1 => "sc",
-                2 => "transfer",
-                3 => "meshing",
-                4 => "solver",
-                5 => "solverdata",
+                2 => "meshing",
+                3 => "solver",
+                4 => "solverdata",
                 _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
@@ -373,10 +369,9 @@ impl SettingCategory {
             SettingCategory::StepPatterns => match idx {
                 0 => "SW步骤模板",
                 1 => "SC步骤模板",
-                2 => "Transfer模板",
-                3 => "Meshing模板",
-                4 => "Solver模板",
-                5 => "Solver数据模板",
+                2 => "Meshing模板",
+                3 => "Solver模板",
+                4 => "Solver数据模板",
                 _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
@@ -572,15 +567,9 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => field_val!(self.config.step_file_patterns, sw, string),
                 1 => field_val!(self.config.step_file_patterns, sc, string),
-                2 => self
-                    .config
-                    .step_file_patterns
-                    .transfer
-                    .clone()
-                    .unwrap_or_default(),
-                3 => field_val!(self.config.step_file_patterns, meshing, string),
-                4 => field_val!(self.config.step_file_patterns, solver, string),
-                5 => field_val!(self.config.step_file_patterns, solver_dat, string),
+                2 => field_val!(self.config.step_file_patterns, meshing, string),
+                3 => field_val!(self.config.step_file_patterns, solver, string),
+                4 => field_val!(self.config.step_file_patterns, solver_dat, string),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -661,16 +650,9 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => self.config.step_file_patterns.sw = value.to_string(),
                 1 => self.config.step_file_patterns.sc = value.to_string(),
-                2 => {
-                    self.config.step_file_patterns.transfer = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
-                }
-                3 => self.config.step_file_patterns.meshing = value.to_string(),
-                4 => self.config.step_file_patterns.solver = value.to_string(),
-                5 => self.config.step_file_patterns.solver_dat = value.to_string(),
+                2 => self.config.step_file_patterns.meshing = value.to_string(),
+                3 => self.config.step_file_patterns.solver = value.to_string(),
+                4 => self.config.step_file_patterns.solver_dat = value.to_string(),
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {
@@ -986,30 +968,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn step_patterns_expose_transfer_field() {
-        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
-        assert_eq!(SettingCategory::StepPatterns.field_name(2), "transfer");
+    fn step_patterns_do_not_expose_transfer_field() {
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
+        assert_eq!(SettingCategory::StepPatterns.field_name(2), "meshing");
         assert_eq!(
             SettingCategory::StepPatterns.field_full_name(2),
-            "step_file_patterns.transfer"
+            "step_file_patterns.meshing"
         );
         assert_eq!(
             SettingCategory::StepPatterns.display_label(2),
-            "Transfer模板"
+            "Meshing模板"
         );
 
         let mut state = SettingsState::new();
         state.config = SettingsConfig::default();
-        assert_eq!(state.get_field_value(SettingCategory::StepPatterns, 2), "");
-
-        state.set_field_value(SettingCategory::StepPatterns, 2, "transfer_{config}.zip");
         assert_eq!(
-            state.config.step_file_patterns.transfer.as_deref(),
-            Some("transfer_{config}.zip")
+            state.get_field_value(SettingCategory::StepPatterns, 2),
+            "model_gen4_{config}.msh.h5"
         );
 
-        state.set_field_value(SettingCategory::StepPatterns, 2, "");
-        assert_eq!(state.config.step_file_patterns.transfer, None);
+        state.set_field_value(SettingCategory::StepPatterns, 2, "mesh_{config}.msh.h5");
+        assert_eq!(
+            state.config.step_file_patterns.meshing,
+            "mesh_{config}.msh.h5"
+        );
     }
 
     #[test]
@@ -1064,7 +1046,7 @@ mod tests {
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
         assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
-        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 5);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);

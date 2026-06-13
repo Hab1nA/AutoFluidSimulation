@@ -20,6 +20,36 @@ except ImportError:
     pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
 
 # ============================================================================
+# 模块级 TOML 配置加载
+# ============================================================================
+
+def _load_toml_at_startup() -> dict[str, Any]:
+    """在模块加载时尝试加载 autofluid_config.toml。
+    若文件不存在或无法解析，返回空字典。
+    """
+    toml_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "autofluid_config.toml"
+    )
+    if not os.path.exists(toml_path):
+        return {}
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+            with open(toml_path, "rb") as f:
+                return cast(dict[str, Any], tomllib.load(f))
+        else:
+            import toml
+            return cast(dict[str, Any], toml.load(toml_path))
+    except Exception:
+        return {}
+
+
+# 模块加载时读取 TOML 配置（用于后续初始化）
+_TOML_CONFIG: dict[str, Any] = _load_toml_at_startup()
+
+
+# ============================================================================
 # 环境变量覆盖（用于部署/迁移）
 # ============================================================================
 
@@ -28,6 +58,16 @@ def _env_override(key: str, default: str) -> str:
     val = os.environ.get(key)
     if val is not None and val.strip():
         return val
+    return default
+
+
+def _toml_or_default(toml_section: str, key: str, default: Any) -> Any:
+    """从 TOML 配置中获取值，若不存在则返回默认值。
+    用于在模块初始化时优先使用 TOML 中的配置。
+    """
+    section = _TOML_CONFIG.get(toml_section)
+    if isinstance(section, dict) and key in section:
+        return section[key]
     return default
 
 
@@ -130,27 +170,27 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SolidWorks 可执行文件路径（备选启动方案：COM Dispatch 失败时直接启动）
     "sw_exe": _env_override(
         "AUTOFLUID_SW_EXE",
-        r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe",
+        _toml_or_default("local_paths", "sw_exe", r"C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe"),
     ),
     # SolidWorks 初始模型文件
     "sw_model": _env_override(
         "AUTOFLUID_SW_MODEL",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT",
+        _toml_or_default("local_paths", "sw_model", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT"),
     ),
     # 外部 Excel 参数表（唯一数据源）
     "excel": _env_override(
         "AUTOFLUID_SW_EXCEL",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx",
+        _toml_or_default("local_paths", "excel", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx"),
     ),
     # STEP 文件输出目录（直接 COM 调用导出 STEP 到此）
     "step_dir": _env_override(
         "AUTOFLUID_STEP_DIR",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step",
+        _toml_or_default("local_paths", "step_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step"),
     ),
     # SpaceClaim 可执行文件
     "sc_exe": _env_override(
         "AUTOFLUID_SC_EXE",
-        r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
+        _toml_or_default("local_paths", "sc_exe", r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe"),
     ),
     # SpaceClaim 脚本文件（Python 格式，兼容 V23 API）
     # 脚本位于项目 executor/ 目录下（固定相对于项目根目录）
@@ -168,7 +208,7 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
-        r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc",
+        _toml_or_default("local_paths", "scdoc_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc"),
     ),
     # 日志目录（固定位于项目 logs/ 目录下）
     "log_dir": os.path.join(
@@ -189,30 +229,30 @@ LOCAL_PATHS: LocalPathsConfig = {
 # 远程工作站 (Windows 22H2) SSH 配置
 # ============================================================================
 REMOTE_CONFIG: RemoteConfig = {
-    "host": os.environ.get("AUTOFLUID_SSH_HOST", "172.17.135.240"),
-    "port": int(os.environ.get("AUTOFLUID_SSH_PORT", "22")),
-    "username": os.environ.get("AUTOFLUID_SSH_USER", "ps"),
-    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
+    "host": os.environ.get("AUTOFLUID_SSH_HOST", _toml_or_default("remote_config", "host", "172.17.135.240")),
+    "port": int(os.environ.get("AUTOFLUID_SSH_PORT", _toml_or_default("remote_config", "port", "22"))),
+    "username": os.environ.get("AUTOFLUID_SSH_USER", _toml_or_default("remote_config", "username", "ps")),
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", _toml_or_default("remote_config", "password", "")),
     # 仿真工作目录
-    "working_dir": r"D:\xkz_1020\workingdir",
+    "working_dir": _toml_or_default("remote_config", "working_dir", r"D:\xkz_1020\workingdir"),
     # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
-    "scripts_dir": r"D:\xkz_1020",
+    "scripts_dir": _toml_or_default("remote_config", "scripts_dir", r"D:\xkz_1020"),
     # 仿真引用文件目录（pdf/fla/chemkin 文件）
-    "ref_files_dir": r"D:\xkz_1020\fluent_chemkin_files",
+    "ref_files_dir": _toml_or_default("remote_config", "ref_files_dir", r"D:\xkz_1020\fluent_chemkin_files"),
     # 远程 SCDOC 接收目录
-    "scdoc_dir": r"D:\xkz_1020\scdoc",
+    "scdoc_dir": _toml_or_default("remote_config", "scdoc_dir", r"D:\xkz_1020\scdoc"),
     # 远程网格划分输出目录 (.msh.h5)
-    "msh_dir": r"D:\xkz_1020\msh",
+    "msh_dir": _toml_or_default("remote_config", "msh_dir", r"D:\xkz_1020\msh"),
     # 远程仿真求解输出目录 (.cas.h5, .dat.h5)
-    "result_dir": r"D:\xkz_1020\case",
+    "result_dir": _toml_or_default("remote_config", "result_dir", r"D:\xkz_1020\case"),
     # 仿真标志目录（用于轮询判断任务完成）
-    "flag_dir": r"D:\xkz_1020\flags",
+    "flag_dir": _toml_or_default("remote_config", "flag_dir", r"D:\xkz_1020\flags"),
     # Conda 环境名称
-    "conda_env": "pyfluent",
+    "conda_env": _toml_or_default("remote_config", "conda_env", "pyfluent"),
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
-    "conda_exe": r"C:\ProgramData\anaconda3\Scripts\conda.exe",
+    "conda_exe": _toml_or_default("remote_config", "conda_exe", r"C:\ProgramData\anaconda3\Scripts\conda.exe"),
     # 远程 ANSYS 安装根目录
-    "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"),
+    "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", _toml_or_default("remote_config", "mpi_bin_dir", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin")),
 }
 
 DEFAULT_WORKSTATION_ID = "default"
@@ -243,21 +283,6 @@ def get_workstation_config(
 def is_server_mode() -> bool:
     """Return True when daemon/TUI are running in remote-server mode."""
     return os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
-
-
-def _server_mode_scdoc_dir() -> str:
-    """Return the daemon-local SCDOC cache used on a Linux server."""
-    data_dir = str(LOCAL_PATHS.get("data_dir") or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data",
-    ))
-    return os.path.join(data_dir, "scdoc")
-
-
-def _apply_server_mode_local_defaults() -> None:
-    """Keep server-mode daemon artifacts out of Windows-only local paths."""
-    if is_server_mode() and not os.environ.get("AUTOFLUID_SCDOC_DIR"):
-        LOCAL_PATHS["scdoc_dir"] = _server_mode_scdoc_dir()
 
 
 def _effective_workstation_config(workstation: WorkstationConfig) -> WorkstationConfig:
@@ -305,7 +330,6 @@ ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, 
 STEP_FILE_PATTERNS = {
     "sw": "model_gen4.SLDPRT_{config}.step",
     "sc": "model_gen4_{config}.scdoc",
-    "transfer": None,  # 传输不产生本地文件
     "meshing": "model_gen4_{config}.msh.h5",
     "solver": "model_gen4_{config}.cas.h5",
     "solverdata": "model_gen4_{config}.dat.h5",
@@ -345,24 +369,24 @@ PROCESS_MANAGEMENT: ProcessManagementConfig = {
 # ============================================================================
 OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     # SolidWorks 启动超时（秒）
-    "sw_startup": 60,
+    "sw_startup": _toml_or_default("solidworks", "sw_startup", 60),
     # SW COM Dispatch 后等待窗口加载的延迟（秒）
-    "sw_dispatch_startup_delay": 8,
+    "sw_dispatch_startup_delay": _toml_or_default("solidworks", "sw_dispatch_startup_delay", 8),
     # SC 进程轮询间隔（秒）
-    "sc_poll_interval": 2.0,
+    "sc_poll_interval": _toml_or_default("spaceclaim", "sc_poll_interval", 2.0),
     # SSH 连接超时（秒）
-    "ssh_connection": 10,
+    "ssh_connection": _toml_or_default("global_settings", "ssh_connection", 10),
     # 远程目录递归创建的深度限制
-    "dir_recursion_limit": 32,
+    "dir_recursion_limit": _toml_or_default("global_settings", "dir_recursion_limit", 32),
     # 文件上传重试的最大次数
-    "ssh_upload_max_retries": 3,
+    "ssh_upload_max_retries": _toml_or_default("global_settings", "ssh_upload_max_retries", 3),
     # SpaceClaim 启动相关超时
     # 启动 exe 后等待进程在系统中出现的最大秒数
-    "sc_process_appear_timeout": 120,
+    "sc_process_appear_timeout": _toml_or_default("spaceclaim", "sc_process_appear_timeout", 120),
     # 进程出现后等待主窗口可交互的最大秒数
-    "sc_gui_ready_timeout": 30,
+    "sc_gui_ready_timeout": _toml_or_default("spaceclaim", "sc_gui_ready_timeout", 30),
     # 主窗口就绪后额外等待后台加载稳定的秒数
-    "sc_gui_stable_delay": 15,
+    "sc_gui_stable_delay": _toml_or_default("spaceclaim", "sc_gui_stable_delay", 15),
 }
 
 # ============================================================================
@@ -376,32 +400,32 @@ from engine.config_fingerprint import compute_config_fingerprint, get_db_path_fo
 # ============================================================================
 ENGINE_CONFIG: EngineConfig = {
     # 文件监控轮询间隔（秒）
-    "watchdog_interval": 1.0,
+    "watchdog_interval": _toml_or_default("global_settings", "watchdog_interval", 1.0),
     # SW 宏执行超时（秒）—— 导出所有构型的总时间
-    "sw_macro_timeout": 3600,
+    "sw_macro_timeout": _toml_or_default("solidworks", "sw_macro_timeout", 3600),
     # SW 自动化行为控制
     # - sw_close_doc_on_finish: 宏完成后关闭已打开的模型文档（减少资源占用）
     # - sw_visible: 是否显示 SolidWorks 主窗口
-    "sw_close_doc_on_finish": True,
-    "sw_visible": True,
+    "sw_close_doc_on_finish": _toml_or_default("solidworks", "sw_close_doc_on_finish", True),
+    "sw_visible": _toml_or_default("solidworks", "sw_visible", True),
     # SC 脚本执行超时（秒）
-    "sc_timeout": 300,
+    "sc_timeout": _toml_or_default("spaceclaim", "sc_timeout", 300),
     # 文件传输超时（秒）
-    "transfer_timeout": 120,
+    "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）
-    "meshing_timeout": 600,
+    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 600),
     # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
-    "meshing_processor_count": 8,
+    "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）
-    "solver_timeout": 7200,
+    "solver_timeout": _toml_or_default("solver", "solver_timeout", 7200),
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
-    "solver_processor_count": 128,
+    "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
-    "solver_iteration_count": 1000,
+    "solver_iteration_count": _toml_or_default("solver", "solver_iteration_count", 1000),
     # 最大重试次数
-    "max_retries": 3,
+    "max_retries": _toml_or_default("global_settings", "max_retries", 3),
     # 全局状态刷新间隔（秒）
-    "state_refresh_interval": 0.5,
+    "state_refresh_interval": _toml_or_default("global_settings", "state_refresh_interval", 0.5),
     # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
     "sc_persistent_ready_timeout": 180,
     # SC SCDOC 文件大小稳定判定窗口（秒）—— SaveAs 完成的判定依据
@@ -639,7 +663,6 @@ def reload_config_from_toml() -> bool:
         if "operation_timeouts" in toml_data:
             OPERATION_TIMEOUTS.update(toml_data["operation_timeouts"])
         _apply_env_overrides()
-        _apply_server_mode_local_defaults()
         if not explicit_workstations:
             _sync_default_workstation()
         return True

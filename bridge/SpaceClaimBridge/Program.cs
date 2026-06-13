@@ -31,6 +31,7 @@ namespace AutoFluidSimulation.Bridge
     ///     --config   &lt;构型编号&gt;
     ///     --stepdir  &lt;STEP文件目录&gt;
     ///     --scdocdir &lt;SCDOC输出目录&gt;
+    ///     --scdocname &lt;SCDOC输出文件名&gt;
     ///     [--timeout &lt;秒数, 默认300&gt;]
     ///
     /// 返回值：
@@ -52,7 +53,6 @@ namespace AutoFluidSimulation.Bridge
 
         private const string ProcessName = "SpaceClaim";
         private const string StepFileNamePattern = "model_gen4.SLDPRT_{0}.step";
-        private const string ScdocFileNamePattern = "model_gen4_{0}.scdoc";
         private const int DefaultProcessAppearTimeoutSeconds = 120;
         private const int DefaultGuiReadyTimeoutSeconds = 30;
         private const int DefaultGuiStableDelaySeconds = 15;
@@ -122,6 +122,10 @@ namespace AutoFluidSimulation.Bridge
                         options.ScdocDir = ReadRequiredArgumentValue(args, ref i, "--scdocdir");
                         if (options.ScdocDir == null) return null;
                         break;
+                    case "--scdocname":
+                        options.ScdocFileName = ReadRequiredArgumentValue(args, ref i, "--scdocname");
+                        if (options.ScdocFileName == null) return null;
+                        break;
                     case "--timeout":
                         string timeoutValue = ReadRequiredArgumentValue(args, ref i, "--timeout");
                         if (timeoutValue == null) return null;
@@ -165,7 +169,8 @@ namespace AutoFluidSimulation.Bridge
             if (string.IsNullOrEmpty(options.ScriptPath) ||
                 string.IsNullOrEmpty(options.ConfigName) ||
                 string.IsNullOrEmpty(options.StepDir) ||
-                string.IsNullOrEmpty(options.ScdocDir))
+                string.IsNullOrEmpty(options.ScdocDir) ||
+                string.IsNullOrEmpty(options.ScdocFileName))
             {
                 // 常驻模式只需要 Script 和 CmdDir
                 if (options.Persistent)
@@ -220,6 +225,7 @@ namespace AutoFluidSimulation.Bridge
   --config   <构型编号>           (必需)
   --stepdir  <STEP文件目录>       (必需)
   --scdocdir <SCDOC输出目录>      (必需)
+  --scdocname <SCDOC输出文件名>    (必需)
   [--timeout <秒数>]              (可选, 默认300)
   [--sc-exe  <SpaceClaim.exe路径>] (可选, 覆盖自动检测)
 
@@ -248,6 +254,7 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine($"[BRIDGE] 构型: {opts.ConfigName}");
             Console.WriteLine($"[BRIDGE] STEP目录: {opts.StepDir}");
             Console.WriteLine($"[BRIDGE] SCDOC目录: {opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] SCDOC文件: {opts.ScdocFileName}");
             Console.WriteLine($"[BRIDGE] 超时: {opts.TimeoutSeconds}s");
 
             var stepFile = GetStepFilePath(opts);
@@ -281,6 +288,7 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
             Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
             Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SCDOC_NAME={opts.ScdocFileName}");
 
             try
             {
@@ -293,6 +301,7 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName;
                 psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName;
                 Process started = Process.Start(psi);
                 workingProcess = ResolveStartedSpaceClaimProcess(
                     started, launchBaseline, processAppearTimeout);
@@ -690,9 +699,13 @@ namespace AutoFluidSimulation.Bridge
         /// <returns>SCDOC 文件路径</returns>
         private static string GetScdocFilePath(BridgeOptions opts)
         {
+            if (Path.GetFileName(opts.ScdocFileName) != opts.ScdocFileName)
+            {
+                throw new ArgumentException("SCDOC 输出文件名不能包含路径");
+            }
             return Path.Combine(
                 opts.ScdocDir,
-                string.Format(ScdocFileNamePattern, opts.ConfigName));
+                opts.ScdocFileName);
         }
 
         /// <summary>
@@ -1113,7 +1126,7 @@ namespace AutoFluidSimulation.Bridge
         /// <summary>SpaceClaim transit 脚本路径（必需）。</summary>
         public string ScriptPath { get; set; }
 
-        /// <summary>构型编号，用于构建 STEP/SCDOC 文件名（一次性模式必需）。</summary>
+        /// <summary>构型编号，用于构建 STEP 文件名（一次性模式必需）。</summary>
         public string ConfigName { get; set; }
 
         /// <summary>STEP 文件所在目录（一次性模式必需）。</summary>
@@ -1121,6 +1134,9 @@ namespace AutoFluidSimulation.Bridge
 
         /// <summary>SCDOC 输出目录（一次性模式必需）。</summary>
         public string ScdocDir { get; set; }
+
+        /// <summary>SCDOC 输出文件名（一次性模式必需）。</summary>
+        public string ScdocFileName { get; set; }
 
         /// <summary>SpaceClaim 进程超时秒数，默认 300。</summary>
         public int TimeoutSeconds { get; set; } = 300;

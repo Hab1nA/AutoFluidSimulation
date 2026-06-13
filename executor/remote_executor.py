@@ -715,6 +715,9 @@ class RemoteExecutor:
         conda_env = config["conda_env"]
         conda_exe = config["conda_exe"]
         scripts_dir = config["scripts_dir"]
+        scdoc_name = get_step_filename("sc", config_name)
+        if not scdoc_name:
+            raise ValueError("无法生成 SCDOC 文件名")
         processor_count = self._meshing_processor_count()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
@@ -736,6 +739,8 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/meshing_gen4.jou", force_quote=True),
             "--scdoc-dir",
             _cmd_arg(config["scdoc_dir"], force_quote=True),
+            "--scdoc-name",
+            _cmd_arg(scdoc_name, force_quote=True),
             "--output-dir",
             _cmd_arg(config["msh_dir"], force_quote=True),
             "--working-dir",

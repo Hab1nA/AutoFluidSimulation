@@ -1,16 +1,13 @@
 [local_paths]
 sw_exe = 'C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\SLDWORKS.exe'
-sw_model = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model.SLDPRT'
-excel = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx'
-step_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step'
+sw_model = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data\model.SLDPRT'
+excel = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data\model.xlsx'
+step_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data\step'
 sc_exe = 'C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe'
-scdoc_dir = 'C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc'
+scdoc_dir = 'C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\data\scdoc'
 
 [remote_config]
 host = "172.17.135.240"
-reachable_host = "127.0.0.1"
-reachable_port = 2222
-connectivity_mode = "reverse_tunnel"
 port = 22
 username = "ps"
 working_dir = 'D:\xkz_1020\workingdir'

@@ -52,7 +52,7 @@ if exist "..\SpaceClaimBridge.exe" (
 
 echo.
 echo Usage:
-echo   SpaceClaimBridge.exe --script "C:\path\to\transit.py" --config 1 --stepdir "C:\step" --scdocdir "C:\scdoc"
+echo   SpaceClaimBridge.exe --script "C:\path\to\transit.py" --config 1 --stepdir "C:\step" --scdocdir "C:\scdoc" --scdocname "model_gen4_1.scdoc"
 
 popd
 endlocal

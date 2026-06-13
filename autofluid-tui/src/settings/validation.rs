@@ -140,14 +140,9 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
 }
 
 fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    let patterns: [(&str, &str, bool); 6] = [
+    let patterns: [(&str, &str, bool); 5] = [
         ("step_file_patterns.sw", &config.step_file_patterns.sw, true),
         ("step_file_patterns.sc", &config.step_file_patterns.sc, true),
-        (
-            "step_file_patterns.transfer",
-            config.step_file_patterns.transfer.as_deref().unwrap_or(""),
-            false,
-        ),
         (
             "step_file_patterns.meshing",
             &config.step_file_patterns.meshing,

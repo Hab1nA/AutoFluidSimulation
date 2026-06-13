@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -52,6 +53,15 @@ def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
     assert "spaceclaim_transit_{}.log" in source
 
 
+def test_spaceclaim_transit_uses_passed_scdoc_name() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    assert "scdoc_name" in source
+    assert "cmd_data.get(\"scdocname\"" in source
+    assert "os.path.basename(scdoc_name)" in source
+    assert "model_gen4_{}.scdoc" not in source
+
+
 def test_persistent_loop_reports_abnormal_exit_codes_and_statuses() -> None:
     source = _source()
 
@@ -90,6 +100,7 @@ def test_argument_parser_reports_missing_values_per_option() -> None:
         "--config",
         "--stepdir",
         "--scdocdir",
+        "--scdocname",
         "--timeout",
         "--sc-exe",
         "--cmddir",
@@ -97,6 +108,18 @@ def test_argument_parser_reports_missing_values_per_option() -> None:
     ):
         assert f'ReadRequiredArgumentValue(args, ref i, "{option}")' in source
     assert "参数 {optionName} 缺少值" in source
+
+
+def test_bridge_scdoc_filename_is_argument_driven() -> None:
+    source = _source()
+
+    assert "ScdocFileNamePattern" not in source
+    assert "ScdocFileName" in source
+    assert "Path.GetFileName(opts.ScdocFileName)" in source
+    assert re.search(
+        r"Path\.Combine\(\s*opts\.ScdocDir,\s*opts\.ScdocFileName\s*\)",
+        source,
+    )
 
 
 def test_process_scan_disposes_processes_on_failed_metadata_access() -> None:
