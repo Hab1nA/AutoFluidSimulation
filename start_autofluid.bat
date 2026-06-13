@@ -31,6 +31,15 @@ set "PS_EXE=pwsh.exe"
 where "%PS_EXE%" >nul 2>nul
 if errorlevel 1 set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 
+where wt.exe >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Windows Terminal wt.exe was not found.
+    echo.
+    echo Please install Windows Terminal or ensure wt.exe is available in PATH.
+    pause
+    exit /b 1
+)
+
 set "PYTHON=%PYTHON_EXE%"
 set "START_CLIENT=1"
 set "START_WORKER=0"
@@ -78,6 +87,7 @@ if "%RUN_CHECK%"=="1" (
     echo PROJECT_DIR=%PROJECT_DIR%
     echo PYTHON_EXE=%PYTHON_EXE%
     echo PS_EXE=%PS_EXE%
+    echo wt.exe is available.
     if "%START_WORKER%"=="1" (
         "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%WORKER_PS1%" -Check
         if errorlevel 1 exit /b 1
@@ -102,9 +112,9 @@ if "%START_WORKER%"=="1" (
 
 if "%START_CLIENT%"=="1" (
     if "%START_WORKER%"=="1" timeout /t 2 /nobreak >nul
-    "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%CLIENT_PS1%"
+    wt.exe -w -1 nt --title "AutoFluid Client" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%CLIENT_PS1%"
     if errorlevel 1 (
-        echo [ERROR] AutoFluid Client exited with an error.
+        echo [ERROR] Failed to start the AutoFluid Client Windows Terminal window.
         pause
         exit /b 1
     )
