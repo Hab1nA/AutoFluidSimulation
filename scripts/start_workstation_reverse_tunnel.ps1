@@ -177,8 +177,15 @@ function Test-RemoteTunnelEndpoint {
 
     $hostBytes = (($RemoteHost.ToCharArray() | ForEach-Object { [int][char]$_ }) -join ",")
     $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((bytes([$hostBytes]).decode(),$RemotePort)); s.close()'"
-    & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 2>$null | Out-Null
-    return $LASTEXITCODE -eq 0
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 2>&1 | Out-Null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
 }
 
 function Get-TunnelLogPaths {

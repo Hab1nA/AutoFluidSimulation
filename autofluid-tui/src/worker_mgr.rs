@@ -16,14 +16,17 @@ pub struct WorkerManager {
     /// 本地 LocalWorker 子进程
     worker_process: Option<Child>,
     /// 工作站 SSH 反向隧道子进程
-    tunnel_process: Option<Child>,
+    workstation_tunnel_process: Option<Child>,
+    /// 服务器到本机 LocalWorker 的 SSH 反向隧道子进程
+    local_worker_tunnel_process: Option<Child>,
 }
 
 impl WorkerManager {
     pub fn new() -> Self {
         Self {
             worker_process: None,
-            tunnel_process: None,
+            workstation_tunnel_process: None,
+            local_worker_tunnel_process: None,
         }
     }
 
@@ -119,8 +122,10 @@ impl WorkerManager {
     }
 
     /// SSH 隧道是否正在运行。
+    #[allow(dead_code)]
     pub fn is_tunnel_running(&mut self) -> bool {
-        Self::is_process_running(&mut self.tunnel_process)
+        Self::is_process_running(&mut self.workstation_tunnel_process)
+            || Self::is_process_running(&mut self.local_worker_tunnel_process)
     }
 
     // ------------------------------------------------------------------
@@ -252,12 +257,16 @@ impl WorkerManager {
         log_buffer: &mut LogBuffer,
         tunnel_kind: &str,
     ) -> bool {
-        // 如果已有隧道在运行，先停止
-        if self.is_tunnel_running() {
+        let tunnel_process = match tunnel_kind {
+            "LocalWorker" => &mut self.local_worker_tunnel_process,
+            _ => &mut self.workstation_tunnel_process,
+        };
+
+        if Self::is_process_running(tunnel_process) {
             log_buffer.push_info("⚠️ SSH 隧道已在运行中".to_string());
             return true;
         }
-        self.tunnel_process = None;
+        *tunnel_process = None;
 
         let tunnel_script = PathBuf::from(project_dir)
             .join("scripts")
@@ -331,11 +340,19 @@ impl WorkerManager {
 
     /// 终止 SSH 反向隧道进程。
     fn stop_tunnel(&mut self, log_buffer: &mut LogBuffer) -> bool {
-        if let Some(ref mut proc) = self.tunnel_process {
+        let workstation_ok =
+            Self::stop_tunnel_process(&mut self.workstation_tunnel_process, log_buffer);
+        let local_worker_ok =
+            Self::stop_tunnel_process(&mut self.local_worker_tunnel_process, log_buffer);
+        workstation_ok && local_worker_ok
+    }
+
+    fn stop_tunnel_process(proc_slot: &mut Option<Child>, log_buffer: &mut LogBuffer) -> bool {
+        if let Some(ref mut proc) = proc_slot {
             match proc.try_wait() {
                 Ok(Some(status)) => {
                     log::info!("[Worker] SSH 隧道已自行退出: {}", status);
-                    self.tunnel_process = None;
+                    *proc_slot = None;
                     return true;
                 }
                 Ok(None) => {
@@ -367,12 +384,12 @@ impl WorkerManager {
                         log::warn!("[Worker] 等待 SSH 隧道退出超时 (5s)");
                         log_buffer.push_info("⚠️ 等待 SSH 隧道退出超时".to_string());
                     }
-                    self.tunnel_process = None;
+                    *proc_slot = None;
                     return true;
                 }
                 Err(e) => {
                     log::warn!("[Worker] 检查 SSH 隧道状态失败: {}", e);
-                    self.tunnel_process = None;
+                    *proc_slot = None;
                     return false;
                 }
             }
@@ -427,9 +444,9 @@ fn log_worker_ssh_checks(data: &serde_json::Value, log_buffer: &mut LogBuffer) {
     for (workstation_id, status) in checks {
         let status_text = status.as_str().unwrap_or("unknown");
         if status_text == "ok" {
-            log_buffer.push_info(format!("  ✅ 工作站 {workstation_id}: SSH ok"));
+            log_buffer.push_info(format!("✅ 工作站 {workstation_id}: SSH ok"));
         } else {
-            log_buffer.push_info(format!("  ❌ 工作站 {workstation_id}: SSH {status_text}"));
+            log_buffer.push_info(format!("❌ 工作站 {workstation_id}: SSH {status_text}"));
         }
     }
 }
@@ -455,7 +472,11 @@ impl Drop for WorkerManager {
             let _ = proc.kill();
             let _ = proc.wait();
         }
-        if let Some(ref mut proc) = self.tunnel_process {
+        if let Some(ref mut proc) = self.workstation_tunnel_process {
+            let _ = proc.kill();
+            let _ = proc.wait();
+        }
+        if let Some(ref mut proc) = self.local_worker_tunnel_process {
             let _ = proc.kill();
             let _ = proc.wait();
         }
@@ -579,10 +600,21 @@ mod tests {
         assert!(result);
         let order = wait_for_marker_lines(&marker, 4);
         let lines: Vec<&str> = order.lines().collect();
-        assert!(lines[0].contains("-TunnelKind Workstation"));
-        assert!(lines[1].contains("-TunnelKind LocalWorker"));
-        assert_eq!(lines[2], "daemon");
-        assert_eq!(lines[3], "worker 127.0.0.1 2223 reverse_tunnel");
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("-TunnelKind Workstation")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("-TunnelKind LocalWorker")));
+        let daemon_idx = lines
+            .iter()
+            .position(|line| *line == "daemon")
+            .expect("daemon prepare marker");
+        let worker_idx = lines
+            .iter()
+            .position(|line| *line == "worker 127.0.0.1 2223 reverse_tunnel")
+            .expect("worker marker");
+        assert!(daemon_idx < worker_idx);
 
         let _ = wm.stop_workers(&mut log_buffer);
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");

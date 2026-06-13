@@ -47,7 +47,7 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
     }
 
     let time_area = ratatui::layout::Rect {
-        x: inner.x + inner.width.saturating_sub(11),
+        x: inner.x + inner.width.saturating_sub(9),
         y: inner.y,
         width: 8.min(inner.width),
         height: inner.height,
