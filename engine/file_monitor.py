@@ -149,7 +149,7 @@ class StepFileMonitor:
         """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
         if cls._FILENAME_REGEX is None:
             sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
+            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)
         return cls._FILENAME_REGEX
 
     def __init__(self, step_dir: str | None = None,
@@ -174,7 +174,7 @@ class StepFileMonitor:
         # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
         if StepFileMonitor._FILENAME_REGEX is None:
             sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
+            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)
 
     @property
     def is_running(self) -> bool:
