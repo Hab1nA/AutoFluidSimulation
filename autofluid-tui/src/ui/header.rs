@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::state::app_state::AppState;
-use crate::utils::format_local_time;
+use crate::utils::{format_local_time, truncate_for_display};
 
 pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let theme = &state.theme;
@@ -16,6 +16,26 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
         .style(Style::default().bg(theme.bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let daemon_text = state.daemon_runtime_text();
+    if inner.width > 30 && !daemon_text.is_empty() {
+        let max_daemon_width = (inner.width / 3).max(12) as usize;
+        let daemon_area = ratatui::layout::Rect {
+            x: inner.x + 1,
+            y: inner.y,
+            width: (max_daemon_width as u16).min(inner.width),
+            height: inner.height,
+        };
+        let daemon = Paragraph::new(truncate_for_display(&daemon_text, max_daemon_width))
+            .style(
+                Style::default()
+                    .fg(theme.gray_5)
+                    .bg(theme.bg)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Left);
+        frame.render_widget(daemon, daemon_area);
+    }
 
     let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序")
         .style(

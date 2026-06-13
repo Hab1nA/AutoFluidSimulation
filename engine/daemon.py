@@ -178,6 +178,8 @@ class PipelineDaemon:
         self._local_worker_process: subprocess.Popen | None = None
         self._local_worker_last_start_attempt = 0.0
         self._alert_watcher_process: subprocess.Popen | None = None
+        self._started_at_epoch: float | None = None
+        self._last_worker_ssh_checks: dict[str, str] = {}
 
         # 运行标志
         self._running = False
@@ -211,6 +213,7 @@ class PipelineDaemon:
             logger.warning(f"[CONFIG] {w}")
 
         self._running = True
+        self._started_at_epoch = time.time()
 
         # ---- 1. 加载 Excel 数据，计算构型指纹，确定数据库路径 ----
         excel_path = LOCAL_PATHS["excel"]
@@ -924,12 +927,14 @@ class PipelineDaemon:
             if status != "ok"
         }
         if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
+            self._last_worker_ssh_checks = dict(ssh_checks)
             logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
             return False, results, f"SSH 连通检查全部失败: {ssh_checks}"
 
         # 清除旧的在线 worker 标记（允许重新注册）
         self.local_worker_registry.clear_online_workers()
         results["registry_ready"] = True
+        self._last_worker_ssh_checks = dict(ssh_checks)
 
         logger.info("[Worker] worker_start 完成: %s", results)
         if failed_ssh_checks:
@@ -956,6 +961,7 @@ class PipelineDaemon:
         self.local_worker_registry.clear_online_workers()
         self.local_worker_registry.clear_pending_tasks()
         results["registry_cleared"] = True
+        self._last_worker_ssh_checks = {}
 
         logger.info("[Worker] worker_stop 完成: %s", results)
         return True, results, "所有 Worker 已停止"
@@ -992,13 +998,93 @@ class PipelineDaemon:
         """获取引擎状态。"""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
+        started_at = getattr(self, "_started_at_epoch", None)
+        uptime_seconds = None
+        started_at_display = None
+        if started_at is not None:
+            uptime_seconds = max(0, int(time.time() - started_at))
+            started_at_display = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(started_at),
+            )
         status = {
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
             "barrier_passed": self.state.is_global_barrier_met(),
             "pipeline_started": self._pipeline_ever_started,
+            "daemon_started_at": started_at,
+            "daemon_started_at_display": started_at_display,
+            "daemon_uptime_seconds": uptime_seconds,
         }
         return True, status, ""
+
+    def _build_health_snapshot(self) -> dict[str, Any]:
+        """Return low-cost dashboard health data without creating new connections."""
+        registry = getattr(self, "local_worker_registry", None)
+        online_workers: list[dict[str, Any]] = []
+        if registry is not None:
+            online_workers_fn = getattr(registry, "online_workers", None)
+            if callable(online_workers_fn):
+                online_workers = list(online_workers_fn())
+
+        server_to_local_ssh = "unknown"
+        for worker in online_workers:
+            network = worker.get("network", {})
+            if not isinstance(network, dict):
+                continue
+            reachable_host = str(network.get("reachable_host") or "").strip()
+            ssh_port = network.get("ssh_port")
+            connectivity_mode = str(network.get("connectivity_mode") or "").strip()
+            if reachable_host and ssh_port:
+                server_to_local_ssh = "ok"
+                break
+            if connectivity_mode:
+                server_to_local_ssh = "unknown"
+
+        workstation_details: dict[str, str] = {}
+        runner = getattr(self, "runner", None)
+        ssh_pool = getattr(runner, "_ssh_pool", {}) if runner is not None else {}
+        if not isinstance(ssh_pool, dict):
+            ssh_pool = {}
+        last_worker_checks = getattr(self, "_last_worker_ssh_checks", {})
+        if not isinstance(last_worker_checks, dict):
+            last_worker_checks = {}
+        workstation_ids = [str(ws.get("id", "default")) for ws in WORKSTATIONS]
+        if not workstation_ids:
+            workstation_ids = ["default"]
+        for workstation_id in workstation_ids:
+            ssh = ssh_pool.get(workstation_id)
+            if ssh is None:
+                workstation_details[workstation_id] = str(
+                    last_worker_checks.get(workstation_id, "unknown")
+                )
+                continue
+            try:
+                connection_is_active = getattr(ssh, "connection_is_active", None)
+                if callable(connection_is_active):
+                    connected = bool(connection_is_active())
+                else:
+                    connected = bool(ssh.is_connected())
+                workstation_details[workstation_id] = (
+                    "ok" if connected else "disconnected"
+                )
+            except Exception as exc:
+                workstation_details[workstation_id] = f"error: {exc}"
+
+        detail_values = set(workstation_details.values())
+        if any(value == "ok" for value in detail_values):
+            server_to_workstation_ssh = "ok"
+        elif any(value == "unknown" for value in detail_values):
+            server_to_workstation_ssh = "unknown"
+        else:
+            server_to_workstation_ssh = "disconnected"
+
+        return {
+            "local_worker_online": bool(online_workers),
+            "server_to_local_ssh": server_to_local_ssh,
+            "server_to_workstation_ssh": server_to_workstation_ssh,
+            "workstation_ssh_details": workstation_details,
+        }
 
     def handle_get_dashboard(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """批量获取 TUI 仪表盘所需的状态、引擎信息和日志增量。"""
@@ -1020,6 +1106,7 @@ class PipelineDaemon:
         return True, {
             "statuses": statuses,
             "engine": engine,
+            "health": self._build_health_snapshot(),
             "logs": logs,
         }, ""
 

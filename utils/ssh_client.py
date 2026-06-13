@@ -125,6 +125,13 @@ class RemoteWorkstation:
         except (OSError, EOFError):
             return False
 
+    def connection_is_active(self) -> bool:
+        """Return cached transport activity without sending a network heartbeat."""
+        if self._ssh is None:
+            return False
+        transport = self._ssh.get_transport()
+        return bool(transport is not None and transport.is_active())
+
     def ensure_connected(self) -> bool:
         """确保连接有效，若断开则自动重连。"""
         if not self.is_connected():

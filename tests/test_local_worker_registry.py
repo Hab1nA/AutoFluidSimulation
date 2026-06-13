@@ -32,6 +32,45 @@ def test_worker_expires_without_heartbeat() -> None:
     assert worker["online"] is False
 
 
+def test_online_workers_returns_only_live_network_snapshots() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=30.0, clock=lambda: now)
+    registry.register(
+        "local-pc-01",
+        {"sw": True},
+        network={
+            "reachable_host": "127.0.0.1",
+            "ssh_port": 2222,
+            "connectivity_mode": "reverse_tunnel",
+        },
+    )
+    registry.register(
+        "stale-pc-01",
+        {"sw": True},
+        network={
+            "reachable_host": "100.64.1.20",
+            "ssh_port": 22,
+            "connectivity_mode": "tailscale",
+        },
+    )
+    now = 120.0
+    registry.heartbeat("local-pc-01")
+    now = 140.0
+
+    workers = registry.online_workers()
+
+    assert [worker["worker_id"] for worker in workers] == ["local-pc-01"]
+    assert workers[0]["network"] == {
+        "reachable_host": "127.0.0.1",
+        "ssh_port": 2222,
+        "connectivity_mode": "reverse_tunnel",
+    }
+    workers[0]["network"]["reachable_host"] = "mutated"
+    assert registry.get_worker("local-pc-01")["network"]["reachable_host"] == "127.0.0.1"
+
+
 def test_heartbeat_refreshes_worker_deadline() -> None:
     from engine.local_worker_registry import LocalWorkerRegistry
 

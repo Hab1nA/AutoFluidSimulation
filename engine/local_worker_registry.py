@@ -75,6 +75,15 @@ class LocalWorkerRegistry:
         with self._lock:
             return any(self._is_online(worker) for worker in self._workers.values())
 
+    def online_workers(self) -> list[dict[str, Any]]:
+        """Return snapshots for workers whose heartbeat is still fresh."""
+        with self._lock:
+            return [
+                self._with_online(worker)
+                for worker in self._workers.values()
+                if self._is_online(worker)
+            ]
+
     def has_active_step_task(
         self,
         step: str,

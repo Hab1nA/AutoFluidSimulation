@@ -573,9 +573,19 @@ class LocalWorker:
 def build_worker_network() -> dict[str, Any]:
     """Collect local network metadata for daemon-side diagnostics."""
     network: dict[str, Any] = {}
-    reachable_host = os.environ.get("AUTOFLUID_WORKER_REACHABLE_HOST", "").strip()
-    connectivity_mode = os.environ.get("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "").strip()
-    ssh_port = int(os.environ.get("AUTOFLUID_WORKER_SSH_PORT", "22"))
+    reachable_host = (
+        os.environ.get("AUTOFLUID_WORKER_REACHABLE_HOST", "").strip()
+        or os.environ.get("AUTOFLUID_SSH_REACHABLE_HOST", "").strip()
+    )
+    connectivity_mode = (
+        os.environ.get("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "").strip()
+        or os.environ.get("AUTOFLUID_SSH_CONNECTIVITY_MODE", "").strip()
+    )
+    ssh_port = int(
+        os.environ.get("AUTOFLUID_WORKER_SSH_PORT")
+        or os.environ.get("AUTOFLUID_SSH_REACHABLE_PORT")
+        or "22"
+    )
     candidate_hosts = _candidate_hosts_from_env() + detect_candidate_hosts()
     candidate_hosts = list(dict.fromkeys(host for host in candidate_hosts if host))
 

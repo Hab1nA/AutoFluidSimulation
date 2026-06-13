@@ -38,6 +38,10 @@ impl IpcClient {
         self.stream.is_some()
     }
 
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     pub async fn connect(&mut self) -> Result<(), String> {
         // 先关闭已有连接，防止连接泄漏导致服务端出现重复连接
         self.disconnect().await;

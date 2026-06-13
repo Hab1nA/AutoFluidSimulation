@@ -105,6 +105,27 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
     }
 
 
+def test_local_worker_from_env_uses_ssh_reachable_metadata_fallback(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker
+
+    monkeypatch.setenv("AUTOFLUID_WORKER_ID", "local-pc-01")
+    monkeypatch.setenv("AUTOFLUID_SERVER_HOST", "ocar.example.test")
+    monkeypatch.setenv("AUTOFLUID_IPC_PORT", "9527")
+    monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_HOST", "127.0.0.1")
+    monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_PORT", "2222")
+    monkeypatch.setenv("AUTOFLUID_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+    monkeypatch.setenv("AUTOFLUID_DISCOVER_PUBLIC_IP", "0")
+    monkeypatch.setattr("engine.local_worker.detect_candidate_hosts", lambda: [])
+
+    worker = LocalWorker.from_env()
+
+    assert worker.config.network == {
+        "reachable_host": "127.0.0.1",
+        "connectivity_mode": "reverse_tunnel",
+        "ssh_port": 2222,
+    }
+
+
 def test_local_worker_from_env_reloads_toml_config(monkeypatch) -> None:
     from engine.local_worker import LocalWorker
 

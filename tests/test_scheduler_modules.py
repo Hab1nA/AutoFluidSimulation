@@ -1800,6 +1800,8 @@ class TestPipelineDaemonCleanStep:
         assert reload_calls == ["reload"]
         assert runner.disconnect_calls == 1
         assert data["ssh_checks"] == {"default": "ok"}
+        assert daemon._last_worker_ssh_checks == {"default": "ok"}
+        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
 
     def test_worker_start_fails_when_all_workstation_ssh_checks_fail(self, monkeypatch):
         from engine import config as config_module
@@ -1837,6 +1839,22 @@ class TestPipelineDaemonCleanStep:
         assert data["ssh_checks"] == {"default": "disconnected"}
         assert daemon.local_worker_registry.has_online_worker() is True
 
+    def test_worker_stop_clears_last_worker_ssh_snapshot(self):
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = None
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon._last_worker_ssh_checks = {"default": "ok"}
+
+        ok, data, message = daemon.handle_worker_stop({})
+
+        assert ok is True
+        assert message == "所有 Worker 已停止"
+        assert data["registry_cleared"] is True
+        assert daemon._last_worker_ssh_checks == {}
+
     def test_worker_start_keeps_partial_success_visible(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module
@@ -1873,6 +1891,8 @@ class TestPipelineDaemonCleanStep:
         assert ok is True
         assert "部分工作站 SSH 连通检查失败" in message
         assert data["ssh_checks"] == {"WS-A": "ok", "WS-B": "disconnected"}
+        assert daemon._last_worker_ssh_checks == {"WS-A": "ok", "WS-B": "disconnected"}
+        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
         assert daemon.local_worker_registry.has_online_worker() is False
 
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):

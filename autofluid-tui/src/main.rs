@@ -10,6 +10,7 @@ mod utils;
 mod worker_mgr;
 
 use std::io;
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -200,9 +201,58 @@ pub(crate) fn apply_dashboard_response(
     if let Some(engine) = data_obj.get("engine") {
         state.update_engine_info(engine);
     }
+    if let Some(health) = data_obj.get("health") {
+        state.update_health_info(health);
+    }
     if let Some(logs) = data_obj.get("logs").and_then(|v| v.as_object()) {
         apply_log_entries_response(logs, state, log_buffer);
     }
+}
+
+fn refresh_dashboard_once(
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    if !ipc.is_connected() {
+        return false;
+    }
+    match rt.block_on(ipc.get_dashboard(state.last_log_id, 50)) {
+        Ok(resp) if resp.is_ok() => {
+            if let Some(data_obj) = resp.data.as_object() {
+                apply_dashboard_response(data_obj, state, log_buffer);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn wait_for_worker_health_refresh(
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    const ATTEMPTS: usize = 5;
+    const DELAY: Duration = Duration::from_millis(250);
+
+    for attempt in 0..ATTEMPTS {
+        if refresh_dashboard_once(rt, ipc, state, log_buffer) && worker_health_is_visible(state) {
+            return;
+        }
+        if attempt + 1 < ATTEMPTS {
+            sleep(DELAY);
+        }
+    }
+}
+
+fn worker_health_is_visible(state: &AppState) -> bool {
+    state.health_info.local_worker_online == Some(true)
+        && state.health_info.server_to_local_ssh.as_deref() == Some("ok")
 }
 
 // ====================================================================
@@ -271,10 +321,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     match rt.block_on(ipc.connect()) {
         Ok(()) => {
             state.connected = true;
+            state.update_local_ipc_tunnel(ipc.host(), true);
             log_buffer.push_info("✅ 已连接到后台引擎".to_string());
         }
         Err(_) => {
             state.connected = false;
+            state.update_local_ipc_tunnel(ipc.host(), false);
             log_buffer.push_info(
                 "❌ 无法连接到后台引擎，请检查远端 daemon 是否运行以及 AUTOFLUID_IPC_HOST 配置"
                     .to_string(),
@@ -332,21 +384,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
-            if ctx.ipc.is_connected() {
-                // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
-                if let Ok(resp) = ctx
-                    .rt
-                    .block_on(ctx.ipc.get_dashboard(ctx.state.last_log_id, 50))
-                {
-                    if resp.is_ok() {
-                        if let Some(data_obj) = resp.data.as_object() {
-                            apply_dashboard_response(data_obj, ctx.state, ctx.log_buffer);
-                        }
-                    }
-                }
-            }
+            // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
+            refresh_dashboard_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
 
             ctx.state.connected = ctx.ipc.is_connected();
+            ctx.state
+                .update_local_ipc_tunnel(ctx.ipc.host(), ctx.state.connected);
             last_ipc_poll = Instant::now();
             ctx.state.needs_redraw = true;
         }
@@ -439,9 +482,12 @@ fn handle_command_result_refs(
         }
         command::CommandResult::StartWorkers => {
             // worker start：先建立 SSH 隧道，再让 daemon 验证远端 SSH，最后启动本地 Worker。
-            worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+            let started = worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
                 worker_mgr::prepare_remote_workers(ipc, rt, buffer)
             });
+            if started {
+                wait_for_worker_health_refresh(rt, ipc, state, log_buffer);
+            }
         }
         command::CommandResult::StopWorkers => {
             // worker stop：发送 IPC 停止命令后停止本地进程
@@ -476,9 +522,12 @@ fn handle_command_result_refs(
                 }
             }
             worker.stop_workers(log_buffer);
-            worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+            let started = worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
                 worker_mgr::prepare_remote_workers(ipc, rt, buffer)
             });
+            if started {
+                wait_for_worker_health_refresh(rt, ipc, state, log_buffer);
+            }
         }
         command::CommandResult::None => {}
     }
@@ -1062,7 +1111,19 @@ mod tests {
                 "engine_status": "running",
                 "sw_macro_started": true,
                 "barrier_passed": false,
-                "pipeline_started": true
+                "pipeline_started": true,
+                "daemon_started_at": 1718000000.0,
+                "daemon_started_at_display": "2026-06-13 14:03:21",
+                "daemon_uptime_seconds": 65
+            },
+            "health": {
+                "local_worker_online": true,
+                "server_to_local_ssh": "ok",
+                "server_to_workstation_ssh": "disconnected",
+                "workstation_ssh_details": {
+                    "WS-A": "ok",
+                    "WS-B": "disconnected"
+                }
             },
             "logs": {
                 "entries": [{
@@ -1087,8 +1148,36 @@ mod tests {
         assert_eq!(state.get_step_status("2", "sw"), "Running");
         assert_eq!(state.engine_info.engine_status, "running");
         assert!(state.engine_info.sw_macro_started);
+        assert_eq!(state.engine_info.daemon_started_at, Some(1718000000.0));
+        assert_eq!(
+            state.engine_info.daemon_started_at_display.as_deref(),
+            Some("2026-06-13 14:03:21")
+        );
+        assert_eq!(state.engine_info.daemon_uptime_seconds, Some(65));
+        assert_eq!(state.health_info.local_worker_online, Some(true));
+        assert_eq!(state.health_info.server_to_local_ssh.as_deref(), Some("ok"));
+        assert_eq!(
+            state.health_info.server_to_workstation_ssh.as_deref(),
+            Some("disconnected")
+        );
         assert_eq!(state.last_log_id, 8);
         assert_eq!(log_buffer.detail_buffer.len(), 1);
+    }
+
+    #[test]
+    fn test_worker_health_visible_requires_registered_local_worker_reachability() {
+        let mut state = AppState::default();
+        state.health_info.server_to_workstation_ssh = Some("ok".to_string());
+
+        assert!(!worker_health_is_visible(&state));
+
+        state.health_info.local_worker_online = Some(true);
+        state.health_info.server_to_local_ssh = Some("ok".to_string());
+
+        assert!(worker_health_is_visible(&state));
+        assert!(state.info_bar_text().contains("LW:OK"));
+        assert!(state.info_bar_text().contains("S→L:OK"));
+        assert!(state.info_bar_text().contains("S→W:OK"));
     }
 
     #[test]
