@@ -501,9 +501,6 @@ class TestFileCleanerCleanStepFiles:
 
     def test_remote_step_file_cleanup_holds_ssh_lock(self, tmp_path, monkeypatch):
         """远程步骤文件清理应在共享 SSH 锁内执行。"""
-        scdoc_dir = tmp_path / "scdoc"
-        scdoc_dir.mkdir()
-        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\xkz_1020\scdoc")
 
         class _ConnectedSSH:
@@ -531,7 +528,7 @@ class TestFileCleanerCleanStepFiles:
             ssh = _ConnectedSSH(lock)
             cleaner = FileCleaner(state, lambda: ssh, ssh_lock=lock)
 
-            cleaner.clean_step_files("sc", config_name=2)
+            cleaner.clean_step_files("transfer", config_name=2)
 
             assert ssh.delete_calls_saw_lock == [True]
             assert lock.entries == 1
@@ -618,6 +615,43 @@ class TestFileCleanerCleanStepFiles:
 
             assert requested_ids == ["WS-B"]
             assert ssh.deleted == ["E:/ws_b/msh/model_gen4_2.msh.h5"]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_deletes_remote_scdoc_only_for_transfer(self, tmp_path, monkeypatch):
+        """clean all 不应把 SC 和 Transfer 的远程 SCDOC 重复清理。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\remote\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\result")
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            ssh = _ConnectedSSH()
+            cleaner = FileCleaner(state, lambda: ssh)
+
+            cleaner.clean_step_files("all", config_name=2)
+
+            remote_scdoc = "D:/remote/scdoc/model_gen4_2.scdoc"
+            assert ssh.deleted.count(remote_scdoc) == 1
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

@@ -371,7 +371,7 @@ class FileCleaner:
         """清理单个步骤的远程文件。"""
         remote_patterns = {
             "sw":       None,
-            "sc":       ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]]),
+            "sc":       None,
             "transfer": ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]]),
             "meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["meshing"]]),
             "solver":   ("result_dir", [STEP_FILE_PATTERNS["solver"], STEP_FILE_PATTERNS["solverdata"]]),
