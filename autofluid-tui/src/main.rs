@@ -438,8 +438,10 @@ fn handle_command_result_refs(
             daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
         }
         command::CommandResult::StartWorkers => {
-            // worker start：启动本地 Worker 进程和 SSH 隧道
-            worker.start_workers(project_dir, log_buffer);
+            // worker start：先建立 SSH 隧道，再让 daemon 验证远端 SSH，最后启动本地 Worker。
+            worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+                worker_mgr::prepare_remote_workers(ipc, rt, buffer)
+            });
         }
         command::CommandResult::StopWorkers => {
             // worker stop：发送 IPC 停止命令后停止本地进程
@@ -461,7 +463,7 @@ fn handle_command_result_refs(
         command::CommandResult::RestartWorkers => {
             // worker restart：先停止再启动
             if ipc.is_connected() {
-                match rt.block_on(ipc.worker_restart()) {
+                match rt.block_on(ipc.worker_stop()) {
                     Ok(resp) if resp.is_ok() => {
                         log_buffer.push_info(format!("✅ {}", resp.message));
                     }
@@ -473,7 +475,10 @@ fn handle_command_result_refs(
                     }
                 }
             }
-            worker.restart_workers(project_dir, log_buffer);
+            worker.stop_workers(log_buffer);
+            worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+                worker_mgr::prepare_remote_workers(ipc, rt, buffer)
+            });
         }
         command::CommandResult::None => {}
     }

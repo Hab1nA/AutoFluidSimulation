@@ -917,11 +917,23 @@ class PipelineDaemon:
                     results["ssh_checks"][ws_id] = f"error: {e}"
                     logger.warning("[Worker] 工作站 %s SSH 连通检查失败: %s", ws_id, e)
 
+        ssh_checks = results["ssh_checks"]
+        failed_ssh_checks = {
+            ws_id: status
+            for ws_id, status in ssh_checks.items()
+            if status != "ok"
+        }
+        if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
+            logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
+            return False, results, f"SSH 连通检查全部失败: {ssh_checks}"
+
         # 清除旧的在线 worker 标记（允许重新注册）
         self.local_worker_registry.clear_online_workers()
         results["registry_ready"] = True
 
         logger.info("[Worker] worker_start 完成: %s", results)
+        if failed_ssh_checks:
+            return True, results, f"部分工作站 SSH 连通检查失败: {failed_ssh_checks}"
         return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
 
     def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:

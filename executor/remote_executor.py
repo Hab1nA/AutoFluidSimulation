@@ -877,8 +877,9 @@ class RemoteExecutor:
         try:
             flag_file = self._meshing_flag_file(config_name, remote_config)
             mesh_name = get_step_filename("meshing", config_name)
+            msh_dir = str(remote_config["msh_dir"]).replace("\\", "/")
             mesh_file = (
-                f"{str(remote_config['msh_dir']).replace('\\', '/')}/{mesh_name}"
+                f"{msh_dir}/{mesh_name}"
                 if mesh_name
                 else None
             )

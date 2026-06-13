@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
+use crate::utils::run_command_with_timeout;
 
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
@@ -351,7 +352,8 @@ impl DaemonManager {
         }
     }
 
-    fn launch_server_daemon(&mut self, _project_dir: &str) -> Result<u32, String> {
+    fn launch_server_daemon(&mut self, project_dir: &str) -> Result<u32, String> {
+        Self::run_server_ipc_tunnel_script(project_dir)?;
         Self::run_server_daemon_command(ServerDaemonAction::Start)?;
         Ok(0)
     }
@@ -385,6 +387,55 @@ impl DaemonManager {
         } else {
             Err(format!("ssh 退出状态: {}, {}", output.status, detail))
         }
+    }
+
+    fn run_server_ipc_tunnel_script(project_dir: &str) -> Result<(), String> {
+        let script = PathBuf::from(project_dir)
+            .join("scripts")
+            .join("start_server_ipc_tunnel.ps1");
+        if !script.exists() {
+            return Err(format!("服务器 IPC 隧道脚本不存在: {}", script.display()));
+        }
+
+        let args = vec![
+            "-NoLogo".to_string(),
+            "-NoProfile".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            script.to_string_lossy().to_string(),
+        ];
+
+        let mut last_error = String::new();
+        for powershell in powershell_candidates() {
+            let mut cmd = Command::new(&powershell);
+            cmd.args(&args).current_dir(project_dir);
+            match run_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
+                Ok(output) if output.status.success() => {
+                    log::info!(
+                        "[Daemon] 服务器 IPC 隧道脚本执行成功: powershell={}, script={}",
+                        powershell,
+                        script.display()
+                    );
+                    return Ok(());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let detail = if stderr.is_empty() { stdout } else { stderr };
+                    last_error = if detail.is_empty() {
+                        format!("{} 退出状态: {}", powershell, output.status)
+                    } else {
+                        format!("{} 退出状态: {}, {}", powershell, output.status, detail)
+                    };
+                }
+                Err(e) => {
+                    last_error = format!("执行 {} 失败: {}", powershell, e);
+                }
+            }
+        }
+
+        Err(format!("启动服务器 IPC 隧道失败: {}", last_error))
     }
 }
 
@@ -475,6 +526,13 @@ fn env_non_empty(key: &str) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
+}
+
+fn powershell_candidates() -> Vec<String> {
+    if let Some(value) = env_non_empty("AUTOFLUID_POWERSHELL_EXE") {
+        return vec![value];
+    }
+    vec!["pwsh.exe".to_string(), "powershell.exe".to_string()]
 }
 
 fn default_server_start_command() -> String {
@@ -579,7 +637,10 @@ mod tests {
         let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        let powershell_exe = fake_success_exe(&project_dir, "fake_pwsh");
         let ssh_exe = fake_success_ssh_exe(&project_dir);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
         std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
@@ -592,6 +653,44 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
         std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn launch_starts_server_ipc_tunnel_before_server_daemon() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_server_ipc_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+        let marker = project_dir.join("launch-order.log");
+        let powershell_exe = fake_marker_exe(&project_dir, "fake_pwsh", &marker, "tunnel");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "daemon");
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
+        let mut daemon = DaemonManager::new();
+
+        let result = daemon.launch(project_dir.to_str().expect("utf8 temp path"));
+
+        assert_eq!(result, Ok(0));
+        let order = fs::read_to_string(&marker).expect("read marker file");
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(lines, vec!["tunnel", "daemon"]);
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
     }
@@ -607,7 +706,10 @@ mod tests {
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
 
         let project_dir = unique_temp_project_dir();
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        let powershell_exe = fake_success_exe(&project_dir, "fake_pwsh");
         let ssh_exe = fake_success_ssh_exe(&project_dir);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
         std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
@@ -675,6 +777,7 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
         std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
     }
@@ -724,22 +827,77 @@ mod tests {
     }
 
     fn fake_success_ssh_exe(project_dir: &std::path::Path) -> PathBuf {
+        fake_success_exe(project_dir, "fake_ssh")
+    }
+
+    fn fake_success_exe(project_dir: &std::path::Path, name: &str) -> PathBuf {
         #[cfg(windows)]
         {
-            let path = project_dir.join("fake_ssh.cmd");
-            fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake ssh cmd");
+            let path = project_dir.join(format!("{name}.cmd"));
+            fs::write(&path, "@echo off\r\nexit /b 0\r\n").expect("write fake success cmd");
             path
         }
         #[cfg(not(windows))]
         {
-            let path = project_dir.join("fake_ssh.sh");
-            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake ssh sh");
+            let path = project_dir.join(format!("{name}.sh"));
+            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake success sh");
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = fs::metadata(&path)
-                .expect("fake ssh metadata")
+                .expect("fake success metadata")
                 .permissions();
             permissions.set_mode(0o755);
-            fs::set_permissions(&path, permissions).expect("chmod fake ssh");
+            fs::set_permissions(&path, permissions).expect("chmod fake success");
+            path
+        }
+    }
+
+    fn write_fake_server_ipc_tunnel_script(project_dir: &std::path::Path) {
+        fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_server_ipc_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+    }
+
+    fn fake_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+        label: &str,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho {label}>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake marker cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(format!("{name}.sh"));
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho {label} >> '{}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake marker shell");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake marker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake marker");
             path
         }
     }

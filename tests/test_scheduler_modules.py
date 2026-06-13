@@ -1801,6 +1801,80 @@ class TestPipelineDaemonCleanStep:
         assert runner.disconnect_calls == 1
         assert data["ssh_checks"] == {"default": "ok"}
 
+    def test_worker_start_fails_when_all_workstation_ssh_checks_fail(self, monkeypatch):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", lambda: False)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "default"}],
+        )
+
+        class _SSH:
+            def is_connected(self) -> bool:
+                return False
+
+        class _Runner:
+            def disconnect_ssh(self) -> None:
+                pass
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon.local_worker_registry.register("local-pc-01", {"sw": True})
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is False
+        assert "SSH 连通检查全部失败" in message
+        assert data["ssh_checks"] == {"default": "disconnected"}
+        assert daemon.local_worker_registry.has_online_worker() is True
+
+    def test_worker_start_keeps_partial_success_visible(self, monkeypatch):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", lambda: False)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}],
+        )
+
+        class _SSH:
+            def __init__(self, connected: bool) -> None:
+                self._connected = connected
+
+            def is_connected(self) -> bool:
+                return self._connected
+
+        class _Runner:
+            def disconnect_ssh(self) -> None:
+                pass
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH(workstation_id == "WS-A")
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon.local_worker_registry = LocalWorkerRegistry()
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is True
+        assert "部分工作站 SSH 连通检查失败" in message
+        assert data["ssh_checks"] == {"WS-A": "ok", "WS-B": "disconnected"}
+        assert daemon.local_worker_registry.has_online_worker() is False
+
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon

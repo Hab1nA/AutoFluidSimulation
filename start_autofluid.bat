@@ -5,7 +5,6 @@ set "PROJECT_DIR=%~dp0"
 if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
 set "PYTHON_EXE=%PROJECT_DIR%\.venv\Scripts\python.exe"
-set "PREFLIGHT_PS1=%PROJECT_DIR%\scripts\start_autofluid_preflight.ps1"
 set "WORKER_PS1=%PROJECT_DIR%\scripts\start_local_worker_window.ps1"
 set "CLIENT_PS1=%PROJECT_DIR%\scripts\start_client_window.ps1"
 
@@ -43,7 +42,7 @@ if errorlevel 1 set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powersh
 
 set "PYTHON=%PYTHON_EXE%"
 set "START_CLIENT=1"
-set "START_WORKER=1"
+set "START_WORKER=0"
 set "RUN_CHECK=0"
 
 :parse_args
@@ -66,7 +65,8 @@ if /I "%~1"=="--client-only" (
     echo.
     echo Notes:
     echo   - The daemon runs on the server in current mode.
-    echo   - Local launch will auto-start SSH tunnels for IPC and workstation access.
+    echo   - Default launch starts only the local TUI client.
+    echo   - Use daemon start and worker start inside the TUI to establish tunnels.
     exit /b 0
 ) else (
     echo [ERROR] Unknown argument: %~1
@@ -87,8 +87,6 @@ if "%RUN_CHECK%"=="1" (
     echo PYTHON_EXE=%PYTHON_EXE%
     echo PS_EXE=%PS_EXE%
     echo wt.exe is available.
-    "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PREFLIGHT_PS1%" -Check
-    if errorlevel 1 exit /b 1
     if "%START_WORKER%"=="1" (
         "%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%WORKER_PS1%" -Check
         if errorlevel 1 exit /b 1
@@ -100,13 +98,7 @@ if "%RUN_CHECK%"=="1" (
     exit /b 0
 )
 
-echo [INFO] Validating AutoFluid remote-daemon startup configuration...
-"%PS_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PREFLIGHT_PS1%"
-if errorlevel 1 (
-    echo [ERROR] AutoFluid startup preflight failed.
-    pause
-    exit /b 1
-)
+echo [INFO] Starting AutoFluid local client. Use daemon start in the TUI to start the server daemon.
 
 if "%START_WORKER%"=="1" (
     wt.exe -w new new-tab --title "AutoFluid LocalWorker" --startingDirectory "%PROJECT_DIR%" "%PS_EXE%" -NoLogo -NoProfile -NoExit -ExecutionPolicy Bypass -File "%WORKER_PS1%"

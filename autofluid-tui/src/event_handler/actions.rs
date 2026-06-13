@@ -2,7 +2,7 @@ use crate::daemon_mgr::DaemonManager;
 use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
-use crate::worker_mgr::WorkerManager;
+use crate::worker_mgr::{prepare_remote_workers, WorkerManager};
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_confirm_result(
@@ -56,7 +56,7 @@ pub fn handle_confirm_result(
         }
         command::CommandResult::RestartWorkers => {
             if ipc.is_connected() {
-                match rt.block_on(ipc.worker_restart()) {
+                match rt.block_on(ipc.worker_stop()) {
                     Ok(resp) if resp.is_ok() => {
                         log_buffer.push_info(format!("✅ {}", resp.message));
                     }
@@ -68,7 +68,10 @@ pub fn handle_confirm_result(
                     }
                 }
             }
-            worker.restart_workers(project_dir, log_buffer);
+            worker.stop_workers(log_buffer);
+            worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+                prepare_remote_workers(ipc, rt, buffer)
+            });
         }
         _ => {}
     }

@@ -1,3 +1,6 @@
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
 /// 将字符索引转换为字节索引（UTF-8 安全）。
 ///
 /// 用于在 String 中按字符位置插入/删除字符时，
@@ -62,4 +65,36 @@ pub fn format_local_time(fmt: &str) -> String {
         .replace("%H", &format!("{:02}", st.wHour))
         .replace("%M", &format!("{:02}", st.wMinute))
         .replace("%S", &format!("{:02}", st.wSecond))
+}
+
+pub fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动命令失败: {}", e))?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("读取命令输出失败: {}", e));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!("命令执行超时 ({}s)", timeout.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!("检查命令状态失败: {}", e));
+            }
+        }
+    }
 }

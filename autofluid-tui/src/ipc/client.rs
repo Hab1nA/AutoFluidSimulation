@@ -436,6 +436,7 @@ impl IpcClient {
             .await
     }
 
+    #[allow(dead_code)]
     pub async fn worker_restart(&mut self) -> Result<IpcResponse, String> {
         self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_RESTART))
             .await

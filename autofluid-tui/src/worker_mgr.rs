@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
 
+use crate::ipc::client::IpcClient;
 use crate::state::LogBuffer;
+use crate::utils::run_command_with_timeout;
 
 /// WorkerManager 管理本地 LocalWorker 进程和 SSH 隧道进程。
 pub struct WorkerManager {
@@ -35,15 +37,37 @@ impl WorkerManager {
     }
 
     /// 启动所有 worker：建立 SSH 隧道 + 启动本地 LocalWorker。
+    #[allow(dead_code)]
     pub fn start_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
+        self.start_workers_with_prepare(project_dir, log_buffer, |_| true)
+    }
+
+    /// 启动所有 worker：建立 SSH 隧道 + 执行 daemon 端准备 + 启动本地 LocalWorker。
+    pub fn start_workers_with_prepare<F>(
+        &mut self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+        prepare_remote_workers: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut LogBuffer) -> bool,
+    {
         log::info!("[Worker] 开始启动 Worker 进程");
 
         // 1. 启动工作站 SSH 反向隧道
         if !self.start_tunnel(project_dir, log_buffer) {
-            log_buffer.push_info("⚠️ SSH 隧道启动失败，继续尝试启动本地 Worker".to_string());
+            log_buffer.push_info("❌ SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+            return false;
         }
 
-        // 2. 启动本地 LocalWorker 进程
+        // 2. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
+        if !prepare_remote_workers(log_buffer) {
+            log_buffer
+                .push_info("❌ daemon 端 Worker 准备失败，已停止本地 Worker 启动".to_string());
+            return false;
+        }
+
+        // 3. 启动本地 LocalWorker 进程
         if !self.start_local_worker(project_dir, log_buffer) {
             log_buffer.push_info("❌ 本地 Worker 启动失败".to_string());
             return false;
@@ -75,6 +99,7 @@ impl WorkerManager {
     }
 
     /// 重启所有 worker：先停止再启动。
+    #[allow(dead_code)]
     pub fn restart_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
         log::info!("[Worker] 开始重启 Worker 进程");
         self.stop_workers(log_buffer);
@@ -114,7 +139,7 @@ impl WorkerManager {
             return false;
         }
 
-        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
+        let python = resolve_python_exe(project_dir);
         log::info!(
             "[Worker] 启动本地 LocalWorker: python={}, script={}",
             python,
@@ -227,7 +252,8 @@ impl WorkerManager {
             tunnel_script.display()
         );
 
-        let mut cmd = Command::new("powershell");
+        let powershell = resolve_powershell_exe();
+        let mut cmd = Command::new(&powershell);
         cmd.args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -244,13 +270,27 @@ impl WorkerManager {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        match cmd.spawn() {
-            Ok(child) => {
-                let pid = child.id();
-                log::info!("[Worker] SSH 反向隧道已启动: pid={}", pid);
-                log_buffer.push_info(format!("✅ SSH 反向隧道已启动 (PID: {})", pid));
-                self.tunnel_process = Some(child);
+        match run_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
+            Ok(output) if output.status.success() => {
+                log::info!(
+                    "[Worker] SSH 反向隧道脚本已确认可达: powershell={}",
+                    powershell
+                );
+                log_buffer.push_info("✅ SSH 反向隧道已建立并通过连通性检查".to_string());
                 true
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                let message = if detail.is_empty() {
+                    format!("PowerShell 退出状态: {}", output.status)
+                } else {
+                    format!("PowerShell 退出状态: {}, {}", output.status, detail)
+                };
+                log::error!("[Worker] 启动 SSH 反向隧道失败: {}", message);
+                log_buffer.push_info(format!("⚠️ 启动 SSH 隧道失败: {}", message));
+                false
             }
             Err(e) => {
                 log::error!("[Worker] 启动 SSH 反向隧道失败: {}", e);
@@ -310,6 +350,66 @@ impl WorkerManager {
         }
         true
     }
+}
+
+fn resolve_python_exe(project_dir: &str) -> String {
+    let project_python = PathBuf::from(project_dir)
+        .join(".venv")
+        .join("Scripts")
+        .join("python.exe");
+    if project_python.exists() {
+        return project_python.to_string_lossy().to_string();
+    }
+    std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string())
+}
+
+pub fn prepare_remote_workers(
+    ipc: &mut IpcClient,
+    rt: &tokio::runtime::Runtime,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    if !ipc.is_connected() {
+        log_buffer.push_info("❌ 未连接到后台引擎，无法准备 daemon 端 Worker".to_string());
+        return false;
+    }
+    log_buffer.push_info("🔧 正在请求 daemon 验证工作站 SSH 连通性...".to_string());
+    match rt.block_on(ipc.worker_start()) {
+        Ok(resp) if resp.is_ok() => {
+            log_buffer.push_info(format!("✅ {}", resp.message));
+            log_worker_ssh_checks(&resp.data, log_buffer);
+            true
+        }
+        Ok(resp) => {
+            log_buffer.push_info(format!("❌ {}", resp.message));
+            log_worker_ssh_checks(&resp.data, log_buffer);
+            false
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 通信失败: {}", e));
+            false
+        }
+    }
+}
+
+fn log_worker_ssh_checks(data: &serde_json::Value, log_buffer: &mut LogBuffer) {
+    let Some(checks) = data.get("ssh_checks").and_then(|value| value.as_object()) else {
+        return;
+    };
+    for (workstation_id, status) in checks {
+        let status_text = status.as_str().unwrap_or("unknown");
+        if status_text == "ok" {
+            log_buffer.push_info(format!("  ✅ 工作站 {workstation_id}: SSH ok"));
+        } else {
+            log_buffer.push_info(format!("  ❌ 工作站 {workstation_id}: SSH {status_text}"));
+        }
+    }
+}
+
+fn resolve_powershell_exe() -> String {
+    std::env::var("AUTOFLUID_POWERSHELL_EXE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "powershell".to_string())
 }
 
 impl Drop for WorkerManager {
@@ -394,5 +494,112 @@ mod tests {
         let mut wm = WorkerManager::new();
         assert!(!wm.is_worker_running());
         assert!(!wm.is_tunnel_running());
+    }
+
+    #[test]
+    fn start_workers_with_prepare_runs_tunnel_then_daemon_prepare_then_local_worker() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-test-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_workstation_reverse_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+        std::fs::write(project_dir.join("main.py"), "print('worker')").expect("write main.py");
+        let marker = project_dir.join("worker-order.log");
+        let powershell_exe = fake_marker_exe(&project_dir, "fake_pwsh", &marker, "tunnel");
+        let python_exe = fake_marker_exe(&project_dir, "fake_python", &marker, "worker");
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("PYTHON", &python_exe);
+
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let result = wm.start_workers_with_prepare(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            |buffer| {
+                buffer.push_info("daemon prepare".to_string());
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&marker)
+                    .and_then(|mut file| {
+                        use std::io::Write;
+                        writeln!(file, "daemon")
+                    })
+                    .expect("write daemon marker");
+                true
+            },
+        );
+
+        assert!(result);
+        let order = wait_for_marker_lines(&marker, 3);
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(lines, vec!["tunnel", "daemon", "worker"]);
+
+        let _ = wm.stop_workers(&mut log_buffer);
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    fn wait_for_marker_lines(marker: &std::path::Path, expected_lines: usize) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Ok(order) = std::fs::read_to_string(marker) {
+                if order.lines().count() >= expected_lines {
+                    return order;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return std::fs::read_to_string(marker).unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn fake_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+        label: &str,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho {label}>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake marker cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(format!("{name}.sh"));
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\necho {label} >> '{}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake marker shell");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake marker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake marker");
+            path
+        }
     }
 }

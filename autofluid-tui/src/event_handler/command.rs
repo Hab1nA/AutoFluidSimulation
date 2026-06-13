@@ -373,18 +373,9 @@ async fn cmd_worker_start(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> Co
         log_buffer.push_info("❌ 未连接到后台引擎".to_string());
         return CommandResult::None;
     }
-    log_buffer.push_info("🔧 正在启动 Worker（验证 SSH 连通性、准备注册表）...".to_string());
-    match ipc.worker_start().await {
-        Ok(resp) if resp.is_ok() => {
-            log_buffer.push_info(format!("✅ {}", resp.message));
-        }
-        Ok(resp) => {
-            log_buffer.push_info(format!("❌ {}", resp.message));
-        }
-        Err(e) => {
-            log_buffer.push_info(format!("❌ 通信失败: {}", e));
-        }
-    }
+    log_buffer.push_info(
+        "🔧 正在启动 Worker（建立 SSH 隧道、验证连通性、启动本地 Worker）...".to_string(),
+    );
     CommandResult::StartWorkers
 }
 
