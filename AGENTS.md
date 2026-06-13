@@ -34,6 +34,19 @@ Command forms:
 - Mypy: `.venv\Scripts\python.exe -m mypy`
 - Ruff: `.venv\Scripts\python.exe -m ruff`
 
+## Server File Handling
+
+For this project, never edit tracked source code directly on the server. Make
+all code changes in the local Windows checkout first, then use a local commit
+to trigger the configured server-side hook/pull workflow. Directly patching
+tracked files on the server creates dirty working trees and version conflicts.
+
+The only exception is server-only environment or runtime files that are ignored
+by the server repository's `.gitignore`, such as machine-local `.env` files,
+secrets, logs, caches, or deployment-specific runtime state. Those ignored
+environment files may be edited directly on the server when the task requires
+it.
+
 ## Source Instructions
 
 - Python rules: `.github/instructions/python.instructions.md`
