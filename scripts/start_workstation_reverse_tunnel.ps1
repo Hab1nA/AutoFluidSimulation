@@ -1,6 +1,8 @@
 param(
     [switch]$Check,
     [switch]$Monitor,
+    [ValidateSet("Workstation", "LocalWorker")]
+    [string]$TunnelKind = "Workstation",
     [int]$RestartDelaySeconds = 5,
     [int]$MonitorRemotePort = 0
 )
@@ -41,6 +43,11 @@ function Resolve-PowerShellExe {
 }
 
 function Get-TunnelSshTarget {
+    if ($TunnelKind -eq "LocalWorker" -and
+        -not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST)) {
+        return $env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST
+    }
+
     foreach ($candidate in @(
         $env:AUTOFLUID_WORKSTATION_TUNNEL_HOST,
         $env:AUTOFLUID_SERVER_TUNNEL_HOST,
@@ -79,6 +86,13 @@ function Get-EnvInt {
 }
 
 function Get-RemoteBindHost {
+    if ($TunnelKind -eq "LocalWorker") {
+        if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_WORKER_REACHABLE_HOST)) {
+            return $env:AUTOFLUID_WORKER_REACHABLE_HOST
+        }
+        return "127.0.0.1"
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SSH_REACHABLE_HOST)) {
         return $env:AUTOFLUID_SSH_REACHABLE_HOST
     }
@@ -86,10 +100,21 @@ function Get-RemoteBindHost {
 }
 
 function Get-RemoteBindPort {
+    if ($TunnelKind -eq "LocalWorker") {
+        return Get-EnvInt -Name "AUTOFLUID_WORKER_SSH_PORT" -DefaultValue 2223
+    }
+
     return Get-EnvInt -Name "AUTOFLUID_SSH_REACHABLE_PORT" -DefaultValue 2222
 }
 
 function Get-TargetHost {
+    if ($TunnelKind -eq "LocalWorker") {
+        if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_HOST)) {
+            return $env:AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_HOST
+        }
+        return "127.0.0.1"
+    }
+
     foreach ($candidate in @(
         $env:AUTOFLUID_WORKSTATION_TUNNEL_TARGET_HOST,
         $env:AUTOFLUID_SSH_HOST
@@ -102,6 +127,10 @@ function Get-TargetHost {
 }
 
 function Get-TargetPort {
+    if ($TunnelKind -eq "LocalWorker") {
+        return Get-EnvInt -Name "AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_PORT" -DefaultValue 22
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_WORKSTATION_TUNNEL_TARGET_PORT)) {
         return Get-EnvInt -Name "AUTOFLUID_WORKSTATION_TUNNEL_TARGET_PORT" -DefaultValue 22
     }
@@ -158,10 +187,11 @@ function Get-TunnelLogPaths {
         [int]$RemotePort
     )
 
+    $tunnelName = if ($TunnelKind -eq "LocalWorker") { "local-worker" } else { "workstation" }
     return @{
-        Stdout = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.out.log"
-        Stderr = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.err.log"
-        Supervisor = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-workstation-tunnel-${RemotePort}.supervisor.log"
+        Stdout = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.out.log"
+        Stderr = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.err.log"
+        Supervisor = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.supervisor.log"
     }
 }
 
@@ -266,7 +296,8 @@ function Get-ExistingTunnelMonitorProcess {
             $_.ProcessId -ne $PID `
                 -and $_.CommandLine -match $scriptPattern `
                 -and $_.CommandLine -match '(^|\s)-Monitor(\s|$)' `
-                -and $_.CommandLine -match "(^|\s)$RemotePort(\s|$)"
+                -and (($_.CommandLine -match "(^|\s)-TunnelKind\s+$TunnelKind(\s|$)") -or ($TunnelKind -eq "Workstation" -and $_.CommandLine -notmatch '(^|\s)-TunnelKind(\s|$)')) `
+                -and $_.CommandLine -match "(^|\s)-MonitorRemotePort\s+$RemotePort(\s|$)"
         } |
         Select-Object -First 1
 }
@@ -289,6 +320,7 @@ function Start-ReverseTunnelSupervisor {
         "-ExecutionPolicy", "Bypass",
         "-File", $scriptPath,
         "-Monitor",
+        "-TunnelKind", $TunnelKind,
         "-MonitorRemotePort", $RemotePort,
         "-RestartDelaySeconds", $RestartDelaySeconds
     )
@@ -349,10 +381,11 @@ $remoteHost = Get-RemoteBindHost
 $remotePort = Get-RemoteBindPort
 $targetHost = Get-TargetHost
 $targetPort = Get-TargetPort
+$tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Workstation" }
 
-Write-Host "Workstation tunnel SSH target: $tunnelTarget"
-Write-Host "Workstation tunnel remote endpoint: ${remoteHost}:${remotePort}"
-Write-Host "Workstation tunnel target endpoint: ${targetHost}:${targetPort}"
+Write-Host "$tunnelLabel tunnel SSH target: $tunnelTarget"
+Write-Host "$tunnelLabel tunnel remote endpoint: ${remoteHost}:${remotePort}"
+Write-Host "$tunnelLabel tunnel target endpoint: ${targetHost}:${targetPort}"
 
 if ($Monitor) {
     Start-ReverseTunnelMonitor `
@@ -366,7 +399,7 @@ if ($Monitor) {
 }
 
 if (-not (Test-TcpEndpoint -HostName $targetHost -Port $targetPort)) {
-    throw "Workstation SSH target is not reachable from this machine: ${targetHost}:${targetPort}"
+    throw "$tunnelLabel SSH target is not reachable from this machine: ${targetHost}:${targetPort}"
 }
 
 if (Test-RemoteTunnelEndpoint `
@@ -374,12 +407,12 @@ if (Test-RemoteTunnelEndpoint `
     -TunnelTarget $tunnelTarget `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort) {
-    Write-Host "AutoFluid workstation reverse SSH tunnel is already reachable; reuse the existing tunnel."
+    Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel is already reachable; reuse the existing tunnel."
     exit 0
 }
 
 if ($Check) {
-    throw "AutoFluid workstation reverse SSH tunnel is not reachable on ${remoteHost}:${remotePort}."
+    throw "AutoFluid $tunnelLabel reverse SSH tunnel is not reachable on ${remoteHost}:${remotePort}."
 }
 
 $process = Start-ReverseTunnelSupervisor -RemotePort $remotePort
@@ -390,11 +423,11 @@ if (-not (Wait-RemoteTunnelEndpoint `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort)) {
     $detail = Get-TunnelStartupDetail -RemotePort $remotePort
-    throw "AutoFluid workstation reverse SSH tunnel supervisor started but did not become reachable. $detail"
+    throw "AutoFluid $tunnelLabel reverse SSH tunnel supervisor started but did not become reachable. $detail"
 }
 
 $processId = $process.ProcessId
 if ($null -eq $processId) {
     $processId = $process.Id
 }
-Write-Host "Started AutoFluid workstation reverse SSH tunnel supervisor with PID $processId."
+Write-Host "Started AutoFluid $tunnelLabel reverse SSH tunnel supervisor with PID $processId."

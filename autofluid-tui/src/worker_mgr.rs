@@ -55,19 +55,25 @@ impl WorkerManager {
         log::info!("[Worker] 开始启动 Worker 进程");
 
         // 1. 启动工作站 SSH 反向隧道
-        if !self.start_tunnel(project_dir, log_buffer) {
-            log_buffer.push_info("❌ SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+        if !self.start_tunnel(project_dir, log_buffer, "Workstation") {
+            log_buffer.push_info("❌ 工作站 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
             return false;
         }
 
-        // 2. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
+        // 2. 启动服务器到本机的 SSH 反向隧道
+        if !self.start_tunnel(project_dir, log_buffer, "LocalWorker") {
+            log_buffer.push_info("❌ 本机 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+            return false;
+        }
+
+        // 3. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
         if !prepare_remote_workers(log_buffer) {
             log_buffer
                 .push_info("❌ daemon 端 Worker 准备失败，已停止本地 Worker 启动".to_string());
             return false;
         }
 
-        // 3. 启动本地 LocalWorker 进程
+        // 4. 启动本地 LocalWorker 进程
         if !self.start_local_worker(project_dir, log_buffer) {
             log_buffer.push_info("❌ 本地 Worker 启动失败".to_string());
             return false;
@@ -149,7 +155,19 @@ impl WorkerManager {
         let mut cmd = Command::new(&python);
         cmd.arg(&worker_script)
             .arg("--worker")
-            .current_dir(project_dir);
+            .current_dir(project_dir)
+            .env(
+                "AUTOFLUID_WORKER_REACHABLE_HOST",
+                env_or_default("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1"),
+            )
+            .env(
+                "AUTOFLUID_WORKER_SSH_PORT",
+                env_or_default("AUTOFLUID_WORKER_SSH_PORT", "2223"),
+            )
+            .env(
+                "AUTOFLUID_WORKER_CONNECTIVITY_MODE",
+                env_or_default("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel"),
+            );
 
         #[cfg(target_os = "windows")]
         {
@@ -227,8 +245,13 @@ impl WorkerManager {
         true
     }
 
-    /// 启动工作站 SSH 反向隧道。
-    fn start_tunnel(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
+    /// 启动指定方向的 SSH 反向隧道。
+    fn start_tunnel(
+        &mut self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+        tunnel_kind: &str,
+    ) -> bool {
         // 如果已有隧道在运行，先停止
         if self.is_tunnel_running() {
             log_buffer.push_info("⚠️ SSH 隧道已在运行中".to_string());
@@ -260,6 +283,8 @@ impl WorkerManager {
             "Bypass",
             "-File",
             &tunnel_script.to_string_lossy(),
+            "-TunnelKind",
+            tunnel_kind,
         ])
         .current_dir(project_dir);
 
@@ -273,10 +298,14 @@ impl WorkerManager {
         match run_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
             Ok(output) if output.status.success() => {
                 log::info!(
-                    "[Worker] SSH 反向隧道脚本已确认可达: powershell={}",
+                    "[Worker] {} SSH 反向隧道脚本已确认可达: powershell={}",
+                    tunnel_kind,
                     powershell
                 );
-                log_buffer.push_info("✅ SSH 反向隧道已建立并通过连通性检查".to_string());
+                log_buffer.push_info(format!(
+                    "✅ {} SSH 反向隧道已建立并通过连通性检查",
+                    tunnel_kind
+                ));
                 true
             }
             Ok(output) => {
@@ -412,6 +441,13 @@ fn resolve_powershell_exe() -> String {
         .unwrap_or_else(|| "powershell".to_string())
 }
 
+fn env_or_default(name: &str, default: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 impl Drop for WorkerManager {
     fn drop(&mut self) {
         // 确保子进程在 WorkerManager 被丢弃时被清理
@@ -497,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workers_with_prepare_runs_tunnel_then_daemon_prepare_then_local_worker() {
+    fn start_workers_with_prepare_runs_both_tunnels_then_daemon_prepare_then_local_worker() {
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-test-{}",
             crate::generate_request_id()
@@ -512,10 +548,13 @@ mod tests {
         .expect("write tunnel script");
         std::fs::write(project_dir.join("main.py"), "print('worker')").expect("write main.py");
         let marker = project_dir.join("worker-order.log");
-        let powershell_exe = fake_marker_exe(&project_dir, "fake_pwsh", &marker, "tunnel");
-        let python_exe = fake_marker_exe(&project_dir, "fake_python", &marker, "worker");
+        let powershell_exe = fake_argument_marker_exe(&project_dir, "fake_pwsh", &marker);
+        let python_exe = fake_worker_env_marker_exe(&project_dir, "fake_python", &marker);
         std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
         std::env::set_var("PYTHON", &python_exe);
+        std::env::set_var("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1");
+        std::env::set_var("AUTOFLUID_WORKER_SSH_PORT", "2223");
+        std::env::set_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel");
 
         let mut wm = WorkerManager::new();
         let mut log_buffer = LogBuffer::new();
@@ -538,13 +577,19 @@ mod tests {
         );
 
         assert!(result);
-        let order = wait_for_marker_lines(&marker, 3);
+        let order = wait_for_marker_lines(&marker, 4);
         let lines: Vec<&str> = order.lines().collect();
-        assert_eq!(lines, vec!["tunnel", "daemon", "worker"]);
+        assert!(lines[0].contains("-TunnelKind Workstation"));
+        assert!(lines[1].contains("-TunnelKind LocalWorker"));
+        assert_eq!(lines[2], "daemon");
+        assert_eq!(lines[3], "worker 127.0.0.1 2223 reverse_tunnel");
 
         let _ = wm.stop_workers(&mut log_buffer);
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         std::env::remove_var("PYTHON");
+        std::env::remove_var("AUTOFLUID_WORKER_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_WORKER_SSH_PORT");
+        std::env::remove_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE");
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
@@ -563,11 +608,10 @@ mod tests {
         }
     }
 
-    fn fake_marker_exe(
+    fn fake_argument_marker_exe(
         project_dir: &std::path::Path,
         name: &str,
         marker: &std::path::Path,
-        label: &str,
     ) -> PathBuf {
         #[cfg(windows)]
         {
@@ -575,30 +619,61 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "@echo off\r\necho {label}>>\"{}\"\r\nexit /b 0\r\n",
+                    "@echo off\r\necho %*>>\"{}\"\r\nexit /b 0\r\n",
                     marker.display()
                 ),
             )
-            .expect("write fake marker cmd");
+            .expect("write fake argument marker exe");
             path
         }
+
         #[cfg(not(windows))]
         {
-            let path = project_dir.join(format!("{name}.sh"));
+            let path = project_dir.join(name);
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\necho {label} >> '{}'\nexit 0\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
                     marker.display()
                 ),
             )
-            .expect("write fake marker shell");
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&path)
-                .expect("fake marker metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("chmod fake marker");
+            .expect("write fake argument marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_worker_env_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake worker env marker exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake worker env marker exe");
+            make_executable(&path);
             path
         }
     }
