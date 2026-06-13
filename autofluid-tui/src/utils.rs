@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -67,6 +68,117 @@ pub fn format_local_time(fmt: &str) -> String {
         .replace("%S", &format!("{:02}", st.wSecond))
 }
 
+pub fn import_project_env(project_dir: &str) -> Result<(), String> {
+    let env_path = PathBuf::from(project_dir).join(".env");
+    let content = match std::fs::read_to_string(&env_path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            ensure_default_server_mode();
+            sync_endpoint_env();
+            return Ok(());
+        }
+        Err(e) => return Err(format!("读取 .env 失败: {}", e)),
+    };
+
+    for (key, value) in parse_env_content(&content) {
+        std::env::set_var(key, value);
+    }
+
+    ensure_default_server_mode();
+    sync_endpoint_env();
+    Ok(())
+}
+
+pub fn resolve_project_dir() -> PathBuf {
+    if let Ok(current_dir) = std::env::current_dir() {
+        if let Some(project_dir) = find_project_dir_from(&current_dir) {
+            return project_dir;
+        }
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(project_dir) = find_project_dir_from(&current_exe) {
+            return project_dir;
+        }
+    }
+    std::env::current_dir().unwrap_or_default()
+}
+
+fn find_project_dir_from(start: &std::path::Path) -> Option<PathBuf> {
+    let mut current = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
+    loop {
+        if current.join("start_daemon.py").is_file()
+            || (current.join(".env").is_file() && current.join("autofluid-tui").is_dir())
+        {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+fn parse_env_content(content: &str) -> Vec<(String, String)> {
+    content.lines().filter_map(parse_env_assignment).collect()
+}
+
+fn parse_env_assignment(raw_line: &str) -> Option<(String, String)> {
+    let mut line = raw_line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("export ") {
+        line = rest.trim_start();
+    }
+
+    let separator = line.find('=')?;
+    let key = line[..separator].trim();
+    if !is_valid_env_key(key) {
+        return None;
+    }
+
+    let mut value = line[separator + 1..].trim().to_string();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+
+    Some((key.to_string(), value))
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn ensure_default_server_mode() {
+    if std::env::var("AUTOFLUID_SERVER_MODE")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+    }
+}
+
+fn sync_endpoint_env() {
+    let ipc_host = std::env::var("AUTOFLUID_IPC_HOST").unwrap_or_default();
+    let server_host = std::env::var("AUTOFLUID_SERVER_HOST").unwrap_or_default();
+    if ipc_host.trim().is_empty() && !server_host.trim().is_empty() {
+        std::env::set_var("AUTOFLUID_IPC_HOST", server_host.trim());
+    } else if server_host.trim().is_empty() && !ipc_host.trim().is_empty() {
+        std::env::set_var("AUTOFLUID_SERVER_HOST", ipc_host.trim());
+    }
+}
+
 pub fn run_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -96,5 +208,51 @@ pub fn run_command_with_timeout(
                 return Err(format!("检查命令状态失败: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_env_content_reads_server_ipc_settings() {
+        let values = parse_env_content(
+            "# comment\n\
+             export AUTOFLUID_SERVER_MODE=server\n\
+             AUTOFLUID_SERVER_HOST=\"127.0.0.1\"\n\
+             AUTOFLUID_IPC_PORT='19527'\n\
+             INVALID KEY=ignored\n",
+        );
+
+        assert_eq!(
+            values,
+            vec![
+                ("AUTOFLUID_SERVER_MODE".to_string(), "server".to_string()),
+                ("AUTOFLUID_SERVER_HOST".to_string(), "127.0.0.1".to_string()),
+                ("AUTOFLUID_IPC_PORT".to_string(), "19527".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn find_project_dir_from_nested_tui_binary_path() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-project-test-{}",
+            crate::generate_request_id()
+        ));
+        let binary_dir = project_dir
+            .join("autofluid-tui")
+            .join("target")
+            .join("release");
+        std::fs::create_dir_all(&binary_dir).expect("create binary dir");
+        std::fs::write(project_dir.join(".env"), "AUTOFLUID_SERVER_MODE=server\n")
+            .expect("write .env");
+
+        let resolved = find_project_dir_from(&binary_dir).expect("resolve project dir");
+
+        assert_eq!(resolved, project_dir);
+
+        let _ = std::fs::remove_dir_all(project_dir);
     }
 }

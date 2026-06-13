@@ -300,10 +300,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    let project_dir = std::env::current_dir()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
+    let project_dir = utils::resolve_project_dir().to_string_lossy().to_string();
+    if let Err(e) = utils::import_project_env(&project_dir) {
+        log::warn!("[TUI] 导入项目环境失败: {}", e);
+    }
 
     let mut ipc = IpcClient::new(None, None);
     let mut state = AppState::new();

@@ -27,7 +27,7 @@ impl DaemonManager {
         }
 
         let daemon_script = PathBuf::from(project_dir).join("start_daemon.py");
-        let python = std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string());
+        let python = local_daemon_python(project_dir);
         log::info!(
             "[Daemon] 准备启动后台引擎: python={}, script={}",
             python,
@@ -535,6 +535,20 @@ fn powershell_candidates() -> Vec<String> {
     vec!["pwsh.exe".to_string(), "powershell.exe".to_string()]
 }
 
+fn local_daemon_python(project_dir: &str) -> String {
+    let venv_python = PathBuf::from(project_dir)
+        .join(".venv")
+        .join("Scripts")
+        .join("python.exe");
+    if venv_python.is_file() {
+        return venv_python.to_string_lossy().to_string();
+    }
+    if let Some(value) = env_non_empty("PYTHON") {
+        return value;
+    }
+    "python".to_string()
+}
+
 fn default_server_start_command() -> String {
     let project_dir = env_non_empty("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
         .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
@@ -595,6 +609,24 @@ mod tests {
 
         assert!(result.is_err());
         assert!(pid_file.exists());
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn local_daemon_python_prefers_project_venv() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("PYTHON", "C:\\wrong-python\\python.exe");
+        let project_dir = unique_temp_project_dir();
+        let python_dir = project_dir.join(".venv").join("Scripts");
+        fs::create_dir_all(&python_dir).expect("create venv scripts dir");
+        let python_exe = python_dir.join("python.exe");
+        fs::write(&python_exe, "").expect("write python marker");
+
+        let resolved = local_daemon_python(project_dir.to_str().expect("utf8 temp path"));
+
+        assert_eq!(resolved, python_exe.to_string_lossy());
+
+        std::env::remove_var("PYTHON");
         let _ = fs::remove_dir_all(project_dir);
     }
 
