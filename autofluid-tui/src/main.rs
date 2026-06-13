@@ -252,7 +252,10 @@ fn wait_for_worker_health_refresh(
 
 fn worker_health_is_visible(state: &AppState) -> bool {
     state.health_info.local_worker_online == Some(true)
-        && state.health_info.server_to_local_ssh.as_deref() == Some("ok")
+        && matches!(
+            state.health_info.server_to_local_ssh.as_deref(),
+            Some("ok" | "disconnected")
+        )
 }
 
 // ====================================================================
@@ -1172,6 +1175,11 @@ mod tests {
         assert!(!worker_health_is_visible(&state));
 
         state.health_info.local_worker_online = Some(true);
+        state.health_info.server_to_local_ssh = Some("disconnected".to_string());
+
+        assert!(worker_health_is_visible(&state));
+        assert!(state.info_bar_text().contains("S→L:断"));
+
         state.health_info.server_to_local_ssh = Some("ok".to_string());
 
         assert!(worker_health_is_visible(&state));

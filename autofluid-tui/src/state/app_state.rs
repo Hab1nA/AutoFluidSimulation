@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+
 use crate::settings::SettingsState;
 use crate::text_buffer::TextBuffer;
 use crate::theme::AppTheme;
@@ -380,33 +383,28 @@ impl AppState {
             .unwrap_or(STATUS_WAITING)
     }
 
+    #[cfg(test)]
     pub fn info_bar_text(&self) -> String {
-        let ipc = ok_label(Some(self.connected));
-        let local_worker = ok_label(self.health_info.local_worker_online);
-        let local_server = if self.health_info.local_ipc_tunnel_direct {
-            "直连"
-        } else {
-            ok_label(self.health_info.local_ipc_tunnel_ok)
-        };
-        let server_local = status_label(self.health_info.server_to_local_ssh.as_deref());
-        let server_workstation =
-            status_label(self.health_info.server_to_workstation_ssh.as_deref());
-        if !self.connected {
-            return format!(
-                "  IPC:{ipc} │ LW:{local_worker} │ L→S:{local_server} │ S→L:{server_local} │ S→W:{server_workstation} │ 引擎:未连接"
-            );
-        }
-        let engine_status = engine_status_display(&self.engine_info.engine_status);
-        let barrier = if self.engine_info.barrier_passed {
-            "已通过"
-        } else {
-            "未通过"
-        };
-        format!(
-            "  IPC:{ipc} │ LW:{local_worker} │ L→S:{local_server} │ S→L:{server_local} │ S→W:{server_workstation} │ 引擎:{} │ 构型:{} │ 屏障:{}",
-            engine_status,
-            self.configs.len(),
-            barrier,
+        self.info_bar_parts()
+            .into_iter()
+            .map(|part| part.text)
+            .collect()
+    }
+
+    pub fn info_bar_line(&self) -> Line<'static> {
+        Line::from(
+            self.info_bar_parts()
+                .into_iter()
+                .map(|part| {
+                    let color = match part.color {
+                        Some(InfoBarColor::Success) => self.theme.success,
+                        Some(InfoBarColor::Error) => self.theme.error,
+                        None => self.theme.gray_5,
+                    };
+                    let style = Style::default().fg(color);
+                    Span::styled(part.text, style)
+                })
+                .collect::<Vec<_>>(),
         )
     }
 
@@ -420,6 +418,51 @@ impl AppState {
             .map(format_uptime)
             .unwrap_or_else(|| "--".to_string());
         format!("启动 {}  运行 {}", started_at, uptime)
+    }
+
+    fn info_bar_parts(&self) -> Vec<InfoBarPart> {
+        let ipc = ok_label(Some(self.connected));
+        let local_worker = ok_label(self.health_info.local_worker_online);
+        let local_server = if self.health_info.local_ipc_tunnel_direct {
+            "直连"
+        } else {
+            ok_label(self.health_info.local_ipc_tunnel_ok)
+        };
+        let server_local = status_label(self.health_info.server_to_local_ssh.as_deref());
+        let server_workstation =
+            status_label(self.health_info.server_to_workstation_ssh.as_deref());
+
+        let mut parts = vec![InfoBarPart::plain("  IPC:")];
+        push_status_part(&mut parts, ipc);
+        parts.push(InfoBarPart::plain(" │ LW:"));
+        push_status_part(&mut parts, local_worker);
+        parts.push(InfoBarPart::plain(" │ L→S:"));
+        push_status_part(&mut parts, local_server);
+        parts.push(InfoBarPart::plain(" │ S→L:"));
+        push_status_part(&mut parts, server_local);
+        parts.push(InfoBarPart::plain(" │ S→W:"));
+        push_status_part(&mut parts, server_workstation);
+        parts.push(InfoBarPart::plain(" │ 引擎:"));
+
+        if !self.connected {
+            parts.push(InfoBarPart::plain("未连接"));
+            return parts;
+        }
+
+        let engine_status = engine_status_display(&self.engine_info.engine_status);
+        parts.push(InfoBarPart::status(engine_status));
+        parts.push(InfoBarPart::plain(format!(
+            " │ 构型:{}",
+            self.configs.len()
+        )));
+        parts.push(InfoBarPart::plain(" │ 屏障:"));
+        let barrier = if self.engine_info.barrier_passed {
+            "已通过"
+        } else {
+            "未通过"
+        };
+        parts.push(InfoBarPart::status(barrier));
+        parts
     }
 
     pub fn clamp_table_scroll(&mut self, visible_height: u16) {
@@ -500,6 +543,40 @@ impl AppState {
         self.ui_mode = UiMode::Normal;
         self.needs_redraw = true;
     }
+}
+
+struct InfoBarPart {
+    text: String,
+    color: Option<InfoBarColor>,
+}
+
+#[derive(Clone, Copy)]
+enum InfoBarColor {
+    Success,
+    Error,
+}
+
+impl InfoBarPart {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            color: None,
+        }
+    }
+
+    fn status(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let color = match text.as_str() {
+            "OK" | "运行中" | "已通过" => Some(InfoBarColor::Success),
+            "断" | "已停止" | "未通过" => Some(InfoBarColor::Error),
+            _ => None,
+        };
+        Self { text, color }
+    }
+}
+
+fn push_status_part(parts: &mut Vec<InfoBarPart>, label: &'static str) {
+    parts.push(InfoBarPart::status(label));
 }
 
 fn ok_label(value: Option<bool>) -> &'static str {
@@ -583,6 +660,27 @@ mod tests {
     }
 
     #[test]
+    fn info_bar_line_colors_status_values_only() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state.engine_info.barrier_passed = false;
+        state.health_info.local_worker_online = Some(true);
+        state.health_info.local_ipc_tunnel_ok = Some(false);
+        state.health_info.server_to_local_ssh = Some("unknown".to_string());
+        state.health_info.server_to_workstation_ssh = Some("disconnected".to_string());
+
+        let line = state.info_bar_line();
+
+        assert_span_color(&line, "OK", Some(state.theme.success));
+        assert_span_color(&line, "断", Some(state.theme.error));
+        assert_span_color(&line, "运行中", Some(state.theme.success));
+        assert_span_color(&line, "未通过", Some(state.theme.error));
+        assert_span_color(&line, "未知", Some(state.theme.gray_5));
+        assert_span_color(&line, " │ 引擎:", Some(state.theme.gray_5));
+    }
+
+    #[test]
     fn info_bar_text_distinguishes_direct_ipc_endpoint() {
         let mut state = AppState::default();
         state.connected = true;
@@ -617,5 +715,14 @@ mod tests {
             state.daemon_runtime_text(),
             "启动 2026-06-13 14:03:21  运行 1m05s"
         );
+    }
+
+    fn assert_span_color(line: &Line<'_>, text: &str, expected: Option<ratatui::style::Color>) {
+        let span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == text)
+            .unwrap_or_else(|| panic!("missing span {text:?}"));
+        assert_eq!(span.style.fg, expected);
     }
 }

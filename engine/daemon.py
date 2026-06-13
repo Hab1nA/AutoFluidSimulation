@@ -1027,19 +1027,16 @@ class PipelineDaemon:
             if callable(online_workers_fn):
                 online_workers = list(online_workers_fn())
 
-        server_to_local_ssh = "unknown"
+        server_to_local_ssh = "disconnected" if online_workers else "unknown"
         for worker in online_workers:
             network = worker.get("network", {})
             if not isinstance(network, dict):
                 continue
             reachable_host = str(network.get("reachable_host") or "").strip()
             ssh_port = network.get("ssh_port")
-            connectivity_mode = str(network.get("connectivity_mode") or "").strip()
             if reachable_host and ssh_port:
                 server_to_local_ssh = "ok"
                 break
-            if connectivity_mode:
-                server_to_local_ssh = "unknown"
 
         workstation_details: dict[str, str] = {}
         runner = getattr(self, "runner", None)

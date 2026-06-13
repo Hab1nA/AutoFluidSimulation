@@ -105,7 +105,7 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
     }
 
 
-def test_local_worker_from_env_uses_ssh_reachable_metadata_fallback(monkeypatch) -> None:
+def test_local_worker_from_env_does_not_reuse_workstation_reachable_metadata(monkeypatch) -> None:
     from engine.local_worker import LocalWorker
 
     monkeypatch.setenv("AUTOFLUID_WORKER_ID", "local-pc-01")
@@ -120,9 +120,7 @@ def test_local_worker_from_env_uses_ssh_reachable_metadata_fallback(monkeypatch)
     worker = LocalWorker.from_env()
 
     assert worker.config.network == {
-        "reachable_host": "127.0.0.1",
-        "connectivity_mode": "reverse_tunnel",
-        "ssh_port": 2222,
+        "ssh_port": 22,
     }
 
 

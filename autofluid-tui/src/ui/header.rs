@@ -17,6 +17,15 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序")
+        .style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center);
+    frame.render_widget(title, inner);
+
     let daemon_text = state.daemon_runtime_text();
     if inner.width > 30 && !daemon_text.is_empty() {
         let max_daemon_width = (inner.width / 3).max(12) as usize;
@@ -36,15 +45,6 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
             .alignment(Alignment::Left);
         frame.render_widget(daemon, daemon_area);
     }
-
-    let title = Paragraph::new("🚀 液氧甲烷火箭发动机仿真总控程序")
-        .style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .alignment(Alignment::Center);
-    frame.render_widget(title, inner);
 
     let time_area = ratatui::layout::Rect {
         x: inner.x + inner.width.saturating_sub(11),
@@ -66,9 +66,8 @@ pub fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, state: &App
 
 pub fn render_info_bar(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
     let theme = &state.theme;
-    let text = state.info_bar_text();
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(theme.gray_5).bg(theme.secondary))
+    let paragraph = Paragraph::new(state.info_bar_line())
+        .style(Style::default().bg(theme.secondary))
         .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
 }

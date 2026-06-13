@@ -148,6 +148,32 @@ def test_dashboard_health_reports_server_to_local_from_online_worker(monkeypatch
     assert health["workstation_ssh_details"] == {"default": "unknown"}
 
 
+def test_dashboard_health_reports_server_to_local_disconnected_without_reachable_metadata(
+    monkeypatch,
+):
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "default"}],
+    )
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register(
+        "local-pc-01",
+        {"sw": True},
+        network={"ssh_port": 22},
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_registry = registry
+    daemon.runner = _Runner({})
+
+    health = daemon._build_health_snapshot()
+
+    assert health["local_worker_online"] is True
+    assert health["server_to_local_ssh"] == "disconnected"
+
+
 def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
     monkeypatch.setattr(
         daemon_module,
