@@ -72,6 +72,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
     daemon.state = _State()
     daemon._pipeline_ever_started = True
     daemon._started_at_epoch = 1_000.0
+    daemon._config_warnings = ["工作站 WS-B 缺少 reachable 配置"]
     daemon.local_worker_registry = None
     daemon.runner = _Runner({"WS-A": _Ssh(True), "WS-B": _Ssh(False)})
     monkeypatch.setattr(daemon_module.time, "time", lambda: 1_065.7)
@@ -119,6 +120,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
                 "connectivity_mode": "direct",
             },
         },
+        "config_warnings": ["工作站 WS-B 缺少 reachable 配置"],
     }
     assert data["logs"]["latest_id"] == 12
     assert handler.calls == [{
@@ -153,6 +155,7 @@ def test_dashboard_health_reports_server_to_local_from_online_worker(monkeypatch
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = registry
     daemon.runner = _Runner({})
+    daemon._config_warnings = []
 
     health = daemon._build_health_snapshot()
 
@@ -181,6 +184,7 @@ def test_dashboard_health_reports_server_to_local_disconnected_without_reachable
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = registry
     daemon.runner = _Runner({})
+    daemon._config_warnings = []
 
     health = daemon._build_health_snapshot()
 
@@ -204,6 +208,7 @@ def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = None
     daemon.runner = _Runner({"WS-A": _TransportOnlySsh(True)})
+    daemon._config_warnings = []
 
     health = daemon._build_health_snapshot()
 
@@ -232,6 +237,7 @@ def test_dashboard_health_reports_last_failed_workstation_target(monkeypatch):
     daemon.local_worker_registry = None
     daemon.runner = _Runner({})
     daemon._last_worker_ssh_checks = {"WS-A": "error: timed out"}
+    daemon._config_warnings = ["工作站 WS-A 在 server 模式下缺少 reachable_host"]
 
     health = daemon._build_health_snapshot()
 
@@ -243,3 +249,4 @@ def test_dashboard_health_reports_last_failed_workstation_target(monkeypatch):
             "connectivity_mode": "direct",
         },
     }
+    assert health["config_warnings"] == ["工作站 WS-A 在 server 模式下缺少 reachable_host"]

@@ -180,6 +180,7 @@ class PipelineDaemon:
         self._alert_watcher_process: subprocess.Popen | None = None
         self._started_at_epoch: float | None = None
         self._last_worker_ssh_checks: dict[str, str] = {}
+        self._config_warnings: list[str] = []
 
         # 运行标志
         self._running = False
@@ -209,6 +210,7 @@ class PipelineDaemon:
         reload_config_from_toml()
         ensure_directories()
         config_warnings = validate_config()
+        self._config_warnings = list(config_warnings)
         for w in config_warnings:
             logger.warning(f"[CONFIG] {w}")
 
@@ -907,6 +909,27 @@ class PipelineDaemon:
         if not worker_id or not task_id:
             return False, None, "缺少 worker_id 或 task_id"
         error = str(params.get("error") or "")
+        if self.state is not None and self.state.get_engine_status() == "stopped":
+            task = self.local_worker_registry.fail_task(
+                task_id,
+                worker_id,
+                "engine stopped",
+            )
+            config_name = task.get("params", {}).get("config_name") if task else None
+            step_name = task.get("step") if task else None
+            if config_name is not None and step_name in {"sw", "sc"}:
+                self.state.set_step_status(
+                    int(config_name),
+                    str(step_name),
+                    STATUS_ERROR,
+                    "engine stopped",
+                )
+            logger.warning(
+                "[LocalWorker] 丢弃 stopped 后到达的任务失败上报: task_id=%s worker_id=%s",
+                task_id,
+                worker_id,
+            )
+            return False, task, "LocalWorker 任务已丢弃: engine stopped"
         task = self.local_worker_registry.fail_task(task_id, worker_id, error)
         return True, task, "LocalWorker 任务失败"
 
@@ -919,6 +942,7 @@ class PipelineDaemon:
         params = params or {}
         results: dict[str, Any] = {
             "ssh_checks": {},
+            "ssh_targets": {},
             "registry_ready": False,
         }
         from engine.config import reload_config_from_toml
@@ -933,13 +957,14 @@ class PipelineDaemon:
         if self.runner is not None:
             for ws in WORKSTATIONS:
                 ws_id = str(ws.get("id", "default"))
+                target = self._workstation_ssh_target(ws)
+                results["ssh_targets"][ws_id] = target
                 try:
                     ssh = self.runner.get_ssh(ws_id)
                     connected = ssh.is_connected()
                     results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
                 except Exception as e:
                     results["ssh_checks"][ws_id] = f"error: {e}"
-                    target = self._workstation_ssh_target(ws)
                     logger.warning(
                         "[Worker] 工作站 %s SSH 连通检查失败 "
                         "(host=%s, port=%s, connectivity_mode=%s): %s",
@@ -959,7 +984,14 @@ class PipelineDaemon:
         if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
             self._last_worker_ssh_checks = dict(ssh_checks)
             logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
-            return False, results, f"SSH 连通检查全部失败: {ssh_checks}"
+            target_summary = ", ".join(
+                f"{ws_id}={target['host']}:{target['port']}({target['connectivity_mode']})"
+                for ws_id, target in results["ssh_targets"].items()
+            )
+            return False, results, (
+                f"SSH 连通检查全部失败: {ssh_checks}; "
+                f"实际检查目标: {target_summary}"
+            )
 
         # 清除旧的在线 worker 标记（允许重新注册）
         self.local_worker_registry.clear_online_workers()
@@ -1113,6 +1145,7 @@ class PipelineDaemon:
             "server_to_workstation_ssh": server_to_workstation_ssh,
             "workstation_ssh_details": workstation_details,
             "workstation_ssh_targets": workstation_targets,
+            "config_warnings": list(getattr(self, "_config_warnings", [])),
         }
 
     @staticmethod

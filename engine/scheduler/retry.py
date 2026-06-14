@@ -67,6 +67,7 @@ class RetryManager:
             True 表示执行成功
         """
         max_retries = ENGINE_CONFIG["max_retries"]
+        last_error_message = ""
 
         for attempt in range(1, int(max_retries) + 1):
             # 检查是否被停止
@@ -106,6 +107,11 @@ class RetryManager:
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
                     return True
                 else:
+                    last_error_message = self._current_error_message(
+                        config_name,
+                        step_name,
+                        execute_func,
+                    )
                     # ★ 检查是否因暂停/停止导致执行失败
                     # （例如 execute_sc_step 在轮询中检测到暂停标志，终止了 SC 进程）
                     if self._guard.mark_paused_if_flagged(config_name, step_name):
@@ -145,6 +151,23 @@ class RetryManager:
                     return False
 
         # 所有重试均失败
-        self.state.set_step_status(config_name, step_name, STATUS_ERROR,
-                                    f"重试 {max_retries} 次后仍然失败")
+        error_message = last_error_message or f"重试 {max_retries} 次后仍然失败"
+        self.state.set_step_status(config_name, step_name, STATUS_ERROR, error_message)
         return False
+
+    def _current_error_message(self, config_name: int, step_name: str, execute_func) -> str:
+        """Return the current step error message if the execute function set one."""
+        owner = getattr(execute_func, "__self__", None)
+        if owner is not None:
+            attr_name = f"last_{step_name}_error"
+            if hasattr(owner, attr_name):
+                return str(getattr(owner, attr_name) or "")
+
+        try:
+            steps = self.state.get_all_steps_for_config(config_name)
+        except (RuntimeError, OSError, KeyError, AttributeError):
+            return ""
+        step = steps.get(step_name, {})
+        if step.get("status") != STATUS_ERROR:
+            return ""
+        return str(step.get("error_message") or "")

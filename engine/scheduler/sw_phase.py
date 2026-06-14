@@ -351,7 +351,13 @@ class SWPhaseHandler:
             if sc_status in (STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR):
                 continue
             if any(
-                status in (STATUS_COMPLETED, STATUS_ERROR)
+                status in (
+                    STATUS_RUNNING,
+                    STATUS_PAUSED,
+                    STATUS_COMPLETED,
+                    STATUS_ERROR,
+                    STATUS_RETRYING,
+                )
                 for status in downstream_statuses.values()
             ):
                 continue

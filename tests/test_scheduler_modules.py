@@ -88,6 +88,35 @@ class TestRetryManager:
         assert result is False
         assert self.state.get_step_status(1, "sc") == STATUS_ERROR
 
+    def test_execute_all_retries_preserves_existing_error_reason(self):
+        """最终失败不应覆盖执行函数写入的具体错误原因。"""
+        def fail_with_reason(cn):
+            self.state.set_step_status(cn, "sc", STATUS_ERROR, "SpaceClaim ready timeout")
+            return False
+
+        result = self.retry_mgr.execute_with_retry(1, "sc", fail_with_reason)
+
+        assert result is False
+        step = self.state.get_all_steps_for_config(1)["sc"]
+        assert step["status"] == STATUS_ERROR
+        assert step["error_message"] == "SpaceClaim ready timeout"
+
+    def test_execute_all_retries_preserves_bound_step_error(self):
+        """执行函数所属对象的 last_<step>_error 应透传到最终 Error。"""
+        class _Executor:
+            last_sc_error = ""
+
+            def run(self, cn):
+                self.last_sc_error = "Bridge exited early"
+                return False
+
+        result = self.retry_mgr.execute_with_retry(1, "sc", _Executor().run)
+
+        assert result is False
+        step = self.state.get_all_steps_for_config(1)["sc"]
+        assert step["status"] == STATUS_ERROR
+        assert step["error_message"] == "Bridge exited early"
+
     def test_execute_stopped_immediately(self):
         """stopped 标志应立即中止执行。"""
         self.stopped.set()
@@ -493,6 +522,74 @@ class TestSWPhaseHandlerFallback:
         handler._enqueue_server_mode_completed_sw([1, 2])
 
         assert sc_queue.qsize() == 0
+
+    def test_server_mode_completed_sw_does_not_requeue_active_downstream(self, monkeypatch):
+        """下游已有进行中状态时，SW 收尾不应让构型回退到 SC 队列。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            def __init__(self):
+                self.status = {
+                    (1, "sc"): STATUS_WAITING,
+                    (1, "transfer"): STATUS_RUNNING,
+                    (2, "sc"): STATUS_WAITING,
+                    (2, "meshing"): STATUS_RETRYING,
+                    (3, "sc"): STATUS_WAITING,
+                    (3, "solver"): STATUS_PAUSED,
+                }
+
+            def get_step_status(self, config_name: int, step_name: str) -> str:
+                return self.status.get((config_name, step_name), STATUS_WAITING)
+
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=object(),
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        handler._enqueue_server_mode_completed_sw([1, 2, 3])
+
+        assert sc_queue.qsize() == 0
+
+    def test_server_mode_completed_sw_enqueues_when_downstream_waiting(self, monkeypatch):
+        """下游均未开始时，SW 收尾仍应正常推入 SC 队列。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            @staticmethod
+            def get_step_status(config_name: int, step_name: str) -> str:
+                return STATUS_WAITING
+
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=object(),
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        handler._enqueue_server_mode_completed_sw([4])
+
+        assert sc_queue.get(timeout=1) == (
+            4,
+            r"C:\AutoFluid\steps\model_gen4.SLDPRT_4.step",
+        )
 
     def test_server_mode_completed_sw_does_not_enqueue_after_stop(self, monkeypatch):
         """收到停止信号后，SW 收尾不应继续推进下游队列。"""
@@ -1944,6 +2041,49 @@ class TestPipelineDaemonCleanStep:
         assert "SSH 连通检查全部失败" in message
         assert data["ssh_checks"] == {"default": "disconnected"}
         assert daemon.local_worker_registry.has_online_worker() is True
+
+    def test_worker_start_failure_reports_effective_ssh_targets(self, monkeypatch):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", lambda: False)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+            }],
+        )
+
+        class _Runner:
+            def disconnect_ssh(self) -> None:
+                pass
+
+            def get_ssh(self, workstation_id: str = "default"):
+                raise TimeoutError("connect timed out")
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon.local_worker_registry = LocalWorkerRegistry()
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is False
+        assert data["ssh_targets"] == {
+            "WS-A": {
+                "host": "127.0.0.1",
+                "port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+            }
+        }
+        assert "WS-A=127.0.0.1:2222(reverse_tunnel)" in message
 
     def test_worker_stop_clears_last_worker_ssh_snapshot(self):
         from engine.daemon import PipelineDaemon

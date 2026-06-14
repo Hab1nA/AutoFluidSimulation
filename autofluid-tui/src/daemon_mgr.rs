@@ -15,8 +15,8 @@ const DAEMON_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
 const IPC_RECONNECT_TIMEOUT_SECS: u64 = 60;
 const IPC_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
-const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(75);
 const SERVER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(150);
+const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = SERVER_DAEMON_START_TIMEOUT;
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
@@ -36,7 +36,7 @@ struct PendingServerStart {
 }
 
 enum ServerStartEvent {
-    Stage(&'static str),
+    Stage(String),
     Done(Result<u32, String>),
 }
 
@@ -495,14 +495,17 @@ impl DaemonManager {
         Self::run_server_ipc_tunnel_script(project_dir)?;
         log::info!("[Daemon] 服务器 IPC 隧道阶段完成，准备启动远端 daemon");
         send_server_start_stage(progress, "服务器 IPC 隧道已就绪，正在启动远端 daemon...");
-        Self::run_server_daemon_command(ServerDaemonAction::Start)
+        Self::run_server_daemon_command(ServerDaemonAction::Start, progress)
     }
 
     fn stop_server_daemon(&mut self) -> Result<(), String> {
-        Self::run_server_daemon_command(ServerDaemonAction::Stop)
+        Self::run_server_daemon_command(ServerDaemonAction::Stop, None)
     }
 
-    fn run_server_daemon_command(action: ServerDaemonAction) -> Result<(), String> {
+    fn run_server_daemon_command(
+        action: ServerDaemonAction,
+        progress: Option<&mpsc::Sender<ServerStartEvent>>,
+    ) -> Result<(), String> {
         let command = ServerDaemonSshCommand::from_env(action)?;
         let args = command.args();
         log::info!(
@@ -510,6 +513,12 @@ impl DaemonManager {
             action.label(),
             command.target
         );
+        if matches!(action, ServerDaemonAction::Start) {
+            send_server_start_stage(
+                progress,
+                format!("远端 daemon 启动命令已发送: target={}", command.target),
+            );
+        }
         let mut cmd = Command::new(&command.ssh_exe);
         cmd.args(&args);
         let output = run_command_with_timeout(&mut cmd, SERVER_DAEMON_COMMAND_TIMEOUT)?;
@@ -531,6 +540,14 @@ impl DaemonManager {
         }
 
         if output.status.success() {
+            if matches!(action, ServerDaemonAction::Start) {
+                let ready_message = if stdout.is_empty() {
+                    "远端 daemon 启动命令已完成，等待本地 IPC 重连...".to_string()
+                } else {
+                    format!("远端 daemon 启动完成: {}", stdout)
+                };
+                send_server_start_stage(progress, ready_message);
+            }
             return Ok(());
         }
 
@@ -610,12 +627,12 @@ fn is_server_mode() -> bool {
         .unwrap_or(false)
 }
 
-fn send_server_start_stage(
-    progress: Option<&mpsc::Sender<ServerStartEvent>>,
-    message: &'static str,
-) {
+fn send_server_start_stage<S>(progress: Option<&mpsc::Sender<ServerStartEvent>>, message: S)
+where
+    S: Into<String>,
+{
     if let Some(sender) = progress {
-        let _ = sender.send(ServerStartEvent::Stage(message));
+        let _ = sender.send(ServerStartEvent::Stage(message.into()));
     }
 }
 
@@ -1077,6 +1094,14 @@ mod tests {
 
         std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
         std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
+
+    #[test]
+    fn server_daemon_command_timeout_covers_remote_readiness_probe() {
+        assert!(
+            SERVER_DAEMON_COMMAND_TIMEOUT >= SERVER_DAEMON_START_TIMEOUT,
+            "SSH command timeout must not expire before the remote readiness probe"
+        );
     }
 
     #[test]
