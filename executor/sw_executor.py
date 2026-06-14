@@ -73,6 +73,7 @@ class SWExecutor:
         self._cleanup_lock = threading.RLock()
         self._first_cleanup_done = False
         self._final_cleanup_done = False
+        self.last_error = ""
 
     def set_control_events(
         self,
@@ -109,11 +110,16 @@ class SWExecutor:
 
     def export_sw_per_config(self, config_name: int) -> bool:
         """在统一 gate 下执行单构型 SW 导出。"""
+        self.last_error = ""
         with self._external_start() as allowed:
             if not allowed:
-                logger.info(f"[SW] 构型{config_name}: 暂停或停止状态下跳过导出")
-                return False
+                return self._fail(f"[SW] 构型{config_name}: 暂停或停止状态下跳过导出")
             return self._export_sw_per_config_admitted(config_name)
+
+    def _fail(self, message: str) -> bool:
+        self.last_error = message
+        logger.error(message)
+        return False
 
     def _export_sw_per_config_admitted(self, config_name: int) -> bool:
         """导出单个构型的 STEP 文件（供 RetryManager 调用）。
@@ -139,8 +145,7 @@ class SWExecutor:
                 pythoncom.CoInitialize()
                 self._com_initialized = True
             except ImportError:
-                logger.error("[SW] pywin32 未安装，无法初始化 COM")
-                return False
+                return self._fail("[SW] pywin32 未安装，无法初始化 COM")
             except Exception:
                 pass  # 已初始化
 
@@ -157,21 +162,18 @@ class SWExecutor:
             try:
                 sw_app = self._connect_sw()
                 if sw_app is None:
-                    logger.error(f"[SW] 构型{config_name}: 无法连接 SolidWorks")
-                    return False
+                    return self._fail(f"[SW] 构型{config_name}: 无法连接 SolidWorks")
                 try:
                     sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
                 except Exception:
                     pass
                 doc = self._open_sw_model(sw_app, sw_model, doc_type)
                 if doc is None:
-                    logger.error(f"[SW] 构型{config_name}: 无法打开模型")
-                    return False
+                    return self._fail(f"[SW] 构型{config_name}: 无法打开模型")
                 if not self._import_design_table_with_retry(
                     doc, sw_app, excel_path, sw_model
                 ):
-                    logger.error(f"[SW] 构型{config_name}: 设计表导入失败")
-                    return False
+                    return self._fail(f"[SW] 构型{config_name}: 设计表导入失败")
                 self._cached_sw_app = sw_app
                 self._cached_doc = doc
                 cache_ready = True
@@ -181,6 +183,7 @@ class SWExecutor:
                     f"[SW] 构型{config_name}: SW 连接失败 "
                     f"({type(e).__name__}: {e})", exc_info=True
                 )
+                self.last_error = f"[SW] 构型{config_name}: SW 连接失败 ({type(e).__name__}: {e})"
                 return False
             finally:
                 if not cache_ready:
@@ -199,19 +202,16 @@ class SWExecutor:
 
         # ---- 校验 STEP 目录 ----
         if not step_dir:
-            logger.error("[SW] 未配置 STEP 输出目录 (step_dir)")
-            return False
+            return self._fail("[SW] 未配置 STEP 输出目录 (step_dir)")
         try:
             os.makedirs(step_dir, exist_ok=True)
         except OSError as e:
-            logger.error(f"[SW] 无法创建 STEP 输出目录: {step_dir}: {e}")
-            return False
+            return self._fail(f"[SW] 无法创建 STEP 输出目录: {step_dir}: {e}")
 
         # ---- 检查文件是否已存在（断点续传 / 之前批次已成功） ----
         filename = get_step_filename("sw", config_name)
         if not filename:
-            logger.error(f"[SW] 构型{config_name}: 无法生成 STEP 文件名")
-            return False
+            return self._fail(f"[SW] 构型{config_name}: 无法生成 STEP 文件名")
         filepath = os.path.join(step_dir, filename)
         if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
             logger.info(
@@ -221,10 +221,12 @@ class SWExecutor:
 
         # ---- 暂停/停止检查 ----
         if self._paused_event is not None and self._paused_event.is_set():
-            logger.info(f"[SW] 构型{config_name}: 暂停标志已置位，中止导出")
+            self.last_error = f"[SW] 构型{config_name}: 暂停标志已置位，中止导出"
+            logger.info(self.last_error)
             return False
         if self._stopped_event is not None and self._stopped_event.is_set():
-            logger.info(f"[SW] 构型{config_name}: 停止标志已置位，中止导出")
+            self.last_error = f"[SW] 构型{config_name}: 停止标志已置位，中止导出"
+            logger.info(self.last_error)
             return False
 
         # ---- 切换构型 → 重建 → 导出 ----
@@ -236,11 +238,10 @@ class SWExecutor:
         try:
             doc.ShowConfiguration2(cn_str)
         except Exception as e:
-            logger.error(
+            return self._fail(
                 f"[SW] 构型{config_name}: ShowConfiguration2 失败 "
                 f"({type(e).__name__}: {e})"
             )
-            return False
 
         # 重建
         ext = doc.Extension
@@ -292,17 +293,19 @@ class SWExecutor:
                 )
                 return True
             else:
-                logger.warning(
+                self.last_error = (
                     f"[SW] 构型{config_name}: SaveAs 返回 {status}，"
                     f"文件存在={os.path.exists(filepath)} "
                     f"(Errors={save_errors.value})"
                 )
+                logger.warning(self.last_error)
                 return False
         except Exception as e:
-            logger.error(
+            self.last_error = (
                 f"[SW] 构型{config_name}: SaveAs 异常 "
                 f"({type(e).__name__}: {e})"
             )
+            logger.error(self.last_error)
             # ★ 清理缓存的 COM 连接，下次重试时重新建立
             self.disconnect_sw_cached()
             return False

@@ -66,6 +66,7 @@ class TaskRunner:
         self._stopped_event: threading.Event | None = None
         self._pipeline_control: PipelineControl | None = None
         self._local_worker_adapter = local_worker_adapter
+        self.last_sw_error = ""
         self.last_sc_error = ""
 
         # ---- 子执行器 ----
@@ -188,8 +189,9 @@ class TaskRunner:
 
     def execute_sw_per_config(self, config_name: int) -> bool:
         """执行单个构型的 SW STEP 导出（委托给 SWExecutor）。"""
+        self.last_sw_error = ""
         if self._should_delegate_local_steps():
-            return bool(
+            ok = bool(
                 self._local_worker_adapter.execute_sw_per_config(
                     config_name,
                     timeout_seconds=float(
@@ -197,7 +199,19 @@ class TaskRunner:
                     ),
                 )
             )
-        return self._sw_executor.export_sw_per_config(config_name)
+            if not ok:
+                self.last_sw_error = str(
+                    getattr(self._local_worker_adapter, "last_error", "")
+                    or "LocalWorker SW 任务失败"
+                )
+            return ok
+        ok = self._sw_executor.export_sw_per_config(config_name)
+        if not ok:
+            self.last_sw_error = str(
+                getattr(self._sw_executor, "last_error", "")
+                or "SW 步骤失败"
+            )
+        return ok
 
     def is_sw_in_flight(self, config_name: int | None = None) -> bool:
         """Return True while a delegated SW LocalWorker task is pending or running."""

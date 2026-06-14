@@ -36,6 +36,52 @@ def test_task_runner_delegates_sw_and_sc_to_local_worker_in_server_mode(monkeypa
     assert calls == [("sw_config", 3, 123), ("sc", 7, 45)]
 
 
+def test_task_runner_captures_delegated_sw_failure_reason(monkeypatch) -> None:
+    from engine.config import ENGINE_CONFIG
+    from engine.task_runner import TaskRunner
+
+    class _Adapter:
+        last_error = "SolidWorks connection failed"
+
+        def execute_sw_per_config(
+            self,
+            config_name: int,
+            timeout_seconds: float = 3600.0,
+        ) -> bool:
+            assert config_name == 3
+            assert timeout_seconds == 123
+            return False
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = _Adapter()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setitem(ENGINE_CONFIG, "sw_macro_timeout", 123)
+
+    assert runner.execute_sw_per_config(3) is False
+    assert runner.last_sw_error == "SolidWorks connection failed"
+
+
+def test_task_runner_captures_local_sw_failure_reason(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    class _SWExecutor:
+        last_error = "SolidWorks SaveAs returned false"
+
+        def export_sw_per_config(self, config_name: int) -> bool:
+            assert config_name == 3
+            return False
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = None
+    runner._sw_executor = _SWExecutor()
+
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
+    assert runner.execute_sw_per_config(3) is False
+    assert runner.last_sw_error == "SolidWorks SaveAs returned false"
+
+
 def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeypatch) -> None:
     from engine.task_runner import TaskRunner
 

@@ -460,7 +460,11 @@ class LocalWorker:
                 "请使用逐构型模式（通过 RetryManager 调度）"
             )
         ok = runner.execute_sw_per_config(int(config_name))
-        return {"ok": bool(ok)}
+        result: dict[str, Any] = {"ok": bool(ok)}
+        if not ok:
+            error = str(getattr(runner, "last_sw_error", "") or "SW 步骤失败")
+            result["error"] = error
+        return result
 
     def _run_sc_task(self, params: dict[str, Any]) -> dict[str, Any]:
         runner = self._get_default_runner()

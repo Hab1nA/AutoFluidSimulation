@@ -726,3 +726,29 @@ def test_local_worker_sc_task_includes_failure_reason(monkeypatch) -> None:
     result = worker._execute_task("sc", {"config_name": 7})
 
     assert result == {"ok": False, "error": "SpaceClaim ready timeout"}
+
+
+def test_local_worker_sw_task_includes_failure_reason(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    class _Runner:
+        last_sw_error = "SolidWorks SaveAs returned false"
+
+        def execute_sw_per_config(self, config_name: int) -> bool:
+            assert config_name == 7
+            return False
+
+    class _State:
+        def load_configs(self, _configs):
+            pass
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    result = worker._execute_task("sw", {"config_name": 7})
+
+    assert result == {"ok": False, "error": "SolidWorks SaveAs returned false"}
