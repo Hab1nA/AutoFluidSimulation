@@ -1968,6 +1968,43 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_server_mode_start_rejects_failed_worker_ssh_snapshot(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "secret",
+            }],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+        daemon._last_worker_ssh_checks = {"WS-A": "disconnected"}
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "工作站 SSH 未就绪" in message
+        assert "WS-A" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
+
     def test_worker_start_reloads_config_and_drops_stale_ssh(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module
@@ -2053,7 +2090,7 @@ class TestPipelineDaemonCleanStep:
         assert ok is False
         assert "SSH 连通检查全部失败" in message
         assert data["ssh_checks"] == {"default": "disconnected"}
-        assert daemon.local_worker_registry.has_online_worker() is True
+        assert daemon.local_worker_registry.has_online_worker() is False
 
     def test_worker_start_failure_reports_effective_ssh_targets(self, monkeypatch):
         from engine import config as config_module

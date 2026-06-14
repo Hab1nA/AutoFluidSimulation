@@ -521,6 +521,9 @@ class PipelineDaemon:
             auth_error = self._server_mode_remote_auth_error()
             if auth_error:
                 return False, None, auth_error
+            ssh_error = self._server_mode_ssh_not_ready()
+            if ssh_error:
+                return False, None, ssh_error
             # 暂停状态下恢复运行
             # 检查调度器主线程是否存活（SW 宏执行期间线程可能因异常退出）
             if not self.scheduler.pipeline_alive and not self.scheduler.is_paused:
@@ -549,6 +552,9 @@ class PipelineDaemon:
         auth_error = self._server_mode_remote_auth_error()
         if auth_error:
             return False, None, auth_error
+        ssh_error = self._server_mode_ssh_not_ready()
+        if ssh_error:
+            return False, None, ssh_error
 
         self.state.set_engine_status("running")
         self._pipeline_ever_started = True
@@ -603,6 +609,25 @@ class PipelineDaemon:
             "server 模式下 ocar 需要工作站 SSH 密码才能执行 transfer/meshing/solver；"
             f"缺少工作站 {', '.join(missing)} 的密码。请在 ocar 运行环境设置 "
             "AUTOFLUID_SSH_PASSWORD 或对应 workstations[].password 环境变量。"
+        )
+
+    def _server_mode_ssh_not_ready(self) -> str | None:
+        """Return an operator-facing error when the last worker SSH check failed."""
+        if not is_server_mode():
+            return None
+        ssh_checks = getattr(self, "_last_worker_ssh_checks", {})
+        if not ssh_checks:
+            return None
+        failed_checks = {
+            workstation_id: status
+            for workstation_id, status in ssh_checks.items()
+            if status != "ok"
+        }
+        if not failed_checks:
+            return None
+        return (
+            "server 模式下工作站 SSH 未就绪，不能启动流水线；"
+            f"请先执行 worker start 建立 SSH 连通性: {failed_checks}"
         )
 
     @staticmethod
@@ -983,6 +1008,7 @@ class PipelineDaemon:
         }
         if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
             self._last_worker_ssh_checks = dict(ssh_checks)
+            self.local_worker_registry.clear_online_workers()
             logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
             target_summary = ", ".join(
                 f"{ws_id}={target['host']}:{target['port']}({target['connectivity_mode']})"
