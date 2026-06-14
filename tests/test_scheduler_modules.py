@@ -1186,6 +1186,19 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "sw") == STATUS_RUNNING
 
+    def test_resume_scan_does_not_requeue_sc_after_downstream_error(self):
+        """下游已有错误历史时，resume 扫描不能把 SC Waiting 重新入队。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_WAITING)
+        self.state.set_step_status(1, "meshing", STATUS_ERROR)
+        self.state.set_step_status(1, "solver", STATUS_ERROR)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "sc") == STATUS_WAITING
+        assert self.scheduler._sc_queue.qsize() == 0
+
     def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
         """断点恢复查询远程任务时应使用构型分配的工作站。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})

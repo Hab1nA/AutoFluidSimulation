@@ -232,8 +232,8 @@ function Get-ReverseTunnelArguments {
     return @(
         "-o", "BatchMode=yes",
         "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=4",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=3",
         "-o", "TCPKeepAlive=yes",
         "-N",
         "-R", $forwardSpec,
@@ -266,7 +266,7 @@ function Start-ReverseTunnelMonitor {
                 -TunnelTarget $TunnelTarget `
                 -RemoteHost $RemoteHost `
                 -RemotePort $RemotePort) {
-            Start-Sleep -Seconds 30
+            Start-Sleep -Seconds 5
             continue
         }
 
@@ -284,8 +284,18 @@ function Start-ReverseTunnelMonitor {
             -TargetPort $TargetPort
 
         Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Starting ssh reverse tunnel: $SshExe $($argumentList -join ' ')"
-        & $SshExe @argumentList 1>> $logs.Stdout 2>> $logs.Stderr
-        $exitCode = $LASTEXITCODE
+        $sshProcess = Start-Process -FilePath $SshExe `
+            -ArgumentList $argumentList `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $logs.Stdout `
+            -RedirectStandardError $logs.Stderr `
+            -PassThru
+
+        while (-not $sshProcess.HasExited) {
+            Start-Sleep -Seconds 5
+        }
+
+        $exitCode = $sshProcess.ExitCode
         Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "ssh reverse tunnel exited with code ${exitCode}; restarting in ${RestartDelaySeconds}s."
         Start-Sleep -Seconds $RestartDelaySeconds
     }

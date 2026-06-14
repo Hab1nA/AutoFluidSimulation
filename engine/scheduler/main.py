@@ -552,6 +552,14 @@ class PipelineScheduler:
                     else:
                         continue
 
+                if step == "sc" and self._has_started_downstream(cn):
+                    logger.debug(
+                        f"{log_prefix} 构型{cn} [sc] 状态={status}，"
+                        "但下游已有执行记录，跳过 SC 恢复入队",
+                        extra={"broadcast": False},
+                    )
+                    break
+
                 # ★ 全局 in-flight 保护：无论步骤处于何种非 COMPLETED 状态，
                 #   只要队列中有该构型的 claim 或 MeshingMonitor 正在处理，
                 #   就跳过该构型（不重置状态、不重复入队）。
@@ -758,6 +766,13 @@ class PipelineScheduler:
             cn,
             step,
             workstation_id=workstation_id,
+        )
+
+    def _has_started_downstream(self, config_name: int) -> bool:
+        """Return true when any step after SC has already left Waiting."""
+        return any(
+            self.state.get_step_status(config_name, step) != STATUS_WAITING
+            for step in ("transfer", "meshing", "solver")
         )
 
     def _is_step_in_flight(self, cn: int, step: str) -> bool:

@@ -67,3 +67,16 @@ Write-Output "probe returned false"
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "probe returned false" in result.stdout
+
+
+def test_tunnel_supervisor_uses_short_keepalive_and_probe_interval() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert '"ServerAliveInterval=5"' in source
+    assert '"ServerAliveCountMax=3"' in source
+    assert "Start-Sleep -Seconds 30" not in source
+    assert "Start-Sleep -Seconds 5" in source
+    assert "Start-Process -FilePath $SshExe" in source
+    assert "while (-not $sshProcess.HasExited)" in source

@@ -652,7 +652,7 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     except Exception as e:
         logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
 
-    logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
+    logger.info("构型 {} 处理完成: {}".format(file_index, scdoc_name))
     return True
 
 

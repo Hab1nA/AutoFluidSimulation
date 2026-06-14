@@ -59,6 +59,7 @@ def test_spaceclaim_transit_uses_passed_scdoc_name() -> None:
     assert "scdoc_name" in source
     assert "cmd_data.get(\"scdocname\"" in source
     assert "os.path.basename(scdoc_name)" in source
+    assert "out_filename" not in source
     assert "model_gen4_{}.scdoc" not in source
 
 

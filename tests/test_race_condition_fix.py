@@ -477,6 +477,30 @@ class TestInFlightProtection:
 
         assert any("构型1 SW 已完成但未入队" in msg for msg in warnings)
 
+    def test_queue_health_ignores_configs_with_downstream_history(self, monkeypatch):
+        """已有下游历史的构型不应被误报为 SC 未入队。"""
+        from engine.scheduler import worker_pool as worker_pool_module
+
+        s = self.ctx.scheduler
+        st = self.ctx.state
+        warnings: list[str] = []
+
+        for cn in st.get_all_configs():
+            st.set_step_status(cn, "sw", STATUS_COMPLETED)
+            st.set_step_status(cn, "sc", STATUS_WAITING)
+            st.set_step_status(cn, "meshing", STATUS_ERROR)
+            st.set_step_status(cn, "solver", STATUS_ERROR)
+
+        monkeypatch.setattr(worker_pool_module.logger, "warning", warnings.append)
+        s.worker_pool._last_queue_report = 0.0
+
+        s.worker_pool._report_queue_health_if_due(
+            100.0 + s.worker_pool._queue_report_interval + 0.1
+        )
+
+        assert warnings == []
+        assert s.worker_pool._waiting_sc_seen_at == {}
+
 
 # ====================================================================
 # 场景 B: 孤儿 Running + 无 claim → 正确检测并重置

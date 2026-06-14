@@ -274,6 +274,7 @@ class WorkerPoolManager:
                 cn for cn in self.state.get_all_configs()
                 if self.state.get_step_status(cn, "sc") == STATUS_WAITING
                 and self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
+                and not self._has_started_downstream(cn)
             ]
             waiting_set = set(waiting_configs)
             for cn in list(self._waiting_sc_seen_at):
@@ -308,6 +309,13 @@ class WorkerPoolManager:
                             self.runner.do_sc_final_cleanup()
                         except Exception as e:
                             logger.warning(f"[WorkerPool] SC 进程清理异常: {e}")
+
+    def _has_started_downstream(self, config_name: int) -> bool:
+        """Return true when any step after SC has already left Waiting."""
+        return any(
+            self.state.get_step_status(config_name, step) != STATUS_WAITING
+            for step in ("transfer", "meshing", "solver")
+        )
 
     def _sc_worker_loop(self):
         """SC 工作线程主循环。
