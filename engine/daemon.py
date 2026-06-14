@@ -855,11 +855,19 @@ class PipelineDaemon:
         if not isinstance(result, dict):
             result = {}
         if self.state is not None and self.state.get_engine_status() == "stopped":
-            task = self.local_worker_registry.fail_task(
-                task_id,
-                worker_id,
-                "engine stopped",
-            )
+            try:
+                task = self.local_worker_registry.fail_task(
+                    task_id,
+                    worker_id,
+                    "engine stopped",
+                )
+            except KeyError:
+                logger.warning(
+                    "[LocalWorker] 丢弃未知任务结果: task_id=%s worker_id=%s",
+                    task_id,
+                    worker_id,
+                )
+                return True, None, "LocalWorker 任务已丢弃: unknown task"
             config_name = task.get("params", {}).get("config_name") if task else None
             step_name = task.get("step") if task else None
             if config_name is not None and step_name in {"sw", "sc"}:
@@ -878,12 +886,28 @@ class PipelineDaemon:
         try:
             scdoc_metadata = self._persist_worker_scdoc(result)
         except (OSError, TypeError, ValueError, binascii.Error) as exc:
-            task = self.local_worker_registry.fail_task(task_id, worker_id, str(exc))
+            try:
+                task = self.local_worker_registry.fail_task(task_id, worker_id, str(exc))
+            except KeyError:
+                logger.warning(
+                    "[LocalWorker] 丢弃未知任务结果: task_id=%s worker_id=%s",
+                    task_id,
+                    worker_id,
+                )
+                return True, None, "LocalWorker 任务已丢弃: unknown task"
             return False, task, f"LocalWorker SCDOC 接收失败: {exc}"
         if scdoc_metadata is not None:
             result = dict(result)
             result["scdoc_file"] = scdoc_metadata
-        task = self.local_worker_registry.complete_task(task_id, worker_id, result)
+        try:
+            task = self.local_worker_registry.complete_task(task_id, worker_id, result)
+        except KeyError:
+            logger.warning(
+                "[LocalWorker] 丢弃未知任务结果: task_id=%s worker_id=%s",
+                task_id,
+                worker_id,
+            )
+            return True, None, "LocalWorker 任务已丢弃: unknown task"
         return True, task, "LocalWorker 任务完成"
 
     def _persist_worker_scdoc(self, result: dict[str, Any]) -> dict[str, Any] | None:
@@ -935,11 +959,20 @@ class PipelineDaemon:
             return False, None, "缺少 worker_id 或 task_id"
         error = str(params.get("error") or "")
         if self.state is not None and self.state.get_engine_status() == "stopped":
-            task = self.local_worker_registry.fail_task(
-                task_id,
-                worker_id,
-                "engine stopped",
-            )
+            try:
+                task = self.local_worker_registry.fail_task(
+                    task_id,
+                    worker_id,
+                    "engine stopped",
+                )
+            except KeyError:
+                logger.warning(
+                    "[LocalWorker] 丢弃未知任务失败回报: task_id=%s worker_id=%s error=%s",
+                    task_id,
+                    worker_id,
+                    error,
+                )
+                return True, None, "LocalWorker 任务已丢弃: unknown task"
             config_name = task.get("params", {}).get("config_name") if task else None
             step_name = task.get("step") if task else None
             if config_name is not None and step_name in {"sw", "sc"}:
@@ -955,7 +988,16 @@ class PipelineDaemon:
                 worker_id,
             )
             return False, task, "LocalWorker 任务已丢弃: engine stopped"
-        task = self.local_worker_registry.fail_task(task_id, worker_id, error)
+        try:
+            task = self.local_worker_registry.fail_task(task_id, worker_id, error)
+        except KeyError:
+            logger.warning(
+                "[LocalWorker] 丢弃未知任务失败回报: task_id=%s worker_id=%s error=%s",
+                task_id,
+                worker_id,
+                error,
+            )
+            return True, None, "LocalWorker 任务已丢弃: unknown task"
         return True, task, "LocalWorker 任务失败"
 
     # ------------------------------------------------------------------

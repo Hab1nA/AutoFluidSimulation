@@ -129,6 +129,40 @@ def test_daemon_worker_step_error_rejects_result_after_engine_stopped(tmp_path) 
     assert daemon.state.get_step_status(2, "sc") == STATUS_ERROR
 
 
+def test_daemon_worker_step_error_ignores_unknown_task_after_cleanup() -> None:
+    from engine.daemon import PipelineDaemon
+
+    daemon = PipelineDaemon()
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"sc": True}})
+
+    ok, task, message = daemon.handle_worker_step_error({
+        "worker_id": "local-pc-01",
+        "task_id": "local-missing",
+        "error": "late subprocess result",
+    })
+
+    assert ok is True
+    assert task is None
+    assert message == "LocalWorker 任务已丢弃: unknown task"
+
+
+def test_daemon_worker_step_complete_ignores_unknown_task_after_cleanup() -> None:
+    from engine.daemon import PipelineDaemon
+
+    daemon = PipelineDaemon()
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"sc": True}})
+
+    ok, task, message = daemon.handle_worker_step_complete({
+        "worker_id": "local-pc-01",
+        "task_id": "local-missing",
+        "result": {"ok": True},
+    })
+
+    assert ok is True
+    assert task is None
+    assert message == "LocalWorker 任务已丢弃: unknown task"
+
+
 def test_daemon_worker_poll_returns_local_clean_task() -> None:
     from engine.daemon import PipelineDaemon
 
