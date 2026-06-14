@@ -1,6 +1,8 @@
 use std::fs;
+use std::fs::File;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
@@ -14,11 +16,13 @@ const IPC_RECONNECT_TIMEOUT_SECS: u64 = 60;
 const IPC_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(75);
+const SERVER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(150);
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
     process: Option<Child>,
     pending_ipc_reconnect: Option<PendingIpcReconnect>,
+    pending_server_start: Option<PendingServerStart>,
 }
 
 struct PendingIpcReconnect {
@@ -26,11 +30,22 @@ struct PendingIpcReconnect {
     next_attempt: Instant,
 }
 
+struct PendingServerStart {
+    receiver: mpsc::Receiver<ServerStartEvent>,
+    deadline: Instant,
+}
+
+enum ServerStartEvent {
+    Stage(&'static str),
+    Done(Result<u32, String>),
+}
+
 impl DaemonManager {
     pub fn new() -> Self {
         Self {
             process: None,
             pending_ipc_reconnect: None,
+            pending_server_start: None,
         }
     }
 
@@ -201,6 +216,85 @@ impl DaemonManager {
         );
     }
 
+    fn begin_server_start(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) {
+        if self.pending_server_start.is_some() {
+            log_buffer.push_info("⚠️ 服务器 daemon 正在启动，请勿重复操作".to_string());
+            return;
+        }
+
+        let project_dir = project_dir.to_string();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_server_start = Some(PendingServerStart {
+            receiver,
+            deadline: Instant::now() + SERVER_DAEMON_START_TIMEOUT,
+        });
+        log_buffer.push_info("⚠️ 正在启动服务器 daemon，界面保持响应...".to_string());
+        std::thread::spawn(move || {
+            let result = Self::launch_server_daemon_sync(&project_dir, Some(&sender));
+            let _ = sender.send(ServerStartEvent::Done(result.map(|()| 0)));
+        });
+    }
+
+    fn poll_server_start(&mut self, state: &mut AppState, log_buffer: &mut LogBuffer) -> bool {
+        let Some(wait) = self.pending_server_start.as_ref() else {
+            return false;
+        };
+
+        if Instant::now() >= wait.deadline {
+            self.pending_server_start = None;
+            log_buffer.push_info("❌ 启动后台引擎失败: 服务器启动任务超时".to_string());
+            state.connected = false;
+            state.needs_redraw = true;
+            return true;
+        }
+
+        let mut changed = false;
+        loop {
+            let Some(wait) = self.pending_server_start.as_ref() else {
+                return changed;
+            };
+            match wait.receiver.try_recv() {
+                Ok(ServerStartEvent::Stage(message)) => {
+                    log_buffer.push_info(format!("⚠️ {}", message));
+                    state.needs_redraw = true;
+                    changed = true;
+                }
+                Ok(ServerStartEvent::Done(Ok(0))) => {
+                    self.pending_server_start = None;
+                    log_buffer.push_info(
+                        "⚠️ 已向服务器发送 daemon 启动命令，等待 IPC 就绪...".to_string(),
+                    );
+                    self.begin_ipc_reconnect_wait(state);
+                    return true;
+                }
+                Ok(ServerStartEvent::Done(Ok(pid))) => {
+                    self.pending_server_start = None;
+                    log_buffer.push_info(format!(
+                        "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
+                        pid
+                    ));
+                    self.begin_ipc_reconnect_wait(state);
+                    return true;
+                }
+                Ok(ServerStartEvent::Done(Err(e))) => {
+                    self.pending_server_start = None;
+                    log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
+                    state.connected = false;
+                    state.needs_redraw = true;
+                    return true;
+                }
+                Err(mpsc::TryRecvError::Empty) => return changed,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending_server_start = None;
+                    log_buffer.push_info("❌ 启动后台引擎失败: 后台启动任务异常退出".to_string());
+                    state.connected = false;
+                    state.needs_redraw = true;
+                    return true;
+                }
+            }
+        }
+    }
+
     pub fn poll_ipc_reconnect(
         &mut self,
         rt: &tokio::runtime::Runtime,
@@ -208,6 +302,7 @@ impl DaemonManager {
         state: &mut AppState,
         log_buffer: &mut LogBuffer,
     ) {
+        self.poll_server_start(state, log_buffer);
         let Some(wait) = self.pending_ipc_reconnect.as_mut() else {
             return;
         };
@@ -361,6 +456,13 @@ impl DaemonManager {
             return;
         }
 
+        if is_server_mode() {
+            self.begin_server_start(project_dir, log_buffer);
+            state.connected = false;
+            state.needs_redraw = true;
+            return;
+        }
+
         match self.launch(project_dir) {
             Ok(0) => {
                 log_buffer
@@ -381,9 +483,19 @@ impl DaemonManager {
     }
 
     fn launch_server_daemon(&mut self, project_dir: &str) -> Result<u32, String> {
-        Self::run_server_ipc_tunnel_script(project_dir)?;
-        Self::run_server_daemon_command(ServerDaemonAction::Start)?;
+        Self::launch_server_daemon_sync(project_dir, None)?;
         Ok(0)
+    }
+
+    fn launch_server_daemon_sync(
+        project_dir: &str,
+        progress: Option<&mpsc::Sender<ServerStartEvent>>,
+    ) -> Result<(), String> {
+        send_server_start_stage(progress, "正在检查服务器 IPC 隧道...");
+        Self::run_server_ipc_tunnel_script(project_dir)?;
+        log::info!("[Daemon] 服务器 IPC 隧道阶段完成，准备启动远端 daemon");
+        send_server_start_stage(progress, "服务器 IPC 隧道已就绪，正在启动远端 daemon...");
+        Self::run_server_daemon_command(ServerDaemonAction::Start)
     }
 
     fn stop_server_daemon(&mut self) -> Result<(), String> {
@@ -401,13 +513,27 @@ impl DaemonManager {
         let mut cmd = Command::new(&command.ssh_exe);
         cmd.args(&args);
         let output = run_command_with_timeout(&mut cmd, SERVER_DAEMON_COMMAND_TIMEOUT)?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stdout.is_empty() {
+            log::info!(
+                "[Daemon] 服务器 daemon SSH 输出: action={}, stdout={}",
+                action.label(),
+                stdout
+            );
+        }
+        if !stderr.is_empty() {
+            log::warn!(
+                "[Daemon] 服务器 daemon SSH 错误输出: action={}, stderr={}",
+                action.label(),
+                stderr
+            );
+        }
 
         if output.status.success() {
             return Ok(());
         }
 
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if stderr.is_empty() { stdout } else { stderr };
         if detail.is_empty() {
             Err(format!("ssh 退出状态: {}", output.status))
@@ -437,8 +563,22 @@ impl DaemonManager {
         for powershell in powershell_candidates() {
             let mut cmd = Command::new(&powershell);
             cmd.args(&args).current_dir(project_dir);
-            match run_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
-                Ok(output) if output.status.success() => {
+            match run_tunnel_script_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
+                Ok((status, stdout, stderr)) if status.success() => {
+                    if !stdout.is_empty() {
+                        log::info!(
+                            "[Daemon] 服务器 IPC 隧道脚本输出: powershell={}, stdout={}",
+                            powershell,
+                            stdout
+                        );
+                    }
+                    if !stderr.is_empty() {
+                        log::warn!(
+                            "[Daemon] 服务器 IPC 隧道脚本错误输出: powershell={}, stderr={}",
+                            powershell,
+                            stderr
+                        );
+                    }
                     log::info!(
                         "[Daemon] 服务器 IPC 隧道脚本执行成功: powershell={}, script={}",
                         powershell,
@@ -446,14 +586,12 @@ impl DaemonManager {
                     );
                     return Ok(());
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                Ok((status, stdout, stderr)) => {
                     let detail = if stderr.is_empty() { stdout } else { stderr };
                     last_error = if detail.is_empty() {
-                        format!("{} 退出状态: {}", powershell, output.status)
+                        format!("{} 退出状态: {}", powershell, status)
                     } else {
-                        format!("{} 退出状态: {}, {}", powershell, output.status, detail)
+                        format!("{} 退出状态: {}, {}", powershell, status, detail)
                     };
                 }
                 Err(e) => {
@@ -470,6 +608,73 @@ fn is_server_mode() -> bool {
     std::env::var("AUTOFLUID_SERVER_MODE")
         .map(|mode| mode.eq_ignore_ascii_case("server"))
         .unwrap_or(false)
+}
+
+fn send_server_start_stage(
+    progress: Option<&mpsc::Sender<ServerStartEvent>>,
+    message: &'static str,
+) {
+    if let Some(sender) = progress {
+        let _ = sender.send(ServerStartEvent::Stage(message));
+    }
+}
+
+fn run_tunnel_script_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<(ExitStatus, String, String), String> {
+    let request_id = crate::generate_request_id();
+    let stdout_path = std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.out"));
+    let stderr_path = std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.err"));
+    let stdout_file = File::create(&stdout_path)
+        .map_err(|e| format!("创建隧道脚本 stdout 临时文件失败: {}", e))?;
+    let stderr_file = File::create(&stderr_path)
+        .map_err(|e| format!("创建隧道脚本 stderr 临时文件失败: {}", e))?;
+    command
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动命令失败: {}", e))?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = read_and_remove_temp_output(&stdout_path);
+                let stderr = read_and_remove_temp_output(&stderr_path);
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                return if detail.is_empty() {
+                    Err(format!("命令执行超时 ({}s)", timeout.as_secs()))
+                } else {
+                    Err(format!("命令执行超时 ({}s): {}", timeout.as_secs(), detail))
+                };
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_file(&stdout_path);
+                let _ = fs::remove_file(&stderr_path);
+                return Err(format!("检查命令状态失败: {}", e));
+            }
+        }
+    };
+
+    let stdout = read_and_remove_temp_output(&stdout_path);
+    let stderr = read_and_remove_temp_output(&stderr_path);
+    Ok((status, stdout, stderr))
+}
+
+fn read_and_remove_temp_output(path: &std::path::Path) -> String {
+    let content = fs::read_to_string(path)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let _ = fs::remove_file(path);
+    content
 }
 
 #[derive(Clone, Copy)]
@@ -581,19 +786,30 @@ fn default_server_start_command() -> String {
         .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
         .map(|path| shell_single_quote(&path))
         .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string());
+    let remote_ipc_port = first_env_non_empty(&[
+        "AUTOFLUID_SERVER_DAEMON_IPC_PORT",
+        "AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT",
+    ])
+    .unwrap_or_else(|| "9527".to_string());
     format!(
         "cd {project_dir} && mkdir -p logs && \
-         env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & \
-         daemon_pid=$!; \
+         {{ env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & \
+         daemon_pid=$!; }}; \
+         ready_count=0; \
          for i in $(seq 1 60); do \
-             if ! kill -0 \"$daemon_pid\" 2>/dev/null; then \
+             if .venv/bin/python -c \"import json,socket; s=socket.create_connection(('127.0.0.1', {remote_ipc_port}), 1); s.settimeout(2); s.sendall((json.dumps(dict(command='get_engine_status', params=dict(), request_id='daemon-start-probe'))+'\\n').encode()); data=s.recv(4096); s.close(); resp=json.loads(data.decode().strip()); raise SystemExit(0 if resp.get('status') == 'ok' else 1)\" >/dev/null 2>&1; then \
+                 ready_count=$((ready_count + 1)); \
+                 if [ \"$ready_count\" -ge 3 ]; then \
+                     echo \"AutoFluid daemon IPC ready (pid=$daemon_pid)\"; \
+                     exit 0; \
+                 fi; \
+             else \
+                 ready_count=0; \
+             fi; \
+             if ! kill -0 \"$daemon_pid\" 2>/dev/null && [ \"$ready_count\" -eq 0 ]; then \
                  echo 'AutoFluid daemon exited before IPC became ready' >&2; \
                  tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
                  exit 1; \
-             fi; \
-             if .venv/bin/python -c \"import socket; s=socket.create_connection(('127.0.0.1', 9527), 1); s.close()\" >/dev/null 2>&1; then \
-                 echo \"AutoFluid daemon IPC ready (pid=$daemon_pid)\"; \
-                 exit 0; \
              fi; \
              sleep 1; \
          done; \
@@ -712,6 +928,84 @@ mod tests {
     }
 
     #[test]
+    fn server_start_with_ipc_returns_while_remote_start_runs() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        let powershell_exe = fake_success_exe(&project_dir, "fake_pwsh");
+        let ssh_exe = fake_sleep_exe(&project_dir, "fake_ssh", 3);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = DaemonManager::new();
+
+        let started = Instant::now();
+        daemon.start_with_ipc(
+            &mut ipc,
+            &rt,
+            &mut state,
+            &mut log_buffer,
+            project_dir.to_str().expect("utf8 temp path"),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "server daemon start must not block the TUI on SSH startup"
+        );
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("正在启动服务器 daemon")));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && !log_buffer
+                .info_messages
+                .iter()
+                .any(|message| message.contains("正在检查服务器 IPC 隧道"))
+        {
+            daemon.poll_server_start(&mut state, &mut log_buffer);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("正在检查服务器 IPC 隧道")));
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn tunnel_script_runner_returns_when_child_keeps_output_handles_open() {
+        let project_dir = unique_temp_project_dir();
+        let helper = fake_background_handle_holder_exe(&project_dir);
+        let mut cmd = Command::new(&helper);
+
+        let started = Instant::now();
+        let result = run_tunnel_script_command_with_timeout(&mut cmd, Duration::from_secs(3));
+
+        assert!(result.is_ok());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "tunnel script runner must not wait for a background child that inherited output handles"
+        );
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn server_daemon_start_command_uses_configured_ssh_target() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
@@ -750,14 +1044,39 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
         std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_IPC_PORT");
+        std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
+        std::env::remove_var("AUTOFLUID_IPC_PORT");
 
         let command = default_server_start_command();
 
+        assert!(command.contains("&& { env AUTOFLUID_SERVER_MODE=server nohup"));
         assert!(command.contains("daemon_pid=$!"));
         assert!(command.contains("kill -0 \"$daemon_pid\""));
         assert!(command.contains("socket.create_connection(('127.0.0.1', 9527)"));
+        assert!(command.contains("command='get_engine_status'"));
+        assert!(command.contains("ready_count=$((ready_count + 1))"));
         assert!(command.contains("tail -n 80 logs/autofluid-daemon.out"));
         assert!(!command.contains("setsid -f"));
+        assert!(!command.contains("&& env AUTOFLUID_SERVER_MODE=server nohup"));
+    }
+
+    #[test]
+    fn default_server_start_command_uses_configured_remote_ipc_port_for_readiness() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_IPC_PORT");
+        std::env::set_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT", "19527");
+        std::env::set_var("AUTOFLUID_IPC_PORT", "18000");
+
+        let command = default_server_start_command();
+
+        assert!(command.contains("socket.create_connection(('127.0.0.1', 19527)"));
+        assert!(!command.contains("socket.create_connection(('127.0.0.1', 18000)"));
+
+        std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
+        std::env::remove_var("AUTOFLUID_IPC_PORT");
     }
 
     #[test]
@@ -975,6 +1294,61 @@ mod tests {
                 .permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(&path, permissions).expect("chmod fake success");
+            path
+        }
+    }
+
+    fn fake_sleep_exe(project_dir: &std::path::Path, name: &str, seconds: u64) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            fs::write(
+                &path,
+                format!(
+                    "@echo off\r\nping 127.0.0.1 -n {} >nul\r\nexit /b 0\r\n",
+                    seconds + 1
+                ),
+            )
+            .expect("write fake sleep cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(format!("{name}.sh"));
+            fs::write(&path, format!("#!/bin/sh\nsleep {seconds}\nexit 0\n"))
+                .expect("write fake sleep sh");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake sleep metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake sleep");
+            path
+        }
+    }
+
+    fn fake_background_handle_holder_exe(project_dir: &std::path::Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_bg_handle_holder.cmd");
+            fs::write(
+                &path,
+                "@echo off\r\nstart \"\" /b cmd /c \"ping 127.0.0.1 -n 4 >nul\"\r\nexit /b 0\r\n",
+            )
+            .expect("write fake background holder cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_bg_handle_holder.sh");
+            fs::write(&path, "#!/bin/sh\n(sleep 3) &\nexit 0\n")
+                .expect("write fake background holder sh");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake background holder metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake background holder");
             path
         }
     }

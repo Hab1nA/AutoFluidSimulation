@@ -47,10 +47,31 @@ function Quote-RemoteShellArg {
     return "'" + $Value.Replace("'", "'\''") + "'"
 }
 
+function Get-AutoFluidServerDaemonIpcPort {
+    foreach ($candidate in @(
+        $env:AUTOFLUID_SERVER_DAEMON_IPC_PORT,
+        $env:AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT
+    )) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        $port = 0
+        if (-not [int]::TryParse($candidate, [ref]$port)) {
+            throw "AutoFluid server daemon IPC port is not a valid integer: $candidate"
+        }
+        if ($port -le 0 -or $port -gt 65535) {
+            throw "AutoFluid server daemon IPC port is out of range: $port"
+        }
+        return $port
+    }
+    return 9527
+}
+
 function Get-AutoFluidServerDaemonStartCommand {
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SERVER_DAEMON_START_CMD)) {
         return $env:AUTOFLUID_SERVER_DAEMON_START_CMD
     }
+    $serverPort = Get-AutoFluidServerDaemonIpcPort
     $serverProjectDir = $env:AUTOFLUID_SERVER_DAEMON_PROJECT_DIR
     if ([string]::IsNullOrWhiteSpace($serverProjectDir)) {
         $serverProjectDir = $env:AUTOFLUID_SERVER_PROJECT_DIR
@@ -61,7 +82,7 @@ function Get-AutoFluidServerDaemonStartCommand {
     else {
         $serverProjectDir = Quote-RemoteShellArg -Value $serverProjectDir
     }
-    return "cd $serverProjectDir && mkdir -p logs && env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & daemon_pid=`$!; for i in `$(seq 1 60); do if ! kill -0 `"`$daemon_pid`" 2>/dev/null; then echo 'AutoFluid daemon exited before IPC became ready' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1; fi; if .venv/bin/python -c `"import socket; s=socket.create_connection(('127.0.0.1', 9527), 1); s.close()`" >/dev/null 2>&1; then echo `"AutoFluid daemon IPC ready (pid=`$daemon_pid)`"; exit 0; fi; sleep 1; done; echo 'AutoFluid daemon IPC readiness timeout' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1"
+    return "cd $serverProjectDir && mkdir -p logs && { env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & daemon_pid=`$!; }; ready_count=0; for i in `$(seq 1 60); do if .venv/bin/python -c `"import json,socket; s=socket.create_connection(('127.0.0.1', $serverPort), 1); s.settimeout(2); s.sendall((json.dumps(dict(command='get_engine_status', params=dict(), request_id='daemon-start-probe'))+'\n').encode()); data=s.recv(4096); s.close(); resp=json.loads(data.decode().strip()); raise SystemExit(0 if resp.get('status') == 'ok' else 1)`" >/dev/null 2>&1; then ready_count=`$((ready_count + 1)); if [ `"`$ready_count`" -ge 3 ]; then echo `"AutoFluid daemon IPC ready (pid=`$daemon_pid)`"; exit 0; fi; else ready_count=0; fi; if ! kill -0 `"`$daemon_pid`" 2>/dev/null && [ `"`$ready_count`" -eq 0 ]; then echo 'AutoFluid daemon exited before IPC became ready' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1; fi; sleep 1; done; echo 'AutoFluid daemon IPC readiness timeout' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1"
 }
 
 function Start-AutoFluidServerDaemon {

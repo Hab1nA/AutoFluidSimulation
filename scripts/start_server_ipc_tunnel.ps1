@@ -154,13 +154,13 @@ $sshExe = Resolve-SshExe
 Test-SshBatchMode -SshExe $sshExe -TunnelTarget $tunnelTarget
 
 if ($Check) {
-    [void](Test-AutoFluidEndpoint)
+    [void](Test-AutoFluidIpcProtocolEndpoint)
     Write-Host "Server IPC tunnel check passed."
     exit 0
 }
 
-if (Test-AutoFluidEndpoint) {
-    Write-Host "AutoFluid server IPC endpoint is already reachable; reuse the existing tunnel."
+if (Test-AutoFluidIpcProtocolEndpoint) {
+    Write-Host "AutoFluid server IPC protocol endpoint is already reachable; reuse the existing tunnel."
     exit 0
 }
 
