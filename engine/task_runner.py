@@ -66,6 +66,7 @@ class TaskRunner:
         self._stopped_event: threading.Event | None = None
         self._pipeline_control: PipelineControl | None = None
         self._local_worker_adapter = local_worker_adapter
+        self.last_sc_error = ""
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -251,22 +252,31 @@ class TaskRunner:
 
     def execute_sc_step(self, config_name: int) -> bool:
         """执行 SC 步骤（SCProcessPool）。"""
+        self.last_sc_error = ""
         if self._should_delegate_local_steps():
-            return bool(
+            ok = bool(
                 self._local_worker_adapter.execute_sc_step(
                     config_name,
                     timeout_seconds=float(config_module.ENGINE_CONFIG["sc_timeout"]),
                 )
             )
+            if not ok:
+                self.last_sc_error = str(
+                    getattr(self._local_worker_adapter, "last_error", "")
+                    or "LocalWorker SC 步骤失败"
+                )
+            return ok
         sw_step_name = get_step_filename("sw", config_name)
         if not sw_step_name:
             logger.error("无法生成 STEP 文件名：STEP_FILE_PATTERNS['sw'] 未配置或格式错误")
-            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "STEP 文件名配置错误")
+            self.last_sc_error = "STEP 文件名配置错误"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, self.last_sc_error)
             return False
         scdoc_name = get_step_filename("sc", config_name)
         if not scdoc_name:
             logger.error("无法生成 SCDOC 文件名：STEP_FILE_PATTERNS['sc'] 未配置或格式错误")
-            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SCDOC 文件名配置错误")
+            self.last_sc_error = "SCDOC 文件名配置错误"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, self.last_sc_error)
             return False
 
         step_dir = LOCAL_PATHS["step_dir"]
@@ -277,26 +287,34 @@ class TaskRunner:
 
         if not os.path.exists(step_file):
             logger.error(f"STEP 文件不存在: {step_file}")
-            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "STEP 文件不存在")
+            self.last_sc_error = f"STEP 文件不存在: {step_file}"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, self.last_sc_error)
             return False
 
         sc_exe = LOCAL_PATHS["sc_exe"]
         sc_script = LOCAL_PATHS["sc_script"]
         if not os.path.exists(sc_exe):
             logger.error(f"SpaceClaim 可执行文件不存在: {sc_exe}")
-            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SC 程序不存在")
+            self.last_sc_error = f"SpaceClaim 可执行文件不存在: {sc_exe}"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, self.last_sc_error)
             return False
         if not os.path.exists(sc_script):
             logger.error(f"SC 脚本文件不存在: {sc_script}")
-            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SC 脚本不存在")
+            self.last_sc_error = f"SC 脚本文件不存在: {sc_script}"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, self.last_sc_error)
             return False
 
-        return self._sc_pool.run_config(
+        ok = self._sc_pool.run_config(
             config_name,
             paused_event=self._paused_event,
             stopped_event=self._stopped_event,
             pipeline_control=self._pipeline_control,
         )
+        if not ok:
+            self.last_sc_error = str(
+                getattr(self._sc_pool, "last_error", "") or "SC 步骤失败"
+            )
+        return ok
 
     # ------------------------------------------------------------------
     # 阶段 3: 文件传输（委托给 RemoteExecutor）

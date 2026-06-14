@@ -31,13 +31,13 @@ import sqlite3
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, Mapping
 
 # 将项目根目录加入 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING, STATUS_ERROR,
     ensure_directories, get_step_filename, is_server_mode, validate_config,
 )
 from engine.config_assigner import ConfigAssigner
@@ -827,6 +827,27 @@ class PipelineDaemon:
         result = params.get("result")
         if not isinstance(result, dict):
             result = {}
+        if self.state is not None and self.state.get_engine_status() == "stopped":
+            task = self.local_worker_registry.fail_task(
+                task_id,
+                worker_id,
+                "engine stopped",
+            )
+            config_name = task.get("params", {}).get("config_name") if task else None
+            step_name = task.get("step") if task else None
+            if config_name is not None and step_name in {"sw", "sc"}:
+                self.state.set_step_status(
+                    int(config_name),
+                    str(step_name),
+                    STATUS_ERROR,
+                    "engine stopped",
+                )
+            logger.warning(
+                "[LocalWorker] 丢弃 stopped 后到达的任务结果: task_id=%s worker_id=%s",
+                task_id,
+                worker_id,
+            )
+            return False, task, "LocalWorker 任务已丢弃: engine stopped"
         try:
             scdoc_metadata = self._persist_worker_scdoc(result)
         except (OSError, TypeError, ValueError, binascii.Error) as exc:
@@ -918,7 +939,16 @@ class PipelineDaemon:
                     results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
                 except Exception as e:
                     results["ssh_checks"][ws_id] = f"error: {e}"
-                    logger.warning("[Worker] 工作站 %s SSH 连通检查失败: %s", ws_id, e)
+                    target = self._workstation_ssh_target(ws)
+                    logger.warning(
+                        "[Worker] 工作站 %s SSH 连通检查失败 "
+                        "(host=%s, port=%s, connectivity_mode=%s): %s",
+                        ws_id,
+                        target["host"],
+                        target["port"],
+                        target["connectivity_mode"],
+                        e,
+                    )
 
         ssh_checks = results["ssh_checks"]
         failed_ssh_checks = {
@@ -1039,6 +1069,7 @@ class PipelineDaemon:
                 break
 
         workstation_details: dict[str, str] = {}
+        workstation_targets: dict[str, dict[str, Any]] = {}
         runner = getattr(self, "runner", None)
         ssh_pool = getattr(runner, "_ssh_pool", {}) if runner is not None else {}
         if not isinstance(ssh_pool, dict):
@@ -1046,10 +1077,10 @@ class PipelineDaemon:
         last_worker_checks = getattr(self, "_last_worker_ssh_checks", {})
         if not isinstance(last_worker_checks, dict):
             last_worker_checks = {}
-        workstation_ids = [str(ws.get("id", "default")) for ws in WORKSTATIONS]
-        if not workstation_ids:
-            workstation_ids = ["default"]
-        for workstation_id in workstation_ids:
+        workstation_configs: list[Mapping[str, Any]] = list(WORKSTATIONS) or [{"id": "default"}]
+        for workstation in workstation_configs:
+            workstation_id = str(workstation.get("id", "default"))
+            workstation_targets[workstation_id] = self._workstation_ssh_target(workstation)
             ssh = ssh_pool.get(workstation_id)
             if ssh is None:
                 workstation_details[workstation_id] = str(
@@ -1081,6 +1112,25 @@ class PipelineDaemon:
             "server_to_local_ssh": server_to_local_ssh,
             "server_to_workstation_ssh": server_to_workstation_ssh,
             "workstation_ssh_details": workstation_details,
+            "workstation_ssh_targets": workstation_targets,
+        }
+
+    @staticmethod
+    def _workstation_ssh_target(workstation: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the effective workstation SSH target without opening connections."""
+        reachable_host = str(workstation.get("reachable_host", "")).strip()
+        if reachable_host:
+            host = reachable_host
+            port = int(workstation.get("reachable_port", workstation.get("port", 22)) or 22)
+            mode = str(workstation.get("connectivity_mode", "") or "reachable")
+        else:
+            host = str(workstation.get("host", "")).strip()
+            port = int(workstation.get("port", 22) or 22)
+            mode = str(workstation.get("connectivity_mode", "") or "direct")
+        return {
+            "host": host,
+            "port": port,
+            "connectivity_mode": mode,
         }
 
     def handle_get_dashboard(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:

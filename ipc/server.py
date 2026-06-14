@@ -198,7 +198,7 @@ class IPCServer:
                         continue
                     self._active_connections += 1
 
-                logger.info(f"[IPC] IPC 客户端连接: {addr}")
+                logger.debug(f"[IPC] IPC 客户端连接: {addr}", extra={"broadcast": False})
                 # 每个客户端在独立线程中处理
                 client_thread = threading.Thread(
                     target=self._handle_client,
@@ -267,7 +267,7 @@ class IPCServer:
             with self._conn_lock:
                 self._active_connections = max(0, self._active_connections - 1)
             if has_sent_valid_message:
-                logger.info(f"[IPC] IPC 客户端断开: {addr}")
+                logger.debug(f"[IPC] IPC 客户端断开: {addr}", extra={"broadcast": False})
             else:
                 # 连接未发送任何有效 IPC 消息即断开——可能是端口探测、
                 # 客户端 connect() 超时后丢弃、或连接泄漏产生的孤儿连接。

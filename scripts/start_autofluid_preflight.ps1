@@ -61,7 +61,7 @@ function Get-AutoFluidServerDaemonStartCommand {
     else {
         $serverProjectDir = Quote-RemoteShellArg -Value $serverProjectDir
     }
-    return "cd $serverProjectDir && mkdir -p logs && env AUTOFLUID_SERVER_MODE=server setsid -f .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null"
+    return "cd $serverProjectDir && mkdir -p logs && env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & daemon_pid=`$!; for i in `$(seq 1 60); do if ! kill -0 `"`$daemon_pid`" 2>/dev/null; then echo 'AutoFluid daemon exited before IPC became ready' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1; fi; if .venv/bin/python -c `"import socket; s=socket.create_connection(('127.0.0.1', 9527), 1); s.close()`" >/dev/null 2>&1; then echo `"AutoFluid daemon IPC ready (pid=`$daemon_pid)`"; exit 0; fi; sleep 1; done; echo 'AutoFluid daemon IPC readiness timeout' >&2; tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; exit 1"
 }
 
 function Start-AutoFluidServerDaemon {

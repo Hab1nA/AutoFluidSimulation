@@ -10,10 +10,10 @@ use crate::utils::run_command_with_timeout;
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
 const DAEMON_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
-const IPC_RECONNECT_TIMEOUT_SECS: u64 = 10;
+const IPC_RECONNECT_TIMEOUT_SECS: u64 = 60;
 const IPC_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
-const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(75);
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
@@ -582,7 +582,24 @@ fn default_server_start_command() -> String {
         .map(|path| shell_single_quote(&path))
         .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string());
     format!(
-        "cd {project_dir} && mkdir -p logs && env AUTOFLUID_SERVER_MODE=server setsid -f .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null"
+        "cd {project_dir} && mkdir -p logs && \
+         env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & \
+         daemon_pid=$!; \
+         for i in $(seq 1 60); do \
+             if ! kill -0 \"$daemon_pid\" 2>/dev/null; then \
+                 echo 'AutoFluid daemon exited before IPC became ready' >&2; \
+                 tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
+                 exit 1; \
+             fi; \
+             if .venv/bin/python -c \"import socket; s=socket.create_connection(('127.0.0.1', 9527), 1); s.close()\" >/dev/null 2>&1; then \
+                 echo \"AutoFluid daemon IPC ready (pid=$daemon_pid)\"; \
+                 exit 0; \
+             fi; \
+             sleep 1; \
+         done; \
+         echo 'AutoFluid daemon IPC readiness timeout' >&2; \
+         tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
+         exit 1"
     )
 }
 
@@ -726,6 +743,21 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
         std::env::remove_var("AUTOFLUID_SSH_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
+    }
+
+    #[test]
+    fn default_server_start_command_waits_for_remote_daemon_readiness() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+
+        let command = default_server_start_command();
+
+        assert!(command.contains("daemon_pid=$!"));
+        assert!(command.contains("kill -0 \"$daemon_pid\""));
+        assert!(command.contains("socket.create_connection(('127.0.0.1', 9527)"));
+        assert!(command.contains("tail -n 80 logs/autofluid-daemon.out"));
+        assert!(!command.contains("setsid -f"));
     }
 
     #[test]

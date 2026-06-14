@@ -58,6 +58,7 @@ def test_local_worker_adapter_returns_false_on_worker_error() -> None:
     thread.join(timeout=2.0)
 
     assert result_holder == {"ok": False}
+    assert adapter.last_error == "SC failed"
 
 
 def test_local_worker_adapter_delegates_local_clean_files() -> None:

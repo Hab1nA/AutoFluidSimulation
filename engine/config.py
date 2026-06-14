@@ -270,6 +270,30 @@ def _workstation_from_remote_config(
 WORKSTATIONS: list[WorkstationConfig] = [_workstation_from_remote_config()]
 
 
+def _sync_default_workstation_reachable_env() -> None:
+    """Apply server-reachable env overrides to the legacy default workstation."""
+    if not WORKSTATIONS:
+        return
+    default_workstation = WORKSTATIONS[0]
+    for key, env_name in [
+        ("reachable_host", "AUTOFLUID_SSH_REACHABLE_HOST"),
+        ("reachable_port", "AUTOFLUID_SSH_REACHABLE_PORT"),
+        ("connectivity_mode", "AUTOFLUID_SSH_CONNECTIVITY_MODE"),
+    ]:
+        env_val = os.environ.get(env_name)
+        if not env_val:
+            continue
+        if key == "reachable_host":
+            default_workstation["reachable_host"] = env_val
+        elif key == "reachable_port":
+            default_workstation["reachable_port"] = int(env_val)
+        else:
+            default_workstation["connectivity_mode"] = env_val
+
+
+_sync_default_workstation_reachable_env()
+
+
 def get_workstation_config(
     workstation_id: str = DEFAULT_WORKSTATION_ID,
 ) -> WorkstationConfig:
@@ -493,13 +517,18 @@ def _apply_env_overrides():
         ("username", "AUTOFLUID_SSH_USER"),
         ("password", "AUTOFLUID_SSH_PASSWORD"),
     ]
+    remote_env_overrides: dict[str, str | int] = {}
     for key, env_name in _env_remote_keys:
         env_val = os.environ.get(env_name)
         if env_val:
             if key in {"port", "reachable_port"}:
                 REMOTE_CONFIG[key] = int(env_val)
+                remote_env_overrides[key] = int(env_val)
             else:
                 REMOTE_CONFIG[key] = env_val
+                remote_env_overrides[key] = env_val
+    if remote_env_overrides:
+        _sync_default_workstation_reachable_env()
 
     _env_ipc_keys = [
         ("host", "AUTOFLUID_IPC_HOST"),
@@ -686,6 +715,23 @@ def validate_config() -> list[str]:
         )
 
     if is_server_mode():
+        for workstation in WORKSTATIONS:
+            ws_id = str(workstation.get("id", DEFAULT_WORKSTATION_ID))
+            raw_host = str(workstation.get("host", "")).strip()
+            raw_port = int(workstation.get("port", 22) or 22)
+            reachable_host = str(workstation.get("reachable_host", "")).strip()
+            if not reachable_host:
+                warnings.append(
+                    f"工作站 {ws_id} 在 server 模式下缺少 "
+                    f"AUTOFLUID_SSH_REACHABLE_HOST，将检查原始地址 "
+                    f"{raw_host}:{raw_port}"
+                )
+                continue
+            if "reachable_port" not in workstation:
+                warnings.append(
+                    f"工作站 {ws_id} 在 server 模式下缺少 "
+                    f"AUTOFLUID_SSH_REACHABLE_PORT，将使用原始端口 {raw_port}"
+                )
         return warnings
 
     if not os.path.exists(LOCAL_PATHS["sw_model"]):

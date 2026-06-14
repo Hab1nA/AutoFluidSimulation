@@ -21,7 +21,10 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 
 
 # ====================================================================
@@ -367,6 +370,61 @@ class TestValidateConfig:
         assert not any("SpaceClaim 可执行文件不存在" in w for w in warnings)
         assert not any("SolidWorks 可执行文件不存在" in w for w in warnings)
 
+    def test_server_mode_warns_when_reachable_config_missing(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            warnings = validate_config()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert any("WS-A" in warning for warning in warnings)
+        assert any("AUTOFLUID_SSH_REACHABLE_HOST" in warning for warning in warnings)
+        assert any("172.17.135.240:22" in warning for warning in warnings)
+
+    def test_server_mode_warns_when_reachable_port_missing(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            warnings = validate_config()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert any("AUTOFLUID_SSH_REACHABLE_PORT" in warning for warning in warnings)
+
 
 # ====================================================================
 # compute_config_fingerprint 测试
@@ -540,9 +598,10 @@ class TestApplyEnvOverrides:
             LOCAL_PATHS["sw_model"] = original
 
     def test_remote_config_override(self, monkeypatch):
-        from engine.config import REMOTE_CONFIG
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
         original_host = REMOTE_CONFIG.get("host", "")
         original_port = REMOTE_CONFIG.get("port", 22)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SSH_HOST", "10.0.0.1")
         monkeypatch.setenv("AUTOFLUID_SSH_PORT", "2222")
         try:
@@ -553,6 +612,64 @@ class TestApplyEnvOverrides:
         finally:
             REMOTE_CONFIG["host"] = original_host
             REMOTE_CONFIG["port"] = original_port
+            WORKSTATIONS[:] = original_workstations
+
+    def test_remote_reachable_env_override_updates_default_workstation(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_PORT", "2222")
+        monkeypatch.setenv("AUTOFLUID_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        try:
+            import engine.config as cfg
+
+            cfg._apply_env_overrides()
+            workstation = cfg.get_workstation_config()
+
+            assert WORKSTATIONS[0]["reachable_host"] == "127.0.0.1"
+            assert WORKSTATIONS[0]["reachable_port"] == 2222
+            assert WORKSTATIONS[0]["connectivity_mode"] == "reverse_tunnel"
+            assert workstation["host"] == "127.0.0.1"
+            assert workstation["port"] == 2222
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_import_applies_reachable_env_to_default_workstation(self, tmp_path):
+        code = (
+            "from engine.config import WORKSTATIONS, get_workstation_config, validate_config\n"
+            "ws = WORKSTATIONS[0]\n"
+            "effective = get_workstation_config()\n"
+            "assert ws['reachable_host'] == '127.0.0.1', ws\n"
+            "assert ws['reachable_port'] == 2222, ws\n"
+            "assert ws['connectivity_mode'] == 'reverse_tunnel', ws\n"
+            "assert effective['host'] == '127.0.0.1', effective\n"
+            "assert effective['port'] == 2222, effective\n"
+            "assert not any('AUTOFLUID_SSH_REACHABLE_HOST' in w for w in validate_config())\n"
+        )
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.getcwd(),
+            "AUTOFLUID_SERVER_MODE": "server",
+            "AUTOFLUID_SSH_REACHABLE_HOST": "127.0.0.1",
+            "AUTOFLUID_SSH_REACHABLE_PORT": "2222",
+            "AUTOFLUID_SSH_CONNECTIVITY_MODE": "reverse_tunnel",
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
 
 
 # ====================================================================

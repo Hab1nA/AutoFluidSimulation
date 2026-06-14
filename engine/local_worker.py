@@ -472,6 +472,9 @@ class LocalWorker:
         result: dict[str, Any] = {"ok": ok}
         if ok:
             result["scdoc_file"] = self._build_scdoc_payload(config_id)
+        else:
+            error = str(getattr(runner, "last_sc_error", "") or "SC 步骤失败")
+            result["error"] = error
         return result
 
     def _run_check_local_environment_task(self, _params: dict[str, Any]) -> dict[str, Any]:

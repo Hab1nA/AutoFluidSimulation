@@ -42,6 +42,8 @@ class _Ssh:
 class _TransportOnlySsh:
     def __init__(self, active: bool) -> None:
         self._active = active
+        self.host = "127.0.0.1"
+        self.port = 2222
 
     def is_connected(self) -> bool:
         raise AssertionError("dashboard health must not send SSH heartbeat probes")
@@ -104,6 +106,18 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "workstation_ssh_details": {
             "WS-A": "ok",
             "WS-B": "disconnected",
+        },
+        "workstation_ssh_targets": {
+            "WS-A": {
+                "host": "",
+                "port": 22,
+                "connectivity_mode": "direct",
+            },
+            "WS-B": {
+                "host": "",
+                "port": 22,
+                "connectivity_mode": "direct",
+            },
         },
     }
     assert data["logs"]["latest_id"] == 12
@@ -178,7 +192,14 @@ def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
     monkeypatch.setattr(
         daemon_module,
         "WORKSTATIONS",
-        [{"id": "WS-A"}],
+        [{
+            "id": "WS-A",
+            "host": "172.17.135.240",
+            "port": 22,
+            "reachable_host": "127.0.0.1",
+            "reachable_port": 2222,
+            "connectivity_mode": "reverse_tunnel",
+        }],
     )
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = None
@@ -188,3 +209,37 @@ def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
 
     assert health["server_to_workstation_ssh"] == "ok"
     assert health["workstation_ssh_details"] == {"WS-A": "ok"}
+    assert health["workstation_ssh_targets"] == {
+        "WS-A": {
+            "host": "127.0.0.1",
+            "port": 2222,
+            "connectivity_mode": "reverse_tunnel",
+        },
+    }
+
+
+def test_dashboard_health_reports_last_failed_workstation_target(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{
+            "id": "WS-A",
+            "host": "172.17.135.240",
+            "port": 22,
+        }],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({})
+    daemon._last_worker_ssh_checks = {"WS-A": "error: timed out"}
+
+    health = daemon._build_health_snapshot()
+
+    assert health["workstation_ssh_details"] == {"WS-A": "error: timed out"}
+    assert health["workstation_ssh_targets"] == {
+        "WS-A": {
+            "host": "172.17.135.240",
+            "port": 22,
+            "connectivity_mode": "direct",
+        },
+    }

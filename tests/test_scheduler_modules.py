@@ -457,6 +457,73 @@ class TestSWPhaseHandlerFallback:
             r"C:\AutoFluid\steps\model_gen4.SLDPRT_1.step",
         )
 
+    def test_server_mode_completed_sw_does_not_requeue_terminal_downstream(self, monkeypatch):
+        """下游已有终态时，SW 收尾不应把构型重新推入 SC 队列。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            def __init__(self):
+                self.status = {
+                    (1, "sc"): STATUS_ERROR,
+                    (1, "meshing"): STATUS_ERROR,
+                    (1, "solver"): STATUS_ERROR,
+                    (2, "sc"): STATUS_COMPLETED,
+                    (2, "transfer"): STATUS_COMPLETED,
+                    (2, "meshing"): STATUS_COMPLETED,
+                }
+
+            def get_step_status(self, config_name: int, step_name: str) -> str:
+                return self.status.get((config_name, step_name), STATUS_WAITING)
+
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=object(),
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        handler._enqueue_server_mode_completed_sw([1, 2])
+
+        assert sc_queue.qsize() == 0
+
+    def test_server_mode_completed_sw_does_not_enqueue_after_stop(self, monkeypatch):
+        """收到停止信号后，SW 收尾不应继续推进下游队列。"""
+        from engine import config as config_module
+        from engine.scheduler.sw_phase import SWPhaseHandler
+        from engine.scheduler.work_queue import UniqueWorkQueue
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(config_module.LOCAL_PATHS, "step_dir", r"C:\AutoFluid\steps")
+
+        class _State:
+            @staticmethod
+            def get_step_status(config_name: int, step_name: str) -> str:
+                return STATUS_WAITING
+
+        stopped = threading.Event()
+        stopped.set()
+        sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        handler = SWPhaseHandler(
+            state_manager=_State(),
+            task_runner=object(),
+            sc_queue=sc_queue,
+            paused_event=threading.Event(),
+            stopped_event=stopped,
+            retry_manager=object(),
+        )
+
+        handler._enqueue_server_mode_completed_sw([1])
+
+        assert sc_queue.qsize() == 0
+
     def test_server_mode_sw_phase_does_not_start_step_file_monitor(self, monkeypatch):
         """server 模式下 SW/SC 由 LocalWorker 执行，daemon 不应启动本地 STEP 监控。"""
         from engine.scheduler.sw_phase import SWPhaseHandler
@@ -1101,6 +1168,45 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler.worker_pool._process_transfer_step(1)
 
         assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_sc_completion_after_stop_does_not_submit_transfer(self):
+        """SC 执行期间停止后，即使在途结果完成也不能推进 Transfer。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_WAITING)
+
+        def complete_after_stop(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "sc"
+            self.scheduler._stopped.set()
+            self.state.set_engine_status("stopped")
+            self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_after_stop
+
+        self.scheduler.worker_pool._process_sc_step(1)
+
+        assert self.scheduler.worker_pool._transfer_queue.qsize() == 0
+
+    def test_transfer_completion_after_stop_does_not_submit_meshing(self):
+        """Transfer 执行期间停止后，即使在途结果完成也不能推进 Meshing。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "transfer", STATUS_WAITING)
+
+        def complete_after_stop(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "transfer"
+            self.scheduler._stopped.set()
+            self.state.set_engine_status("stopped")
+            self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_after_stop
+
+        self.scheduler.worker_pool._process_transfer_step(1)
+
         assert self.scheduler.meshing_monitor.qsize() == 0
 
     def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):

@@ -457,14 +457,38 @@ fn log_worker_ssh_checks(data: &serde_json::Value, log_buffer: &mut LogBuffer) {
     let Some(checks) = data.get("ssh_checks").and_then(|value| value.as_object()) else {
         return;
     };
+    let targets = data
+        .get("workstation_ssh_targets")
+        .and_then(|value| value.as_object());
     for (workstation_id, status) in checks {
         let status_text = status.as_str().unwrap_or("unknown");
+        let target_text = targets
+            .and_then(|items| items.get(workstation_id))
+            .and_then(format_worker_ssh_target)
+            .map(|target| format!(" ({target})"))
+            .unwrap_or_default();
         if status_text == "ok" {
-            log_buffer.push_info(format!("✅ 工作站 {workstation_id}: SSH ok"));
+            log_buffer.push_info(format!("✅ 工作站 {workstation_id}: SSH ok{target_text}"));
         } else {
-            log_buffer.push_info(format!("❌ 工作站 {workstation_id}: SSH {status_text}"));
+            log_buffer.push_info(format!(
+                "❌ 工作站 {workstation_id}: SSH {status_text}{target_text}"
+            ));
         }
     }
+}
+
+fn format_worker_ssh_target(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let host = obj.get("host").and_then(|v| v.as_str()).unwrap_or("");
+    let port = obj.get("port").and_then(|v| v.as_i64()).unwrap_or(22);
+    let mode = obj
+        .get("connectivity_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("direct");
+    if host.is_empty() {
+        return Some(format!("target=:{} mode={}", port, mode));
+    }
+    Some(format!("target={host}:{port} mode={mode}"))
 }
 
 fn resolve_powershell_exe() -> String {
@@ -567,6 +591,32 @@ mod tests {
         let mut wm = WorkerManager::new();
         assert!(!wm.is_worker_running());
         assert!(!wm.is_tunnel_running());
+    }
+
+    #[test]
+    fn worker_ssh_check_log_includes_effective_target() {
+        let mut log_buffer = LogBuffer::new();
+        let data = serde_json::json!({
+            "ssh_checks": {
+                "WS-A": "error: timed out"
+            },
+            "workstation_ssh_targets": {
+                "WS-A": {
+                    "host": "127.0.0.1",
+                    "port": 2222,
+                    "connectivity_mode": "reverse_tunnel"
+                }
+            }
+        });
+
+        log_worker_ssh_checks(&data, &mut log_buffer);
+
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("WS-A")
+                && message.contains("127.0.0.1:2222")
+                && message.contains("reverse_tunnel")
+                && message.contains("timed out")
+        }));
     }
 
     #[test]

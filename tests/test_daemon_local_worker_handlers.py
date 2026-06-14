@@ -75,6 +75,33 @@ def test_daemon_worker_step_complete_persists_scdoc_payload(tmp_path, monkeypatc
     assert (tmp_path / "model_gen4_7.scdoc").read_bytes() == b"server payload"
 
 
+def test_daemon_worker_step_complete_rejects_result_after_engine_stopped(tmp_path) -> None:
+    from engine.daemon import PipelineDaemon
+    from engine.config import STATUS_ERROR, STATUS_RUNNING
+    from engine.state_manager import StateManager
+
+    daemon = PipelineDaemon()
+    daemon.state = StateManager(str(tmp_path / "state.db"))
+    daemon.state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+    daemon.state.set_step_status(2, "sc", STATUS_RUNNING)
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"sc": True}})
+    queued = daemon.local_worker_registry.enqueue_task("sc", {"config_name": 2})
+    daemon.handle_worker_poll({"worker_id": "local-pc-01"})
+    daemon.state.set_engine_status("stopped")
+
+    ok, completed, message = daemon.handle_worker_step_complete({
+        "worker_id": "local-pc-01",
+        "task_id": queued["task_id"],
+        "result": {"ok": True},
+    })
+
+    assert ok is False
+    assert completed["status"] == "error"
+    assert completed["error"] == "engine stopped"
+    assert message == "LocalWorker 任务已丢弃: engine stopped"
+    assert daemon.state.get_step_status(2, "sc") == STATUS_ERROR
+
+
 def test_daemon_worker_poll_returns_local_clean_task() -> None:
     from engine.daemon import PipelineDaemon
 

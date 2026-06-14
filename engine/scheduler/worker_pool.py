@@ -444,11 +444,23 @@ class WorkerPoolManager:
 
             # ★ 执行完成后再次确认状态，仅在 SC 确实 Completed 时推入 Transfer
             sc_status = self.state.get_step_status(config_name, "sc")
+            if self._stopped.is_set():
+                logger.info(
+                    "[WorkerPool] 构型%s SC 完成后检测到停止标志，跳过 Transfer 入队",
+                    config_name,
+                )
+                return
 
         # ★ SC 成功（或已 Completed），推入 Transfer 队列
         if sc_status == STATUS_COMPLETED:
             if self._is_stale_step_result(config_name, "sc", generation):
                 self._discard_stale_step_result(config_name, "sc")
+                return
+            if self._stopped.is_set():
+                logger.info(
+                    "[WorkerPool] 构型%s SC 已完成但引擎已停止，跳过 Transfer 入队",
+                    config_name,
+                )
                 return
             self.submit_transfer(config_name)
         else:
@@ -569,11 +581,23 @@ class WorkerPoolManager:
 
             # ★ 执行完成后再次确认状态
             transfer_status = self.state.get_step_status(config_name, "transfer")
+            if self._stopped.is_set():
+                logger.info(
+                    "[WorkerPool] 构型%s Transfer 完成后检测到停止标志，跳过 Meshing 入队",
+                    config_name,
+                )
+                return
 
         # ★ Transfer 成功（或已 Completed），提交 MeshingMonitor
         if transfer_status == STATUS_COMPLETED:
             if self._is_stale_step_result(config_name, "transfer", generation):
                 self._discard_stale_step_result(config_name, "transfer")
+                return
+            if self._stopped.is_set():
+                logger.info(
+                    "[WorkerPool] 构型%s Transfer 已完成但引擎已停止，跳过 Meshing 入队",
+                    config_name,
+                )
                 return
             if self._meshing_monitor is not None:
                 self._meshing_monitor.submit(config_name)

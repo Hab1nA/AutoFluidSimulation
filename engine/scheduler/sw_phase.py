@@ -334,11 +334,26 @@ class SWPhaseHandler:
         """server 模式下将 LocalWorker 已完成的 SW 构型推入 SC 队列。"""
         if not is_server_mode():
             return
+        if self._stopped.is_set():
+            logger.info("[SW] 收到停止信号，跳过 server 模式 SW 收尾入队")
+            return
+        if self._paused.is_set():
+            logger.info("[SW] 当前处于暂停状态，跳过 server 模式 SW 收尾入队")
+            return
 
         step_dir = LOCAL_PATHS.get("step_dir", "")
         for config_name in config_names:
             sc_status = self.state.get_step_status(config_name, "sc")
-            if sc_status in (STATUS_RUNNING, STATUS_COMPLETED):
+            downstream_statuses = {
+                step: self.state.get_step_status(config_name, step)
+                for step in ("transfer", "meshing", "solver")
+            }
+            if sc_status in (STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR):
+                continue
+            if any(
+                status in (STATUS_COMPLETED, STATUS_ERROR)
+                for status in downstream_statuses.values()
+            ):
                 continue
 
             step_filename = get_step_filename("sw", config_name)

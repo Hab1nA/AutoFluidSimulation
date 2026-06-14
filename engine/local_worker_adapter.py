@@ -19,6 +19,7 @@ class LocalWorkerAdapter:
     ) -> None:
         self._registry = registry
         self._result_poll_interval = result_poll_interval
+        self.last_error = ""
 
     def execute_sw_per_config(
         self,
@@ -78,7 +79,9 @@ class LocalWorkerAdapter:
         params: dict[str, Any],
         timeout_seconds: float,
     ) -> dict[str, Any] | None:
+        self.last_error = ""
         if not self._registry.has_online_worker():
+            self.last_error = "没有在线 LocalWorker"
             logger.error("[LocalWorker] 没有在线 LocalWorker，无法执行 %s", step)
             return None
         task = self._registry.enqueue_task(
@@ -92,14 +95,19 @@ class LocalWorkerAdapter:
             poll_interval=self._result_poll_interval,
         )
         if finished["status"] != "completed":
+            self.last_error = str(finished.get("error", "") or "LocalWorker 任务失败")
             logger.error(
                 "[LocalWorker] 任务失败: step=%s task_id=%s error=%s",
                 step,
                 finished["task_id"],
-                finished.get("error", ""),
+                self.last_error,
             )
             return None
         result = finished.get("result", {})
         if not isinstance(result, dict):
+            self.last_error = "LocalWorker 返回结果格式错误"
             return {"ok": False}
-        return dict(result)
+        result_dict = dict(result)
+        if not bool(result_dict.get("ok", True)):
+            self.last_error = str(result_dict.get("error", "") or "LocalWorker 任务失败")
+        return result_dict

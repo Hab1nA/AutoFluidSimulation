@@ -98,3 +98,73 @@ def test_task_runner_reports_no_delegated_sw_task_in_local_mode(monkeypatch) -> 
     monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
 
     assert runner.is_sw_in_flight(3) is False
+
+
+def test_task_runner_initializes_last_sc_error(tmp_path) -> None:
+    from engine.state_manager import StateManager
+    from engine.task_runner import TaskRunner
+
+    runner = TaskRunner(StateManager(str(tmp_path / "state.db")))
+
+    assert runner.last_sc_error == ""
+
+
+def test_task_runner_captures_delegated_sc_failure_reason(monkeypatch) -> None:
+    from engine.config import ENGINE_CONFIG
+    from engine.task_runner import TaskRunner
+
+    class _Adapter:
+        last_error = "SpaceClaim ready timeout"
+
+        def execute_sc_step(
+            self,
+            config_name: int,
+            timeout_seconds: float = 3600.0,
+        ) -> bool:
+            assert config_name == 7
+            assert timeout_seconds == 45
+            return False
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = _Adapter()
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setitem(ENGINE_CONFIG, "sc_timeout", 45)
+
+    assert runner.execute_sc_step(7) is False
+    assert runner.last_sc_error == "SpaceClaim ready timeout"
+
+
+def test_task_runner_captures_sc_pool_failure_reason(monkeypatch, tmp_path) -> None:
+    from engine.config import LOCAL_PATHS
+    from engine.task_runner import TaskRunner
+
+    step_dir = tmp_path / "step"
+    scdoc_dir = tmp_path / "scdoc"
+    sc_exe = tmp_path / "SpaceClaim.exe"
+    sc_script = tmp_path / "script.py"
+    step_dir.mkdir()
+    scdoc_dir.mkdir()
+    sc_exe.write_text("", encoding="utf-8")
+    sc_script.write_text("", encoding="utf-8")
+    (step_dir / "model_gen4.SLDPRT_7.step").write_text("step", encoding="utf-8")
+    monkeypatch.setitem(LOCAL_PATHS, "step_dir", str(step_dir))
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(sc_exe))
+    monkeypatch.setitem(LOCAL_PATHS, "sc_script", str(sc_script))
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
+    class _Pool:
+        last_error = "Bridge exited early"
+
+        def run_config(self, *_args, **_kwargs) -> bool:
+            return False
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = object()
+    runner._sc_pool = _Pool()
+    runner._paused_event = None
+    runner._stopped_event = None
+    runner._pipeline_control = None
+
+    assert runner.execute_sc_step(7) is False
+    assert runner.last_sc_error == "Bridge exited early"

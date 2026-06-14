@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
 
 #nullable enable
@@ -81,6 +82,9 @@ namespace AutoFluidSimulation.Bridge
         {
             try
             {
+                Console.OutputEncoding = Encoding.UTF8;
+                Console.InputEncoding = Encoding.UTF8;
+
                 var options = ParseArguments(args);
                 if (options == null)
                 {

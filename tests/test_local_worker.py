@@ -700,3 +700,29 @@ def test_local_worker_sc_task_includes_scdoc_payload(tmp_path, monkeypatch) -> N
     assert payload["filename"] == "model_gen4_7.scdoc"
     assert payload["size"] == len(b"scdoc payload")
     assert base64.b64decode(payload["content_b64"]) == b"scdoc payload"
+
+
+def test_local_worker_sc_task_includes_failure_reason(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    class _Runner:
+        last_sc_error = "SpaceClaim ready timeout"
+
+        def execute_sc_step(self, config_name: int) -> bool:
+            assert config_name == 7
+            return False
+
+    class _State:
+        def load_configs(self, _configs):
+            pass
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    result = worker._execute_task("sc", {"config_name": 7})
+
+    assert result == {"ok": False, "error": "SpaceClaim ready timeout"}
