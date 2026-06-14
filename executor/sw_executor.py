@@ -74,6 +74,7 @@ class SWExecutor:
         self._first_cleanup_done = False
         self._final_cleanup_done = False
         self.last_error = ""
+        self._last_open_error: Exception | None = None
 
     def set_control_events(
         self,
@@ -168,6 +169,16 @@ class SWExecutor:
                 except Exception:
                     pass
                 doc = self._open_sw_model(sw_app, sw_model, doc_type)
+                if doc is None:
+                    recovered, recovered_sw_app, recovered_doc = (
+                        self._recover_after_open_rpc_failure(
+                            sw_model,
+                            doc_type,
+                        )
+                    )
+                    if recovered:
+                        sw_app = recovered_sw_app
+                        doc = recovered_doc
                 if doc is None:
                     return self._fail(f"[SW] 构型{config_name}: 无法打开模型")
                 if not self._import_design_table_with_retry(
@@ -527,11 +538,63 @@ class SWExecutor:
             return False
         return "SLDWORKS.exe" in result.stdout
 
+    @staticmethod
+    def _is_com_rpc_failure(exc: Exception | None) -> bool:
+        """判断 COM 异常是否表示 SolidWorks RPC/进程崩溃。"""
+        if exc is None:
+            return False
+        text = str(exc)
+        return any(
+            marker in text
+            for marker in (
+                "-2147023170",
+                "0x800706BE",
+                "-2147023174",
+                "0x800706BA",
+                "远程过程调用失败",
+                "RPC_S_CALL_FAILED",
+                "RPC_S_SERVER_UNAVAILABLE",
+            )
+        )
+
+    def _recover_after_open_rpc_failure(
+        self,
+        sw_model: str,
+        doc_type: int,
+    ) -> tuple[bool, Any | None, Any | None]:
+        """OpenDoc6 RPC 失败时清理残留进程并重连一次。"""
+        if not self._is_com_rpc_failure(self._last_open_error):
+            return False, None, None
+
+        logger.warning(
+            "[SW-COM] OpenDoc6 检测到 COM/RPC 失败，"
+            "将终止残留 SolidWorks 进程并重试一次"
+        )
+        self._terminate_sw_processes()
+        self._uninitialize_com_if_needed()
+        try:
+            import pythoncom
+
+            pythoncom.CoInitialize()
+            self._com_initialized = True
+        except Exception as e:
+            logger.debug(f"[SW-COM] RPC 恢复时 COM 初始化异常: {e}")
+
+        sw_app = self._connect_sw()
+        if sw_app is None:
+            return True, None, None
+        try:
+            sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
+        except Exception:
+            pass
+        return True, sw_app, self._open_sw_model(sw_app, sw_model, doc_type)
+
     def _open_sw_model(self, sw_app: Any, sw_model: str, doc_type: int) -> Any:  # noqa: ANN401  COM 动态对象
         """通过 OpenDoc6 打开 SW 模型文件并验证 COM 代理有效性。"""
         import win32com.client
         import pythoncom
 
+        self._last_open_error = None
         logger.info(f"[SW-COM] 正在打开模型 (OpenDoc6): {os.path.basename(sw_model)}")
         open_errors = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         open_warnings = win32com.client.VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
@@ -555,6 +618,7 @@ class SWExecutor:
                     f"模型可能存在问题（缺失参考/重建错误）"
                 )
         except Exception as open_err:
+            self._last_open_error = open_err
             logger.error(
                 f"[SW-COM] OpenDoc6 异常 ({type(open_err).__name__}: {open_err})"
             )
