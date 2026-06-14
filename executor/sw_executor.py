@@ -583,11 +583,23 @@ class SWExecutor:
         sw_app = self._connect_sw()
         if sw_app is None:
             return True, None, None
-        try:
-            sw_app.Visible = bool(ENGINE_CONFIG.get("sw_visible", True))
-        except Exception:
-            pass
+        self._hide_document_window_for_recovery(sw_app, doc_type)
         return True, sw_app, self._open_sw_model(sw_app, sw_model, doc_type)
+
+    @staticmethod
+    def _hide_document_window_for_recovery(
+        sw_app: Any,
+        doc_type: int,
+    ) -> None:  # noqa: ANN401  COM 动态对象
+        """恢复重试时隐藏文档窗口，避开崩溃的 UI 渲染路径。"""
+        try:
+            sw_app.Visible = False
+        except Exception as e:
+            logger.debug(f"[SW-COM] 设置恢复打开隐藏主窗口失败: {e}")
+        try:
+            sw_app.DocumentVisible(False, doc_type)
+        except Exception as e:
+            logger.debug(f"[SW-COM] 设置恢复打开隐藏窗口失败: {e}")
 
     def _open_sw_model(self, sw_app: Any, sw_model: str, doc_type: int) -> Any:  # noqa: ANN401  COM 动态对象
         """通过 OpenDoc6 打开 SW 模型文件并验证 COM 代理有效性。"""

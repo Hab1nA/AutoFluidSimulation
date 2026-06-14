@@ -162,7 +162,10 @@ def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
     monkeypatch,
 ):
     executor = SWExecutor(SimpleNamespace())
-    app = SimpleNamespace()
+    first_app = SimpleNamespace()
+    recovered_app = SimpleNamespace()
+    connect_calls = []
+    visible_calls = []
     terminate_calls = []
     open_calls = []
 
@@ -190,9 +193,23 @@ def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
             return None
         return _Doc()
 
-    monkeypatch.setattr(executor, "_connect_sw", lambda: app)
+    def connect_sw():
+        connect_calls.append("connect")
+        return first_app if len(connect_calls) == 1 else recovered_app
+
+    def document_visible(visible, doc_type):
+        visible_calls.append((visible, doc_type))
+
+    recovered_app.Visible = True
+    recovered_app.DocumentVisible = document_visible
+
+    monkeypatch.setattr(executor, "_connect_sw", connect_sw)
     monkeypatch.setattr(executor, "_open_sw_model", open_model)
-    monkeypatch.setattr(executor, "_import_design_table_with_retry", lambda *_args: True)
+    monkeypatch.setattr(
+        executor,
+        "_import_design_table_with_retry",
+        lambda _doc, app, *_args: app is recovered_app,
+    )
     monkeypatch.setattr(
         executor,
         "_terminate_sw_processes",
@@ -202,6 +219,8 @@ def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
 
     assert executor.export_sw_per_config(1) is True
     assert open_calls == ["open", "open"]
+    assert recovered_app.Visible is False
+    assert visible_calls == [(False, 1)]
     assert terminate_calls == ["terminate"]
 
 
