@@ -1,406 +1,462 @@
-# TUI 显示 Fluent 仿真剩余时间 — 设计文档
+# TUI 显示 Fluent Solver 剩余时间设计
 
-> 文档版本：v1.0  
-> 创建日期：2026-06-05  
-> 目标：在 TUI info_bar 显示当前构型的 Fluent 仿真剩余时间
-
----
-
-## 目录
-
-1. [需求概述](#1-需求概述)
-2. [现状分析](#2-现状分析)
-3. [方案选型](#3-方案选型)
-4. [架构设计](#4-架构设计)
-5. [数据流与协议](#5-数据流与协议)
-6. [实施计划](#6-实施计划)
-7. [关键文件清单](#7-关键文件清单)
-8. [验证方案](#8-验证方案)
-9. [待确认事项](#9-待确认事项)
+> 文档版本：v2.0
+> 更新日期：2026-06-14
+> 目标：Fluent 开始迭代后，在 TUI 表格的 solver 步骤单元格中用剩余时间替换 `Running`，并保持绿色显示。
 
 ---
 
-## 1. 需求概述
+## 1. 需求与结论
 
-在 TUI 界面顶部 info_bar 区域，"当前时间"一栏左侧显示**当前构型仿真剩余时间**。
+当某个构型正在执行 `solver` 步骤，且 Fluent transcript 已报告剩余时间时，TUI 表格中该构型的 solver 单元格从：
 
-**显示效果**：
+```text
+⏳ Running
 ```
-  引擎: 运行中  │  构型数: 5  │  屏障: 已通过  │  ⏳ 01:23:45
+
+替换为：
+
+```text
+⏳ 01:23:45
 ```
 
-仅当有构型正在 solver 阶段且进度数据可用时显示 `│ ⏳ HH:MM:SS`，否则保持 info_bar 原样。
+约束：
+
+- 只替换正在执行 solver 的表格单元格，不修改顶部 `info_bar` 的引擎状态文本。
+- 只有 `solver` 步骤有剩余时间数据时替换；`sw`、`sc`、`transfer`、`meshing` 的 `Running` 显示保持原样。
+- 剩余时间单元格使用绿色；不全局修改 `STATUS_RUNNING` 的颜色，避免影响其他步骤。
+- 如果 Fluent transcript 格式未知或暂时无进度数据，TUI 继续显示原始 `⏳ Running`，不得影响求解流程。
 
 ---
 
-## 2. 现状分析
+## 2. 本地现状
 
-### 2.1 当前数据流
+### 2.1 TUI 状态与显示路径
 
-```
-远程工作站 (Windows)
-  └─ batch_solver_gen4.py
-       └─ pyfluent.launch_fluent() → solver_session
-            └─ solver_session.tui.solve.iterate(1000)  ← 阻塞调用
-                 └─ Fluent 控制台输出迭代信息（含剩余时间）→ 无人捕获
+当前 TUI 的状态表格由 `autofluid-tui/src/ui/table.rs` 渲染：
 
-本地 PC
-  └─ remote_executor.wait_solver_completion()
-       └─ 每 30s 轮询标志文件（仅检查完成/未完成）
-
-  └─ IPC get_engine_status → {engine_status, sw_macro_started, barrier_passed, pipeline_started}
-       └─ 无进度信息
-
-  └─ TUI info_bar → "引擎: 运行中 │ 构型数: 5 │ 屏障: 已通过"
-       └─ 无剩余时间
+```rust
+let status = state.get_step_status(&cn_str, step);
+let icon = status_icon(status);
+let color = status_color(status);
+let text = format!("{} {}", icon, status);
 ```
 
-### 2.2 Fluent 迭代输出
+因此 `Running` 出现在表格单元格，而不是顶部 `info_bar`。顶部 `info_bar` 由 `AppState::info_bar_text()` 生成，显示的是引擎状态、构型数、屏障状态、IPC/worker/SSH 健康信息。
 
-Fluent 在每次迭代时向控制台输出信息，其中包含**Fluent 自身预估的剩余仿真时间**。该输出由 PyFluent 的 gRPC transcript 通道实时传输到本地 Python 进程。
+TUI 主循环现在通过 `get_dashboard` 拉取聚合数据：
 
-### 2.3 PyFluent Transcript 机制
+```text
+get_dashboard
+  ├─ statuses
+  ├─ engine
+  ├─ health
+  └─ logs
+```
 
-`solver_session.transcript` 在会话创建时已自动启动（`start_transcript=True` 默认）。
+所以 solver 剩余时间应加入现有 `engine` payload；不要新增独立轮询命令。
 
-**核心 API**（源码：`ansys/fluent/core/streaming_services/transcript_streaming.py`）：
+### 2.2 Daemon 与远程 solver 路径
 
-| 方法 | 说明 |
-|------|------|
-| `register_callback(fn, **kwargs)` | 注册回调，每行 Fluent 输出触发一次，返回 `callback_id` |
-| `unregister_callback(callback_id)` | 注销回调 |
-| `start()` / `stop()` | 控制流式传输（默认已启动） |
+当前 solver 启动与等待路径：
 
-- 回调在 gRPC 后台线程中调用，与 `iterate()` 主线程**并行执行**
-- 回调接收参数为 Fluent 输出文本行（默认去尾换行符）
-- `keep_new_lines=True` 时保留换行符
+```text
+executor/remote_executor.py
+  ├─ _build_solver_command()
+  │    └─ 启动 executor/remote_scripts/batch_solver_gen4.py
+  ├─ execute_solver()
+  │    └─ 通过交互式计划任务启动远程 Fluent
+  └─ wait_solver_completion()
+       └─ 每 30s 检查 done/error flag 和 cas/dat 输出文件
+```
 
-**继承关系**：`Transcript` → `StreamingService`（`streaming.py`）
+`batch_solver_gen4.py` 目前直接执行：
 
-`StreamingService.register_callback()` 实现：
 ```python
-def register_callback(self, callback: Callable, *args, **kwargs) -> str:
-    with self._lock:
-        callback_id = f"{next(self._service_callback_id)}"
-        self._service_callbacks[callback_id] = [callback, args, kwargs]
-        return callback_id
+solver_session.tui.solve.iterate(args.iterate_count)
 ```
+
+Fluent 迭代期间的 transcript 输出尚未被捕获；daemon 也没有 `solver_progress` 状态。
+
+### 2.3 工作区注意事项
+
+当前工作区已有未提交改动，且涉及本功能会触及的文件，包括：
+
+- `autofluid-tui/src/state/app_state.rs`
+- `autofluid-tui/src/main.rs`
+- `autofluid-tui/src/ui/header.rs`
+- `engine/daemon.py`
+- `tests/test_daemon_dashboard.py`
+
+实施时必须在现有工作区状态上增量合并，不能覆盖或回滚这些改动。
 
 ---
 
-## 3. 方案选型
+## 3. 架构方案
 
-### 3.1 候选方案对比
+采用 Fluent transcript 回调作为主方案。
 
-| 方案 | 数据来源 | 优点 | 缺点 |
-|------|---------|------|------|
-| **A. Transcript 回调** | Fluent 控制台输出 | 实时、直接获取 Fluent 预估时间、无需额外文件 | 需确认输出格式 |
-| B. Report 文件行数 | `.set` 中配置的 report file monitor | 已有配置、无需改 Fluent 设置 | 需自行计算剩余时间、精度低 |
-| C. PyFluent Solution Monitor | `solver_session.solution.monitor` | Pythonic API | 仅含残差数据，无剩余时间 |
+```text
+远程工作站
+  batch_solver_gen4.py
+    ├─ launch_fluent()
+    ├─ register transcript callback
+    ├─ iterate()
+    │    └─ Fluent 每次迭代输出 remaining time
+    ├─ parse remaining time
+    └─ atomic write solver_progress_<config>.json
 
-### 3.2 结论
+Daemon / 本地控制端
+  remote_executor.wait_solver_completion()
+    ├─ 每 30s 读取 progress JSON
+    ├─ state_manager.set_solver_progress()
+    └─ 完成/失败/超时/停止时 clear_solver_progress()
 
-**选择方案 A（Transcript 回调）**。
+IPC
+  get_engine_status()
+    └─ data.solver_progress
+  get_dashboard()
+    └─ engine 复用 get_engine_status payload
 
-理由：
-1. **直接获取 Fluent 预估时间**，无需自行计算
-2. **实时性好**：回调在 gRPC 线程中触发，与 iterate() 并行
-3. **改动最小**：仅需注册/注销回调，不改变 Fluent 配置或迭代流程
-4. **report 文件方案作为降级备选**：若 transcript 不可用，可回退到方案 B
+TUI
+  apply_dashboard_response()
+    └─ AppState.update_engine_info()
+         └─ EngineInfo.solver_progress
+  table.rs
+    └─ solver Running 单元格显示 HH:MM:SS
+```
+
+选择 transcript 的理由：
+
+- 直接使用 Fluent 自身预估的剩余时间，不在 daemon 侧重新估算。
+- 回调与 `iterate()` 并行，避免阻塞主求解调用。
+- 不改变 Fluent journal、report monitor 或求解配置。
+- transcript 解析失败时可以自然降级为不显示进度。
 
 ---
 
-## 4. 架构设计
+## 4. 数据与接口设计
 
-### 4.1 整体架构
+### 4.1 远程 progress 文件
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        远程工作站 (Windows)                          │
-│                                                                     │
-│  batch_solver_gen4.py                                               │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  solver_session = pyfluent.launch_fluent(...)                 │  │
-│  │                                                               │  │
-│  │  # 注册 transcript 回调                                       │  │
-│  │  callback_id = solver_session.transcript                      │  │
-│  │      .register_callback(_on_transcript_line)                  │  │
-│  │                                                               │  │
-│  │  solver_session.tui.solve.iterate(1000)  ← 阻塞              │  │
-│  │       │                                                       │  │
-│  │       │  gRPC transcript 流                                   │  │
-│  │       ▼                                                       │  │
-│  │  _on_transcript_line(text)                                    │  │
-│  │       │  解析迭代行 → 提取剩余时间                             │  │
-│  │       ▼                                                       │  │
-│  │  写入 progress_file (JSON) ─────────────────────────────────┐ │  │
-│  │                                                               │  │
-│  │  solver_session.transcript                                    │  │
-│  │      .unregister_callback(callback_id)                        │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                                                                     │
-│  flag_dir/solver_progress_{config_id}.json                          │
-└─────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ SSH SFTP 读取（30s 间隔）
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                          本地 PC                                     │
-│                                                                     │
-│  remote_executor.wait_solver_completion()                           │
-│       │  读取 solver_progress_{config_id}.json                      │
-│       ▼                                                             │
-│  state_manager.set_solver_progress()                                │
-│       │  存入 engine_state 表                                       │
-│       ▼                                                             │
-│  daemon.handle_get_engine_status()                                  │
-│       │  响应中附加 solver_progress 字段                             │
-│       ▼                                                             │
-│  IPC get_engine_status ─────────────────────────────────────────┐   │
-│                                                                 │   │
-│  TUI                                                            ▼   │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │  AppState.update_engine_info()                                │  │
-│  │       │  解析 solver_progress → SolverProgress                │  │
-│  │       ▼                                                       │  │
-│  │  info_bar_text()                                              │  │
-│  │       │  追加 "│ ⏳ HH:MM:SS"                                 │  │
-│  │       ▼                                                       │  │
-│  │  render_info_bar() → 显示在 info_bar 区域                     │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────┘
+路径：
+
+```text
+{flag_dir}/solver_progress_{config_id}.json
 ```
 
-### 4.2 组件职责
-
-| 组件 | 职责 | 修改类型 |
-|------|------|---------|
-| `batch_solver_gen4.py` | 注册 transcript 回调，解析输出，写入进度文件 | **新增** |
-| `_build_solver_command()` | 传递 `--progress-file` 参数 | **修改** |
-| `wait_solver_completion()` | 轮询时同步读取进度文件 | **修改** |
-| `StateManager` | 存储/查询 solver progress | **新增方法** |
-| `handle_get_engine_status()` | 响应中附加 progress 数据 | **修改** |
-| `EngineInfo` / `SolverProgress` | Rust 侧数据结构 | **新增** |
-| `update_engine_info()` | 解析 progress 字段 | **修改** |
-| `info_bar_text()` | 追加剩余时间显示 | **修改** |
-
----
-
-## 5. 数据流与协议
-
-### 5.1 远程进度文件格式
-
-路径：`{flag_dir}/solver_progress_{config_id}.json`
+内容：
 
 ```json
 {
+  "config_name": 5,
   "current_iter": 350,
   "total_iter": 1000,
   "remaining_sec": 5025.0,
-  "raw_line": "  iter  350  ...  estimated time remaining: 1:23:45",
-  "ts": 1717584000.123
+  "raw_line": "iter 350 ... estimated time remaining: 1:23:45",
+  "updated_at": 1717584000.123
 }
 ```
 
+字段含义：
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `current_iter` | int | 当前迭代数 |
-| `total_iter` | int | 总迭代数 |
-| `remaining_sec` | float | Fluent 预估剩余秒数 |
-| `raw_line` | str | 原始 Fluent 输出行（便于调试） |
-| `ts` | float | 写入时间戳（`time.time()`） |
+| `config_name` | int | 构型编号 |
+| `current_iter` | int \| null | 当前迭代步；无法解析时可为 `null` |
+| `total_iter` | int | 本次 `--iterate-count` |
+| `remaining_sec` | float | Fluent 报告的剩余秒数 |
+| `raw_line` | str | 触发更新的原始 transcript 行 |
+| `updated_at` | float | 写入时间戳，`time.time()` |
 
-> **注**：字段结构为初始设计，具体字段需根据 Fluent 实际输出格式调整。
+写入策略：
 
-### 5.2 StateManager 存储
+- 先写 `{progress_file}.tmp`，再用 `os.replace()` 原子替换。
+- progress 文件为可选能力；没有传入 `--progress-file` 时脚本行为与现在一致。
+- `finally` 中尽量删除 progress 文件，避免 stale 显示。
 
-在 `engine_state` 表中新增键：
+### 4.2 transcript 解析策略
 
-```sql
-INSERT OR REPLACE INTO engine_state (key, value) VALUES ('solver_progress', '{"config_name": 5, "current_iter": 350, "total_iter": 1000, "remaining_sec": 5025.0}')
+先支持常见写法：
+
+```text
+estimated time remaining: 1:23:45
+remaining time: 1:23:45
+time remaining: 1:23:45
 ```
 
-### 5.3 IPC 响应扩展
+解析规则：
 
-`get_engine_status` 响应新增 `solver_progress` 字段：
+- 支持 `H:MM:SS` 和 `MM:SS`。
+- 若同一行能解析出 iteration 编号，则写入 `current_iter`；否则 `current_iter = null`。
+- 格式不匹配时忽略该行，不写 progress，不抛异常。
+- 真实 Fluent 输出样例应作为实施时首个验证项；如果样例不同，只扩展解析器，不改变数据链路。
+
+### 4.3 StateManager
+
+复用现有 `engine_state` 表，新增 key：
+
+```text
+solver_progress
+```
+
+新增方法：
+
+```python
+def set_solver_progress(self, progress: dict[str, object]) -> None: ...
+def get_solver_progress(self) -> dict[str, object] | None: ...
+def clear_solver_progress(self) -> None: ...
+```
+
+行为：
+
+- `set_solver_progress()` 存储 JSON 字符串。
+- `get_solver_progress()` 在 key 不存在、为空或 JSON 损坏时返回 `None`。
+- `clear_solver_progress()` 删除或清空该 key。
+- `reset_all()`、`reset_config_steps(..., from_step="solver")`、solver 完成/失败/超时路径都应清理相关 progress。
+
+### 4.4 IPC payload
+
+`get_engine_status` 的 `data` 增加：
 
 ```json
 {
-  "status": "ok",
-  "data": {
-    "engine_status": "running",
-    "sw_macro_started": true,
-    "barrier_passed": true,
-    "pipeline_started": true,
-    "solver_progress": {
-      "config_name": 5,
-      "current_iter": 350,
-      "total_iter": 1000,
-      "remaining_sec": 5025.0
-    }
+  "solver_progress": {
+    "config_name": 5,
+    "current_iter": 350,
+    "total_iter": 1000,
+    "remaining_sec": 5025.0,
+    "updated_at": 1717584000.123
   }
 }
 ```
 
-当无活跃仿真时，`solver_progress` 为 `null`。
+无活跃 solver progress 时：
 
-### 5.4 Rust 侧数据结构
+```json
+{
+  "solver_progress": null
+}
+```
+
+`get_dashboard` 不新增字段，只让已有 `engine` 对象自然包含 `solver_progress`。
+
+### 4.5 Rust TUI 状态与显示
+
+新增结构：
 
 ```rust
 #[derive(Debug, Clone, Default)]
 pub struct SolverProgress {
     pub config_name: u64,
-    pub current_iter: u64,
+    pub current_iter: Option<u64>,
     pub total_iter: u64,
     pub remaining_sec: f64,
-}
-
-// EngineInfo 新增字段
-pub struct EngineInfo {
-    pub engine_status: String,
-    pub sw_macro_started: bool,
-    pub barrier_passed: bool,
-    pub pipeline_started: bool,
-    pub solver_progress: Option<SolverProgress>,  // 新增
+    pub updated_at: Option<f64>,
 }
 ```
 
----
+`EngineInfo` 新增：
 
-## 6. 实施计划
+```rust
+pub solver_progress: Option<SolverProgress>
+```
 
-### Phase 1: 远程端进度追踪（Python）
+显示规则：
 
-**文件**：`executor/remote_scripts/batch_solver_gen4.py`
+- `AppState::update_engine_info()` 解析 `solver_progress`。
+- 新增 helper，例如：
 
-1. 添加 `--progress-file` 可选参数
-2. 定义 transcript 回调函数 `_on_transcript_line(text)`：
-   - 记录原始行到日志（调试用）
-   - 正则匹配 Fluent 迭代输出中的剩余时间（**具体正则待输出样例确认**）
-   - 匹配成功后写入 progress_file（JSON，原子写入避免读取不完整）
-3. 在 `iterate()` 前注册回调，`iterate()` 后注销回调
-4. 迭代完成后删除进度文件
+```rust
+pub fn step_cell_text(&self, config: &str, step: &str) -> String
+pub fn step_cell_color(&self, config: &str, step: &str) -> ratatui::style::Color
+```
 
-**文件**：`executor/remote_executor.py` — `_build_solver_command()`
-
-5. 命令中追加 `--progress-file "{flag_dir}/solver_progress_{config_id}.json"`
-
-### Phase 2: Daemon 侧进度读取（Python）
-
-**文件**：`executor/remote_executor.py` — `wait_solver_completion()`
-
-1. 在 30s 轮询循环中，用 SFTP 读取进度文件
-2. 解析 JSON，调用 `state_manager.set_solver_progress()`
-3. 每次轮询都更新（30s 刷新间隔）
-
-**文件**：`engine/state_manager.py`
-
-4. 新增 `set_solver_progress(progress: dict)` 方法
-5. 新增 `get_solver_progress() -> dict | None` 方法
-6. 在 `engine_state` 表中存储/读取 `solver_progress` 键
-
-### Phase 3: IPC 协议扩展
-
-**文件**：`engine/daemon.py` — `handle_get_engine_status()`
-
-1. 从 StateManager 读取 solver_progress
-2. 附加到响应数据中
-
-**文件**：`autofluid-tui/src/state/app_state.rs`
-
-3. 新增 `SolverProgress` 结构体
-4. `EngineInfo` 新增 `solver_progress: Option<SolverProgress>` 字段
-5. `update_engine_info()` 解析 `solver_progress` 字段
-
-### Phase 4: TUI 显示
-
-**文件**：`autofluid-tui/src/state/app_state.rs` — `info_bar_text()`
-
-1. 当 `solver_progress` 存在时，追加 `│ ⏳ HH:MM:SS`
-2. 格式化秒数为 `HH:MM:SS`
-
-**文件**：`autofluid-tui/src/ui/header.rs` — 无需修改
+- 当 `step == "solver"`、状态为 `Running`、`solver_progress.config_name` 等于当前构型、`remaining_sec >= 0` 时：
+  - 文本为 `⏳ HH:MM:SS`
+  - 颜色为 `theme.success` 或等价绿色
+- 其他情况保持当前 `status_icon(status) + status` 和 `status_color(status)`。
 
 ---
 
-## 7. 关键文件清单
+## 5. 实施计划
 
-| 文件 | 修改内容 | 语言 |
-|------|---------|------|
-| `executor/remote_scripts/batch_solver_gen4.py` | +transcript 回调 + `--progress-file` 参数 | Python |
-| `executor/remote_executor.py` | +传递 progress-file 参数 + 轮询读取进度 | Python |
-| `engine/state_manager.py` | +`set_solver_progress()` / `get_solver_progress()` | Python |
-| `engine/daemon.py` | +`handle_get_engine_status()` 附加 progress | Python |
-| `autofluid-tui/src/state/app_state.rs` | +`SolverProgress` 结构体 + 解析 + `info_bar_text()` 追加显示 | Rust |
-| `autofluid-tui/src/ui/header.rs` | 无需修改 | Rust |
+### Phase 1: 远程脚本 progress 生成
+
+修改 `executor/remote_scripts/batch_solver_gen4.py`：
+
+1. 添加 `--progress-file` 可选参数。
+2. 添加纯函数：
+   - `_parse_remaining_time_line(line: str, total_iter: int) -> dict[str, object] | None`
+   - `_format/parse` 辅助函数用于时间转换。
+3. 添加 `_write_progress_file(progress_file: str, progress: dict[str, object])`，使用 `.tmp` + `os.replace()`。
+4. 在 `iterate()` 前注册 transcript callback，在 `finally` 注销 callback。
+5. 在脚本结束和异常清理路径中删除 progress 文件。
+
+### Phase 2: 远程读取与 daemon 状态
+
+修改 `utils/ssh_client.py`：
+
+1. 增加 `read_remote_text_file(remote_path: str, timeout: float | None = None) -> str | None`。
+2. 使用 SFTP `open(..., "rb")` 读取小文本，遵循现有连接与通道 timeout 风格。
+
+修改 `executor/remote_executor.py`：
+
+1. 增加 `_solver_progress_file(config_name, remote_config=None)`。
+2. `_build_solver_command()` 追加 `--progress-file` 参数。
+3. `wait_solver_completion()` 每次 poll 时读取 progress JSON。
+4. 解析成功后调用 `state.set_solver_progress()`。
+5. 完成、error flag、输出文件校验失败、stop、timeout 时调用 `state.clear_solver_progress()` 并尽量删除远程 progress 文件。
+
+修改 `engine/state_manager.py`：
+
+1. 增加 `set_solver_progress()`、`get_solver_progress()`、`clear_solver_progress()`。
+2. reset solver 或 reset all 时清理 progress。
+
+### Phase 3: IPC 与 dashboard
+
+修改 `engine/daemon.py`：
+
+1. `handle_get_engine_status()` 增加 `solver_progress`。
+2. 保持 `handle_get_dashboard()` 结构不变，让 `engine` payload 自动携带 progress。
+
+### Phase 4: TUI 表格显示
+
+修改 `autofluid-tui/src/state/app_state.rs`：
+
+1. 增加 `SolverProgress`。
+2. `EngineInfo` 增加 `solver_progress`。
+3. `update_engine_info()` 解析该字段。
+4. 增加 `format_hh_mm_ss()` 和 solver 单元格显示 helper。
+
+修改 `autofluid-tui/src/ui/table.rs`：
+
+1. 使用 AppState helper 获取单元格文本。
+2. 对匹配到 solver progress 的单元格使用绿色。
+3. 不修改顶部 `header.rs` / `info_bar` 展示逻辑。
 
 ---
 
-## 8. 验证方案
+## 6. 关键文件清单
 
-### 8.1 单元验证
+| 文件 | 修改内容 |
+|------|----------|
+| `executor/remote_scripts/batch_solver_gen4.py` | transcript callback、剩余时间解析、progress JSON 写入 |
+| `executor/remote_executor.py` | 构建 `--progress-file`、轮询读取 progress、清理 stale progress |
+| `utils/ssh_client.py` | 新增公共远程文本读取方法 |
+| `engine/state_manager.py` | 存储、读取、清理 `solver_progress` |
+| `engine/daemon.py` | `get_engine_status` / dashboard engine payload 扩展 |
+| `autofluid-tui/src/state/app_state.rs` | Rust progress 状态、解析、时间格式化和单元格 helper |
+| `autofluid-tui/src/ui/table.rs` | solver 单元格文本与绿色显示 |
+| `tests/test_batch_solver_script.py` | 远程脚本解析、callback、progress 文件测试 |
+| `tests/test_remote_executor.py` / `tests/test_remote_executor_full.py` | solver command、progress 读取与清理测试 |
+| `tests/test_state_manager.py` | progress 状态 CRUD 测试 |
+| `tests/test_daemon_dashboard.py` | dashboard engine payload 测试 |
 
-1. **远程脚本**：手动运行 `batch_solver_gen4.py --progress-file test.json`
-   - 确认 transcript 回调被触发
-   - 确认进度文件 JSON 格式正确
-   - 确认 iterate() 返回后进度文件被清理
+---
 
-2. **StateManager**：单元测试 `set_solver_progress()` / `get_solver_progress()`
+## 7. 验证方案
 
-3. **IPC 协议**：运行 `pytest tests/test_ipc_protocol.py` 确认兼容
+### 7.1 Python 单元测试
 
-### 8.2 集成验证
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_batch_solver_script.py -v
+.venv\Scripts\python.exe -m pytest tests/test_remote_executor.py tests/test_remote_executor_full.py -v
+.venv\Scripts\python.exe -m pytest tests/test_state_manager.py tests/test_daemon_dashboard.py -v
+```
 
-4. **Daemon**：启动 daemon，调用 `get_engine_status` 确认响应包含 `solver_progress`
+覆盖场景：
 
-5. **TUI**：启动 TUI，确认 info_bar 显示 `│ ⏳ HH:MM:SS`
+- `--progress-file` 可选，不传时行为兼容。
+- transcript 样例行可解析为 `remaining_sec`。
+- progress 文件原子写入且 JSON 字段完整。
+- callback 注册后在 `finally` 中注销。
+- solver command 包含 `--progress-file`。
+- daemon 读取 progress 后写入 state。
+- solver 完成、失败、超时、停止后清理 progress。
+- `get_dashboard()["engine"]["solver_progress"]` 正确透传。
 
-### 8.3 端到端验证
+### 7.2 Rust 单元测试
 
-6. **完整流程**：运行一个构型的 solver 阶段
-   - 确认剩余时间随迭代递减
-   - 确认仿真完成后剩余时间消失
+在 `autofluid-tui/` 下运行：
 
-7. **边界情况**：
-   - 仿真刚开始（无数据）→ 不显示
-   - 仿真中途暂停 → 保持最后值
-   - 仿真超时 → 进度文件被清理
-
-### 8.4 质量门禁
-
-```bash
-# Python
-.venv\Scripts\python.exe -m ruff check .
-.venv\Scripts\python.exe -m mypy .
-.venv\Scripts\python.exe -m pytest tests/
-
-# Rust (from autofluid-tui/)
-cargo check
-cargo clippy -- -D warnings
-cargo fmt --check
+```powershell
 cargo test
 ```
 
+覆盖场景：
+
+- `update_engine_info()` 解析 `solver_progress`。
+- `remaining_sec` 格式化为 `HH:MM:SS`。
+- 只有匹配构型的 solver `Running` 单元格替换为剩余时间。
+- 非 solver 步骤、非 Running 状态、构型不匹配、无 progress 时保持原显示。
+
+### 7.3 质量门禁
+
+Python：
+
+```powershell
+.venv\Scripts\python.exe -m ruff check .
+.venv\Scripts\python.exe -m mypy .
+.venv\Scripts\python.exe -m pytest tests/
+```
+
+Rust：
+
+```powershell
+cd autofluid-tui
+cargo fmt --check
+cargo check
+cargo clippy -- -D warnings
+cargo test
+```
+
+### 7.4 手动 / E2E 验证
+
+1. 使用短迭代数 fixture，例如临时将 `solver_iteration_count` 调整为 `25`。
+2. 启动一次完整 solver 流程。
+3. Fluent 开始迭代后确认对应构型的 solver 单元格显示 `⏳ HH:MM:SS`。
+4. 确认该单元格为绿色。
+5. solver 完成后确认单元格进入 `Completed`，不残留旧剩余时间。
+6. 恢复真实 `solver_iteration_count` 配置。
+
 ---
 
-## 9. 待确认事项
+## 8. 风险与默认处理
 
-| # | 问题 | 影响 | 状态 |
-|---|------|------|------|
-| 1 | Fluent 迭代输出中剩余时间的具体格式 | 正则解析逻辑 | ⏳ 待用户提供输出样例 |
-| 2 | `--progress-file` 参数是否为可选（降级到不显示） | 命令行参数设计 | 建议可选 |
-| 3 | 多构型同时在 solver 阶段时的显示策略 | info_bar 展示 | 建议显示最近更新的构型 |
-| 4 | 进度文件原子写入策略（避免读取到不完整 JSON） | 数据完整性 | 建议先写 .tmp 再 rename |
+| 风险 | 默认处理 |
+|------|----------|
+| Fluent transcript 实际格式与预期不同 | 先不显示剩余时间，不影响求解；用真实样例扩展解析器 |
+| progress JSON 正在写入时被读取 | 远程脚本原子替换；daemon 读到损坏 JSON 时忽略本轮 |
+| solver 异常退出导致 stale progress | daemon 完成/失败/超时/停止路径清理 state，并尽量删除远程 progress 文件 |
+| 多工作站或多个 solver 并发 | progress 带 `config_name`；TUI 只替换匹配构型单元格 |
+| 当前工作区已有未提交改动 | 实施前审阅相关 diff，增量合并，不回滚用户改动 |
 
 ---
 
-## 附录：方案 B 降级备选（Report 文件监控）
+## 9. 已确认与待实测项
 
-若 transcript 回调方案不可行（如 PyFluent 版本不支持或输出格式无法解析），可降级为 report 文件监控方案：
+已确认：
 
-1. `.set` 文件已配置 report file monitor（`report-def-t-rfile.out` 等），每迭代写一行
-2. 在 `batch_solver_gen4.py` 中启动后台线程，每 5s 读取 report 文件行数
-3. 计算 `remaining = (total - current) × (elapsed / current)`
-4. 写入进度文件
+- 展示位置为 TUI 表格中的 solver 步骤单元格。
+- 不修改顶部 `info_bar` 的引擎状态。
+- 剩余时间显示为绿色。
+- 无 progress 时保持当前 `Running` 显示。
 
-**缺点**：需自行计算剩余时间，精度低于 Fluent 自身预估。
+待实测：
+
+- 真实 Fluent transcript 中剩余时间的精确文本格式。
+- PyFluent 当前版本的 `solver_session.transcript.register_callback()` 参数行为。
+
+---
+
+## 附录：降级备选
+
+如果 transcript callback 在当前 PyFluent / Fluent 版本不可用，可以降级为 report 文件估算：
+
+1. 读取 Fluent report file monitor 输出行数。
+2. 根据已完成迭代数和 elapsed time 估算剩余时间。
+3. 写入相同 `solver_progress_{config}.json`。
+4. daemon、IPC、TUI 不需要改变。
+
+该方案精度低于 Fluent 自身预估，仅作为 fallback。

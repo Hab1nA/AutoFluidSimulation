@@ -34,7 +34,7 @@ pub use utils::format_local_time;
 /// 初始化文件日志。
 /// 优先使用 AUTOFLUID_SESSION_LOG_DIR 环境变量（由 Python 启动器设置）；
 /// 若未设置，尝试查找 logs/client/ 下最新的时间戳子目录；
-/// 若均不可用，回退到 stderr-only 模式。
+/// 若均不可用，回退到临时文件，避免 stderr 污染 TUI alternate screen。
 fn init_file_logger() {
     use log::LevelFilter;
     use std::fs::OpenOptions;
@@ -74,16 +74,32 @@ fn init_file_logger() {
 }
 
 fn init_stderr_logger() {
-    env_logger::Builder::new()
-        .filter_level(log::LevelFilter::Info)
-        .target(env_logger::Target::Stderr)
-        .format_timestamp_millis()
-        .try_init()
-        .ok();
-    log::info!(
-        "AutoFluid TUI v{} 启动 (stderr-only 日志)",
-        env!("CARGO_PKG_VERSION")
-    );
+    let fallback_path = std::env::temp_dir().join("autofluid-tui.log");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&fallback_path)
+    {
+        Ok(file) => {
+            env_logger::Builder::new()
+                .filter_level(log::LevelFilter::Info)
+                .target(env_logger::Target::Pipe(Box::new(file)))
+                .format_timestamp_millis()
+                .try_init()
+                .ok();
+            log::info!(
+                "AutoFluid TUI v{} 启动，fallback 日志文件: {:?}",
+                env!("CARGO_PKG_VERSION"),
+                fallback_path
+            );
+        }
+        Err(_) => {
+            env_logger::Builder::new()
+                .filter_level(log::LevelFilter::Off)
+                .try_init()
+                .ok();
+        }
+    }
 }
 
 /// 查找 logs/client/ 下最新的时间戳子目录
@@ -100,6 +116,9 @@ fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
     entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
     entries.first().map(|e| e.path())
 }
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -385,6 +404,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             ctx.state.needs_redraw = false;
         }
 
+        ctx.daemon
+            .poll_ipc_reconnect(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
+
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
             // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
@@ -422,6 +444,7 @@ fn submit_command(
 ) -> command::CommandResult {
     log::info!("[TUI] 用户命令: source={source}, command={cmd:?}");
     log_buffer.push_info(format!("> {}", cmd));
+    state.needs_redraw = true;
     rt.block_on(command::dispatch_command(cmd, ipc, state, log_buffer))
 }
 
@@ -1021,6 +1044,28 @@ mod tests {
         let last_poll = Instant::now();
 
         assert!(!should_poll_ipc(last_poll, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn test_submit_command_marks_redraw_for_immediate_repaint() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState {
+            needs_redraw: false,
+            ..Default::default()
+        };
+        let mut log_buffer = LogBuffer::new();
+
+        let result = submit_command("help", "test", &rt, &mut ipc, &mut state, &mut log_buffer);
+
+        assert!(matches!(result, command::CommandResult::None));
+        assert!(
+            state.needs_redraw,
+            "submitting a command must repaint log/input changes without waiting for resize"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.2  
+> 文档版本：v1.3  
 > 创建日期：2026-05-09  
-> 最后更新：2026-05-20  
+> 最后更新：2026-06-14  
 > 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.1)
 
 ---
@@ -104,17 +104,17 @@ SW → SC → Transfer → Meshing → Solver
 
 | 模块 | 文件 | 行数 | 核心职责 |
 |------|------|------|---------|
-| PipelineDaemon | `engine/daemon.py` | ~500 | 后台守护进程，IPC 命令处理器，协调所有子系统 |
-| PipelineScheduler | `engine/scheduler/main.py` | ~571 | DAG 调度主逻辑、全局屏障、Solver 分发 |
-| Scheduler 子包 | `engine/scheduler/` | ~2100+ | `barrier.py` 屏障协调、`sw_phase.py` SW 阶段、`worker_pool.py` 3 工作线程池、`meshing_monitor.py` 网格监控、`retry.py` 重试管理、`utils.py` 辅助函数 |
-| TaskRunner | `engine/task_runner.py` | ~217 | 各阶段执行逻辑编排（委托 executor 模块） |
-| StateManager | `engine/state_manager.py` | ~579 | SQLite WAL 持久化状态（configs/steps/engine_state 表） |
-| SCProcessPool | `engine/sc_process_pool.py` | ~567 | 3 槽位常驻进程池（文件协议 IPC，消除 SC 启动开销） |
-| StepFileMonitor | `engine/file_monitor.py` | ~382 | FileStableDetector 文件写入完成检测（多采样稳定性判定） |
+| PipelineDaemon | `engine/daemon.py` | ~1443 | 后台守护进程，IPC 命令处理器，协调所有子系统 |
+| PipelineScheduler | `engine/scheduler/main.py` | ~1012 | DAG 调度主逻辑、全局屏障、Solver 分发 |
+| Scheduler 子包 | `engine/scheduler/` | ~3820 | `barrier.py` 屏障协调、`sw_phase.py` SW 阶段、`worker_pool.py` 3 工作线程池、`meshing_monitor.py` 网格监控、`retry.py` 重试管理、`utils.py` 辅助函数 |
+| TaskRunner | `engine/task_runner.py` | ~420 | 各阶段执行逻辑编排（委托 executor 模块） |
+| StateManager | `engine/state_manager.py` | ~926 | SQLite WAL 持久化状态（configs/steps/engine_state 表） |
+| SCProcessPool | `engine/sc_process_pool.py` | ~782 | 3 槽位常驻进程池（文件协议 IPC，消除 SC 启动开销） |
+| StepFileMonitor | `engine/file_monitor.py` | ~429 | FileStableDetector 文件写入完成检测（多采样稳定性判定） |
 | Config | `engine/config.py` | ~516 | TOML 配置加载 + 环境变量覆盖 + TypedDict 定义 |
 | ConfigFingerprint | `engine/config_fingerprint.py` | ~31 | 配置指纹 MD5 计算（数据库分片，不同构型组合自动切换 DB） |
-| IPCServer | `ipc/server.py` | ~264 | TCP Socket 监听与命令分发 |
-| IPCProtocol | `ipc/protocol.py` | ~129 | JSON over TCP 消息协议（11 个命令） |
+| IPCServer | `ipc/server.py` | ~321 | TCP Socket 监听与命令分发 |
+| IPCProtocol | `ipc/protocol.py` | ~151 | JSON over TCP 消息协议（20 个命令，含 Worker 命令） |
 | RemoteWorkstation | `utils/ssh_client.py` | ~504 | paramiko SSH/SFTP 封装 |
 | Logger | `utils/logger.py` | ~493 | 会话级日志 + 广播处理器（TUI 增量拉取） |
 | ExcelReader | `utils/excel_reader.py` | ~83 | Excel 参数表读取 |
@@ -122,31 +122,36 @@ SW → SC → Transfer → Meshing → Solver
 | RemoteExecutor | `executor/remote_executor.py` | ~282 | SFTP 传输 + 远程 Meshing/Solver 执行 |
 | SWExecutor | `executor/sw_executor.py` | ~1395 | SolidWorks COM 自动化（直接 API 导出 STEP） |
 | SCScript | `executor/spaceclaim_transit.py` | ~789 | SpaceClaim Python API 转换脚本 |
+| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型到工作站的轮询分配 |
+| LocalWorkerRegistry | `engine/local_worker_registry.py` | ~120 | Worker 注册、心跳、任务队列调度 |
+| LocalWorkerAdapter | `engine/local_worker_adapter.py` | ~180 | Daemon 侧 Worker 代理，投递 SW/SC 任务 |
+| LocalWorker | `engine/local_worker.py` | ~350 | 本地 Worker 客户端，执行 SW/SC 任务 |
 
 #### Rust TUI 前端
 
 | 模块 | 文件 | 行数 | 核心职责 |
 |------|------|------|---------|
-| Main | `autofluid-tui/src/main.rs` | ~837 | 异步主循环、事件分发、UI 渲染调度 |
-| DaemonManager | `autofluid-tui/src/daemon_mgr.rs` | ~107 | Daemon 子进程生命周期管理 |
-| Theme | `autofluid-tui/src/theme.rs` | ~104 | ThemePalette 10 字段语义色板 + AppTheme 扩展 |
-| IpcClient | `autofluid-tui/src/ipc/client.rs` | ~196 | tokio TCP 客户端、命令发送/响应接收 |
-| IpcProtocol | `autofluid-tui/src/ipc/protocol.rs` | ~98 | Rust 端协议定义（与 Python 端同步） |
-| AppState | `autofluid-tui/src/state/app_state.rs` | ~394 | 应用状态管理（表格数据、过滤、日志缓冲） |
-| Table UI | `autofluid-tui/src/ui/table.rs` | ~90 | 状态表格渲染 |
-| Header UI | `autofluid-tui/src/ui/header.rs` | ~45 | 标题栏渲染 |
-| Layout | `autofluid-tui/src/ui/layout.rs` | ~73 | 整体布局分割 |
-| CommandBar | `autofluid-tui/src/ui/command_bar.rs` | ~285 | 8 按钮快捷栏 + Daemon 子菜单 |
-| Dialogs | `autofluid-tui/src/ui/dialogs.rs` | ~499 | 确认对话框、消息框渲染 |
-| Scrollbar | `autofluid-tui/src/ui/scrollbar.rs` | ~118 | 垂直/水平滚动条（支持拖拽） |
-| Logs UI | `autofluid-tui/src/ui/logs.rs` | ~317 | 双栏日志面板（信息提示 + 详细日志） |
-| Command Handler | `autofluid-tui/src/event_handler/command.rs` | ~451 | 命令解析与执行 |
-| KeyHandler | `autofluid-tui/src/event_handler/key_handler.rs` | ~544 | 键盘快捷键处理 |
-| MouseHandler | `autofluid-tui/src/event_handler/mouse.rs` | ~1018 | 鼠标交互（悬停、点击、拖拽、滚轮） |
-| Settings | `autofluid-tui/src/settings/mod.rs` | ~758 | 7 分类 48 字段设置管理 |
-| SettingsUI | `autofluid-tui/src/settings/settings_ui.rs` | ~434 | 设置页面渲染 |
-| SettingsIO | `autofluid-tui/src/settings/config_io.rs` | ~83 | TOML 配置读写 |
-| SettingsValidation | `autofluid-tui/src/settings/validation.rs` | ~343 | 字段校验 |
+| Main | `autofluid-tui/src/main.rs` | ~3 | 异步主循环、事件分发、UI 渲染调度 |
+| DaemonManager | `autofluid-tui/src/daemon_mgr.rs` | ~1000 | Daemon 子进程生命周期管理 |
+| Theme | `autofluid-tui/src/theme.rs` | ~128 | ThemePalette 10 字段语义色板 + AppTheme 扩展 |
+| IpcClient | `autofluid-tui/src/ipc/client.rs` | ~751 | tokio TCP 客户端、命令发送/响应接收 |
+| IpcProtocol | `autofluid-tui/src/ipc/protocol.rs` | ~164 | Rust 端协议定义（与 Python 端同步） |
+| AppState | `autofluid-tui/src/state/app_state.rs` | ~728 | 应用状态管理（表格数据、过滤、日志缓冲） |
+| Table UI | `autofluid-tui/src/ui/table.rs` | ~111 | 状态表格渲染 |
+| Header UI | `autofluid-tui/src/ui/header.rs` | ~73 | 标题栏渲染 |
+| Layout | `autofluid-tui/src/ui/layout.rs` | ~64 | 整体布局分割 |
+| CommandBar | `autofluid-tui/src/ui/command_bar.rs` | ~423 | 8 按钮快捷栏 + Daemon 子菜单 |
+| Dialogs | `autofluid-tui/src/ui/dialogs.rs` | ~1039 | 确认对话框、消息框渲染 |
+| Scrollbar | `autofluid-tui/src/ui/scrollbar.rs` | ~154 | 垂直/水平滚动条（支持拖拽） |
+| Logs UI | `autofluid-tui/src/ui/logs.rs` | ~374 | 双栏日志面板（信息提示 + 详细日志） |
+| Command Handler | `autofluid-tui/src/event_handler/command.rs` | ~636 | 命令解析与执行 |
+| KeyHandler | `autofluid-tui/src/event_handler/key_handler.rs` | ~547 | 键盘快捷键处理 |
+| MouseHandler | `autofluid-tui/src/event_handler/mouse.rs` | ~1397 | 鼠标交互（悬停、点击、拖拽、滚轮） |
+| Settings | `autofluid-tui/src/settings/mod.rs` | ~1121 | 7 分类 48 字段设置管理 |
+| SettingsUI | `autofluid-tui/src/settings/settings_ui.rs` | ~453 | 设置页面渲染 |
+| SettingsIO | `autofluid-tui/src/settings/config_io.rs` | ~135 | TOML 配置读写 |
+| SettingsValidation | `autofluid-tui/src/settings/validation.rs` | ~486 | 字段校验 |
+| WorkerManager | `autofluid-tui/src/worker_mgr.rs` | ~200 | TUI 侧 Worker 进程和 SSH 隧道管理 |
 
 ---
 
@@ -254,18 +259,18 @@ LocalWorker 是本地 PC 上的独立进程，负责：
 
 LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC JSON-over-TCP 协议），新增以下命令：
 
-| 命令 | 方向 | 用途 |
-|------|------|------|
-| `worker_register` | LocalWorker → Daemon | Worker 上线注册，报告本地 PC 能力 |
-| `worker_heartbeat` | LocalWorker → Daemon | 心跳保活（每 30 秒） |
-| `worker_poll` | LocalWorker → Daemon | 主动轮询领取待执行 SW/SC 任务 |
-| `worker_step_complete` | LocalWorker → Daemon | 上报步骤完成（SW/SC） |
-| `worker_step_error` | LocalWorker → Daemon | 上报步骤执行失败 |
-| `worker_execute` | Daemon → LocalWorker | 下发执行指令（SW/SC） |
-| `worker_file_ready` | LocalWorker → Daemon | 上报 STEP 文件就绪 |
-| `worker_scdoc_uploaded` | LocalWorker → Daemon | 上报 SCDOC 已上传到服务器 A |
-| `collect_results` | LocalWorker → Daemon | 请求拉取暂存结果 |
-| `collect_ack` | LocalWorker → Daemon | 确认结果已接收 |
+| 命令 | 方向 | 用途 | 状态 |
+|------|------|------|------|
+| `worker_register` | LocalWorker → Daemon | Worker 上线注册，报告本地 PC 能力 | ✅ 已实现 |
+| `worker_heartbeat` | LocalWorker → Daemon | 心跳保活（每 30 秒） | ✅ 已实现 |
+| `worker_poll` | LocalWorker → Daemon | 主动轮询领取待执行 SW/SC 任务 | ✅ 已实现 |
+| `worker_step_complete` | LocalWorker → Daemon | 上报步骤完成（SW/SC） | ✅ 已实现 |
+| `worker_step_error` | LocalWorker → Daemon | 上报步骤执行失败 | ✅ 已实现 |
+| `worker_execute` | Daemon → LocalWorker | 下发执行指令（SW/SC） | ❌ 未实现（当前通过 poll 模式） |
+| `worker_file_ready` | LocalWorker → Daemon | 上报 STEP 文件就绪 | ❌ 未实现 |
+| `worker_scdoc_uploaded` | LocalWorker → Daemon | 上报 SCDOC 已上传到服务器 A | ❌ 未实现 |
+| `collect_results` | LocalWorker → Daemon | 请求拉取暂存结果 | ❌ 未实现 |
+| `collect_ack` | LocalWorker → Daemon | 确认结果已接收 | ❌ 未实现 |
 
 #### 4.1.3 服务器 A 的 Daemon 改造
 
@@ -273,7 +278,7 @@ LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC
 
 当前 `IPC_CONFIG["host"]` 为 `"127.0.0.1"`（仅本地回环），需改为 `"0.0.0.0"` 以接受远程连接。同时需增加 TLS/SSL 加密或 SSH 隧道，防止明文传输 SSH 密码等敏感信息。
 
-当前过渡实现采用环境变量控制远程控制面：
+**已落地实现**：当前部署已实现 server mode，通过环境变量控制远程控制面：
 
 ```text
 # ocar daemon
@@ -291,11 +296,11 @@ AUTOFLUID_IPC_AUTH_TOKEN=<shared-secret>
 
 `server` 模式下 TUI 不启动本地 `start_daemon.py`，只连接远程 IPC。`auth_token` 是过渡期的最低限度保护；实际部署仍建议使用 SSH 隧道、VPN 或 TLS，避免裸露控制端口。
 
-当前过渡实现已提供最小 `LocalWorker` 注册/心跳客户端。LocalWorker 会上报 `public_ip`、`candidate_hosts`、`reachable_host`、`connectivity_mode`、`ssh_port` 等网络诊断信息；这些信息用于帮助确认 ocar 视角的可达地址，但不会自动证明 SSH 可用。真正用于服务器端 SSH 的地址必须在 `[[workstations]]` 中配置，并由 ocar 侧探测验证。
+**已落地的 LocalWorker 实现**：当前已实现完整的 LocalWorker 注册/心跳客户端。LocalWorker 会上报 `public_ip`、`candidate_hosts`、`reachable_host`、`connectivity_mode`、`ssh_port` 等网络诊断信息；这些信息用于帮助确认 ocar 视角的可达地址，但不会自动证明 SSH 可用。真正用于服务器端 SSH 的地址必须在 `[[workstations]]` 中配置，并由 ocar 侧探测验证。
 
 **TaskRunner 本地部分替换**：
 
-原来 `TaskRunner.execute_sw_step()` 和 `TaskRunner.execute_sc_step()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。新增 `LocalWorkerAdapter` 类：
+原来 `TaskRunner.execute_sw_step()` 和 `TaskRunner.execute_sc_step()` 直接在本地执行，改为通过 RPC 下发给 LocalWorker。**已落地实现**：新增 `LocalWorkerAdapter` 类：
 
 ```python
 class LocalWorkerAdapter:
@@ -314,6 +319,8 @@ class LocalWorkerAdapter:
 **StepFileMonitor 远程化**：
 
 当前 `StepFileMonitor` 轮询本地 `step_dir`，改造后由 LocalWorker 侧的 Monitor 检测到文件就绪后，通过 `worker_file_ready` 命令上报给 Daemon。Daemon 侧不再需要 `StepFileMonitor` 实例，改为接收上报事件推入 SC 队列。
+
+> **注意**：`worker_file_ready` 命令尚未实现。当前 LocalWorker 通过 `worker_step_complete` 上报 SC 完成结果，SCDOC 随命令一起上传。
 
 #### 4.1.4 服务器 A 资源评估
 
@@ -409,19 +416,15 @@ WORKSTATIONS = [
 
 #### 4.2.2 SSH 连接池
 
-当前 `TaskRunner` 中 `self._ssh` 是单实例（`Optional[RemoteWorkstation]`），需改为连接池：
+**已落地实现**：当前 `TaskRunner` 中已实现 SSH 连接池：
 
 ```python
-# 当前 (engine/task_runner.py:51)
-self._ssh: Optional[RemoteWorkstation] = None
-self._ssh_lock = threading.RLock()
-
-# 改造后
+# 已实现 (engine/task_runner.py)
 self._ssh_pool: dict[str, RemoteWorkstation] = {}
 self._ssh_locks: dict[str, threading.RLock] = {}
 ```
 
-`get_ssh()` 方法需增加 `workstation_id` 参数：
+`get_ssh()` 方法已支持 `workstation_id` 参数：
 
 ```python
 def get_ssh(self, workstation_id: str) -> RemoteWorkstation:
@@ -438,7 +441,7 @@ def get_ssh(self, workstation_id: str) -> RemoteWorkstation:
 
 #### 4.2.3 构型分配器 (ConfigAssigner)
 
-新增模块，负责将构型分配到工作站。推荐轮询取模方案：
+**已落地实现**：新增模块，负责将构型分配到工作站。采用轮询取模方案：
 
 ```python
 class ConfigAssigner:

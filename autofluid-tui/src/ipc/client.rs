@@ -43,14 +43,18 @@ impl IpcClient {
     }
 
     pub async fn connect(&mut self) -> Result<(), String> {
+        self.connect_with_timeout(DEFAULT_TIMEOUT).await
+    }
+
+    pub async fn connect_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         // 先关闭已有连接，防止连接泄漏导致服务端出现重复连接
         self.disconnect().await;
         let addr = format!("{}:{}", self.host, self.port);
         log::info!("[IPC] 正在连接后台引擎: {}", addr);
-        match tokio::time::timeout(DEFAULT_TIMEOUT, TcpStream::connect(&addr)).await {
+        match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 self.stream = Some(stream);
-                match self.verify_connection().await {
+                match self.verify_connection_with_timeout(timeout).await {
                     Ok(()) => {
                         self.last_reconnect = None; // 连接成功，清除冷却
                         self.consecutive_failures = 0; // 连接成功，重置失败计数
@@ -82,7 +86,7 @@ impl IpcClient {
         }
     }
 
-    async fn verify_connection(&mut self) -> Result<(), String> {
+    async fn verify_connection_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         let request = IpcRequest::new(super::protocol::CMD_GET_ENGINE_STATUS);
         let mut stream = self.stream.take().ok_or_else(|| "未连接".to_string())?;
 
@@ -94,7 +98,7 @@ impl IpcClient {
 
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
-        let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, async {
+        let read_result = tokio::time::timeout(timeout, async {
             // 使用 read_until 替代逐字节读取，提高效率
             match reader.read_until(b'\n', &mut buffer).await {
                 Ok(0) => Ok(false), // EOF

@@ -10,15 +10,28 @@ use crate::utils::run_command_with_timeout;
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
 const DAEMON_SHUTDOWN_TIMEOUT_SECS: u64 = 60;
+const IPC_RECONNECT_TIMEOUT_SECS: u64 = 10;
+const IPC_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
+const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
+const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
     process: Option<Child>,
+    pending_ipc_reconnect: Option<PendingIpcReconnect>,
+}
+
+struct PendingIpcReconnect {
+    deadline: Instant,
+    next_attempt: Instant,
 }
 
 impl DaemonManager {
     pub fn new() -> Self {
-        Self { process: None }
+        Self {
+            process: None,
+            pending_ipc_reconnect: None,
+        }
     }
 
     pub fn launch(&mut self, project_dir: &str) -> Result<u32, String> {
@@ -144,7 +157,6 @@ impl DaemonManager {
         }
         // 超时仅记录，不强杀——daemon 可能仍在清理中
         log::warn!("[Daemon] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
-        eprintln!("[TUI] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)，TUI 退出");
         false
     }
 
@@ -168,7 +180,6 @@ impl DaemonManager {
             std::thread::sleep(Duration::from_millis(200));
         }
         log::warn!("[Daemon] 等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
-        eprintln!("[TUI] 等待后台引擎退出超时 ({timeout_secs}s)，TUI 退出");
         false
     }
 
@@ -176,44 +187,61 @@ impl DaemonManager {
     // IPC 生命周期集成方法
     // ------------------------------------------------------------------
 
-    /// 后台引擎启动后重连 IPC，阻塞等待至超时。
-    pub fn reconnect_ipc_after_launch_sync(
+    fn begin_ipc_reconnect_wait(&mut self, state: &mut AppState) {
+        let now = Instant::now();
+        self.pending_ipc_reconnect = Some(PendingIpcReconnect {
+            deadline: now + Duration::from_secs(IPC_RECONNECT_TIMEOUT_SECS),
+            next_attempt: now,
+        });
+        state.connected = false;
+        state.needs_redraw = true;
+        log::info!(
+            "[Daemon] 后台引擎启动后进入分步 IPC 重连: timeout_ms={}",
+            Duration::from_secs(IPC_RECONNECT_TIMEOUT_SECS).as_millis()
+        );
+    }
+
+    pub fn poll_ipc_reconnect(
+        &mut self,
         rt: &tokio::runtime::Runtime,
         ipc: &mut IpcClient,
         state: &mut AppState,
         log_buffer: &mut LogBuffer,
     ) {
-        let timeout = Duration::from_secs(10);
-        let deadline = std::time::Instant::now() + timeout;
-        log::info!(
-            "[Daemon] 等待后台引擎 IPC 就绪: timeout_ms={}",
-            timeout.as_millis()
-        );
-        while std::time::Instant::now() < deadline {
-            if ipc.is_connected() {
-                state.connected = true;
-                log::info!("[Daemon] IPC 已处于连接状态");
-                return;
-            }
-            match rt.block_on(ipc.connect()) {
-                Ok(()) => {
-                    state.connected = true;
-                    // ★ 重置日志状态：新 daemon 的日志 ID 从 1 重新开始，
-                    // 必须清零 last_log_id 否则增量轮询会因 since_id 过高而收不到任何条目
-                    state.last_log_id = 0;
-                    log_buffer.clear_detail();
-                    log_buffer.push_info("✅ 已连接到后台引擎".to_string());
-                    log::info!("[Daemon] 后台引擎 IPC 已就绪");
-                    return;
-                }
-                Err(_) => {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
+        let Some(wait) = self.pending_ipc_reconnect.as_mut() else {
+            return;
+        };
+        if ipc.is_connected() {
+            state.connected = true;
+            self.pending_ipc_reconnect = None;
+            log::info!("[Daemon] IPC 已处于连接状态");
+            return;
         }
-        state.connected = false;
-        log::warn!("[Daemon] 后台引擎已启动，但 IPC 暂未就绪");
-        log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
+        let now = Instant::now();
+        if now >= wait.deadline {
+            self.pending_ipc_reconnect = None;
+            state.connected = false;
+            state.needs_redraw = true;
+            log::warn!("[Daemon] 后台引擎已启动，但 IPC 暂未就绪");
+            log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
+            return;
+        }
+        if now < wait.next_attempt {
+            return;
+        }
+        wait.next_attempt = now + IPC_RECONNECT_INTERVAL;
+        if rt
+            .block_on(ipc.connect_with_timeout(IPC_RECONNECT_ATTEMPT_TIMEOUT))
+            .is_ok()
+        {
+            self.pending_ipc_reconnect = None;
+            state.connected = true;
+            state.last_log_id = 0;
+            state.needs_redraw = true;
+            log_buffer.clear_detail();
+            log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+            log::info!("[Daemon] 后台引擎 IPC 已就绪");
+        }
     }
 
     /// 停止后台引擎并通过 IPC 通知对端退出，然后断开 IPC。
@@ -295,7 +323,7 @@ impl DaemonManager {
                     log_buffer.push_info(
                         "⚠️ 已向服务器发送 daemon 启动命令，等待 IPC 就绪...".to_string(),
                     );
-                    Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+                    self.begin_ipc_reconnect_wait(state);
                 }
                 Err(e) => {
                     log_buffer.push_info(format!("❌ 重启服务器 daemon 失败: {}", e));
@@ -311,7 +339,7 @@ impl DaemonManager {
                     "⚠️ 后台引擎正在重启 (PID: {})，等待 IPC 就绪...",
                     pid
                 ));
-                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+                self.begin_ipc_reconnect_wait(state);
             }
             Err(e) => {
                 log_buffer.push_info(format!("❌ 重启后台引擎失败: {}", e));
@@ -322,7 +350,7 @@ impl DaemonManager {
     pub fn start_with_ipc(
         &mut self,
         ipc: &mut IpcClient,
-        rt: &tokio::runtime::Runtime,
+        _rt: &tokio::runtime::Runtime,
         state: &mut AppState,
         log_buffer: &mut LogBuffer,
         project_dir: &str,
@@ -337,14 +365,14 @@ impl DaemonManager {
             Ok(0) => {
                 log_buffer
                     .push_info("⚠️ 已向服务器发送 daemon 启动命令，等待 IPC 就绪...".to_string());
-                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+                self.begin_ipc_reconnect_wait(state);
             }
             Ok(pid) => {
                 log_buffer.push_info(format!(
                     "⚠️ 后台引擎正在启动 (PID: {})，等待 IPC 就绪...",
                     pid
                 ));
-                Self::reconnect_ipc_after_launch_sync(rt, ipc, state, log_buffer);
+                self.begin_ipc_reconnect_wait(state);
             }
             Err(e) => {
                 log_buffer.push_info(format!("❌ 启动后台引擎失败: {}", e));
@@ -370,10 +398,9 @@ impl DaemonManager {
             action.label(),
             command.target
         );
-        let output = Command::new(&command.ssh_exe)
-            .args(&args)
-            .output()
-            .map_err(|e| format!("执行 ssh 失败: {}", e))?;
+        let mut cmd = Command::new(&command.ssh_exe);
+        cmd.args(&args);
+        let output = run_command_with_timeout(&mut cmd, SERVER_DAEMON_COMMAND_TIMEOUT)?;
 
         if output.status.success() {
             return Ok(());
@@ -567,9 +594,6 @@ fn shell_single_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::ipc::client::IpcClient;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique_temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -614,7 +638,7 @@ mod tests {
 
     #[test]
     fn local_daemon_python_prefers_project_venv() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("PYTHON", "C:\\wrong-python\\python.exe");
         let project_dir = unique_temp_project_dir();
         let python_dir = project_dir.join(".venv").join("Scripts");
@@ -631,8 +655,48 @@ mod tests {
     }
 
     #[test]
+    fn start_with_ipc_returns_without_waiting_for_reconnect_timeout() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let project_dir = unique_temp_project_dir();
+        fs::write(project_dir.join("start_daemon.py"), "").expect("write daemon script");
+        let python_exe = fake_success_exe(&project_dir, "fake_python");
+        std::env::set_var("PYTHON", &python_exe);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = DaemonManager::new();
+
+        let started = Instant::now();
+        daemon.start_with_ipc(
+            &mut ipc,
+            &rt,
+            &mut state,
+            &mut log_buffer,
+            project_dir.to_str().expect("utf8 temp path"),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "daemon start must not freeze the TUI while waiting for IPC reconnect"
+        );
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("等待 IPC 就绪")));
+
+        std::env::remove_var("PYTHON");
+        let _ = daemon.stop(project_dir.to_str().expect("utf8 temp path"));
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn server_daemon_start_command_uses_configured_ssh_target() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         std::env::set_var("AUTOFLUID_SSH_EXE", "ssh-test");
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
@@ -666,7 +730,7 @@ mod tests {
 
     #[test]
     fn launch_uses_server_daemon_start_command_in_server_mode() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
         write_fake_server_ipc_tunnel_script(&project_dir);
@@ -692,7 +756,7 @@ mod tests {
 
     #[test]
     fn launch_starts_server_ipc_tunnel_before_server_daemon() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
         fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
@@ -734,7 +798,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
 
         let project_dir = unique_temp_project_dir();
@@ -816,7 +880,7 @@ mod tests {
 
     #[test]
     fn restart_does_not_start_server_daemon_when_stop_fails() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
         let ssh_exe = fake_success_ssh_exe(&project_dir);

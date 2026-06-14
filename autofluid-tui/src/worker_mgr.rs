@@ -186,7 +186,9 @@ impl WorkerManager {
             .env(
                 "AUTOFLUID_WORKER_CONNECTIVITY_MODE",
                 env_or_default("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel"),
-            );
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
 
         #[cfg(target_os = "windows")]
         {
@@ -500,10 +502,6 @@ impl Drop for WorkerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// 防止并行测试竞争环境变量的互斥锁。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn is_process_running_returns_false_for_none() {
@@ -573,7 +571,7 @@ mod tests {
 
     #[test]
     fn start_workers_with_prepare_runs_both_tunnels_then_daemon_prepare_then_local_worker() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-test-{}",
             crate::generate_request_id()
@@ -634,6 +632,13 @@ mod tests {
             .position(|line| *line == "worker 127.0.0.1 2223 reverse_tunnel")
             .expect("worker marker");
         assert!(daemon_idx < worker_idx);
+        assert!(
+            log_buffer
+                .info_messages
+                .iter()
+                .any(|message| message.contains("本地 Worker 已启动")),
+            "local worker should start even when stdio is silenced"
+        );
 
         let _ = wm.stop_workers(&mut log_buffer);
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");

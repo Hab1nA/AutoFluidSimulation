@@ -293,6 +293,11 @@ watcher 通过 IPC 拉取 `WARNING` 及以上日志，按 `level + source + raw_
 和 `fingerprint`；如设置 `AUTOFLUID_OPENCLAW_WEBHOOK_TOKEN`，请求会携带
 `Authorization: Bearer <token>`。
 
+生产环境只保留 daemon 内部托管 watcher 这一条启动路径。不要启用独立的
+`autofluid-alert-watcher.service`，否则可能与 daemon 拥有的 watcher 重复拉取
+同一批日志并重复发送告警。ocar 上该独立 systemd unit 应保持 masked；如需恢复，
+必须先确认 daemon 内部 watcher 已停用或同步调整生命周期设计。
+
 ## 13. 当前未完成的远期项
 
 以下内容属于 `architecture-refactoring-plan.md` 中的远期规划，不应误认为当前已经完整落地：
