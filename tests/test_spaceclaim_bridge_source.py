@@ -117,8 +117,9 @@ def test_bridge_scdoc_filename_is_argument_driven() -> None:
     assert "ScdocFileName" in source
     assert "Path.GetFileName(opts.ScdocFileName)" in source
     assert re.search(
-        r"Path\.Combine\(\s*opts\.ScdocDir,\s*opts\.ScdocFileName\s*\)",
+        r"Path\.Combine\(\s*opts\.ScdocDir!?,\s*opts\.ScdocFileName!?\s*\)",
         source,
+        re.DOTALL,
     )
 
 

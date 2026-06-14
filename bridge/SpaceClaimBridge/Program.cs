@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 
+#nullable enable
+
 namespace AutoFluidSimulation.Bridge
 {
     /// <summary>
@@ -52,6 +54,7 @@ namespace AutoFluidSimulation.Bridge
         };
 
         private const string ProcessName = "SpaceClaim";
+        // 与 Python 端 SCProcessPool 的 STEP 文件名模式保持一致
         private const string StepFileNamePattern = "model_gen4.SLDPRT_{0}.step";
         private const int DefaultProcessAppearTimeoutSeconds = 120;
         private const int DefaultGuiReadyTimeoutSeconds = 30;
@@ -98,7 +101,7 @@ namespace AutoFluidSimulation.Bridge
         /// </summary>
         /// <param name="args">原始命令行参数数组</param>
         /// <returns>解析后的选项对象，解析失败返回 null</returns>
-        private static BridgeOptions ParseArguments(string[] args)
+        private static BridgeOptions? ParseArguments(string[] args)
         {
             var options = new BridgeOptions();
 
@@ -127,7 +130,7 @@ namespace AutoFluidSimulation.Bridge
                         if (options.ScdocFileName == null) return null;
                         break;
                     case "--timeout":
-                        string timeoutValue = ReadRequiredArgumentValue(args, ref i, "--timeout");
+                        string? timeoutValue = ReadRequiredArgumentValue(args, ref i, "--timeout");
                         if (timeoutValue == null) return null;
                         if (!int.TryParse(timeoutValue, out int t) || t <= 0)
                         {
@@ -149,7 +152,7 @@ namespace AutoFluidSimulation.Bridge
                         if (options.CmdDir == null) return null;
                         break;
                     case "--slotid":
-                        string slotValue = ReadRequiredArgumentValue(args, ref i, "--slotid");
+                        string? slotValue = ReadRequiredArgumentValue(args, ref i, "--slotid");
                         if (slotValue == null) return null;
                         if (!int.TryParse(slotValue, out int sid) || sid < 0)
                         {
@@ -201,7 +204,7 @@ namespace AutoFluidSimulation.Bridge
         /// <param name="index">当前选项索引（引用传递，自动递增）</param>
         /// <param name="optionName">选项名称（用于错误消息）</param>
         /// <returns>参数值，缺少值时返回 null</returns>
-        private static string ReadRequiredArgumentValue(string[] args, ref int index, string optionName)
+        private static string? ReadRequiredArgumentValue(string[] args, ref int index, string optionName)
         {
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
             {
@@ -233,7 +236,8 @@ namespace AutoFluidSimulation.Bridge
   --persistent                    (启用常驻模式)
   --script   <transit脚本路径>    (必需)
   --cmddir   <IPC命令目录>       (必需)
-  --slotid   <槽位ID>            (可选, 默认0)
+  [--sc-exe  <SpaceClaim.exe路径>] (可选, 覆盖自动检测)
+  [--slotid   <槽位ID>]           (可选, 默认0)
 ");
         }
 
@@ -267,7 +271,7 @@ namespace AutoFluidSimulation.Bridge
 
             Directory.CreateDirectory(opts.ScdocDir);
 
-            string scExe = FindSpaceClaimExe(opts.ScExePath);
+            string? scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -280,7 +284,7 @@ namespace AutoFluidSimulation.Bridge
             int processAppearTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT",
                 DefaultProcessAppearTimeoutSeconds);
-            Process workingProcess = null;
+            Process? workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (环境变量传参模式)...");
             Console.WriteLine($"[BRIDGE] Exe: {scExe}");
@@ -298,10 +302,10 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
                     UseShellExecute = false,
                 };
-                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName;
-                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName;
+                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName!;
                 Process started = Process.Start(psi);
                 workingProcess = ResolveStartedSpaceClaimProcess(
                     started, launchBaseline, processAppearTimeout);
@@ -403,15 +407,9 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine($"[BRIDGE] 槽位: {opts.SlotId}");
             Console.WriteLine($"[BRIDGE] IPC目录: {opts.CmdDir}");
 
-            if (string.IsNullOrEmpty(opts.CmdDir))
-            {
-                Console.Error.WriteLine("[BRIDGE_ERROR] 常驻模式需要 --cmddir 参数");
-                return (int)ExitCode.InvalidArgs;
-            }
-
             Directory.CreateDirectory(opts.CmdDir);
 
-            string scExe = FindSpaceClaimExe(opts.ScExePath);
+            string? scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -423,7 +421,7 @@ namespace AutoFluidSimulation.Bridge
             int processAppearTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT",
                 DefaultProcessAppearTimeoutSeconds);
-            Process workingProcess = null;
+            Process? workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (常驻模式)...");
             Console.WriteLine($"[BRIDGE] Exe: {scExe}");
@@ -445,7 +443,7 @@ namespace AutoFluidSimulation.Bridge
                 // to the child SpaceClaim process that runs spaceclaim_transit.py.
                 psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";
                 psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
-                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = opts.SlotId.ToString();
                 Process started = Process.Start(psi);
                 workingProcess = ResolveStartedSpaceClaimProcess(
@@ -481,7 +479,7 @@ namespace AutoFluidSimulation.Bridge
             }
 
             // 等待脚本就绪标志
-            string readyFile = Path.Combine(opts.CmdDir, $"sc_ready_{opts.SlotId}.json");
+            string readyFile = Path.Combine(opts.CmdDir!, $"sc_ready_{opts.SlotId}.json");
             Console.WriteLine($"[BRIDGE] 等待脚本就绪标志: {readyFile}");
             int persistentReadyTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PERSISTENT_READY_TIMEOUT",
@@ -525,7 +523,7 @@ namespace AutoFluidSimulation.Bridge
 
             Console.WriteLine("[BRIDGE] 常驻模式就绪，开始命令循环...");
 
-            string cmdFile = Path.Combine(opts.CmdDir, $"sc_cmd_{opts.SlotId}.json");
+            string cmdFile = Path.Combine(opts.CmdDir!, $"sc_cmd_{opts.SlotId}.json");
 
             // 命令循环：监听进程退出和 quit 文件命令
             int exitCode = (int)ExitCode.Success;
@@ -651,8 +649,8 @@ namespace AutoFluidSimulation.Bridge
         /// <param name="launchBaseline">启动时间基线</param>
         /// <param name="processAppearTimeout">进程出现超时秒数</param>
         /// <returns>可用的 SpaceClaim 进程对象，未找到返回 null</returns>
-        private static Process ResolveStartedSpaceClaimProcess(
-            Process startedProcess,
+        private static Process? ResolveStartedSpaceClaimProcess(
+            Process? startedProcess,
             DateTime launchBaseline,
             int processAppearTimeout)
         {
@@ -688,8 +686,8 @@ namespace AutoFluidSimulation.Bridge
         private static string GetStepFilePath(BridgeOptions opts)
         {
             return Path.Combine(
-                opts.StepDir,
-                string.Format(StepFileNamePattern, opts.ConfigName));
+                opts.StepDir!,
+                string.Format(StepFileNamePattern, opts.ConfigName!));
         }
 
         /// <summary>
@@ -704,8 +702,8 @@ namespace AutoFluidSimulation.Bridge
                 throw new ArgumentException("SCDOC 输出文件名不能包含路径");
             }
             return Path.Combine(
-                opts.ScdocDir,
-                opts.ScdocFileName);
+                opts.ScdocDir!,
+                opts.ScdocFileName!);
         }
 
         /// <summary>
@@ -726,7 +724,7 @@ namespace AutoFluidSimulation.Bridge
 
             try
             {
-                string monitorFile = Path.Combine(opts.CmdDir, $"sc_bridge_{opts.SlotId}.json");
+                string monitorFile = Path.Combine(opts.CmdDir!, $"sc_bridge_{opts.SlotId}.json");
                 int bridgePid = Process.GetCurrentProcess().Id;
                 string json =
                     "{" +
@@ -750,7 +748,7 @@ namespace AutoFluidSimulation.Bridge
         /// </summary>
         /// <param name="cmdFile">命令文件路径</param>
         /// <returns>文件内容，读取失败返回 null</returns>
-        private static string ReadCommandFile(string cmdFile)
+        private static string? ReadCommandFile(string cmdFile)
         {
             try
             {
@@ -786,7 +784,7 @@ namespace AutoFluidSimulation.Bridge
         /// <returns>包含 quit 指令返回 true</returns>
         private static bool IsQuitCommandPending(string cmdFile)
         {
-            string content = ReadCommandFile(cmdFile);
+            string? content = ReadCommandFile(cmdFile);
             return content != null && content.Contains("\"quit\"");
         }
 
@@ -795,7 +793,7 @@ namespace AutoFluidSimulation.Bridge
         /// </summary>
         /// <param name="process">进程对象（可为 null）</param>
         /// <returns>进程 PID 或 0</returns>
-        private static int GetProcessIdOrDefault(Process process)
+        private static int GetProcessIdOrDefault(Process? process)
         {
             if (process == null)
             {
@@ -817,7 +815,7 @@ namespace AutoFluidSimulation.Bridge
         /// </summary>
         /// <param name="value">待转义的原始字符串</param>
         /// <returns>转义后的 JSON 安全字符串</returns>
-        private static string EscapeJsonString(string value)
+        private static string EscapeJsonString(string? value)
         {
             if (value == null)
             {
@@ -855,7 +853,7 @@ namespace AutoFluidSimulation.Bridge
         /// </summary>
         /// <param name="userPath">命令行指定的可选路径</param>
         /// <returns>找到的可执行文件路径，未找到返回 null</returns>
-        private static string FindSpaceClaimExe(string userPath = null)
+        private static string? FindSpaceClaimExe(string? userPath = null)
         {
             // 1. 优先使用命令行指定的路径
             if (!string.IsNullOrEmpty(userPath) && File.Exists(userPath))
@@ -864,7 +862,7 @@ namespace AutoFluidSimulation.Bridge
                 return userPath;
             }
             // 2. 检查环境变量 AUTOFLUID_SC_EXE
-            string envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
+            string? envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
             if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
             {
                 Console.WriteLine($"[BRIDGE] 找到 SpaceClaim.exe (环境变量): {envPath}");
@@ -902,7 +900,7 @@ namespace AutoFluidSimulation.Bridge
         /// <param name="after">启动时间基线（UTC）</param>
         /// <param name="timeoutSec">等待超时秒数</param>
         /// <returns>匹配的进程对象，超时返回 null</returns>
-        private static Process WaitForProcessAppear(DateTime after, int timeoutSec)
+        private static Process? WaitForProcessAppear(DateTime after, int timeoutSec)
         {
             // 记录启动前已有的进程 PID，用于过滤旧进程
             var existingPids = new HashSet<int>();
@@ -917,7 +915,7 @@ namespace AutoFluidSimulation.Bridge
             while (DateTime.UtcNow < deadline)
             {
                 Process[] procs = Process.GetProcessesByName(ProcessName);
-                Process selectedProcess = null;
+                Process? selectedProcess = null;
                 try
                 {
                     foreach (Process p in procs)
@@ -1124,31 +1122,31 @@ namespace AutoFluidSimulation.Bridge
     internal class BridgeOptions
     {
         /// <summary>SpaceClaim transit 脚本路径（必需）。</summary>
-        public string ScriptPath { get; set; }
+        public string? ScriptPath { get; set; }
 
         /// <summary>构型编号，用于构建 STEP 文件名（一次性模式必需）。</summary>
-        public string ConfigName { get; set; }
+        public string? ConfigName { get; set; }
 
         /// <summary>STEP 文件所在目录（一次性模式必需）。</summary>
-        public string StepDir { get; set; }
+        public string? StepDir { get; set; }
 
         /// <summary>SCDOC 输出目录（一次性模式必需）。</summary>
-        public string ScdocDir { get; set; }
+        public string? ScdocDir { get; set; }
 
         /// <summary>SCDOC 输出文件名（一次性模式必需）。</summary>
-        public string ScdocFileName { get; set; }
+        public string? ScdocFileName { get; set; }
 
         /// <summary>SpaceClaim 进程超时秒数，默认 300。</summary>
         public int TimeoutSeconds { get; set; } = 300;
 
         /// <summary>自定义 SpaceClaim.exe 路径，覆盖自动检测。</summary>
-        public string ScExePath { get; set; }
+        public string? ScExePath { get; set; }
 
         /// <summary>是否启用常驻模式（循环处理命令）。</summary>
         public bool Persistent { get; set; }
 
         /// <summary>常驻模式 IPC 命令目录路径（常驻模式必需）。</summary>
-        public string CmdDir { get; set; }
+        public string? CmdDir { get; set; }
 
         /// <summary>常驻模式槽位 ID，默认 0。</summary>
         public int SlotId { get; set; }

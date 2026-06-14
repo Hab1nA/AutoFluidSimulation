@@ -11,6 +11,20 @@ use crate::ipc::client::IpcClient;
 use crate::state::LogBuffer;
 use crate::utils::run_command_with_timeout;
 
+/// 进程终止结果
+enum StopResult {
+    /// 没有进程需要终止
+    NoProcess,
+    /// 进程已自行退出
+    AlreadyExited,
+    /// 成功终止
+    Terminated,
+    /// 等待退出超时
+    Timeout,
+    /// 终止过程中出错
+    Error(String),
+}
+
 /// WorkerManager 管理本地 LocalWorker 进程和 SSH 隧道进程。
 pub struct WorkerManager {
     /// 本地 LocalWorker 子进程
@@ -199,55 +213,26 @@ impl WorkerManager {
 
     /// 终止本地 LocalWorker 子进程。
     fn stop_local_worker(&mut self, log_buffer: &mut LogBuffer) -> bool {
-        if let Some(ref mut proc) = self.worker_process {
-            match proc.try_wait() {
-                Ok(Some(status)) => {
-                    log::info!("[Worker] 本地 Worker 已自行退出: {}", status);
-                    self.worker_process = None;
-                    return true;
-                }
-                Ok(None) => {
-                    // 进程仍在运行，尝试终止
-                    log::info!("[Worker] 正在终止本地 Worker 进程...");
-                    if let Err(e) = proc.kill() {
-                        log::warn!("[Worker] 终止本地 Worker 进程失败: {}", e);
-                        log_buffer.push_info(format!("⚠️ 终止本地 Worker 失败: {}", e));
-                        return false;
-                    }
-                    // 使用 try_wait 轮询替代 wait()，避免阻塞主循环
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                    let mut terminated = false;
-                    while std::time::Instant::now() < deadline {
-                        match proc.try_wait() {
-                            Ok(Some(status)) => {
-                                log::info!("[Worker] 本地 Worker 已终止: {}", status);
-                                log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
-                                terminated = true;
-                                break;
-                            }
-                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                            Err(e) => {
-                                log::warn!("[Worker] 检查本地 Worker 退出状态失败: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    if !terminated {
-                        log::warn!("[Worker] 等待本地 Worker 退出超时 (5s)");
-                        log_buffer.push_info("⚠️ 等待本地 Worker 退出超时".to_string());
-                    }
-                    self.worker_process = None;
-                    return true;
-                }
-                Err(e) => {
-                    log::warn!("[Worker] 检查本地 Worker 状态失败: {}", e);
-                    self.worker_process = None;
-                    return false;
-                }
+        let result = Self::stop_child_process(&mut self.worker_process, "本地 Worker", 5);
+        match result {
+            StopResult::NoProcess => true,
+            StopResult::AlreadyExited => {
+                log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
+                true
+            }
+            StopResult::Terminated => {
+                log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
+                true
+            }
+            StopResult::Timeout => {
+                log_buffer.push_info("⚠️ 等待本地 Worker 退出超时".to_string());
+                true
+            }
+            StopResult::Error(e) => {
+                log_buffer.push_info(format!("⚠️ 终止本地 Worker 失败: {}", e));
+                false
             }
         }
-        // 没有进程在运行，视为成功
-        true
     }
 
     /// 启动指定方向的 SSH 反向隧道。
@@ -348,53 +333,82 @@ impl WorkerManager {
     }
 
     fn stop_tunnel_process(proc_slot: &mut Option<Child>, log_buffer: &mut LogBuffer) -> bool {
-        if let Some(ref mut proc) = proc_slot {
-            match proc.try_wait() {
-                Ok(Some(status)) => {
-                    log::info!("[Worker] SSH 隧道已自行退出: {}", status);
-                    *proc_slot = None;
-                    return true;
-                }
-                Ok(None) => {
-                    log::info!("[Worker] 正在终止 SSH 隧道进程...");
-                    if let Err(e) = proc.kill() {
-                        log::warn!("[Worker] 终止 SSH 隧道进程失败: {}", e);
-                        log_buffer.push_info(format!("⚠️ 终止 SSH 隧道失败: {}", e));
-                        return false;
-                    }
-                    // 使用 try_wait 轮询替代 wait()，避免阻塞主循环
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                    let mut terminated = false;
-                    while std::time::Instant::now() < deadline {
-                        match proc.try_wait() {
-                            Ok(Some(status)) => {
-                                log::info!("[Worker] SSH 隧道已终止: {}", status);
-                                log_buffer.push_info("✅ SSH 隧道已终止".to_string());
-                                terminated = true;
-                                break;
-                            }
-                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-                            Err(e) => {
-                                log::warn!("[Worker] 检查 SSH 隧道退出状态失败: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    if !terminated {
-                        log::warn!("[Worker] 等待 SSH 隧道退出超时 (5s)");
-                        log_buffer.push_info("⚠️ 等待 SSH 隧道退出超时".to_string());
-                    }
-                    *proc_slot = None;
-                    return true;
-                }
-                Err(e) => {
-                    log::warn!("[Worker] 检查 SSH 隧道状态失败: {}", e);
-                    *proc_slot = None;
-                    return false;
-                }
+        let result = Self::stop_child_process(proc_slot, "SSH 隧道", 5);
+        match result {
+            StopResult::NoProcess => true,
+            StopResult::AlreadyExited => {
+                log_buffer.push_info("✅ SSH 隧道已终止".to_string());
+                true
+            }
+            StopResult::Terminated => {
+                log_buffer.push_info("✅ SSH 隧道已终止".to_string());
+                true
+            }
+            StopResult::Timeout => {
+                log_buffer.push_info("⚠️ 等待 SSH 隧道退出超时".to_string());
+                true
+            }
+            StopResult::Error(e) => {
+                log_buffer.push_info(format!("⚠️ 终止 SSH 隧道失败: {}", e));
+                false
             }
         }
-        true
+    }
+
+    /// 通用进程终止辅助方法。
+    ///
+    /// 先检查进程是否已退出，若仍在运行则发送 kill 信号并轮询等待。
+    /// 使用 `try_wait` 轮询替代 `wait()`，避免阻塞主循环。
+    fn stop_child_process(
+        proc_slot: &mut Option<Child>,
+        name: &str,
+        timeout_secs: u64,
+    ) -> StopResult {
+        let Some(ref mut proc) = proc_slot else {
+            return StopResult::NoProcess;
+        };
+        match proc.try_wait() {
+            Ok(Some(status)) => {
+                log::info!("[Worker] {} 已自行退出: {}", name, status);
+                *proc_slot = None;
+                StopResult::AlreadyExited
+            }
+            Ok(None) => {
+                log::info!("[Worker] 正在终止 {}...", name);
+                if let Err(e) = proc.kill() {
+                    log::warn!("[Worker] 终止 {} 失败: {}", name, e);
+                    *proc_slot = None;
+                    return StopResult::Error(e.to_string());
+                }
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                while std::time::Instant::now() < deadline {
+                    match proc.try_wait() {
+                        Ok(Some(status)) => {
+                            log::info!("[Worker] {} 已终止: {}", name, status);
+                            *proc_slot = None;
+                            return StopResult::Terminated;
+                        }
+                        Ok(None) => {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            log::warn!("[Worker] 检查 {} 退出状态失败: {}", name, e);
+                            *proc_slot = None;
+                            return StopResult::Error(e.to_string());
+                        }
+                    }
+                }
+                log::warn!("[Worker] 等待 {} 退出超时 ({}s)", name, timeout_secs);
+                *proc_slot = None;
+                StopResult::Timeout
+            }
+            Err(e) => {
+                log::warn!("[Worker] 检查 {} 状态失败: {}", name, e);
+                *proc_slot = None;
+                StopResult::Error(e.to_string())
+            }
+        }
     }
 }
 
@@ -486,6 +500,10 @@ impl Drop for WorkerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 防止并行测试竞争环境变量的互斥锁。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn is_process_running_returns_false_for_none() {
@@ -555,6 +573,7 @@ mod tests {
 
     #[test]
     fn start_workers_with_prepare_runs_both_tunnels_then_daemon_prepare_then_local_worker() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-test-{}",
             crate::generate_request_id()

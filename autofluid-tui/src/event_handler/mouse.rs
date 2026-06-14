@@ -1165,17 +1165,17 @@ pub fn handle_dialog_button_click(
                                 &mut *runtime.ipc,
                                 log_buffer,
                             ));
-                    actions::handle_confirm_result(
-                        result,
-                        runtime.rt,
-                        &mut *runtime.ipc,
+                    let mut ctx = crate::EventContext {
                         state,
                         log_buffer,
-                        &mut *runtime.daemon,
-                        &mut *runtime.worker,
-                        runtime.project_dir,
-                        &mut *runtime.full_quit,
-                    );
+                        ipc: runtime.ipc,
+                        daemon: runtime.daemon,
+                        worker: runtime.worker,
+                        rt: runtime.rt,
+                        project_dir: runtime.project_dir,
+                        full_quit: runtime.full_quit,
+                    };
+                    actions::handle_confirm_result(result, &mut ctx);
                 }
                 state.ui_mode = UiMode::Normal;
                 state.confirm_message = None;

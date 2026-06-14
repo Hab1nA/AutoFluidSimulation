@@ -284,7 +284,7 @@ pub fn run_tui() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 事件处理上下文，聚合 process_event 所需的全部可变引用。
-struct EventContext<'a> {
+pub(crate) struct EventContext<'a> {
     state: &'a mut AppState,
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
@@ -426,110 +426,95 @@ fn submit_command(
 }
 
 fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext) {
-    handle_command_result_refs(
-        result,
-        ctx.rt,
-        ctx.ipc,
-        ctx.state,
-        ctx.log_buffer,
-        ctx.daemon,
-        ctx.worker,
-        ctx.project_dir,
-        ctx.full_quit,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_command_result_refs(
-    result: command::CommandResult,
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    daemon: &mut daemon_mgr::DaemonManager,
-    worker: &mut worker_mgr::WorkerManager,
-    project_dir: &str,
-    full_quit: &mut bool,
-) {
     match result {
         command::CommandResult::Quit => {
-            state.should_quit = true;
+            ctx.state.should_quit = true;
         }
         command::CommandResult::FullQuit => {
             log::info!("[TUI] 收到完全退出请求，准备停止后台引擎并关闭界面");
-            *full_quit = true;
-            if ipc.is_connected() {
-                match rt.block_on(ipc.full_quit()) {
+            *ctx.full_quit = true;
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.full_quit()) {
                     Ok(resp) if resp.is_ok() => {
-                        log_buffer.push_info(format!("✅ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
                     }
                     Ok(resp) => {
-                        log_buffer.push_info(format!("❌ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
                     }
                     Err(e) => {
-                        log_buffer.push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                        ctx.log_buffer
+                            .push_info(format!("❌ 停止后台引擎通信失败: {}", e));
                     }
                 }
             }
-            rt.block_on(ipc.disconnect());
-            state.should_quit = true;
+            ctx.rt.block_on(ctx.ipc.disconnect());
+            ctx.state.should_quit = true;
         }
         command::CommandResult::StartDaemon => {
-            daemon.start_with_ipc(ipc, rt, state, log_buffer, project_dir);
+            ctx.daemon
+                .start_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::RestartDaemon => {
-            daemon.restart_with_ipc(ipc, rt, state, log_buffer, project_dir);
+            ctx.daemon.restart_with_ipc(
+                ctx.ipc,
+                ctx.rt,
+                ctx.state,
+                ctx.log_buffer,
+                ctx.project_dir,
+            );
         }
         command::CommandResult::StopDaemon => {
-            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
+            ctx.daemon
+                .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::StartWorkers => {
-            // worker start：先建立 SSH 隧道，再让 daemon 验证远端 SSH，最后启动本地 Worker。
-            let started = worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
-                worker_mgr::prepare_remote_workers(ipc, rt, buffer)
-            });
+            let started =
+                ctx.worker
+                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
+                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
+                    });
             if started {
-                wait_for_worker_health_refresh(rt, ipc, state, log_buffer);
+                wait_for_worker_health_refresh(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
             }
         }
         command::CommandResult::StopWorkers => {
-            // worker stop：发送 IPC 停止命令后停止本地进程
-            if ipc.is_connected() {
-                match rt.block_on(ipc.worker_stop()) {
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
                     Ok(resp) if resp.is_ok() => {
-                        log_buffer.push_info(format!("✅ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
                     }
                     Ok(resp) => {
-                        log_buffer.push_info(format!("❌ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
                     }
                     Err(e) => {
-                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
                     }
                 }
             }
-            worker.stop_workers(log_buffer);
+            ctx.worker.stop_workers(ctx.log_buffer);
         }
         command::CommandResult::RestartWorkers => {
-            // worker restart：先停止再启动
-            if ipc.is_connected() {
-                match rt.block_on(ipc.worker_stop()) {
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
                     Ok(resp) if resp.is_ok() => {
-                        log_buffer.push_info(format!("✅ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
                     }
                     Ok(resp) => {
-                        log_buffer.push_info(format!("❌ {}", resp.message));
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
                     }
                     Err(e) => {
-                        log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
                     }
                 }
             }
-            worker.stop_workers(log_buffer);
-            let started = worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
-                worker_mgr::prepare_remote_workers(ipc, rt, buffer)
-            });
+            ctx.worker.stop_workers(ctx.log_buffer);
+            let started =
+                ctx.worker
+                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
+                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
+                    });
             if started {
-                wait_for_worker_health_refresh(rt, ipc, state, log_buffer);
+                wait_for_worker_health_refresh(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
             }
         }
         command::CommandResult::None => {}
@@ -537,60 +522,45 @@ fn handle_command_result_refs(
 }
 
 fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
-    let EventContext {
-        state,
-        log_buffer,
-        ipc,
-        daemon,
-        worker,
-        rt,
-        project_dir,
-        full_quit,
-    } = ctx;
     match event {
         CrosstermEvent::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-            let action = key_handler::handle_key(key, state);
+            let action = key_handler::handle_key(key, ctx.state);
             match action {
                 key_handler::AppAction::Quit => {
-                    state.should_quit = true;
+                    ctx.state.should_quit = true;
                 }
                 key_handler::AppAction::SubmitCommand(cmd) => {
-                    let result = submit_command(&cmd, "keyboard", rt, ipc, state, log_buffer);
-                    handle_command_result_refs(
-                        result,
-                        rt,
-                        ipc,
-                        state,
-                        log_buffer,
-                        daemon,
-                        worker,
-                        project_dir,
-                        full_quit,
+                    let result = submit_command(
+                        &cmd,
+                        "keyboard",
+                        ctx.rt,
+                        ctx.ipc,
+                        ctx.state,
+                        ctx.log_buffer,
                     );
+                    handle_command_result(result, ctx);
                 }
                 key_handler::AppAction::Confirm => {
-                    if let Some(callback) = state.confirm_callback.take() {
-                        let result = rt
-                            .block_on(command::execute_confirm_action(&callback, ipc, log_buffer));
-                        event_handler::actions::handle_confirm_result(
-                            result,
-                            rt,
-                            ipc,
-                            state,
-                            log_buffer,
-                            daemon,
-                            worker,
-                            project_dir,
-                            full_quit,
-                        );
+                    if let Some(callback) = ctx.state.confirm_callback.take() {
+                        let result = ctx.rt.block_on(command::execute_confirm_action(
+                            &callback,
+                            ctx.ipc,
+                            ctx.log_buffer,
+                        ));
+                        event_handler::actions::handle_confirm_result(result, ctx);
                     }
                 }
                 key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
                 key_handler::AppAction::DiscardSettings => {
-                    state.close_settings();
+                    ctx.state.close_settings();
                 }
                 key_handler::AppAction::SaveSettings => {
-                    event_handler::actions::save_settings(state, ipc, rt, log_buffer);
+                    event_handler::actions::save_settings(
+                        ctx.state,
+                        ctx.ipc,
+                        ctx.rt,
+                        ctx.log_buffer,
+                    );
                 }
                 key_handler::AppAction::None => {}
             }
@@ -598,21 +568,21 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
         CrosstermEvent::Mouse(mouse) => {
             event_handler::mouse::handle_mouse(
                 mouse,
-                state,
-                log_buffer,
+                ctx.state,
+                ctx.log_buffer,
                 event_handler::mouse::MouseRuntime {
-                    ipc,
-                    rt,
-                    daemon,
-                    worker,
-                    project_dir,
-                    full_quit,
+                    ipc: ctx.ipc,
+                    rt: ctx.rt,
+                    daemon: ctx.daemon,
+                    worker: ctx.worker,
+                    project_dir: ctx.project_dir,
+                    full_quit: ctx.full_quit,
                 },
             );
         }
         CrosstermEvent::Resize(w, h) => {
-            state.update_terminal_size(w, h);
-            state.needs_redraw = true;
+            ctx.state.update_terminal_size(w, h);
+            ctx.state.needs_redraw = true;
         }
         _ => {}
     }

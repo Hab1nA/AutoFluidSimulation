@@ -434,7 +434,13 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         format!("export_{}.log", time_str)
     };
 
-    let log_dir = std::env::current_dir().unwrap_or_default().join("logs");
+    let log_dir = match std::env::current_dir() {
+        Ok(dir) => dir.join("logs"),
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 获取当前目录失败: {}", e));
+            return CommandResult::None;
+        }
+    };
     let _ = fs::create_dir_all(&log_dir);
     let filepath = log_dir.join(&filename);
 
