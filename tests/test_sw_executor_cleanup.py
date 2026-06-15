@@ -86,7 +86,7 @@ def test_export_per_config_cleans_up_when_model_open_fails(
     assert executor._com_initialized is False
 
 
-def test_export_per_config_cleans_up_when_design_table_import_fails(
+def test_export_per_config_cleans_up_when_first_config_switch_fails(
     fake_com_modules,
     sw_paths,
     monkeypatch,
@@ -96,13 +96,12 @@ def test_export_per_config_cleans_up_when_design_table_import_fails(
     doc = SimpleNamespace()
     cleanup_calls = []
 
+    def fail_show_config(_name):
+        raise RuntimeError("configuration switch failed")
+
+    doc.ShowConfiguration2 = fail_show_config
     monkeypatch.setattr(executor, "_connect_sw", lambda: app)
     monkeypatch.setattr(executor, "_open_sw_model", lambda *_args: doc)
-    monkeypatch.setattr(
-        executor,
-        "_import_design_table_with_retry",
-        lambda *_args: False,
-    )
     monkeypatch.setattr(
         executor,
         "_disconnect_sw",
@@ -257,11 +256,6 @@ def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
 
     monkeypatch.setattr(executor, "_connect_sw", connect_sw)
     monkeypatch.setattr(executor, "_open_sw_model", open_model)
-    monkeypatch.setattr(
-        executor,
-        "_import_design_table_with_retry",
-        lambda _doc, app, *_args: app is recovered_app,
-    )
     monkeypatch.setattr(
         executor,
         "_terminate_sw_processes",

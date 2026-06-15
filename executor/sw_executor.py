@@ -4,7 +4,7 @@ SolidWorks COM 自动化执行器 (SW Executor)
 
 负责通过 win32com 驱动 SolidWorks 完成：
 - SW 进程连接/启动（三层降级策略）
-- Excel 设计表导入（多策略容错）
+- 使用模型内已链接设计表提供的构型
 - 所有构型 STEP 文件导出
 - COM 资源清理
 
@@ -14,9 +14,7 @@ SolidWorks COM 自动化执行器 (SW Executor)
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
-import tempfile
 import time
 import gc
 import threading
@@ -41,7 +39,7 @@ logger = setup_logger(__name__)
 class SWExecutor:
     """SolidWorks COM 自动化执行器。
 
-    封装 SolidWorks 的连接、设计表导入、STEP 导出等所有 COM 操作。
+    封装 SolidWorks 的连接、模型构型切换、STEP 导出等所有 COM 操作。
     """
 
     # swDocumentTypes_e
@@ -126,7 +124,7 @@ class SWExecutor:
         """导出单个构型的 STEP 文件（供 RetryManager 调用）。
 
         执行流程：
-        1. 首次调用时建立 SW 连接、打开模型、导入设计表（缓存在实例属性）
+        1. 首次调用时建立 SW 连接、打开已链接设计表的模型（缓存在实例属性）
         2. 切换到目标构型 → 重建 → SaveAs STEP
         3. 所有构型完成后由调用方调用 _disconnect_sw_cached() 清理
 
@@ -152,7 +150,6 @@ class SWExecutor:
 
         step_dir = LOCAL_PATHS.get("step_dir", "")
         sw_model = LOCAL_PATHS["sw_model"]
-        excel_path = LOCAL_PATHS.get("excel", "")
         doc_type = self._guess_sw_doc_type(sw_model)
 
         # ---- 首次调用：建立 SW 连接 ----
@@ -181,10 +178,10 @@ class SWExecutor:
                         doc = recovered_doc
                 if doc is None:
                     return self._fail(f"[SW] 构型{config_name}: 无法打开模型")
-                if not self._import_design_table_with_retry(
-                    doc, sw_app, excel_path, sw_model
-                ):
-                    return self._fail(f"[SW] 构型{config_name}: 设计表导入失败")
+                logger.info(
+                    "[SW] 模型已打开；使用模型内已链接设计表，"
+                    "不主动导入 Excel 或批量写入参数"
+                )
                 self._cached_sw_app = sw_app
                 self._cached_doc = doc
                 cache_ready = True
@@ -249,6 +246,7 @@ class SWExecutor:
         try:
             doc.ShowConfiguration2(cn_str)
         except Exception as e:
+            self.disconnect_sw_cached()
             return self._fail(
                 f"[SW] 构型{config_name}: ShowConfiguration2 失败 "
                 f"({type(e).__name__}: {e})"
@@ -695,7 +693,7 @@ class SWExecutor:
         pythoncom.CoUninitialize()
 
     # ------------------------------------------------------------------
-    # 设计表导入
+    # 已链接设计表格式预验证
     # ------------------------------------------------------------------
 
     def _validate_design_table(self, excel_path: str) -> list[str]:
@@ -779,321 +777,6 @@ class SWExecutor:
         if not warnings:
             logger.info("[SW-DesignTable] Excel 设计表格式预验证通过")
         return warnings
-
-    def _model_has_design_table(self, doc: Any) -> bool:  # noqa: ANN401  COM 动态对象
-        """检测模型是否已存在设计表（链接或内嵌），避免进入 Excel OLE 编辑态。"""
-        try:
-            extension = getattr(doc, "Extension", None)
-            checker = getattr(extension, "HasDesignTable", None)
-            if callable(checker) and bool(checker()):
-                logger.info("[SW-DesignTable] 检测到模型已有设计表（HasDesignTable=True）")
-                return True
-        except Exception as e:
-            logger.debug(f"[SW-DesignTable] HasDesignTable 检测异常: {e}")
-
-        try:
-            getter = getattr(doc, "GetDesignTable", None)
-            dt = getter() if callable(getter) else getter
-            if dt is not None:
-                logger.info("[SW-DesignTable] 检测到模型已有设计表（GetDesignTable 返回非空）")
-                return True
-        except Exception as e:
-            logger.debug(f"[SW-DesignTable] GetDesignTable 检测异常: {e}")
-
-        logger.info("[SW-DesignTable] 模型无设计表，将进行导入")
-        return False
-
-    def _import_design_table_with_retry(self, doc: Any, sw_app: Any, excel_path: str, sw_model: str) -> bool:  # noqa: ANN401  COM 动态对象
-        """带容错与多策略降级的设计表导入。"""
-        basename_model = os.path.basename(sw_model)
-
-        if self._model_has_design_table(doc):
-            logger.info("[SW-DesignTable] 模型已有设计表，跳过导入（已自动同步参数）")
-            return True
-
-        # ---- 策略A: InsertFamilyTableOpen（最多2次） ----
-        tmp_excel_path = None
-        try:
-            tmp_fd, tmp_excel_path = tempfile.mkstemp(
-                suffix=".xlsx", prefix="sw_design_table_"
-            )
-            os.close(tmp_fd)
-            shutil.copy2(excel_path, tmp_excel_path)
-            logger.info(
-                f"[SW-DesignTable] 已复制 Excel 到临时文件: "
-                f"{os.path.basename(tmp_excel_path)}"
-            )
-        except OSError as e_copy:
-            logger.warning(f"[SW-DesignTable] 无法复制 Excel: {e_copy}，使用原始路径")
-            tmp_excel_path = excel_path
-
-        insert_ok = False
-        for attempt in (1, 2):
-            if insert_ok:
-                break
-            import_path = tmp_excel_path or excel_path
-            logger.info(f"[SW-DesignTable] InsertFamilyTableOpen 尝试 {attempt}/2")
-            try:
-                inserted = doc.InsertFamilyTableOpen(import_path)
-                logger.info(f"[SW-DesignTable] InsertFamilyTableOpen 返回: {inserted}")
-                if inserted:
-                    insert_ok = True
-                elif attempt == 1:
-                    logger.info("[SW-DesignTable] 等待 3 秒后重试...")
-                    time.sleep(3)
-            except Exception as e_insert:
-                logger.warning(
-                    f"[SW-DesignTable] InsertFamilyTableOpen 异常 "
-                    f"({type(e_insert).__name__}: {e_insert})"
-                )
-                if attempt == 1:
-                    time.sleep(3)
-
-        if insert_ok:
-            logger.info("[SW-DesignTable] ✓ InsertFamilyTableOpen 成功")
-            self._post_process_design_table(doc, excel_path)
-            self._cleanup_tmp_excel(tmp_excel_path, excel_path)
-            return True
-
-        # ---- 策略B: 解析 Excel，COM 直接设参 ----
-        logger.info("[SW-DesignTable] InsertFamilyTableOpen 失败，尝试 COM 直接设参...")
-        com_ok = self._apply_params_via_com(doc, excel_path)
-
-        self._cleanup_tmp_excel(tmp_excel_path, excel_path)
-
-        if com_ok:
-            return True
-
-        # ---- 全部失败 → 详细诊断 ----
-        self._diagnose_param_mismatch(doc, excel_path)
-        logger.error("=" * 60)
-        logger.error("[SW-DesignTable] 所有导入方式均失败！")
-        logger.error(f"[SW-DesignTable] Excel: {excel_path}")
-        logger.error(f"[SW-DesignTable] 模型: {basename_model}")
-        logger.error("[SW-DesignTable] 请检查上述诊断信息中列出的参数名不匹配项。")
-        logger.error("=" * 60)
-        try:
-            sw_app.CloseDoc(basename_model)
-        except Exception:
-            pass
-        return False
-
-    def _post_process_design_table(self, doc: Any, excel_path: str) -> None:  # noqa: ANN401  COM 动态对象
-        """InsertFamilyTableOpen 成功后的后处理。"""
-        try:
-            design_table = doc.GetDesignTable()
-            if design_table is not None:
-                try:
-                    design_table.Updatable = False
-                    logger.info("[SW-DesignTable] 已禁止'模型→设计表'反向更新")
-                except Exception as e_upd:
-                    logger.debug(f"[SW-DesignTable] 设置 Updatable=False 失败: {e_upd}")
-                logger.info(
-                    "[SW-DesignTable] 跳过全局 UpdateModel；"
-                    "后续将按构型逐一切换、重建并导出"
-                )
-            else:
-                logger.info("[SW-DesignTable] GetDesignTable 返回 None（可能已自动应用）")
-        except Exception as e_dt:
-            logger.debug(f"[SW-DesignTable] 后处理异常: {e_dt}")
-
-    @staticmethod
-    def _cleanup_tmp_excel(tmp_path: str, original_path: str):
-        """清理临时 Excel 文件。"""
-        if tmp_path and tmp_path != original_path:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-    def _apply_params_via_com(self, doc: Any, excel_path: str) -> bool:  # noqa: ANN401  COM 动态对象
-        """策略B: 解析 Excel 参数表，直接通过 COM API 为每个构型设置参数值。"""
-        logger.info("[SW-DesignTable] 正在读取 Excel 参数表...")
-        import openpyxl
-
-        config_data = {}  # {config_name: [param_values]}
-        wb = None
-        try:
-            wb = openpyxl.load_workbook(excel_path, data_only=True)
-            ws = wb.active
-
-            row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
-            if not row2_cells:
-                logger.error("[SW-DesignTable] Excel 第2行缺失（应包含参数名）")
-                return False
-            row2 = [cell.value for cell in row2_cells[0]]
-            excel_param_names = [
-                str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
-            ]
-            if not excel_param_names:
-                logger.error("[SW-DesignTable] Excel 第2行无有效参数名")
-                return False
-            logger.info(
-                f"[SW-DesignTable] Excel 参数名 ({len(excel_param_names)}个): "
-                f"{excel_param_names}"
-            )
-
-            for row in ws.iter_rows(min_row=3, values_only=True):
-                if row[0] is None:
-                    break
-                try:
-                    cn = int(row[0])
-                    vals = [float(row[i]) for i in range(1, len(excel_param_names) + 1)]
-                    config_data[cn] = vals
-                except (ValueError, TypeError, IndexError):
-                    continue
-            logger.info(f"[SW-DesignTable] 读取到 {len(config_data)} 个构型数据")
-
-            if not config_data:
-                logger.error("[SW-DesignTable] Excel 无有效构型数据")
-                return False
-        finally:
-            if wb is not None:
-                wb.close()
-
-        # --- 获取模型配置列表 ---
-        model_configs = []
-        try:
-            raw = None
-            try:
-                doc._FlagAsMethod('GetConfigurationNames')
-                raw = doc.GetConfigurationNames()
-            except TypeError:
-                raw = doc.GetConfigurationNames
-            if isinstance(raw, (tuple, list)):
-                model_configs = [str(c) for c in raw]
-            elif raw is not None:
-                model_configs = [str(raw)]
-        except Exception as e:
-            logger.warning(f"[SW-DesignTable] 获取配置列表失败 ({type(e).__name__})，尝试替代方法...")
-            for cn in sorted(config_data.keys()):
-                cfg_str = str(cn)
-                try:
-                    doc.ShowConfiguration2(cfg_str)
-                    model_configs.append(cfg_str)
-                except Exception:
-                    pass
-        if model_configs:
-            logger.info(f"[SW-DesignTable] 模型配置 ({len(model_configs)}个): {model_configs[:5]}...")
-        else:
-            logger.warning("[SW-DesignTable] 无法获取模型配置列表，将尝试所有 Excel 构型")
-
-        # --- 构建参数名映射 ---
-        matched_params = []
-        unmatched_excel = []
-        for ep in excel_param_names:
-            try:
-                test_param = doc.Parameter(ep)
-                if test_param is not None:
-                    matched_params.append(ep)
-                else:
-                    unmatched_excel.append(ep)
-            except Exception:
-                unmatched_excel.append(ep)
-
-        if unmatched_excel:
-            logger.warning(
-                f"[SW-DesignTable] {len(unmatched_excel)} 个 Excel 参数在模型中未找到: "
-                f"{unmatched_excel}"
-            )
-        if not matched_params:
-            logger.error("[SW-DesignTable] 没有任何 Excel 参数与模型匹配！无法设置参数。")
-            if unmatched_excel:
-                logger.info(
-                    f"[SW-DesignTable] 未匹配的 Excel 参数: {sorted(unmatched_excel)}"
-                )
-            return False
-        logger.info(
-            f"[SW-DesignTable] 匹配参数 ({len(matched_params)}个): {matched_params}"
-        )
-
-        # --- 逐个构型设置参数 ---
-        skip_config_check = not model_configs
-        success_count = 0
-        for config_name, param_values in config_data.items():
-            cfg_str = str(config_name)
-
-            if not skip_config_check and cfg_str not in model_configs:
-                logger.debug(f"[SW-DesignTable] 构型{config_name} 不在模型配置列表中，跳过")
-                continue
-
-            try:
-                doc.ShowConfiguration2(cfg_str)
-            except Exception as e:
-                logger.warning(f"[SW-DesignTable] 切换构型{cfg_str}失败: {e}")
-                continue
-
-            config_ok = True
-            for pname, pvalue in zip(matched_params, param_values):
-                try:
-                    param = doc.Parameter(pname)
-                    if param is None:
-                        logger.warning(f"[SW-DesignTable] 构型{config_name}: 参数'{pname}'不存在")
-                        config_ok = False
-                        continue
-                    param.Value = pvalue
-                    logger.debug(f"[SW-DesignTable] 构型{config_name}: {pname} = {pvalue}")
-                except Exception as e:
-                    logger.warning(
-                        f"[SW-DesignTable] 构型{config_name} 设置 {pname}={pvalue} 失败: "
-                        f"{type(e).__name__}: {e}"
-                    )
-                    config_ok = False
-
-            if config_ok:
-                success_count += 1
-            else:
-                logger.warning(f"[SW-DesignTable] 构型{config_name} 部分参数设置失败")
-
-        logger.info(
-            f"[SW-DesignTable] ✓ 完成: {success_count}/{len(config_data)} 个构型参数已设置"
-        )
-        return success_count > 0
-
-    def _diagnose_param_mismatch(self, doc: Any, excel_path: str) -> None:  # noqa: ANN401  COM 动态对象
-        """详细诊断 Excel 参数表与模型参数的不匹配情况。"""
-        logger.info("=" * 60)
-        logger.info("[SW-DesignTable] 参数名不匹配分析")
-        logger.info("=" * 60)
-
-        import openpyxl
-        excel_params = []
-        wb = None
-        try:
-            wb = openpyxl.load_workbook(excel_path, data_only=True)
-            ws = wb.active
-            row2_cells = list(ws.iter_rows(min_row=2, max_row=2))
-            if row2_cells:
-                row2 = [cell.value for cell in row2_cells[0]]
-                excel_params = [
-                    str(v).strip() for v in row2[1:] if v is not None and str(v).strip()
-                ]
-        except Exception:
-            pass
-        finally:
-            if wb is not None:
-                wb.close()
-
-        model_param_names = []
-        for ep in excel_params:
-            try:
-                p = doc.Parameter(ep)
-                if p is not None:
-                    model_param_names.append(ep)
-            except Exception:
-                pass
-
-        logger.info(f"[SW-DesignTable] Excel 参数 ({len(excel_params)}): {excel_params}")
-        logger.info(f"[SW-DesignTable] 模型匹配参数 ({len(model_param_names)}): {model_param_names}")
-
-        unmatched = [p for p in excel_params if p not in model_param_names]
-
-        if unmatched:
-            logger.info("")
-            logger.info("[SW-DesignTable] 建议修复方式：")
-            logger.info("[SW-DesignTable] 1. 更新 Excel 第2行参数名，使其与模型一致")
-            logger.info("[SW-DesignTable] 2. 或在 SW 中重命名模型参数，使其与 Excel 一致")
-            logger.info("[SW-DesignTable] 3. 若参数名无误，检查 Excel 工作表和 SW 文档类型是否匹配")
 
     # ------------------------------------------------------------------
     # STEP 导出
