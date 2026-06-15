@@ -1,191 +1,107 @@
 # AutoFluid Agent Guide
 
-This file adapts the existing Copilot instructions in `.github/` for Codex.
-Before editing code, use this file as the entry point and load the
-language-specific instruction file(s) needed for the files being changed.
+Use this file as the repository entry point. Keep it short; load the
+language-specific instruction files before changing source code.
 
-## Copilot CLI Subagents
+## Copilot CLI Workers
 
-When complex work benefits from subagents, create and manage them through the
-`copilot-orchestrator` skill rather than through ad hoc prompts or local wrapper
-scripts. In Copilot CLI, load that workflow with the `skill` tool before
-launching workers; in Codex, follow the installed skill instructions for
-worker prompts, instruction routing, timeouts, and safety constraints.
+When Codex delegates work to Copilot CLI, use the installed
+`copilot-orchestrator` workflow and the user wrapper:
 
-Use the canonical `copilot` CLI spelling only. When Codex launches Copilot CLI
-workers from PowerShell, use a login shell so the user's profile-provided
-Copilot provider, model, authentication, and environment defaults are loaded.
-Codex remains responsible for task breakdown, worker result review, integration,
-workspace cleanliness, and final verification.
+```powershell
+& "$HOME\.copilot\codex-worker.ps1" -Repo "<repo>" -Prompt "<task>" -Agent codex-investigator
+```
+
+Available local agents:
+
+- `codex-investigator`: read-only investigation and code-path mapping.
+- `codex-implementer`: scoped edits; use only with `-AllowWrite`.
+- `codex-reviewer`: read-only diff or change review.
+
+Use `login:true` for Codex shell calls that launch Copilot so the PowerShell
+profile provides the active `mimo-v2.5-pro` provider settings. Do not pass
+`--effort` directly for this model.
 
 ## Environment
 
-Use the project virtual environment for all Python commands:
+Use the project virtual environment for Python:
 
 `C:\Users\XKZ\Documents\VSCode Projects\AutoFluidSimulation\.venv\Scripts\python.exe`
 
-Do not use bare `python`, because the Codex process may resolve it to another
-interpreter such as MSYS2 Python.
-
-Command forms:
+Common commands:
 
 - Tests: `.venv\Scripts\python.exe -m pytest`
 - Pip: `.venv\Scripts\python.exe -m pip`
 - Mypy: `.venv\Scripts\python.exe -m mypy`
 - Ruff: `.venv\Scripts\python.exe -m ruff`
 
-## Server File Handling
+Avoid bare `python`; it may resolve to the wrong interpreter.
 
-For this project, never edit tracked source code directly on the server. Make
-all code changes in the local Windows checkout first, then use a local commit
-to trigger the configured server-side hook/pull workflow. Directly patching
-tracked files on the server creates dirty working trees and version conflicts.
+## Server File Policy
 
-The only exception is server-only environment or runtime files that are ignored
-by the server repository's `.gitignore`, such as machine-local `.env` files,
-secrets, logs, caches, or deployment-specific runtime state. Those ignored
-environment files may be edited directly on the server when the task requires
-it.
+Tracked source changes are local-first. Edit tracked files in this Windows
+checkout, then use the normal commit-triggered server sync.
 
-## Source Instructions
+Direct server edits are only for `.gitignore`-ignored runtime or environment
+files such as local `.env`, secrets, logs, caches, and deployment state.
 
-- Python rules: `.github/instructions/python.instructions.md`
-- Rust rules: `.github/instructions/rust.instructions.md`
-- C# rules: `.github/instructions/csharp.instructions.md`
-- Commit message rules: see "Commit Messages" section below
+## Instruction Routing
+
+- Python: `.github/instructions/python.instructions.md`
+- Rust: `.github/instructions/rust.instructions.md`
+- C#: `.github/instructions/csharp.instructions.md`
 - Review prompts:
-  `.github/prompts/review-python.prompt.md`,
-  `.github/prompts/review-rust.prompt.md`,
-  `.github/prompts/review-csharp.prompt.md`
+  - `.github/prompts/review-python.prompt.md`
+  - `.github/prompts/review-rust.prompt.md`
+  - `.github/prompts/review-csharp.prompt.md`
 
-## Language Routing
-
-- For `*.py`, read and follow `.github/instructions/python.instructions.md`.
-- For `autofluid-tui/**/*.rs` and Rust TOML work, read and follow
-  `.github/instructions/rust.instructions.md`.
-- For `bridge/**/*.cs` and `bridge/**/*.csproj`, read and follow
-  `.github/instructions/csharp.instructions.md`.
-- For `.toml`, `.ini`, `.bat`, and project config files, use
-  `.github/instructions/python.instructions.md` for root-level files,
-  `.github/instructions/rust.instructions.md` for files in `autofluid-tui/`,
-  and `.github/instructions/csharp.instructions.md` for files in `bridge/`.
-- If a task spans multiple languages, read each relevant instruction file, but
-  keep edits language-scoped and avoid mixing one language's idioms into another.
-
-## Cross-Language Guardrails
-
-- Restrict all source code edits to the syntax of the target file's language.
-  Do not mix syntax between languages, even when implementing cross-language
-  interfaces like IPC. If a task requires cross-language coordination, edit
-  each file in its native language separately.
-- Do not copy external API examples or documentation blocks into source files.
+Load each relevant instruction file for the files being changed. For mixed
+tasks, keep edits scoped by language and do not mix idioms or syntax across
+Python, Rust, and C# files.
 
 ## Architecture Snapshot
 
-AutoFluid has three main layers:
+Main layers:
 
 - Python daemon and executors: `engine/`, `executor/`, `ipc/`, `utils/`
 - Rust TUI client: `autofluid-tui/`
 - C# SpaceClaim bridge: `bridge/SpaceClaimBridge/`
 
-Key interactions:
+Shared contracts:
 
 - Python daemon exposes JSON-over-TCP IPC on port `9527`.
 - Rust TUI polls IPC asynchronously with `tokio` and renders with `ratatui`.
-- Python launches SpaceClaim Bridge through subprocesses.
-- `autofluid_config.toml` is shared between Python config loading and the Rust
-  TUI settings page; shared field names must remain identical `snake_case`.
+- Python launches the SpaceClaim bridge through subprocesses.
+- `autofluid_config.toml` is shared by Python config loading and the Rust TUI;
+  shared fields must stay aligned and use `snake_case`.
+- C# `ExitCode` changes must stay compatible with Python `SCProcessPool`.
 
-High-risk compatibility areas:
+## Quality Gates
 
-- IPC protocol changes must keep Rust and Python clients compatible.
-- State database schema changes must consider backward compatibility.
-- C# `ExitCode` changes must be reflected in Python `SCProcessPool` handling.
+Run the smallest relevant gate after changes:
 
-## Python Rules
+- Python: `.venv\Scripts\python.exe -m ruff check .`,
+  `.venv\Scripts\python.exe -m mypy .`,
+  `.venv\Scripts\python.exe -m pytest tests/`
+- Rust, from `autofluid-tui/`: `cargo check`,
+  `cargo clippy -- -D warnings`, `cargo fmt --check`, `cargo test`
+- C#, from `bridge/SpaceClaimBridge/`: `compile.bat` or `compile_noref.bat`
 
-- Follow Python 3.10+ typing style such as `dict[str, list[int]]`.
-- Public methods need complete parameter and return annotations.
-- Prefer `from __future__ import annotations` in new Python modules.
-- Step methods follow `execute_{step}_step()` where applicable.
-- Use module log prefixes such as `[SW]`, `[SC]`, `[Transfer]`, `[Meshing]`,
-  `[Solver]`, `[Scheduler]`, `[IPC]`, and `[State]`.
-- Avoid `dataclasses.asdict()` for objects containing non-serializable fields
-  such as `subprocess.Popen`; manually build dictionaries instead.
+If a gate cannot be run, state why and run the best narrower check available.
 
-Quality gate after Python changes:
+## Reviews
 
-- `.venv\Scripts\python.exe -m ruff check .`
-- `.venv\Scripts\python.exe -m mypy .`
-- `.venv\Scripts\python.exe -m pytest tests/`
-
-If a quality gate command fails, analyze the output, fix the corresponding
-errors in the code, and re-run the command until it passes.
-
-## Rust Rules
-
-- Rust code lives under `autofluid-tui/`.
-- Use `tokio` for async work and avoid blocking calls such as
-  `std::thread::sleep` in async contexts.
-- Propagate errors with `Result<T, E>`; avoid `unwrap()` in IPC and UI loops.
-- Keep configuration fields `snake_case` and aligned with Python/TOML names.
-
-Quality gate after Rust changes, from `autofluid-tui/`:
-
-- `cargo check`
-- `cargo clippy -- -D warnings`
-- `cargo fmt --check`
-- `cargo test`
-
-If a quality gate command fails, analyze the output, fix the corresponding
-errors in the code, and re-run the command until it passes.
-
-## C# Rules
-
-- C# bridge code lives under `bridge/SpaceClaimBridge/`.
-- Target `.NET Framework 4.8`.
-- Use block-scoped namespaces, `PascalCase` types/methods, `_camelCase` private
-  fields, and XML `///` comments for public types and methods.
-- Top-level execution should catch unhandled exceptions and return an
-  `ExitCode` matching the Python `SCProcessPool` expectations
-  (e.g., `0` = Success, `1` = Error, `2` = Timeout).
-- Keep command-line arguments compatible with Python:
-  `--script <path> --config <id> --stepdir <dir> --scdocdir <dir> [--timeout <sec>]`.
-
-Quality gate after C# changes:
-
-- Run `compile.bat` or `compile_noref.bat` in `bridge/SpaceClaimBridge/`.
-- Manually verify Python-side `SCProcessPool` handles all `ExitCode` values.
-
-If a quality gate command fails, analyze the output, fix the corresponding
-errors in the code, and re-run the command until it passes.
-
-## Review Mode
-
-When asked to review:
-
-- Use the matching `.github/prompts/review-*.prompt.md` file.
-- Review only the requested language unless the user asks for cross-language
-  review.
-- Lead with findings ordered by severity, with file and line references.
-- If an interface issue crosses language boundaries, report it as a
-  cross-language interface issue before modifying other languages.
+When asked to review, use the matching review prompt, report findings first,
+order by severity, and include file/line references. Report cross-language
+contract issues explicitly.
 
 ## Commit Messages
 
-When creating commits, write Chinese commit messages in this format:
+Use Chinese commit messages:
 
 `<type>: <description>`
 
-Allowed types:
+Allowed types: `feat`, `fix`, `refactor`, `perf`, `docs`, `chore`, `test`,
+`style`.
 
-- `feat`
-- `fix`
-- `refactor`
-- `perf`
-- `docs`
-- `chore`
-- `test`
-- `style`
-
-The description should be concise, in Chinese, and no longer than 72 characters.
+Keep the description concise and no longer than 72 characters.
