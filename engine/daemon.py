@@ -932,7 +932,7 @@ class PipelineDaemon:
             )
         if not content:
             raise ValueError("SCDOC 文件为空")
-        scdoc_dir = str(LOCAL_PATHS["scdoc_dir"])
+        scdoc_dir = self._worker_scdoc_receive_dir()
         os.makedirs(scdoc_dir, exist_ok=True)
         target_path = os.path.join(scdoc_dir, filename)
         with open(target_path, "wb") as handle:
@@ -949,6 +949,13 @@ class PipelineDaemon:
             "size": len(content),
             "server_path": target_path,
         }
+
+    @staticmethod
+    def _worker_scdoc_receive_dir() -> str:
+        """Return the daemon-local directory for LocalWorker SCDOC payloads."""
+        if is_server_mode():
+            return os.path.join(str(LOCAL_PATHS["data_dir"]), "scdoc")
+        return str(LOCAL_PATHS["scdoc_dir"])
 
     def handle_worker_step_error(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """Handle LocalWorker task failure."""

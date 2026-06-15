@@ -348,8 +348,8 @@ class TestSWPhaseHandlerFallback:
         assert config_name == 1
         assert step_file.endswith("model_gen4.SLDPRT_1.step")
 
-    def test_server_mode_enqueues_sc_before_next_sw_config_starts(self, monkeypatch):
-        """server 模式下单构型 SW 完成后应立即释放给 SC，而非等全部 SW 结束。"""
+    def test_server_mode_defers_worker_pool_until_all_sw_configs_finish(self, monkeypatch):
+        """server 模式下应避免 SW 导出中途启动 SpaceClaim。"""
         from engine import config as config_module
         from engine.scheduler.sw_phase import SWPhaseHandler
         from engine.scheduler.work_queue import UniqueWorkQueue
@@ -394,12 +394,14 @@ class TestSWPhaseHandlerFallback:
                 self.state = state
                 self.sc_queue = sc_queue
                 self.second_sw_started_after_first_sc_enqueued = False
+                self.second_sw_started_after_worker_pool = False
 
             def execute_sw_per_config(self, config_name: int) -> bool:
                 if config_name == 2:
                     self.second_sw_started_after_first_sc_enqueued = (
                         self.sc_queue.has_claim(1)
                     )
+                    self.second_sw_started_after_worker_pool = worker_pool.start_count > 0
                 self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
                 return True
 
@@ -414,8 +416,24 @@ class TestSWPhaseHandlerFallback:
             def execute_with_retry(config_name: int, step_name: str, func):
                 return func(config_name)
 
+        class _WorkerPool:
+            def __init__(self):
+                self.start_count = 0
+
+            def start_if_needed(self) -> None:
+                self.start_count += 1
+
+        class _MeshingMonitor:
+            def __init__(self):
+                self.start_count = 0
+
+            def start_if_needed(self) -> None:
+                self.start_count += 1
+
         state = _State()
         sc_queue = UniqueWorkQueue[tuple[int, str]](key=lambda item: item[0])
+        worker_pool = _WorkerPool()
+        meshing_monitor = _MeshingMonitor()
         runner = _Runner(state, sc_queue)
         handler = SWPhaseHandler(
             state_manager=state,
@@ -424,11 +442,16 @@ class TestSWPhaseHandlerFallback:
             paused_event=threading.Event(),
             stopped_event=threading.Event(),
             retry_manager=_RetryManager(),
+            worker_pool_manager=worker_pool,
+            meshing_monitor=meshing_monitor,
         )
 
         assert handler._execute_sw_macro([1, 2]) is True
 
         assert runner.second_sw_started_after_first_sc_enqueued is True
+        assert runner.second_sw_started_after_worker_pool is False
+        assert worker_pool.start_count == 1
+        assert meshing_monitor.start_count == 1
         assert sc_queue.has_claim(1) is True
         assert sc_queue.has_claim(2) is True
 

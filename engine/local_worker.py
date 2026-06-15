@@ -71,7 +71,7 @@ class LocalWorker:
         self._finished_reports: queue.Queue[dict[str, Any]] = queue.Queue()
         self._pending_reports: list[dict[str, Any]] = []
         self._deferred_tasks: list[dict[str, Any]] = []
-        self._active_lane_counts: dict[str, int] = {"sw": 0, "sc": 0, "other": 0}
+        self._active_lane_counts: dict[str, int] = {"cad": 0, "other": 0}
         self._lane_lock = threading.Lock()
 
     @classmethod
@@ -91,7 +91,7 @@ class LocalWorker:
             "sc": True,
             "clean": True,
             "check": True,
-            "sc_slots": int(os.environ.get("AUTOFLUID_WORKER_SC_SLOTS", "3")),
+            "sc_slots": 1,
         }
         return cls(
             LocalWorkerConfig(
@@ -257,7 +257,7 @@ class LocalWorker:
         with self._lane_lock:
             return any(
                 self._active_lane_counts.get(lane, 0) < self._lane_limit(lane)
-                for lane in ("sw", "sc", "other")
+                for lane in ("cad", "other")
             )
 
     def _try_start_task(self, task: dict[str, Any]) -> bool:
@@ -290,19 +290,13 @@ class LocalWorker:
 
     @staticmethod
     def _task_lane(step: str) -> str:
-        if step == "sw":
-            return "sw"
-        if step == "sc":
-            return "sc"
+        if step in {"sw", "sc"}:
+            return "cad"
         return "other"
 
     def _lane_limit(self, lane: str) -> int:
-        if lane == "sc":
-            raw_slots = self.config.capabilities.get("sc_slots", 3)
-            try:
-                return max(1, int(raw_slots))
-            except (TypeError, ValueError):
-                return 3
+        if lane == "cad":
+            return 1
         return 1
 
     def handle_polled_task(self, task: dict[str, Any]) -> dict[str, Any]:

@@ -28,7 +28,7 @@ def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> Non
             server_host="ocar.example.test",
             server_port=9527,
             auth_token="secret",
-            capabilities={"sw": True, "sc_slots": 3},
+            capabilities={"sw": True, "sc_slots": 1},
             network={
                 "candidate_hosts": ["172.17.135.240", "100.64.1.20"],
                 "reachable_host": "100.64.1.20",
@@ -45,7 +45,7 @@ def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> Non
     assert register["auth_token"] == "secret"
     assert register["params"] == {
         "worker_id": "local-pc-01",
-        "capabilities": {"sw": True, "sc_slots": 3},
+        "capabilities": {"sw": True, "sc_slots": 1},
         "network": {
             "candidate_hosts": ["172.17.135.240", "100.64.1.20"],
             "reachable_host": "100.64.1.20",
@@ -322,7 +322,41 @@ def test_local_worker_run_once_polls_and_reports_task_completion() -> None:
     assert sent_commands == ["worker_poll", "worker_step_complete"]
 
 
-def test_local_worker_run_once_overlaps_sc_with_next_sw_without_parallel_sw() -> None:
+def test_local_worker_serializes_windows_cad_tasks() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    started: list[str] = []
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+            capabilities={"sc_slots": 3},
+        ),
+        task_handlers={
+            "sw": lambda _params: started.append("sw") or {"ok": True},
+            "sc": lambda _params: started.append("sc") or {"ok": True},
+        },
+    )
+
+    worker._active_lane_counts["cad"] = 1
+    assert worker._try_start_task({
+        "task_id": "sc-while-sw",
+        "step": "sc",
+        "params": {"config_name": 1},
+    }) is False
+
+    worker._active_lane_counts["cad"] = 1
+    assert worker._try_start_task({
+        "task_id": "sw-while-sc",
+        "step": "sw",
+        "params": {"config_name": 2},
+    }) is False
+
+    assert started == []
+
+
+def test_local_worker_run_once_serializes_cad_without_parallel_sw() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
     tasks = deque([
@@ -398,20 +432,26 @@ def test_local_worker_run_once_overlaps_sc_with_next_sw_without_parallel_sw() ->
     assert "sw-1" in reports
     assert worker.run_once(now=101.0) == "dispatched"
     assert sc_started.wait(timeout=1.0)
-    assert worker.run_once(now=102.0) == "dispatched"
-    assert sw2_started.wait(timeout=1.0)
-
+    assert worker.run_once(now=102.0) == "deferred"
+    assert sw2_started.is_set() is False
     assert sc_started.is_set()
-    assert sw2_started.is_set()
     assert worker.run_once(now=103.0) == "deferred"
     assert sw3_started.is_set() is False
     assert max_active_sw == 1
 
-    sw2_release.set()
     sc_release.set()
     deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline and not {"sc-1", "sw-2"}.issubset(reports):
+    while time.monotonic() < deadline and "sc-1" not in reports:
         worker.run_once(now=104.0)
+        time.sleep(0.01)
+
+    assert "sc-1" in reports
+    assert worker.run_once(now=105.0) == "dispatched"
+    assert sw2_started.wait(timeout=1.0)
+    sw2_release.set()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and "sw-2" not in reports:
+        worker.run_once(now=106.0)
         time.sleep(0.01)
 
     assert {"sc-1", "sw-2"}.issubset(reports)

@@ -44,6 +44,7 @@ def test_daemon_worker_step_complete_persists_scdoc_payload(tmp_path, monkeypatc
     from engine.config import LOCAL_PATHS
     from engine.daemon import PipelineDaemon
 
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
     monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(tmp_path))
     daemon = PipelineDaemon()
     daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"sc": True}})
@@ -73,6 +74,42 @@ def test_daemon_worker_step_complete_persists_scdoc_payload(tmp_path, monkeypatc
         "server_path": str(tmp_path / "model_gen4_7.scdoc"),
     }
     assert (tmp_path / "model_gen4_7.scdoc").read_bytes() == b"server payload"
+
+
+def test_server_mode_worker_scdoc_payload_uses_daemon_data_dir(tmp_path, monkeypatch) -> None:
+    from engine.config import LOCAL_PATHS
+    from engine.daemon import PipelineDaemon
+
+    data_dir = tmp_path / "data"
+    local_scdoc_dir = tmp_path / "local_scdoc"
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setitem(LOCAL_PATHS, "data_dir", str(data_dir))
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(local_scdoc_dir))
+
+    daemon = PipelineDaemon()
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"sc": True}})
+    queued = daemon.local_worker_registry.enqueue_task("sc", {"config_name": 7})
+
+    ok, completed, message = daemon.handle_worker_step_complete({
+        "worker_id": "local-pc-01",
+        "task_id": queued["task_id"],
+        "result": {
+            "ok": True,
+            "scdoc_file": {
+                "config_name": 7,
+                "filename": "model_gen4_7.scdoc",
+                "size": len(b"server payload"),
+                "content_b64": base64.b64encode(b"server payload").decode("ascii"),
+            },
+        },
+    })
+
+    expected_path = data_dir / "scdoc" / "model_gen4_7.scdoc"
+    assert ok is True
+    assert message == "LocalWorker 任务完成"
+    assert completed["result"]["scdoc_file"]["server_path"] == str(expected_path)
+    assert expected_path.read_bytes() == b"server payload"
+    assert not (local_scdoc_dir / "model_gen4_7.scdoc").exists()
 
 
 def test_daemon_worker_step_complete_rejects_result_after_engine_stopped(tmp_path) -> None:

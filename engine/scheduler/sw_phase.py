@@ -155,13 +155,13 @@ class SWPhaseHandler:
 
         # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
         #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
-        #    实现边导出边处理的并行流水线）
-        #    同时启动 MeshingMonitor 消费线程，确保 Worker 完成 Transfer
-        #    后提交的构型能被及时消费，而非堆积到 SW 阶段结束后。
+        #    实现边导出边处理的并行流水线）。
+        #    server 模式下 Windows CAD 步骤由同一个 LocalWorker 桌面串行承载，
+        #    SpaceClaim 需等 SolidWorks 全部导出结束后再启动，避免 GUI/内核资源竞争。
         self._ensure_file_monitor_running()
-        if self.worker_pool_manager:
+        if self.worker_pool_manager and not is_server_mode():
             self.worker_pool_manager.start_if_needed()
-        if self.meshing_monitor:
+        if self.meshing_monitor and not is_server_mode():
             self.meshing_monitor.start_if_needed()
 
         # ---- 通过 RetryManager 逐构型导出 STEP ----
@@ -258,7 +258,19 @@ class SWPhaseHandler:
             logger.info(
                 f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
             )
+            self._start_deferred_downstream_workers()
         return True
+
+    def _start_deferred_downstream_workers(self) -> None:
+        """Start downstream workers after server-mode SW export is fully done."""
+        if not is_server_mode():
+            return
+        if self._stopped.is_set() or self._paused.is_set():
+            return
+        if self.worker_pool_manager:
+            self.worker_pool_manager.start_if_needed()
+        if self.meshing_monitor:
+            self.meshing_monitor.start_if_needed()
 
     def _handle_sw_breakpoint_resume(self, all_configs: list[int], recursion_depth: int) -> bool:
         """
