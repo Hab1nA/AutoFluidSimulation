@@ -18,6 +18,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from engine.config import LOCAL_PATHS, get_step_filename, reload_config_from_toml
+from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from ipc.protocol import (
@@ -554,7 +555,6 @@ class LocalWorker:
 
     def _get_default_runner(self) -> TaskRunner:
         if self._default_runner is None:
-            state = StateManager()
             if self._config_payload is not None:
                 configs = {
                     int(config_name): list(values)
@@ -562,6 +562,8 @@ class LocalWorker:
                 }
             else:
                 configs = read_model_configs(LOCAL_PATHS["excel"])
+            fingerprint = compute_config_fingerprint(configs)
+            state = StateManager(db_path=get_db_path_for_fingerprint(fingerprint))
             state.load_configs(configs)
             self._default_runner = TaskRunner(state)
         return self._default_runner

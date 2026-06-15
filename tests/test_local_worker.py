@@ -216,7 +216,7 @@ def test_local_worker_task_runner_reuses_registered_excel_configs(monkeypatch) -
             return True
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", fake_read_model_configs)
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
@@ -245,13 +245,36 @@ def test_local_worker_task_runner_executes_local_steps_without_redelegating(monk
 
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", _Runner)
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
     runner = worker._get_default_runner()
 
     assert runner._should_delegate_local_steps() is False
+
+
+def test_local_worker_default_runner_uses_fingerprinted_state_db(monkeypatch, tmp_path) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.config_fingerprint import compute_config_fingerprint
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    default_db = data_dir / "pipeline_state.db"
+    configs = {1: [1.0, 2.0, 3.0, 4.0]}
+    fingerprint = compute_config_fingerprint(configs)
+    expected_db = data_dir / f"pipeline_state_{fingerprint}.db"
+
+    monkeypatch.setitem(local_worker_module.LOCAL_PATHS, "data_dir", str(data_dir))
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: configs)
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+    runner = worker._get_default_runner()
+
+    assert runner.state.db_path == str(expected_db)
+    assert expected_db.exists()
+    assert not default_db.exists()
 
 
 def test_local_worker_executes_polled_task_with_injected_handler() -> None:
@@ -728,7 +751,7 @@ def test_local_worker_default_handlers_delegate_to_local_task_runner(monkeypatch
             self.configs = configs
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
     monkeypatch.setattr(
         LocalWorker,
@@ -765,7 +788,7 @@ def test_local_worker_default_handlers_support_check_and_local_clean(monkeypatch
             self.configs = configs
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
@@ -804,7 +827,7 @@ def test_local_worker_default_handlers_support_stage_cleanup(monkeypatch) -> Non
             pass
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
@@ -869,7 +892,7 @@ def test_local_worker_sc_task_includes_scdoc_payload(tmp_path, monkeypatch) -> N
 
     monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
@@ -900,7 +923,7 @@ def test_local_worker_sc_task_includes_failure_reason(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
@@ -926,7 +949,7 @@ def test_local_worker_sw_task_includes_failure_reason(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {7: [1.0]})
-    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda **_kwargs: _State())
     monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
 
     worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))

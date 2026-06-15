@@ -58,13 +58,14 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     daemon = PipelineDaemon()
     daemon.start()
 
-    assert daemon.state is not None
-    assert daemon.runner is not None
-    assert daemon.scheduler is not None
+    assert daemon.state is None
+    assert daemon.runner is None
+    assert daemon.scheduler is None
     assert daemon._config_load_error is not None
     assert "等待 LocalWorker 提供构型数据" in daemon._config_load_error
     assert config_events == ["reload", "ensure"]
     assert released == [True]
+    assert not (tmp_path / "server-mode.db").exists()
 
 
 def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path) -> None:
@@ -279,9 +280,10 @@ def test_server_mode_does_not_read_local_excel_on_start(monkeypatch, tmp_path) -
     daemon = PipelineDaemon()
     daemon.start()
 
-    assert daemon.state is not None
+    assert daemon.state is None
     assert daemon._config_load_error is not None
     assert "等待 LocalWorker 提供构型数据" in daemon._config_load_error
+    assert not (tmp_path / "server-mode.db").exists()
 
 
 def test_server_mode_rejects_pipeline_start_when_configs_are_not_loaded() -> None:

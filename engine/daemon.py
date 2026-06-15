@@ -258,13 +258,13 @@ class PipelineDaemon:
                 )
                 db_path = recovered_db_path
                 self._config_load_error = None
+                logger.info(f"状态数据库: {db_path}")
             else:
                 logger.warning(
                     "[ServerMode] %s；仅启动 IPC/LocalWorker 控制面，start 将拒绝启动流水线",
                     self._config_load_error,
                 )
-                db_path = IPC_CONFIG["db_path"]
-            logger.info(f"状态数据库: {db_path}")
+                db_path = None
         else:
             fingerprint = compute_config_fingerprint(configs)
             db_path = get_db_path_for_fingerprint(fingerprint)
@@ -272,25 +272,26 @@ class PipelineDaemon:
             logger.info(f"状态数据库: {db_path}")
 
         # ---- 2. 创建业务组件 ----
-        self.state = StateManager(db_path=db_path)
-        if configs:
-            self.state.load_configs(configs)
-            self._assign_config_workstations()
-            logger.info(f"已同步 {len(configs)} 个构型到状态库")
+        if db_path is not None:
+            self.state = StateManager(db_path=db_path)
+            if configs:
+                self.state.load_configs(configs)
+                self._assign_config_workstations()
+                logger.info(f"已同步 {len(configs)} 个构型到状态库")
 
-        self.runner = TaskRunner(self.state, local_worker_adapter=self.local_worker_adapter)
-        self.scheduler = PipelineScheduler(self.state, self.runner)
+            self.runner = TaskRunner(self.state, local_worker_adapter=self.local_worker_adapter)
+            self.scheduler = PipelineScheduler(self.state, self.runner)
 
-        # ---- 2.5 启动时状态一致性检查 ----
-        # 新进程没有调度器线程，残留的 paused/running 状态一定是不一致的
-        # （stop() 挂起或进程被杀导致 set_engine_status("stopped") 未执行）
-        stale_status = self.state.get_engine_status()
-        if stale_status in ("paused", "running"):
-            logger.warning(
-                f"检测到残留引擎状态 '{stale_status}'（可能是上次退出时 stop() 未完成），"
-                f"重置为 stopped"
-            )
-            self.state.set_engine_status("stopped")
+            # ---- 2.5 启动时状态一致性检查 ----
+            # 新进程没有调度器线程，残留的 paused/running 状态一定是不一致的
+            # （stop() 挂起或进程被杀导致 set_engine_status("stopped") 未执行）
+            stale_status = self.state.get_engine_status()
+            if stale_status in ("paused", "running"):
+                logger.warning(
+                    f"检测到残留引擎状态 '{stale_status}'（可能是上次退出时 stop() 未完成），"
+                    f"重置为 stopped"
+                )
+                self.state.set_engine_status("stopped")
 
         self.ipc_server = IPCServer()
         self.ipc_server.register_default_handlers(self)
