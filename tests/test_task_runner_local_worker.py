@@ -82,12 +82,20 @@ def test_task_runner_captures_local_sw_failure_reason(monkeypatch) -> None:
     assert runner.last_sw_error == "SolidWorks SaveAs returned false"
 
 
-def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeypatch) -> None:
+def test_task_runner_server_mode_delegates_sw_cleanup_and_verification(monkeypatch) -> None:
     from engine.task_runner import TaskRunner
 
     class _SWExecutor:
         def __getattr__(self, name: str):
             raise AssertionError(f"server mode should not call local SW cleanup: {name}")
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def cleanup_stage(self, step_name: str, phase: str, timeout_seconds: float = 300.0) -> bool:
+            self.calls.append((step_name, phase))
+            return True
 
     class _State:
         def get_all_configs(self) -> list[int]:
@@ -99,7 +107,7 @@ def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeyp
     runner = TaskRunner.__new__(TaskRunner)
     runner.state = _State()
     runner._sw_executor = _SWExecutor()
-    runner._local_worker_adapter = object()
+    runner._local_worker_adapter = _Adapter()
 
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
 
@@ -109,6 +117,45 @@ def test_task_runner_server_mode_skips_local_sw_cleanup_and_verification(monkeyp
     runner.reset_sw_cleanup()
     runner.disconnect_sw_cached()
     assert runner.verify_step_exports("C:/not-on-ocar") == 2
+    assert runner._local_worker_adapter.calls == [
+        ("sw", "shutdown"),
+        ("sw", "first"),
+        ("sw", "final"),
+        ("sw", "reset"),
+        ("sw", "disconnect"),
+    ]
+
+
+def test_task_runner_server_mode_delegates_sc_final_cleanup(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    class _SCPool:
+        def do_final_cleanup(self) -> None:
+            raise AssertionError("server mode should not clean daemon-local SC pool")
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def cleanup_stage(self, step_name: str, phase: str, timeout_seconds: float = 300.0) -> bool:
+            self.calls.append((step_name, phase))
+            return True
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._sc_pool = _SCPool()
+    runner._local_worker_adapter = _Adapter()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+    runner.shutdown_sc_pool()
+    runner.do_sc_final_cleanup()
+    runner.reset_sc_pool()
+
+    assert runner._local_worker_adapter.calls == [
+        ("sc", "shutdown"),
+        ("sc", "final"),
+        ("sc", "reset"),
+    ]
 
 
 def test_task_runner_reports_delegated_sw_task_in_flight_in_server_mode(monkeypatch) -> None:
@@ -182,6 +229,7 @@ def test_task_runner_captures_delegated_sc_failure_reason(monkeypatch) -> None:
 
 def test_task_runner_captures_sc_pool_failure_reason(monkeypatch, tmp_path) -> None:
     from engine.config import LOCAL_PATHS
+    import engine.task_runner as task_runner_module
     from engine.task_runner import TaskRunner
 
     step_dir = tmp_path / "step"
@@ -197,6 +245,10 @@ def test_task_runner_captures_sc_pool_failure_reason(monkeypatch, tmp_path) -> N
     monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
     monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(sc_exe))
     monkeypatch.setitem(LOCAL_PATHS, "sc_script", str(sc_script))
+    monkeypatch.setitem(task_runner_module.LOCAL_PATHS, "step_dir", str(step_dir))
+    monkeypatch.setitem(task_runner_module.LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+    monkeypatch.setitem(task_runner_module.LOCAL_PATHS, "sc_exe", str(sc_exe))
+    monkeypatch.setitem(task_runner_module.LOCAL_PATHS, "sc_script", str(sc_script))
     monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
 
     class _Pool:
@@ -205,7 +257,12 @@ def test_task_runner_captures_sc_pool_failure_reason(monkeypatch, tmp_path) -> N
         def run_config(self, *_args, **_kwargs) -> bool:
             return False
 
+    class _State:
+        def set_step_status(self, *_args, **_kwargs) -> None:
+            raise AssertionError("valid inputs should reach SC pool before state error updates")
+
     runner = TaskRunner.__new__(TaskRunner)
+    runner.state = _State()
     runner._local_worker_adapter = object()
     runner._sc_pool = _Pool()
     runner._paused_event = None

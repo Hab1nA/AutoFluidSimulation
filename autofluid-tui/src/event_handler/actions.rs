@@ -22,6 +22,8 @@ pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventCont
                     }
                 }
             }
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
             ctx.rt.block_on(ctx.ipc.disconnect());
             ctx.state.should_quit = true;
         }
@@ -43,7 +45,8 @@ pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventCont
                     }
                 }
             }
-            ctx.worker.stop_workers(ctx.log_buffer);
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
         }
         command::CommandResult::RestartWorkers => {
             if ctx.ipc.is_connected() {
@@ -59,7 +62,8 @@ pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventCont
                     }
                 }
             }
-            ctx.worker.stop_workers(ctx.log_buffer);
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
             ctx.worker
                 .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
                     prepare_remote_workers(ctx.ipc, ctx.rt, buffer)

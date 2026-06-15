@@ -216,3 +216,54 @@ def test_daemon_worker_poll_returns_local_clean_task() -> None:
     assert message == "LocalWorker 已领取任务"
     assert task["step"] == "clean_local_files"
     assert task["params"] == {"step_name": "sw", "config_name": 3}
+
+
+def test_daemon_worker_stop_cleans_pid_file_processes(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    calls: list[str] = []
+
+    daemon = PipelineDaemon()
+    monkeypatch.setattr(
+        "engine.daemon.cleanup_worker_processes_from_pid_files",
+        lambda: calls.append("pid_cleanup") or {"local_worker": {"status": "terminated"}},
+    )
+
+    ok, data, message = daemon.handle_worker_stop({})
+
+    assert ok is True
+    assert message == "所有 Worker 已停止"
+    assert calls == ["pid_cleanup"]
+    assert data["process_cleanup"] == {"local_worker": {"status": "terminated"}}
+
+
+def test_daemon_shutdown_stops_autostarted_local_worker_and_pid_files(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    calls: list[str] = []
+
+    class _Process:
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            calls.append("terminate")
+
+        def wait(self, timeout: float | None = None) -> None:
+            calls.append(f"wait:{timeout}")
+
+    daemon = PipelineDaemon()
+    daemon.scheduler = None
+    daemon.runner = None
+    daemon.ipc_server = None
+    daemon._local_worker_process = _Process()
+    monkeypatch.setattr("engine.daemon.release_process_lock", lambda: calls.append("release"))
+    monkeypatch.setattr(
+        "engine.daemon.cleanup_worker_processes_from_pid_files",
+        lambda: calls.append("pid_cleanup") or {},
+    )
+
+    daemon.shutdown()
+
+    assert calls == ["terminate", "wait:5", "pid_cleanup", "release"]
+    assert daemon._local_worker_process is None

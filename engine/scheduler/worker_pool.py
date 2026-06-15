@@ -19,7 +19,7 @@ from typing import Callable
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, get_step_filename, is_server_mode,
+    LOCAL_PATHS, get_step_filename,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -86,7 +86,7 @@ class WorkerPoolManager:
         self._transfer_worker_threads: list[threading.Thread] = []
 
         # ---- 工作线程数 ----
-        self._num_sc_workers = 1 if is_server_mode() else 3
+        self._num_sc_workers = 3
         self._num_transfer_workers = 1  # Transfer 工作线程数（SFTP 单线程保证安全）
 
         # ---- SC 全部完成检测 ----

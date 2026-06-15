@@ -472,6 +472,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     ctx.rt.block_on(ctx.ipc.disconnect());
 
     if *ctx.full_quit {
+        ctx.worker
+            .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
         let _ = ctx.daemon.stop(ctx.project_dir);
     }
 
@@ -514,6 +516,8 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                     }
                 }
             }
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
             ctx.rt.block_on(ctx.ipc.disconnect());
             ctx.state.should_quit = true;
         }
@@ -558,7 +562,8 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                     }
                 }
             }
-            ctx.worker.stop_workers(ctx.log_buffer);
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
         }
         command::CommandResult::RestartWorkers => {
             if ctx.ipc.is_connected() {
@@ -574,7 +579,8 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                     }
                 }
             }
-            ctx.worker.stop_workers(ctx.log_buffer);
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
             let started =
                 ctx.worker
                     .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {

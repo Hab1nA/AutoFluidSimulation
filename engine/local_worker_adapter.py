@@ -56,6 +56,19 @@ class LocalWorkerAdapter:
             params["config_name"] = config_name
         return self._execute("clean_local_files", params, timeout_seconds)
 
+    def cleanup_stage(
+        self,
+        step_name: str,
+        phase: str,
+        timeout_seconds: float = 300.0,
+    ) -> bool:
+        """Delegate LocalWorker-side CAD process cleanup."""
+        return self._execute(
+            "cleanup_stage",
+            {"step_name": step_name, "phase": phase},
+            timeout_seconds,
+        )
+
     def has_active_task(
         self,
         step: str,

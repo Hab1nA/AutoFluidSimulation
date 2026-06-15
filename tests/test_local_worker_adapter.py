@@ -124,3 +124,31 @@ def test_local_worker_adapter_reports_active_registry_task() -> None:
     registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
 
     assert adapter.has_active_task("sw", 7) is False
+
+
+def test_local_worker_adapter_delegates_stage_cleanup() -> None:
+    from engine.local_worker_adapter import LocalWorkerAdapter
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sw": True, "sc": True})
+    adapter = LocalWorkerAdapter(registry, result_poll_interval=0.01)
+
+    result_holder: dict[str, bool] = {}
+
+    def wait_for_result() -> None:
+        result_holder["ok"] = adapter.cleanup_stage("sw", "final", timeout_seconds=2.0)
+
+    thread = threading.Thread(target=wait_for_result)
+    thread.start()
+
+    task = registry.poll_task("local-pc-01")
+    assert task is not None
+    assert task["step"] == "cleanup_stage"
+    assert task["params"] == {"step_name": "sw", "phase": "final"}
+    assert task["timeout_seconds"] == 2.0
+
+    registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
+    thread.join(timeout=2.0)
+
+    assert result_holder == {"ok": True}

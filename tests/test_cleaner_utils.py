@@ -154,6 +154,8 @@ class TestFileCleanerSystemCheck:
                 "id": "WS-A",
                 "host": "172.17.135.240",
                 "port": 22,
+                "reachable_host": "",
+                "connectivity_mode": "",
             }
         ]
         try:
@@ -736,6 +738,81 @@ class TestProcessUtils:
         """删除不存在的 PID 文件不抛异常。"""
         from utils.process_utils import remove_pid_file
         remove_pid_file(str(tmp_path / "nope.pid"))  # 不应抛异常
+
+    def test_run_taskkill_uses_tree_kill_on_windows(self, monkeypatch):
+        """Windows 进程清理必须杀进程树，避免残留 ssh/PowerShell 子进程。"""
+        import sys
+        from utils import process_utils
+
+        calls: list[list[str]] = []
+
+        class _Result:
+            returncode = 0
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(
+            process_utils.subprocess,
+            "run",
+            lambda args, **_kwargs: calls.append(list(args)) or _Result(),
+        )
+
+        assert process_utils.run_taskkill(1234) is True
+        assert calls == [["taskkill", "/PID", "1234", "/T", "/F"]]
+
+    def test_worker_pid_file_paths_are_stable(self, tmp_path, monkeypatch):
+        """Worker/tunnel PID 文件应有稳定命名，供跨进程重启后清理。"""
+        from utils import process_utils
+
+        monkeypatch.setitem(process_utils.LOCAL_PATHS, "data_dir", str(tmp_path))
+
+        assert process_utils.worker_pid_file("local_worker") == str(
+            tmp_path / "local_worker.pid"
+        )
+        assert process_utils.worker_pid_file("tunnel_workstation") == str(
+            tmp_path / "tunnel_workstation.pid"
+        )
+        assert process_utils.worker_pid_file("tunnel_localworker") == str(
+            tmp_path / "tunnel_localworker.pid"
+        )
+
+    def test_cleanup_worker_pid_files_kills_alive_processes_and_removes_files(
+        self, tmp_path, monkeypatch
+    ):
+        """worker stop/quit full 应能通过 PID 文件清理跨会话残留进程。"""
+        from utils import process_utils
+
+        killed: list[int] = []
+        stale_pid = tmp_path / "local_worker.pid"
+        live_pid = tmp_path / "tunnel_workstation.pid"
+        stale_pid.write_text("2222", encoding="utf-8")
+        live_pid.write_text("3333", encoding="utf-8")
+
+        monkeypatch.setattr(
+            process_utils,
+            "WORKER_PID_KINDS",
+            ("local_worker", "tunnel_workstation"),
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "worker_pid_file",
+            lambda kind: str(tmp_path / f"{kind}.pid"),
+        )
+        monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 3333)
+        monkeypatch.setattr(
+            process_utils,
+            "run_taskkill",
+            lambda pid, timeout=5: killed.append(pid) or True,
+        )
+
+        result = process_utils.cleanup_worker_processes_from_pid_files()
+
+        assert result == {
+            "local_worker": {"pid": 2222, "status": "stale"},
+            "tunnel_workstation": {"pid": 3333, "status": "terminated"},
+        }
+        assert killed == [3333]
+        assert not stale_pid.exists()
+        assert not live_pid.exists()
 
 
 class TestCheckIpcReady:

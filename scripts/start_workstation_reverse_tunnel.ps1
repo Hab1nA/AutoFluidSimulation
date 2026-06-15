@@ -348,6 +348,35 @@ function Start-ReverseTunnelSupervisor {
         -PassThru
 }
 
+function Write-TunnelSupervisorPid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Process
+    )
+
+    $pidFile = $env:AUTOFLUID_TUNNEL_PID_FILE
+    if ([string]::IsNullOrWhiteSpace($pidFile)) {
+        return
+    }
+
+    $processId = $null
+    if ($Process.PSObject.Properties.Name -contains "ProcessId") {
+        $processId = $Process.ProcessId
+    }
+    if ($null -eq $processId) {
+        $processId = $Process.Id
+    }
+    if ($null -eq $processId) {
+        return
+    }
+
+    $pidDir = Split-Path -Parent $pidFile
+    if (-not [string]::IsNullOrWhiteSpace($pidDir)) {
+        New-Item -ItemType Directory -Path $pidDir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $pidFile -Value ([string]$processId) -Encoding ASCII
+}
+
 function Wait-RemoteTunnelEndpoint {
     param(
         [Parameter(Mandatory = $true)]
@@ -425,6 +454,10 @@ if (Test-RemoteTunnelEndpoint `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort) {
     Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel is already reachable; reuse the existing tunnel."
+    $existing = Get-ExistingTunnelMonitorProcess -RemotePort $remotePort
+    if ($null -ne $existing) {
+        Write-TunnelSupervisorPid -Process $existing
+    }
     exit 0
 }
 
@@ -433,6 +466,7 @@ if ($Check) {
 }
 
 $process = Start-ReverseTunnelSupervisor -RemotePort $remotePort
+Write-TunnelSupervisorPid -Process $process
 
 if (-not (Wait-RemoteTunnelEndpoint `
     -SshExe $sshExe `

@@ -11,8 +11,16 @@ import sys
 import socket
 import subprocess
 
+from engine.config import LOCAL_PATHS
+
 
 MIN_VALID_PID = 1
+WORKER_PID_KINDS = (
+    "local_worker",
+    "tunnel_workstation",
+    "tunnel_localworker",
+    "server_ipc_tunnel",
+)
 
 
 def is_process_alive(pid: int) -> bool:
@@ -106,7 +114,7 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
 
     try:
         result = subprocess.run(
-            ["taskkill", "/pid", str(pid), "/f"],
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -115,6 +123,36 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
         return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def worker_pid_file(kind: str) -> str:
+    """Return the stable PID file path for worker and SSH tunnel helpers."""
+    if kind not in WORKER_PID_KINDS:
+        raise ValueError(f"未知 Worker PID 类型: {kind}")
+    data_dir = str(LOCAL_PATHS.get("data_dir") or "data")
+    return os.path.join(data_dir, f"{kind}.pid")
+
+
+def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[str, int | str]]:
+    """Terminate worker/tunnel processes recorded in stable PID files.
+
+    This is intentionally PID-file based so `worker stop`, `quit full`, and
+    `main.py --stop` can clean processes that were started by an earlier client
+    or daemon process whose in-memory `Popen`/`Child` handles are gone.
+    """
+    results: dict[str, dict[str, int | str]] = {}
+    for kind in WORKER_PID_KINDS:
+        pid_file = worker_pid_file(kind)
+        pid = read_pid_file(pid_file)
+        if pid is None:
+            continue
+        status = "stale"
+        if is_process_alive(pid):
+            status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+        if status != "failed":
+            remove_pid_file(pid_file)
+        results[kind] = {"pid": pid, "status": status}
+    return results
 
 
 def check_ipc_ready(host: str = "127.0.0.1", port: int = 9527) -> bool:

@@ -80,3 +80,14 @@ def test_tunnel_supervisor_uses_short_keepalive_and_probe_interval() -> None:
     assert "Start-Sleep -Seconds 5" in source
     assert "Start-Process -FilePath $SshExe" in source
     assert "while (-not $sshProcess.HasExited)" in source
+
+
+def test_tunnel_script_persists_supervisor_pid_for_cleanup() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "AUTOFLUID_TUNNEL_PID_FILE" in source
+    assert "Set-Content -LiteralPath $pidFile" in source
+    assert '$Process.PSObject.Properties.Name -contains "ProcessId"' in source
+    assert "$processId" in source

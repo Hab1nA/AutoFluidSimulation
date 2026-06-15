@@ -71,7 +71,7 @@ class LocalWorker:
         self._finished_reports: queue.Queue[dict[str, Any]] = queue.Queue()
         self._pending_reports: list[dict[str, Any]] = []
         self._deferred_tasks: list[dict[str, Any]] = []
-        self._active_lane_counts: dict[str, int] = {"cad": 0, "other": 0}
+        self._active_lane_counts: dict[str, int] = {"sw": 0, "sc": 0, "other": 0}
         self._lane_lock = threading.Lock()
 
     @classmethod
@@ -91,7 +91,7 @@ class LocalWorker:
             "sc": True,
             "clean": True,
             "check": True,
-            "sc_slots": 1,
+            "sc_slots": 3,
         }
         return cls(
             LocalWorkerConfig(
@@ -257,7 +257,7 @@ class LocalWorker:
         with self._lane_lock:
             return any(
                 self._active_lane_counts.get(lane, 0) < self._lane_limit(lane)
-                for lane in ("cad", "other")
+                for lane in ("sw", "sc", "other")
             )
 
     def _try_start_task(self, task: dict[str, Any]) -> bool:
@@ -290,13 +290,22 @@ class LocalWorker:
 
     @staticmethod
     def _task_lane(step: str) -> str:
-        if step in {"sw", "sc"}:
-            return "cad"
+        if step == "sw":
+            return "sw"
+        if step == "sc":
+            return "sc"
         return "other"
 
     def _lane_limit(self, lane: str) -> int:
-        if lane == "cad":
+        if lane == "sw":
             return 1
+        if lane == "sc":
+            raw_slots = self.config.capabilities.get("sc_slots", 3)
+            try:
+                slots = int(raw_slots)
+            except (TypeError, ValueError):
+                slots = 3
+            return max(1, slots)
         return 1
 
     def handle_polled_task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -340,7 +349,7 @@ class LocalWorker:
             return False
         if step in self._task_handlers:
             return False
-        return step in {"sw", "sc"}
+        return step == "sw"
 
     def _execute_task_in_subprocess(
         self,
@@ -443,6 +452,8 @@ class LocalWorker:
             return self._run_check_local_environment_task
         if step == "clean_local_files":
             return self._run_clean_local_files_task
+        if step == "cleanup_stage":
+            return self._run_cleanup_stage_task
         raise RuntimeError(f"LocalWorker 尚未配置步骤处理器: {step}")
 
     def _run_sw_task(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -490,6 +501,39 @@ class LocalWorker:
         runner = self._get_default_runner()
         runner.clean_local_step_files(step_name, config_name)
         return {"ok": True}
+
+    def _run_cleanup_stage_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        step_name = str(params.get("step_name") or "").lower()
+        phase = str(params.get("phase") or "").lower()
+        runner = self._get_default_runner()
+        if step_name == "sw":
+            if phase in {"first", "reset", "disconnect"}:
+                # In server mode SW is intentionally serialized on the LocalWorker.
+                # These phases must not kill SolidWorks mid-run; final/shutdown do.
+                if phase == "disconnect":
+                    runner.disconnect_sw_cached()
+                elif phase == "reset":
+                    runner.reset_sw_cleanup()
+                else:
+                    runner.do_sw_first_cleanup()
+            elif phase == "final":
+                runner.do_sw_final_cleanup()
+            elif phase == "shutdown":
+                runner.shutdown_sw_processes()
+            else:
+                raise RuntimeError(f"未知 SW 清理阶段: {phase}")
+            return {"ok": True}
+        if step_name == "sc":
+            if phase == "final":
+                runner.do_sc_final_cleanup()
+            elif phase == "shutdown":
+                runner.shutdown_sc_pool()
+            elif phase == "reset":
+                runner.reset_sc_pool()
+            else:
+                raise RuntimeError(f"未知 SC 清理阶段: {phase}")
+            return {"ok": True}
+        raise RuntimeError(f"未知本地清理步骤: {step_name}")
 
     def _build_scdoc_payload(self, config_name: int) -> dict[str, Any]:
         """Read the generated SCDOC so the server daemon can continue transfer."""

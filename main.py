@@ -31,7 +31,14 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
-from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill, check_ipc_ready
+from utils.process_utils import (
+    check_ipc_ready,
+    cleanup_worker_processes_from_pid_files,
+    is_process_alive,
+    read_pid_file,
+    remove_pid_file,
+    run_taskkill,
+)
 from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -157,6 +164,7 @@ def _stop_all_processes() -> None:
             ("start_daemon.py", "后台引擎"),
             ("start_client.py", "TUI 客户端"),
             ("main.py --all", "总控程序(--all)"),
+            ("main.py --worker", "LocalWorker"),
         ]:
             try:
                 ps_filter = (
@@ -185,6 +193,7 @@ def _stop_all_processes() -> None:
             except (subprocess.SubprocessError, OSError):
                 pass
 
+    cleanup_worker_processes_from_pid_files()
     _stop_daemon_subprocess()
     print("所有进程已停止。")
 

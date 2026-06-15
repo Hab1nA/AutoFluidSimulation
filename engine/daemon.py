@@ -50,7 +50,15 @@ from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
 from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
-from utils.process_utils import is_process_alive, read_pid_file, write_pid_file, remove_pid_file, check_ipc_ready
+from utils.process_utils import (
+    check_ipc_ready,
+    cleanup_worker_processes_from_pid_files,
+    is_process_alive,
+    read_pid_file,
+    remove_pid_file,
+    worker_pid_file,
+    write_pid_file,
+)
 
 logger = setup_logger("PipelineDaemon")
 
@@ -344,6 +352,15 @@ class PipelineDaemon:
         # 停止 daemon 拥有的告警 watcher，避免 IPC 关闭后子进程残留
         self._stop_alert_watcher()
 
+        # 停止 daemon 自动唤起的 LocalWorker，并清理跨会话残留 worker/tunnel PID。
+        self._stop_local_worker_process()
+        try:
+            cleanup_results = cleanup_worker_processes_from_pid_files()
+            if cleanup_results:
+                logger.info("[Worker] shutdown PID 清理结果: %s", cleanup_results)
+        except Exception as e:
+            logger.warning("[Worker] shutdown PID 清理异常: %s", e)
+
         # 停止 IPC 服务器
         if self.ipc_server:
             try:
@@ -358,6 +375,29 @@ class PipelineDaemon:
             logger.warning(f"进程锁释放异常: {e}")
 
         logger.info("PipelineDaemon 已关闭")
+
+    def _stop_local_worker_process(self) -> None:
+        """Stop the LocalWorker child process owned by this daemon instance."""
+        process = getattr(self, "_local_worker_process", None)
+        self._local_worker_process = None
+        if process is None:
+            return
+        if process.poll() is not None:
+            remove_pid_file(worker_pid_file("local_worker"))
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.warning("[LocalWorker] 强制终止异常: %s", e)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.warning("[LocalWorker] 终止异常: %s", e)
+        finally:
+            remove_pid_file(worker_pid_file("local_worker"))
 
     def _assign_config_workstations(self) -> None:
         """Persist stable workstation assignments for newly loaded configs."""
@@ -694,6 +734,7 @@ class PipelineDaemon:
             return
 
         self._local_worker_process = process
+        write_pid_file(worker_pid_file("local_worker"), process.pid)
         logger.info(
             "[LocalWorker] 已自动唤起本机 LocalWorker: pid=%s, log=%s",
             process.pid,
@@ -1099,6 +1140,7 @@ class PipelineDaemon:
         self.local_worker_registry.clear_pending_tasks()
         results["registry_cleared"] = True
         self._last_worker_ssh_checks = {}
+        results["process_cleanup"] = cleanup_worker_processes_from_pid_files()
 
         logger.info("[Worker] worker_stop 完成: %s", results)
         return True, results, "所有 Worker 已停止"

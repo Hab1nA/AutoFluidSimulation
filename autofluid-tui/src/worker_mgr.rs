@@ -25,6 +25,31 @@ enum StopResult {
     Error(String),
 }
 
+#[derive(Clone, Copy)]
+enum WorkerPidKind {
+    LocalWorker,
+    TunnelWorkstation,
+    TunnelLocalWorker,
+}
+
+impl WorkerPidKind {
+    fn filename(self) -> &'static str {
+        match self {
+            Self::LocalWorker => "local_worker.pid",
+            Self::TunnelWorkstation => "tunnel_workstation.pid",
+            Self::TunnelLocalWorker => "tunnel_localworker.pid",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LocalWorker => "本地 Worker",
+            Self::TunnelWorkstation => "工作站 SSH 隧道",
+            Self::TunnelLocalWorker => "本机 SSH 隧道",
+        }
+    }
+}
+
 /// WorkerManager 管理本地 LocalWorker 进程和 SSH 隧道进程。
 pub struct WorkerManager {
     /// 本地 LocalWorker 子进程
@@ -33,6 +58,8 @@ pub struct WorkerManager {
     workstation_tunnel_process: Option<Child>,
     /// 服务器到本机 LocalWorker 的 SSH 反向隧道子进程
     local_worker_tunnel_process: Option<Child>,
+    /// 最近一次启动 worker 时使用的项目目录，用于跨会话 PID 文件清理。
+    project_dir: PathBuf,
 }
 
 impl WorkerManager {
@@ -41,6 +68,7 @@ impl WorkerManager {
             worker_process: None,
             workstation_tunnel_process: None,
             local_worker_tunnel_process: None,
+            project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
@@ -70,6 +98,7 @@ impl WorkerManager {
         F: FnOnce(&mut LogBuffer) -> bool,
     {
         log::info!("[Worker] 开始启动 Worker 进程");
+        self.project_dir = PathBuf::from(project_dir);
 
         // 1. 启动工作站 SSH 反向隧道
         if !self.start_tunnel(project_dir, log_buffer, "Workstation") {
@@ -102,6 +131,18 @@ impl WorkerManager {
 
     /// 停止所有 worker：终止本地 Worker 进程 + 关闭 SSH 隧道。
     pub fn stop_workers(&mut self, log_buffer: &mut LogBuffer) -> bool {
+        self.stop_workers_for_project(None, log_buffer)
+    }
+
+    /// 停止所有 worker，并用项目目录中的 PID 文件清理跨会话残留进程。
+    pub fn stop_workers_for_project(
+        &mut self,
+        project_dir: Option<&str>,
+        log_buffer: &mut LogBuffer,
+    ) -> bool {
+        if let Some(project_dir) = project_dir {
+            self.project_dir = PathBuf::from(project_dir);
+        }
         log::info!("[Worker] 开始停止 Worker 进程");
         let mut success = true;
 
@@ -113,6 +154,17 @@ impl WorkerManager {
         // 2. 终止 SSH 隧道进程
         if !self.stop_tunnel(log_buffer) {
             success = false;
+        }
+
+        for kind in [
+            WorkerPidKind::LocalWorker,
+            WorkerPidKind::TunnelWorkstation,
+            WorkerPidKind::TunnelLocalWorker,
+        ] {
+            if !Self::cleanup_pid_file_for_path(&self.project_dir, kind) {
+                log_buffer.push_info(format!("⚠️ {} PID 文件清理失败", kind.label()));
+                success = false;
+            }
         }
 
         if success {
@@ -200,6 +252,7 @@ impl WorkerManager {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
+                let _ = Self::write_pid_file(project_dir, WorkerPidKind::LocalWorker, pid);
                 log::info!("[Worker] 本地 LocalWorker 已启动: pid={}", pid);
                 log_buffer.push_info(format!("✅ 本地 Worker 已启动 (PID: {})", pid));
                 self.worker_process = Some(child);
@@ -282,6 +335,17 @@ impl WorkerManager {
             "-TunnelKind",
             tunnel_kind,
         ])
+        .env(
+            "AUTOFLUID_TUNNEL_PID_FILE",
+            Self::pid_file_for(
+                project_dir,
+                if tunnel_kind == "LocalWorker" {
+                    WorkerPidKind::TunnelLocalWorker
+                } else {
+                    WorkerPidKind::TunnelWorkstation
+                },
+            ),
+        )
         .current_dir(project_dir);
 
         #[cfg(target_os = "windows")]
@@ -411,6 +475,36 @@ impl WorkerManager {
                 StopResult::Error(e.to_string())
             }
         }
+    }
+
+    fn pid_file_for(project_dir: &str, kind: WorkerPidKind) -> PathBuf {
+        PathBuf::from(project_dir)
+            .join("data")
+            .join(kind.filename())
+    }
+
+    fn write_pid_file(project_dir: &str, kind: WorkerPidKind, pid: u32) -> std::io::Result<()> {
+        let pid_file = Self::pid_file_for(project_dir, kind);
+        if let Some(parent) = pid_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(pid_file, pid.to_string())
+    }
+
+    fn cleanup_pid_file_for_path(project_dir: &std::path::Path, kind: WorkerPidKind) -> bool {
+        let pid_file = project_dir.join("data").join(kind.filename());
+        let Ok(raw_pid) = std::fs::read_to_string(&pid_file) else {
+            return true;
+        };
+        let pid = raw_pid.trim().parse::<u32>().ok();
+        let mut success = true;
+        if let Some(pid) = pid {
+            success = kill_process_tree(pid) || !is_pid_alive(pid);
+        }
+        if success {
+            let _ = std::fs::remove_file(pid_file);
+        }
+        success
     }
 }
 
@@ -591,6 +685,100 @@ mod tests {
         let mut wm = WorkerManager::new();
         assert!(!wm.is_worker_running());
         assert!(!wm.is_tunnel_running());
+    }
+
+    #[test]
+    fn worker_pid_file_path_uses_project_data_dir() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-pid-path-{}",
+            crate::generate_request_id()
+        ));
+
+        assert_eq!(
+            WorkerManager::pid_file_for(
+                project_dir.to_str().expect("utf8 temp path"),
+                WorkerPidKind::LocalWorker
+            ),
+            project_dir.join("data").join("local_worker.pid")
+        );
+        assert_eq!(
+            WorkerManager::pid_file_for(
+                project_dir.to_str().expect("utf8 temp path"),
+                WorkerPidKind::TunnelWorkstation
+            ),
+            project_dir.join("data").join("tunnel_workstation.pid")
+        );
+        assert_eq!(
+            WorkerManager::pid_file_for(
+                project_dir.to_str().expect("utf8 temp path"),
+                WorkerPidKind::TunnelLocalWorker
+            ),
+            project_dir.join("data").join("tunnel_localworker.pid")
+        );
+    }
+
+    #[test]
+    fn cleanup_pid_file_removes_stale_pid_file_without_process_handle() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-stale-pid-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let pid_file = project_dir.join("data").join("local_worker.pid");
+        std::fs::write(&pid_file, "999999").expect("write pid");
+
+        let result =
+            WorkerManager::cleanup_pid_file_for_path(&project_dir, WorkerPidKind::LocalWorker);
+
+        assert!(result);
+        assert!(!pid_file.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn cleanup_pid_file_terminates_live_process_without_process_handle() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-live-pid-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let pid_file = project_dir.join("data").join("tunnel_localworker.pid");
+
+        #[cfg(target_os = "windows")]
+        let mut child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live pid process");
+
+        #[cfg(not(target_os = "windows"))]
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live pid process");
+
+        std::fs::write(&pid_file, child.id().to_string()).expect("write pid");
+
+        let result = WorkerManager::cleanup_pid_file_for_path(
+            &project_dir,
+            WorkerPidKind::TunnelLocalWorker,
+        );
+
+        assert!(result);
+        assert!(!pid_file.exists());
+        let exited = child.try_wait().expect("query child status").is_some();
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            exited,
+            "cleanup should terminate the live PID from the file"
+        );
+        let _ = std::fs::remove_dir_all(project_dir);
     }
 
     #[test]
@@ -782,5 +970,68 @@ mod tests {
             make_executable(&path);
             path
         }
+    }
+}
+
+fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const STILL_ACTIVE_EXIT_CODE: u32 = 259;
+        unsafe {
+            let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut exit_code = 0;
+            if GetExitCodeProcess(handle, &mut exit_code) == 0 {
+                CloseHandle(handle);
+                return false;
+            }
+            CloseHandle(handle);
+            exit_code == STILL_ACTIVE_EXIT_CODE
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn kill_process_tree(pid: u32) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

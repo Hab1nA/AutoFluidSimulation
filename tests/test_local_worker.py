@@ -105,6 +105,20 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
     }
 
 
+def test_local_worker_from_env_defaults_to_three_sc_slots(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker
+
+    monkeypatch.setenv("AUTOFLUID_WORKER_ID", "local-pc-01")
+    monkeypatch.setenv("AUTOFLUID_SERVER_HOST", "ocar.example.test")
+    monkeypatch.setenv("AUTOFLUID_DISCOVER_PUBLIC_IP", "0")
+    monkeypatch.setattr("engine.local_worker.detect_candidate_hosts", lambda: [])
+
+    worker = LocalWorker.from_env()
+
+    assert worker.config.capabilities["sc_slots"] == 3
+    assert worker._lane_limit("sc") == 3
+
+
 def test_local_worker_from_env_does_not_reuse_workstation_reachable_metadata(monkeypatch) -> None:
     from engine.local_worker import LocalWorker
 
@@ -212,6 +226,32 @@ def test_local_worker_task_runner_reuses_registered_excel_configs(monkeypatch) -
 
     assert calls == [local_worker_module.LOCAL_PATHS["excel"]]
     assert loaded_configs == [{1: [1.0, 2.0, 3.0, 4.0]}]
+
+
+def test_local_worker_task_runner_executes_local_steps_without_redelegating(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    class _State:
+        def load_configs(self, configs):
+            pass
+
+    class _Runner:
+        def __init__(self, _state):
+            self._local_worker_adapter = None
+
+        def _should_delegate_local_steps(self) -> bool:
+            return self._local_worker_adapter is not None
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", _Runner)
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+    runner = worker._get_default_runner()
+
+    assert runner._should_delegate_local_steps() is False
 
 
 def test_local_worker_executes_polled_task_with_injected_handler() -> None:
@@ -322,7 +362,7 @@ def test_local_worker_run_once_polls_and_reports_task_completion() -> None:
     assert sent_commands == ["worker_poll", "worker_step_complete"]
 
 
-def test_local_worker_serializes_windows_cad_tasks() -> None:
+def test_local_worker_runs_sc_parallel_but_keeps_sw_single_lane() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
     started: list[str] = []
@@ -339,24 +379,59 @@ def test_local_worker_serializes_windows_cad_tasks() -> None:
         },
     )
 
-    worker._active_lane_counts["cad"] = 1
+    worker._active_lane_counts["sw"] = 1
     assert worker._try_start_task({
         "task_id": "sc-while-sw",
         "step": "sc",
         "params": {"config_name": 1},
-    }) is False
+    }) is True
 
-    worker._active_lane_counts["cad"] = 1
+    worker._active_lane_counts["sw"] = 1
     assert worker._try_start_task({
-        "task_id": "sw-while-sc",
+        "task_id": "sw-while-sw",
         "step": "sw",
         "params": {"config_name": 2},
     }) is False
 
-    assert started == []
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline and "sc" not in started:
+        time.sleep(0.01)
+    assert started == ["sc"]
 
 
-def test_local_worker_run_once_serializes_cad_without_parallel_sw() -> None:
+def test_local_worker_allows_three_parallel_sc_tasks_but_single_sw() -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            worker_id="local-pc-01",
+            server_host="ocar.example.test",
+            server_port=9527,
+            capabilities={"sc_slots": 3},
+        )
+    )
+
+    worker._active_lane_counts["sc"] = 2
+    assert worker._has_available_lane() is True
+    assert worker._task_lane("sc") == "sc"
+    assert worker._lane_limit("sc") == 3
+
+    worker._active_lane_counts["sc"] = 3
+    assert worker._try_start_task({
+        "task_id": "sc-full",
+        "step": "sc",
+        "params": {"config_name": 4},
+    }) is False
+
+    worker._active_lane_counts["sw"] = 1
+    assert worker._try_start_task({
+        "task_id": "sw-full",
+        "step": "sw",
+        "params": {"config_name": 5},
+    }) is False
+
+
+def test_local_worker_run_once_allows_sc_parallel_without_parallel_sw() -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
     tasks = deque([
@@ -432,29 +507,28 @@ def test_local_worker_run_once_serializes_cad_without_parallel_sw() -> None:
     assert "sw-1" in reports
     assert worker.run_once(now=101.0) == "dispatched"
     assert sc_started.wait(timeout=1.0)
-    assert worker.run_once(now=102.0) == "deferred"
-    assert sw2_started.is_set() is False
+    assert worker.run_once(now=102.0) == "dispatched"
+    assert sw2_started.wait(timeout=1.0)
     assert sc_started.is_set()
     assert worker.run_once(now=103.0) == "deferred"
     assert sw3_started.is_set() is False
     assert max_active_sw == 1
 
     sc_release.set()
+    sw2_release.set()
     deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline and "sc-1" not in reports:
+    while time.monotonic() < deadline and not {"sc-1", "sw-2"}.issubset(reports):
         worker.run_once(now=104.0)
         time.sleep(0.01)
 
-    assert "sc-1" in reports
+    assert {"sc-1", "sw-2"}.issubset(reports)
     assert worker.run_once(now=105.0) == "dispatched"
-    assert sw2_started.wait(timeout=1.0)
-    sw2_release.set()
     deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline and "sw-2" not in reports:
+    while time.monotonic() < deadline and "sw-3" not in reports:
         worker.run_once(now=106.0)
         time.sleep(0.01)
 
-    assert {"sc-1", "sw-2"}.issubset(reports)
+    assert {"sc-1", "sw-2", "sw-3"}.issubset(reports)
     assert max_active_sw == 1
 
 
@@ -704,6 +778,74 @@ def test_local_worker_default_handlers_support_check_and_local_clean(monkeypatch
         "ok": True,
     }
     assert calls == [("check", None), ("sw", 3)]
+
+
+def test_local_worker_default_handlers_support_stage_cleanup(monkeypatch) -> None:
+    import engine.local_worker as local_worker_module
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+
+    class _Runner:
+        def do_sw_final_cleanup(self) -> None:
+            calls.append("sw_final")
+
+        def do_sc_final_cleanup(self) -> None:
+            calls.append("sc_final")
+
+        def shutdown_sw_processes(self) -> None:
+            calls.append("sw_shutdown")
+
+        def shutdown_sc_pool(self) -> None:
+            calls.append("sc_shutdown")
+
+    class _State:
+        def load_configs(self, _configs):
+            pass
+
+    monkeypatch.setattr(local_worker_module, "read_model_configs", lambda _path: {1: [1.0]})
+    monkeypatch.setattr(local_worker_module, "StateManager", lambda: _State())
+    monkeypatch.setattr(local_worker_module, "TaskRunner", lambda _state: _Runner())
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    assert worker._execute_task("cleanup_stage", {"step_name": "sw", "phase": "final"}) == {
+        "ok": True,
+    }
+    assert worker._execute_task("cleanup_stage", {"step_name": "sc", "phase": "final"}) == {
+        "ok": True,
+    }
+    assert worker._execute_task("cleanup_stage", {"step_name": "sw", "phase": "shutdown"}) == {
+        "ok": True,
+    }
+    assert worker._execute_task("cleanup_stage", {"step_name": "sc", "phase": "shutdown"}) == {
+        "ok": True,
+    }
+    assert calls == ["sw_final", "sc_final", "sw_shutdown", "sc_shutdown"]
+
+
+def test_local_worker_sc_timeout_task_runs_in_process_to_reuse_pool(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    worker = LocalWorker(
+        LocalWorkerConfig("local-pc-01", "ocar", 9527),
+        task_handlers={"sc": lambda params: {"ok": True, "config": params["config_name"]}},
+    )
+
+    def fail_if_isolated(*_args, **_kwargs):
+        raise AssertionError("SC tasks must reuse the LocalWorker process and SCProcessPool")
+
+    monkeypatch.setattr(worker, "_execute_task_in_subprocess", fail_if_isolated)
+
+    response = worker.handle_polled_task({
+        "task_id": "sc-1",
+        "step": "sc",
+        "params": {"config_name": 7},
+        "timeout_seconds": 45,
+    })
+
+    assert response["command"] == "worker_step_complete"
+    assert response["params"]["result"] == {"ok": True, "config": 7}
 
 
 def test_local_worker_sc_task_includes_scdoc_payload(tmp_path, monkeypatch) -> None:

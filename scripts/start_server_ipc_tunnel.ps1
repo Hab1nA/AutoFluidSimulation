@@ -130,6 +130,10 @@ function Start-ServerTunnel {
         throw "Failed to start AutoFluid server IPC tunnel. $detail"
     }
 
+    $pidFile = Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $pidFile) -Force | Out-Null
+    Set-Content -LiteralPath $pidFile -Value ([string]$process.Id) -Encoding ASCII
+
     return $process
 }
 

@@ -27,3 +27,10 @@ def test_server_ipc_tunnel_reuse_requires_protocol_probe() -> None:
     assert "if (Test-AutoFluidIpcProtocolEndpoint)" in content
     assert "AutoFluid server IPC protocol endpoint is already reachable" in content
     assert "if (Test-AutoFluidEndpoint)" not in content
+
+
+def test_server_ipc_tunnel_persists_pid_for_cleanup() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+
+    assert "server_ipc_tunnel.pid" in content
+    assert "Set-Content -LiteralPath $pidFile" in content

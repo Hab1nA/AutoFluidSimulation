@@ -226,6 +226,24 @@ class TestSchedulerModuleImports:
         )
         assert result.returncode == 0, result.stderr
 
+    def test_server_mode_worker_pool_keeps_three_sc_workers(self, monkeypatch):
+        """server mode 下 SC 仍应保持三工作线程并发，不能降级为单线程。"""
+        from engine.scheduler.worker_pool import WorkerPoolManager
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+        manager = WorkerPoolManager(
+            state_manager=object(),
+            task_runner=object(),
+            sc_queue=object(),
+            paused_event=threading.Event(),
+            stopped_event=threading.Event(),
+            barrier_passed_event=threading.Event(),
+            retry_manager=object(),
+        )
+
+        assert manager._num_sc_workers == 3
+
 
 class TestSWPhaseHandlerFallback:
     """验证 SW 独立模式文件监控回调。"""
@@ -1076,15 +1094,15 @@ class TestPipelineSchedulerStartRecovery:
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_server_mode_uses_single_sc_worker_for_single_local_worker_slot(self, monkeypatch):
-        """server 模式下 SC 投递应匹配 LocalWorker 单 CAD 槽，避免排队任务超时。"""
+    def test_server_mode_keeps_three_sc_workers_for_local_worker_sc_slots(self, monkeypatch):
+        """server 模式下 SC 投递应匹配 LocalWorker 三个 SC 槽位。"""
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
 
         from engine.scheduler import PipelineScheduler
 
         scheduler = PipelineScheduler(self.state, self.runner)
 
-        assert scheduler.worker_pool._num_sc_workers == 1
+        assert scheduler.worker_pool._num_sc_workers == 3
 
     def test_local_mode_keeps_three_sc_workers(self, monkeypatch):
         """非 server 模式保留本地 SpaceClaim 原有 3 个 SC worker。"""

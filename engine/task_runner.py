@@ -223,30 +223,35 @@ class TaskRunner:
     def shutdown_sw_processes(self) -> None:
         """全量清理 SolidWorks 进程。"""
         if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sw", "shutdown")
             return
         self._sw_executor.shutdown_all()
 
     def do_sw_first_cleanup(self) -> None:
         """首次 SW 全体清理（进入 SW 阶段前调用）。"""
         if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sw", "first")
             return
         self._sw_executor.do_first_cleanup()
 
     def do_sw_final_cleanup(self) -> None:
         """末次 SW 全体清理（SW 阶段全部完成后调用）。"""
         if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sw", "final")
             return
         self._sw_executor.do_final_cleanup()
 
     def reset_sw_cleanup(self) -> None:
         """重置 SW 全量清理状态。"""
         if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sw", "reset")
             return
         self._sw_executor.reset_cleanup_state()
 
     def disconnect_sw_cached(self) -> None:
         """清理 SW 单构型导出缓存连接。"""
         if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sw", "disconnect")
             return
         self._sw_executor.disconnect_sw_cached()
 
@@ -441,12 +446,35 @@ class TaskRunner:
 
     def shutdown_sc_pool(self) -> None:
         """全量清理 SpaceClaim 进程。"""
+        if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sc", "shutdown")
+            return
         self._sc_pool.shutdown_all()
 
     def do_sc_final_cleanup(self) -> None:
         """末次 SC 全体清理（SC 阶段全部完成后调用）。"""
+        if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sc", "final")
+            return
         self._sc_pool.do_final_cleanup()
 
     def reset_sc_pool(self) -> None:
         """重置 SC 进程池状态。"""
+        if self._should_delegate_local_steps():
+            self._delegate_cleanup_stage("sc", "reset")
+            return
         self._sc_pool.reset()
+
+    def _delegate_cleanup_stage(self, step_name: str, phase: str) -> None:
+        cleanup_stage = getattr(self._local_worker_adapter, "cleanup_stage", None)
+        if not callable(cleanup_stage):
+            return
+        ok = bool(cleanup_stage(step_name, phase))
+        if not ok:
+            error = str(getattr(self._local_worker_adapter, "last_error", ""))
+            logger.warning(
+                "[LocalWorker] %s %s 清理失败%s",
+                step_name.upper(),
+                phase,
+                f": {error}" if error else "",
+            )
