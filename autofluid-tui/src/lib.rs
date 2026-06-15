@@ -25,6 +25,7 @@ use event_handler::command;
 use event_handler::key_handler;
 use ipc::client::IpcClient;
 use state::app_state::{ScrollbarInfo, UiMode};
+use state::app_state::{STATUS_COMPLETED, STEP_DISPLAY};
 use state::log_buffer::LogEntry;
 use state::{AppState, LogBuffer};
 use ui::layout::AppLayout;
@@ -215,7 +216,9 @@ pub(crate) fn apply_dashboard_response(
     log_buffer: &mut LogBuffer,
 ) {
     if let Some(statuses) = data_obj.get("statuses") {
+        let previous_statuses = state.status_data.clone();
         state.update_status_data(statuses);
+        announce_completed_status_transitions(statuses, &previous_statuses, log_buffer);
     }
     if let Some(engine) = data_obj.get("engine") {
         state.update_engine_info(engine);
@@ -225,6 +228,47 @@ pub(crate) fn apply_dashboard_response(
     }
     if let Some(logs) = data_obj.get("logs").and_then(|v| v.as_object()) {
         apply_log_entries_response(logs, state, log_buffer);
+    }
+}
+
+fn announce_completed_status_transitions(
+    statuses: &serde_json::Value,
+    previous_statuses: &std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    >,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(configs) = statuses.as_object() else {
+        return;
+    };
+
+    for (config_name, steps_val) in configs {
+        let Some(previous_steps) = previous_statuses.get(config_name) else {
+            continue;
+        };
+        let Some(steps) = steps_val.as_object() else {
+            continue;
+        };
+
+        for (step_name, status_val) in steps {
+            if status_val.as_str() != Some(STATUS_COMPLETED) {
+                continue;
+            }
+            if previous_steps.get(step_name).map(String::as_str) == Some(STATUS_COMPLETED) {
+                continue;
+            }
+            if !previous_steps.contains_key(step_name) {
+                continue;
+            }
+
+            let display_name = STEP_DISPLAY
+                .iter()
+                .find(|(name, _)| *name == step_name)
+                .map(|(_, display)| *display)
+                .unwrap_or(step_name.as_str());
+            log_buffer.push_info(format!("✅ 构型{config_name} {display_name} 已完成"));
+        }
     }
 }
 
@@ -1180,6 +1224,58 @@ mod tests {
         );
         assert_eq!(state.last_log_id, 8);
         assert_eq!(log_buffer.detail_buffer.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_dashboard_response_announces_step_completion_transition() {
+        let mut state = AppState::default();
+        let mut log_buffer = LogBuffer::new();
+
+        let running = serde_json::json!({
+            "statuses": {
+                "3": {"transfer": "Running"}
+            }
+        });
+        apply_dashboard_response(
+            running.as_object().expect("object response"),
+            &mut state,
+            &mut log_buffer,
+        );
+
+        let completed = serde_json::json!({
+            "statuses": {
+                "3": {"transfer": "Completed"}
+            }
+        });
+        apply_dashboard_response(
+            completed.as_object().expect("object response"),
+            &mut state,
+            &mut log_buffer,
+        );
+
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("构型3 文件传输 已完成")));
+    }
+
+    #[test]
+    fn test_apply_dashboard_response_does_not_announce_initial_completed_state() {
+        let mut state = AppState::default();
+        let mut log_buffer = LogBuffer::new();
+        let data = serde_json::json!({
+            "statuses": {
+                "3": {"transfer": "Completed"}
+            }
+        });
+
+        apply_dashboard_response(
+            data.as_object().expect("object response"),
+            &mut state,
+            &mut log_buffer,
+        );
+
+        assert!(log_buffer.info_messages.is_empty());
     }
 
     #[test]
