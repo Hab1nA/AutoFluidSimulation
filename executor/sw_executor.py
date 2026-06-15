@@ -888,11 +888,10 @@ class SWExecutor:
                     logger.info("[SW-DesignTable] 已禁止'模型→设计表'反向更新")
                 except Exception as e_upd:
                     logger.debug(f"[SW-DesignTable] 设置 Updatable=False 失败: {e_upd}")
-                try:
-                    design_table.UpdateModel()
-                    logger.info("[SW-DesignTable] UpdateModel 完成")
-                except Exception as e_um:
-                    logger.debug(f"[SW-DesignTable] UpdateModel 异常: {e_um}")
+                logger.info(
+                    "[SW-DesignTable] 跳过全局 UpdateModel；"
+                    "后续将按构型逐一切换、重建并导出"
+                )
             else:
                 logger.info("[SW-DesignTable] GetDesignTable 返回 None（可能已自动应用）")
         except Exception as e_dt:

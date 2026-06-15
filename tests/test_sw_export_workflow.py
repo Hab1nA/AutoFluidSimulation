@@ -640,7 +640,7 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         self.runner._sw_executor._post_process_design_table(mock_doc, "fake.xlsx")
 
         mock_dt.Updatable = PropertyMock()
-        mock_dt.UpdateModel.assert_called()
+        mock_dt.UpdateModel.assert_not_called()
 
     def test_cleanup_tmp_excel(self):
         tmp = os.path.join(self.tmpdir, "tmp_copy.xlsx")

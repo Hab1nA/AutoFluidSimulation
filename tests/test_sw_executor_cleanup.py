@@ -128,6 +128,7 @@ def test_export_per_config_saveas_exception_disconnects_cached_com(
     extension = SimpleNamespace()
     doc = SimpleNamespace(Extension=extension)
     cleanup_calls = []
+    terminate_calls = []
 
     doc.ShowConfiguration2 = lambda _name: True
     doc.Rebuild = lambda _arg: True
@@ -148,9 +149,15 @@ def test_export_per_config_saveas_exception_disconnects_cached_com(
             (sw_app, sw_doc, sw_model)
         ),
     )
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
 
     assert executor.export_sw_per_config(1) is False
     assert cleanup_calls == [(app, doc, LOCAL_PATHS["sw_model"])]
+    assert terminate_calls == []
     assert executor._cached_sw_app is None
     assert executor._cached_doc is None
     assert executor._com_initialized is False
