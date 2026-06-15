@@ -1076,6 +1076,26 @@ class TestPipelineSchedulerStartRecovery:
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    def test_server_mode_uses_single_sc_worker_for_single_local_worker_slot(self, monkeypatch):
+        """server 模式下 SC 投递应匹配 LocalWorker 单 CAD 槽，避免排队任务超时。"""
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+        from engine.scheduler import PipelineScheduler
+
+        scheduler = PipelineScheduler(self.state, self.runner)
+
+        assert scheduler.worker_pool._num_sc_workers == 1
+
+    def test_local_mode_keeps_three_sc_workers(self, monkeypatch):
+        """非 server 模式保留本地 SpaceClaim 原有 3 个 SC worker。"""
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
+        from engine.scheduler import PipelineScheduler
+
+        scheduler = PipelineScheduler(self.state, self.runner)
+
+        assert scheduler.worker_pool._num_sc_workers == 3
+
     def test_start_skips_step_monitor_when_only_meshing_pending(self, caplog):
         """SC/Transfer 已完成时，start 直接恢复 Meshing，不扫描旧 STEP。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
@@ -1264,8 +1284,15 @@ class TestPipelineSchedulerStartRecovery:
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
 
-    def test_stale_sc_completion_after_reset_does_not_submit_transfer(self):
+    def test_stale_sc_completion_after_reset_does_not_submit_transfer(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         """reset 期间完成的旧 SC 结果不应覆盖 reset 后状态或推进 Transfer。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_step_status(1, "sw", STATUS_COMPLETED)
         self.state.set_step_status(1, "sc", STATUS_WAITING)
@@ -1303,8 +1330,15 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
         assert self.scheduler.meshing_monitor.qsize() == 0
 
-    def test_sc_completion_after_stop_does_not_submit_transfer(self):
+    def test_sc_completion_after_stop_does_not_submit_transfer(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         """SC 执行期间停止后，即使在途结果完成也不能推进 Transfer。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_step_status(1, "sw", STATUS_COMPLETED)
         self.state.set_step_status(1, "sc", STATUS_WAITING)
