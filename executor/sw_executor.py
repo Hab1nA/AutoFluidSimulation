@@ -319,6 +319,12 @@ class SWExecutor:
             logger.error(self.last_error)
             # ★ 清理缓存的 COM 连接，下次重试时重新建立
             self.disconnect_sw_cached()
+            if self._is_com_rpc_failure(e):
+                logger.warning(
+                    "[SW-COM] SaveAs 检测到 COM/RPC 失败，"
+                    "将终止残留 SolidWorks 进程以便下次重试重新启动"
+                )
+                self._terminate_sw_processes()
             return False
 
     def disconnect_sw_cached(self) -> None:

@@ -156,6 +156,51 @@ def test_export_per_config_saveas_exception_disconnects_cached_com(
     assert executor._com_initialized is False
 
 
+def test_export_per_config_saveas_rpc_failure_terminates_sw(
+    fake_com_modules,
+    sw_paths,
+    monkeypatch,
+):
+    executor = SWExecutor(SimpleNamespace())
+    app = SimpleNamespace()
+    extension = SimpleNamespace()
+    doc = SimpleNamespace(Extension=extension)
+    cleanup_calls = []
+    terminate_calls = []
+
+    doc.ShowConfiguration2 = lambda _name: True
+    doc.Rebuild = lambda _arg: True
+    extension.Rebuild = lambda _arg: True
+
+    def raise_saveas(*_args):
+        raise RuntimeError("-2147023170 远程过程调用失败。")
+
+    extension.SaveAs = raise_saveas
+    executor._cached_sw_app = app
+    executor._cached_doc = doc
+    executor._com_initialized = True
+
+    monkeypatch.setattr(
+        executor,
+        "_disconnect_sw",
+        lambda sw_app, sw_doc, sw_model: cleanup_calls.append(
+            (sw_app, sw_doc, sw_model)
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
+
+    assert executor.export_sw_per_config(1) is False
+    assert cleanup_calls == [(app, doc, LOCAL_PATHS["sw_model"])]
+    assert terminate_calls == ["terminate"]
+    assert executor._cached_sw_app is None
+    assert executor._cached_doc is None
+    assert executor._com_initialized is False
+
+
 def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
     fake_com_modules,
     sw_paths,
