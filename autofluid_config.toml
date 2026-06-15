@@ -49,7 +49,7 @@ meshing_processor_count = 8
 [solver]
 solver_timeout = 10800
 solver_processor_count = 128
-solver_iteration_count = 1000
+solver_iteration_count = 25
 
 [global_settings]
 watchdog_interval = 1.0

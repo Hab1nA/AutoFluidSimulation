@@ -139,6 +139,34 @@ def test_daemon_worker_step_complete_rejects_result_after_engine_stopped(tmp_pat
     assert daemon.state.get_step_status(2, "sc") == STATUS_ERROR
 
 
+def test_daemon_worker_step_complete_accepts_check_after_engine_stopped(tmp_path) -> None:
+    from engine.daemon import PipelineDaemon
+    from engine.state_manager import StateManager
+
+    daemon = PipelineDaemon()
+    daemon.state = StateManager(str(tmp_path / "state.db"))
+    daemon.handle_worker_register({"worker_id": "local-pc-01", "capabilities": {"check": True}})
+    queued = daemon.local_worker_registry.enqueue_task("check_local_environment", {})
+    daemon.handle_worker_poll({"worker_id": "local-pc-01"})
+    daemon.state.set_engine_status("stopped")
+
+    ok, completed, message = daemon.handle_worker_step_complete({
+        "worker_id": "local-pc-01",
+        "task_id": queued["task_id"],
+        "result": {
+            "ok": True,
+            "local_checks": {"Excel参数表": {"path": "model.xlsx", "exists": True}},
+        },
+    })
+
+    assert ok is True
+    assert completed["status"] == "completed"
+    assert completed["result"]["local_checks"] == {
+        "Excel参数表": {"path": "model.xlsx", "exists": True}
+    }
+    assert message == "LocalWorker 任务完成"
+
+
 def test_daemon_worker_step_error_rejects_result_after_engine_stopped(tmp_path) -> None:
     from engine.config import STATUS_ERROR, STATUS_RUNNING
     from engine.daemon import PipelineDaemon

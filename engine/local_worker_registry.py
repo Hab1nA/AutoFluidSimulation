@@ -170,6 +170,14 @@ class LocalWorkerRegistry:
                 self.heartbeat(worker_id)
                 return None
 
+    def get_task(self, task_id: str) -> dict[str, Any] | None:
+        """Return one LocalWorker task snapshot without changing its state."""
+        with self._task_condition:
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            return self._task_snapshot(task)
+
     def complete_task(
         self,
         task_id: str,

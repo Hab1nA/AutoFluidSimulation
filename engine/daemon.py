@@ -887,6 +887,14 @@ class PipelineDaemon:
             return True, None, "LocalWorker 暂无任务"
         return True, task, "LocalWorker 已领取任务"
 
+    def _should_reject_worker_result_after_engine_stopped(self, task: dict[str, Any] | None) -> bool:
+        """Return True for pipeline-mutating LocalWorker tasks that arrived after stop."""
+        if self.state is None or self.state.get_engine_status() != "stopped":
+            return False
+        if not task:
+            return False
+        return str(task.get("step") or "") in {"sw", "sc"}
+
     def handle_worker_step_complete(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """Handle LocalWorker task completion."""
         params = params or {}
@@ -897,20 +905,13 @@ class PipelineDaemon:
         result = params.get("result")
         if not isinstance(result, dict):
             result = {}
-        if self.state is not None and self.state.get_engine_status() == "stopped":
-            try:
-                task = self.local_worker_registry.fail_task(
-                    task_id,
-                    worker_id,
-                    "engine stopped",
-                )
-            except KeyError:
-                logger.warning(
-                    "[LocalWorker] 丢弃未知任务结果: task_id=%s worker_id=%s",
-                    task_id,
-                    worker_id,
-                )
-                return True, None, "LocalWorker 任务已丢弃: unknown task"
+        task = self.local_worker_registry.get_task(task_id)
+        if self._should_reject_worker_result_after_engine_stopped(task):
+            task = self.local_worker_registry.fail_task(
+                task_id,
+                worker_id,
+                "engine stopped",
+            )
             config_name = task.get("params", {}).get("config_name") if task else None
             step_name = task.get("step") if task else None
             if config_name is not None and step_name in {"sw", "sc"}:
@@ -1008,21 +1009,13 @@ class PipelineDaemon:
         if not worker_id or not task_id:
             return False, None, "缺少 worker_id 或 task_id"
         error = str(params.get("error") or "")
-        if self.state is not None and self.state.get_engine_status() == "stopped":
-            try:
-                task = self.local_worker_registry.fail_task(
-                    task_id,
-                    worker_id,
-                    "engine stopped",
-                )
-            except KeyError:
-                logger.warning(
-                    "[LocalWorker] 丢弃未知任务失败回报: task_id=%s worker_id=%s error=%s",
-                    task_id,
-                    worker_id,
-                    error,
-                )
-                return True, None, "LocalWorker 任务已丢弃: unknown task"
+        task = self.local_worker_registry.get_task(task_id)
+        if self._should_reject_worker_result_after_engine_stopped(task):
+            task = self.local_worker_registry.fail_task(
+                task_id,
+                worker_id,
+                "engine stopped",
+            )
             config_name = task.get("params", {}).get("config_name") if task else None
             step_name = task.get("step") if task else None
             if config_name is not None and step_name in {"sw", "sc"}:

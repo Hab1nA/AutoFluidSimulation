@@ -132,6 +132,21 @@ def test_worker_task_queue_roundtrip() -> None:
     assert completed["result"] == {"ok": True}
 
 
+def test_get_task_returns_snapshot() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+
+    queued = registry.enqueue_task("check_local_environment", {"probe": True})
+    snapshot = registry.get_task(str(queued["task_id"]))
+
+    assert snapshot is not None
+    assert snapshot["step"] == "check_local_environment"
+    snapshot["params"]["probe"] = False
+
+    assert registry.get_task(str(queued["task_id"]))["params"]["probe"] is True
+
+
 def test_has_active_step_task_tracks_pending_and_running_config_tasks() -> None:
     from engine.local_worker_registry import LocalWorkerRegistry
 
