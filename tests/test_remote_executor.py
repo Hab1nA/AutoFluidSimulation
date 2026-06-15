@@ -4,6 +4,8 @@ import json
 import hashlib
 import threading
 
+import pytest
+
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
     LOCAL_PATHS,
@@ -14,6 +16,11 @@ from engine.config import (
 )
 import executor.remote_executor as remote_executor_module
 from executor.remote_executor import RemoteExecutor
+
+
+@pytest.fixture(autouse=True)
+def _default_non_server_mode(monkeypatch):
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
 
 
 class _StateRecorder:
@@ -142,6 +149,38 @@ def test_execute_transfer_passes_timeout_and_control_events(tmp_path, monkeypatc
             "stopped_event": stopped,
         }
     ]
+
+
+def test_execute_transfer_reads_worker_scdoc_from_data_dir_in_server_mode(
+    tmp_path,
+    monkeypatch,
+):
+    data_scdoc_dir = tmp_path / "data" / "scdoc"
+    local_scdoc_dir = tmp_path / "local_scdoc"
+    data_scdoc_dir.mkdir(parents=True)
+    local_scdoc_dir.mkdir()
+    scdoc_file = data_scdoc_dir / "model_gen4_5.scdoc"
+    scdoc_file.write_bytes(b"server-mode-scdoc")
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setitem(LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+    monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(local_scdoc_dir))
+    monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote scdoc")
+
+    uploaded: list[str] = []
+
+    class _SSH:
+        def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None):
+            return None
+
+        def upload_file(self, local_path: str, remote_path: str, **kwargs) -> bool:
+            uploaded.append(local_path)
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.execute_transfer(5) is True
+    assert uploaded == [str(scdoc_file)]
 
 
 def test_execute_transfer_uses_workstation_specific_remote_dir(tmp_path, monkeypatch):

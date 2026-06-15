@@ -25,7 +25,7 @@ from engine.config import (
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS, REMOTE_CONFIG, ENGINE_CONFIG,
     OPERATION_TIMEOUTS,
     STATUS_ERROR, get_step_filename, STEP_FILE_PATTERNS,
-    get_workstation_config,
+    get_workstation_config, is_server_mode,
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
 from utils.logger import setup_logger
@@ -119,6 +119,13 @@ class RemoteExecutor:
             "pid_file": f"{flag_dir}/autofluid_bg_{task_hash}.pid",
             "script_file": f"{flag_dir}/autofluid_bg_{task_hash}.cmd",
         }
+
+    @staticmethod
+    def _local_scdoc_dir() -> str:
+        """Return the daemon-local SCDOC source directory for Transfer."""
+        if is_server_mode():
+            return os.path.join(str(LOCAL_PATHS["data_dir"]), "scdoc")
+        return str(LOCAL_PATHS["scdoc_dir"])
 
     @staticmethod
     def _remote_task_key(
@@ -520,7 +527,7 @@ class RemoteExecutor:
             self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "SCDOC 文件名配置错误")
             return False
         local_file = os.path.join(
-            str(LOCAL_PATHS["scdoc_dir"]),
+            self._local_scdoc_dir(),
             _scdoc_name,
         )
         remote_config = self._remote_config_for_workstation(workstation_id)
