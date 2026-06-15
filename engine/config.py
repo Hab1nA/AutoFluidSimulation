@@ -543,6 +543,10 @@ def _apply_env_overrides():
             else:
                 IPC_CONFIG[key] = env_val
 
+    solver_iteration_count = os.environ.get("AUTOFLUID_SOLVER_ITERATION_COUNT")
+    if solver_iteration_count:
+        ENGINE_CONFIG["solver_iteration_count"] = int(solver_iteration_count)
+
 
 def _sync_default_workstation() -> None:
     """Keep WORKSTATIONS[0] aligned with REMOTE_CONFIG in legacy mode."""

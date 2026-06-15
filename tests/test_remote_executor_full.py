@@ -105,6 +105,7 @@ class TestTransferEdgeCases:
         (scdoc_dir / "model_gen4_7.scdoc").write_bytes(b"data")
 
         monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(scdoc_dir))
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote")
 
         class _SSH:
@@ -125,6 +126,7 @@ class TestTransferEdgeCases:
         scdoc_file.write_bytes(b"data")
 
         monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(scdoc_dir))
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote")
 
         uploads: list[tuple[str, str]] = []

@@ -965,6 +965,24 @@ class TestReloadConfigFromToml:
             LOCAL_PATHS["sw_exe"] = original
             monkeypatch.delenv("AUTOFLUID_SW_EXE", raising=False)
 
+    def test_solver_iteration_count_env_overrides_toml(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import ENGINE_CONFIG
+
+        monkeypatch.setenv("AUTOFLUID_SOLVER_ITERATION_COUNT", "25")
+        original = ENGINE_CONFIG.get("solver_iteration_count", 1000)
+
+        def _mock_load(*args, **kwargs):
+            return {"solver": {"solver_iteration_count": 1000}}
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert ENGINE_CONFIG["solver_iteration_count"] == 25
+        finally:
+            ENGINE_CONFIG["solver_iteration_count"] = original
+            monkeypatch.delenv("AUTOFLUID_SOLVER_ITERATION_COUNT", raising=False)
+
 
 class TestConfigDictCompleteness:
     """验证各配置字典的必填键完整性。"""

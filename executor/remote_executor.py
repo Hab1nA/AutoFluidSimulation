@@ -123,6 +123,9 @@ class RemoteExecutor:
     @staticmethod
     def _local_scdoc_dir() -> str:
         """Return the daemon-local SCDOC source directory for Transfer."""
+        explicit_scdoc_dir = os.environ.get("AUTOFLUID_SCDOC_DIR")
+        if explicit_scdoc_dir:
+            return explicit_scdoc_dir
         if is_server_mode():
             return os.path.join(str(LOCAL_PATHS["data_dir"]), "scdoc")
         return str(LOCAL_PATHS["scdoc_dir"])
