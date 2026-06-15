@@ -1169,6 +1169,7 @@ pub fn handle_dialog_button_click(
                         state,
                         log_buffer,
                         ipc: runtime.ipc,
+                        check_task: None,
                         daemon: runtime.daemon,
                         worker: runtime.worker,
                         rt: runtime.rt,

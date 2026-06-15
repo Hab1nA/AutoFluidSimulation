@@ -196,6 +196,7 @@ fn build_check_content_lines(
     // ---- 本地环境检查 ----
     let daemon_header = "─── Daemon 检查 ──";
     let local_header = "─── 本地环境检查 ──";
+    let local_worker_health_header = "─── LocalWorker 在线状态 ──";
     let local_worker_header = "─── LocalWorker 本地环境检查 ──";
     let workstation_header = "─── 工作站配置检查 ──";
     let remote_header = "─── 远程工作站检查 ──";
@@ -203,6 +204,7 @@ fn build_check_content_lines(
         [
             daemon_header,
             local_header,
+            local_worker_health_header,
             local_worker_header,
             workstation_header,
             remote_header,
@@ -459,6 +461,38 @@ fn build_check_content_lines(
         .map(object_to_check_items)
         .unwrap_or_default();
 
+    let local_worker_health_items = data
+        .get("health")
+        .and_then(|v| v.as_object())
+        .map(|health| {
+            let mut items = Vec::new();
+            if let Some(online) = health.get("local_worker_online").and_then(|v| v.as_bool()) {
+                items.push(CheckItem {
+                    label: "LW注册状态".to_string(),
+                    value: if online {
+                        "在线".to_string()
+                    } else {
+                        "离线".to_string()
+                    },
+                    exists: Some(online),
+                });
+            }
+            if let Some(status) = health.get("server_to_local_ssh").and_then(|v| v.as_str()) {
+                let exists = match status {
+                    "ok" => Some(true),
+                    "disconnected" | "error" => Some(false),
+                    _ => None,
+                };
+                items.push(CheckItem {
+                    label: "S→L反向隧道".to_string(),
+                    value: status.to_string(),
+                    exists,
+                });
+            }
+            items
+        })
+        .unwrap_or_default();
+
     let local_worker_items: Vec<CheckItem> = data
         .get("local_worker_checks")
         .and_then(|v| v.as_object())
@@ -638,6 +672,17 @@ fn build_check_content_lines(
             local_header,
             target_header_w,
             &local_items,
+            label_width,
+            theme,
+        );
+    }
+
+    if !local_worker_health_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            local_worker_health_header,
+            target_header_w,
+            &local_worker_health_items,
             label_width,
             theme,
         );
@@ -963,10 +1008,14 @@ mod tests {
             "daemon_checks": {
                 "server_mode": {"ok": true, "message": "server mode enabled"}
             },
+            "health": {
+                "local_worker_online": true,
+                "server_to_local_ssh": "ok"
+            },
             "local_worker_checks": {
-                "SW可执行文件": {
-                    "path": "C:\\SW\\SLDWORKS.exe",
-                    "exists": true
+                "active_check": {
+                    "message": "LocalWorker 主动自检超时",
+                    "exists": false
                 }
             }
         });
@@ -976,9 +1025,14 @@ mod tests {
         assert!(text.contains("Daemon"));
         assert!(text.contains("server_mode"));
         assert!(text.contains("LocalWorker"));
-        assert!(text.contains("SW可执行文件"));
-        assert!(text.contains("C:\\SW\\SLDWORKS.exe"));
+        assert!(text.contains("LW注册状态"));
+        assert!(text.contains("在线"));
+        assert!(text.contains("S→L反向隧道"));
+        assert!(text.contains("ok"));
+        assert!(text.contains("active_check"));
+        assert!(text.contains("主动自检超时"));
         assert!(text.contains("✅"));
+        assert!(text.contains("❌"));
     }
 
     #[test]

@@ -1657,6 +1657,39 @@ def test_task_runner_server_mode_merges_local_worker_check(monkeypatch):
     assert result["local_worker_checks"] == {"SW可执行文件": {"exists": True}}
 
 
+def test_task_runner_server_mode_reports_active_local_worker_check_failure(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def run_system_check(self):
+            return {
+                "local_checks": {},
+                "remote_checks": {},
+                "daemon_checks": {},
+                "workstation_checks": {},
+            }
+
+    class _LocalWorkerAdapter:
+        last_error = "LocalWorker 主动自检超时"
+
+        def check_local_environment(self):
+            return None
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._cleaner = _Cleaner()
+    runner._local_worker_adapter = _LocalWorkerAdapter()
+
+    result = runner.run_system_check()
+
+    assert result["local_worker_checks"] == {
+        "active_check": {
+            "exists": False,
+            "message": "LocalWorker 主动自检超时",
+        }
+    }
+
+
 def test_task_runner_server_mode_delegates_local_file_clean(monkeypatch):
     from engine.task_runner import TaskRunner
 
@@ -2351,9 +2384,19 @@ class TestPipelineDaemonCleanStep:
 
     def test_check_returns_runner_schema(self):
         from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
 
         daemon = PipelineDaemon.__new__(PipelineDaemon)
         daemon.runner = _CleanStepRunner()
+        daemon._config_warnings = []
+        daemon._last_worker_ssh_checks = {}
+        registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+        registry.register(
+            "local-pc-01",
+            {"sw": True},
+            network={"reachable_host": "127.0.0.1", "ssh_port": 2222},
+        )
+        daemon.local_worker_registry = registry
         expected = {
             "local_checks": {},
             "remote_checks": {},
@@ -2369,7 +2412,10 @@ class TestPipelineDaemonCleanStep:
         ok, data, message = daemon.handle_check({})
 
         assert ok is True
-        assert data is expected
+        assert data is not expected
+        assert data["health"]["local_worker_online"] is True
+        assert data["health"]["server_to_local_ssh"] == "ok"
+        assert data["local_worker_checks"] == expected["local_worker_checks"]
         assert message == "系统自检完成"
 
     def test_clean_rejects_when_pipeline_running(self):

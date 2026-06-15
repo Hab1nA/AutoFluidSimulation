@@ -408,10 +408,14 @@ class TaskRunner:
         if self._should_delegate_local_steps():
             local_worker_result = self._local_worker_adapter.check_local_environment()
             if local_worker_result is None:
+                message = str(
+                    getattr(self._local_worker_adapter, "last_error", "")
+                    or "LocalWorker 主动自检未完成或失败"
+                )
                 result["local_worker_checks"] = {
-                    "status": {
+                    "active_check": {
                         "exists": False,
-                        "message": "LocalWorker 未在线或自检失败",
+                        "message": message,
                     }
                 }
             else:

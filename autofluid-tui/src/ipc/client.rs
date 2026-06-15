@@ -42,6 +42,10 @@ impl IpcClient {
         &self.host
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     pub async fn connect(&mut self) -> Result<(), String> {
         self.connect_with_timeout(DEFAULT_TIMEOUT).await
     }

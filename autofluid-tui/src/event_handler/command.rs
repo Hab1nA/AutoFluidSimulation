@@ -10,6 +10,7 @@ pub enum CommandResult {
     None,
     Quit,
     FullQuit,
+    StartCheck,
     StartDaemon,
     StopDaemon,
     RestartDaemon,
@@ -38,7 +39,7 @@ pub async fn dispatch_command(
         }
         "start" => cmd_start(ipc, log_buffer).await,
         "pause" => cmd_pause(ipc, log_buffer).await,
-        "check" => cmd_check(ipc, state, log_buffer).await,
+        "check" => cmd_check(ipc, state, log_buffer),
         "status" => cmd_status(ipc, log_buffer).await,
         "reset" => cmd_reset(&parts, state, log_buffer),
         "clean" => cmd_clean(&parts, state, log_buffer),
@@ -106,37 +107,16 @@ async fn cmd_pause(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandRe
     CommandResult::None
 }
 
-async fn cmd_check(
+fn cmd_check(
     ipc: &mut IpcClient,
-    state: &mut AppState,
+    _state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) -> CommandResult {
     if !ipc.is_connected() {
         log_buffer.push_info("❌ 未连接到后台引擎".to_string());
         return CommandResult::None;
     }
-    log_buffer.push_info("🔍 正在系统自检（含远程 SSH 检测，请耐心等待）...".to_string());
-    match ipc.check_system().await {
-        Ok(resp) if resp.is_ok() => {
-            log_buffer.push_info("✅ 系统自检完成".to_string());
-            state.check_data = Some(resp.data);
-            state.dialog_scroll = 0;
-            state.ui_mode = UiMode::CheckResult;
-        }
-        Ok(resp) => {
-            log_buffer.push_info(format!("❌ 系统自检失败: {}", resp.message));
-        }
-        Err(e) => {
-            // 自动重连已在 send_request_with_timeout 内部完成，
-            // 此处仅根据当前连接状态告知用户结果。
-            if ipc.is_connected() {
-                log_buffer.push_info(format!("❌ 通信失败: {}（连接已自动恢复）", e));
-            } else {
-                log_buffer.push_info(format!("❌ 通信失败: {}（自动重连失败，请手动重连）", e));
-            }
-        }
-    }
-    CommandResult::None
+    CommandResult::StartCheck
 }
 
 async fn cmd_status(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandResult {

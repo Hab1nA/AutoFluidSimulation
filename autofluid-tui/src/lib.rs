@@ -20,10 +20,13 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use event_handler::command;
 use event_handler::key_handler;
 use ipc::client::IpcClient;
+use ipc::protocol::IpcResponse;
 use state::app_state::{ScrollbarInfo, UiMode};
 use state::app_state::{STATUS_COMPLETED, STEP_DISPLAY};
 use state::log_buffer::LogEntry;
@@ -351,11 +354,82 @@ pub(crate) struct EventContext<'a> {
     state: &'a mut AppState,
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
+    check_task: Option<&'a mut Option<CheckTask>>,
     daemon: &'a mut daemon_mgr::DaemonManager,
     worker: &'a mut worker_mgr::WorkerManager,
     rt: &'a tokio::runtime::Runtime,
     project_dir: &'a str,
     full_quit: &'a mut bool,
+}
+
+struct CheckTask {
+    receiver: Receiver<Result<IpcResponse, String>>,
+}
+
+pub(crate) fn apply_check_response(
+    result: Result<IpcResponse, String>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    match result {
+        Ok(resp) if resp.is_ok() => {
+            log_buffer.push_info("✅ 系统自检完成".to_string());
+            state.check_data = Some(resp.data);
+            state.dialog_scroll = 0;
+            state.ui_mode = UiMode::CheckResult;
+        }
+        Ok(resp) => {
+            log_buffer.push_info(format!("❌ 系统自检失败: {}", resp.message));
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 系统自检通信失败: {}", e));
+        }
+    }
+    state.needs_redraw = true;
+}
+
+fn spawn_check_task(host: &str, port: u16) -> CheckTask {
+    let (sender, receiver) = mpsc::channel();
+    let host = host.to_string();
+    thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| {
+                rt.block_on(async {
+                    let mut ipc = IpcClient::new(Some(&host), Some(port));
+                    ipc.connect().await?;
+                    let result = ipc.check_system().await;
+                    ipc.disconnect().await;
+                    result
+                })
+            });
+        let _ = sender.send(result);
+    });
+    CheckTask { receiver }
+}
+
+fn poll_check_task(
+    check_task: &mut Option<CheckTask>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(task) = check_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(result) => {
+            *check_task = None;
+            apply_check_response(result, state, log_buffer);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            *check_task = None;
+            log_buffer.push_info("❌ 系统自检后台任务异常结束".to_string());
+            state.needs_redraw = true;
+        }
+    }
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
@@ -373,6 +447,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut log_buffer = LogBuffer::new();
     let mut daemon = daemon_mgr::DaemonManager::new();
     let mut worker = worker_mgr::WorkerManager::new();
+    let mut check_task: Option<CheckTask> = None;
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
@@ -412,6 +487,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         state: &mut state,
         log_buffer: &mut log_buffer,
         ipc: &mut ipc,
+        check_task: Some(&mut check_task),
         daemon: &mut daemon,
         worker: &mut worker,
         rt: &rt,
@@ -425,6 +501,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
 
         ctx.state.tick();
+        if let Some(check_task) = ctx.check_task.as_deref_mut() {
+            poll_check_task(check_task, ctx.state, ctx.log_buffer);
+        }
 
         if let Some(cmd) = ctx.state.pending_command.take() {
             let source = ctx.state.pending_command_source.take().unwrap_or("program");
@@ -520,6 +599,24 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                 .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
             ctx.rt.block_on(ctx.ipc.disconnect());
             ctx.state.should_quit = true;
+        }
+        command::CommandResult::StartCheck => {
+            if let Some(check_task) = ctx.check_task.as_deref_mut() {
+                if check_task.is_some() {
+                    ctx.log_buffer
+                        .push_info("ℹ 系统自检正在运行，请等待当前检查完成".to_string());
+                } else {
+                    ctx.log_buffer
+                        .push_info("🔍 正在系统自检（含远程 SSH 检测，请耐心等待）...".to_string());
+                    ctx.state.check_data = None;
+                    ctx.state.dialog_scroll = 0;
+                    if matches!(ctx.state.ui_mode, UiMode::CheckResult) {
+                        ctx.state.ui_mode = UiMode::Normal;
+                    }
+                    *check_task = Some(spawn_check_task(ctx.ipc.host(), ctx.ipc.port()));
+                }
+            }
+            ctx.state.needs_redraw = true;
         }
         command::CommandResult::StartDaemon => {
             ctx.daemon
@@ -1116,6 +1213,41 @@ mod tests {
             state.needs_redraw,
             "submitting a command must repaint log/input changes without waiting for resize"
         );
+    }
+
+    #[test]
+    fn test_apply_check_response_opens_result_dialog() {
+        let mut state = AppState::default();
+        let mut log_buffer = LogBuffer::new();
+        let response = IpcResponse {
+            status: "ok".to_string(),
+            data: serde_json::json!({
+                "health": {
+                    "local_worker_online": true,
+                    "server_to_local_ssh": "ok"
+                }
+            }),
+            message: "系统自检完成".to_string(),
+            request_id: "test".to_string(),
+        };
+
+        apply_check_response(Ok(response), &mut state, &mut log_buffer);
+
+        assert!(matches!(state.ui_mode, UiMode::CheckResult));
+        assert_eq!(
+            state
+                .check_data
+                .as_ref()
+                .and_then(|data| data.get("health"))
+                .and_then(|health| health.get("local_worker_online"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert!(state.needs_redraw);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("系统自检完成")));
     }
 
     #[test]

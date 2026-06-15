@@ -785,7 +785,8 @@ class PipelineDaemon:
         """处理 check 命令（系统自检）。"""
         if self.runner is None:
             raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
-        results = self.runner.run_system_check()
+        results = dict(self.runner.run_system_check())
+        results["health"] = self._build_health_snapshot()
         return True, results, "系统自检完成"
 
     def handle_worker_register(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
