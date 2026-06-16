@@ -159,6 +159,7 @@ class EngineConfig(TypedDict):
     solver_iteration_count: int
     max_retries: int
     state_refresh_interval: float
+    sc_max_slots: int
     sc_persistent_ready_timeout: int
     sc_scdoc_stable_seconds: float
 
@@ -434,6 +435,8 @@ ENGINE_CONFIG: EngineConfig = {
     "sw_visible": _toml_or_default("solidworks", "sw_visible", True),
     # SC 脚本执行超时（秒）
     "sc_timeout": _toml_or_default("spaceclaim", "sc_timeout", 300),
+    # SpaceClaim 常驻槽位数。默认单槽，避免同一工作站并发启动多个 SpaceClaim 实例。
+    "sc_max_slots": _toml_or_default("spaceclaim", "sc_max_slots", 1),
     # 文件传输超时（秒）
     "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）
@@ -546,6 +549,9 @@ def _apply_env_overrides():
     solver_iteration_count = os.environ.get("AUTOFLUID_SOLVER_ITERATION_COUNT")
     if solver_iteration_count:
         ENGINE_CONFIG["solver_iteration_count"] = int(solver_iteration_count)
+    sc_max_slots = os.environ.get("AUTOFLUID_SC_MAX_SLOTS")
+    if sc_max_slots:
+        ENGINE_CONFIG["sc_max_slots"] = max(1, int(sc_max_slots))
 
 
 def _sync_default_workstation() -> None:

@@ -76,7 +76,7 @@ class SCProcessPool:
     通过文件协议 IPC 与 Bridge 通信，消除每次 15-30s 的 GUI 启动开销。
     """
 
-    MAX_SLOTS = 3
+    MAX_SLOTS = 1
 
     def __init__(self):
         self._data_dir = LOCAL_PATHS.get("data_dir", "data")
@@ -87,6 +87,7 @@ class SCProcessPool:
 
         self._bridge_path = LOCAL_PATHS.get("sc_bridge", "")
         self._sc_script = LOCAL_PATHS.get("sc_script", "")
+        self._max_slots = max(1, int(ENGINE_CONFIG.get("sc_max_slots", self.MAX_SLOTS)))
 
         self._persistent_slots: dict[int, PersistentSlot] = {}
         self._persistent_cmd_dir = os.path.join(self._data_dir, "sc_ipc")
@@ -300,8 +301,8 @@ class SCProcessPool:
             if s.status in ("starting", "ready", "busy")
             and (s.process is None or s.process.poll() is None)
         )
-        if active_slots >= self.MAX_SLOTS:
-            logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self.MAX_SLOTS})")
+        if active_slots >= self._max_slots:
+            logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self._max_slots})")
             return None
 
         slot_id = self._next_slot_id
@@ -789,7 +790,7 @@ class SCProcessPool:
             ready_count = sum(1 for s in self._persistent_slots.values() if s.status == "ready")
             busy_count = sum(1 for s in self._persistent_slots.values() if s.status == "busy")
             return {
-                "max_slots": self.MAX_SLOTS,
+                "max_slots": self._max_slots,
                 "ready": ready_count,
                 "busy": busy_count,
                 "slots": {

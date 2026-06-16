@@ -105,9 +105,20 @@ class TestSCProcessPoolInit:
         assert os.path.isdir(data_dir)
         assert os.path.isdir(os.path.join(data_dir, "sc_ipc"))
 
-    def test_max_slots_constant(self):
+    def test_default_max_slots_is_one(self):
         from engine.sc_process_pool import SCProcessPool
-        assert SCProcessPool.MAX_SLOTS == 3
+        pool = SCProcessPool()
+        assert pool._max_slots == 1
+
+    def test_max_slots_can_be_configured(self, monkeypatch):
+        from engine.config import ENGINE_CONFIG
+        from engine.sc_process_pool import SCProcessPool
+
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_max_slots", 2)
+
+        pool = SCProcessPool()
+
+        assert pool._max_slots == 2
 
     def test_initial_state(self, tmp_path, monkeypatch):
         data_dir = str(tmp_path / "data")
@@ -204,11 +215,10 @@ class TestMaxSlots:
         from engine.sc_process_pool import SCProcessPool, PersistentSlot
         pool = SCProcessPool()
 
-        # 模拟 3 个 busy 且进程存活的槽位
-        for i in range(1, 4):
-            slot = PersistentSlot(slot_id=i, status="busy", current_config=i)
-            slot.process = type("AlivePopen", (), {"poll": lambda self: None})()
-            pool._persistent_slots[i] = slot
+        # 默认单槽：模拟唯一槽位 busy 且进程存活。
+        slot = PersistentSlot(slot_id=1, status="busy", current_config=1)
+        slot.process = type("AlivePopen", (), {"poll": lambda self: None})()
+        pool._persistent_slots[1] = slot
 
         with pool._lock:
             result = pool._get_or_create_persistent_slot()

@@ -41,6 +41,7 @@ sc_poll_interval = 2.0
 sc_process_appear_timeout = 120
 sc_gui_ready_timeout = 30
 sc_gui_stable_delay = 5
+sc_max_slots = 1
 
 [meshing]
 meshing_timeout = 1800

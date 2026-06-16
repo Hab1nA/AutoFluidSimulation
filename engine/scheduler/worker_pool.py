@@ -18,6 +18,7 @@ import time
 from typing import Callable
 
 from engine.config import (
+    ENGINE_CONFIG,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, get_step_filename,
 )
@@ -86,7 +87,7 @@ class WorkerPoolManager:
         self._transfer_worker_threads: list[threading.Thread] = []
 
         # ---- 工作线程数 ----
-        self._num_sc_workers = 3
+        self._num_sc_workers = max(1, int(ENGINE_CONFIG.get("sc_max_slots", 1)))
         self._num_transfer_workers = 1  # Transfer 工作线程数（SFTP 单线程保证安全）
 
         # ---- SC 全部完成检测 ----

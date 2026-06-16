@@ -226,8 +226,8 @@ class TestSchedulerModuleImports:
         )
         assert result.returncode == 0, result.stderr
 
-    def test_server_mode_worker_pool_keeps_three_sc_workers(self, monkeypatch):
-        """server mode 下 SC 仍应保持三工作线程并发，不能降级为单线程。"""
+    def test_server_mode_worker_pool_defaults_to_one_sc_worker(self, monkeypatch):
+        """server mode 下默认单路 SC，避免工作站并发启动多个 SpaceClaim。"""
         from engine.scheduler.worker_pool import WorkerPoolManager
 
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
@@ -242,7 +242,7 @@ class TestSchedulerModuleImports:
             retry_manager=object(),
         )
 
-        assert manager._num_sc_workers == 3
+        assert manager._num_sc_workers == 1
 
 
 class TestSWPhaseHandlerFallback:
@@ -1094,25 +1094,25 @@ class TestPipelineSchedulerStartRecovery:
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_server_mode_keeps_three_sc_workers_for_local_worker_sc_slots(self, monkeypatch):
-        """server 模式下 SC 投递应匹配 LocalWorker 三个 SC 槽位。"""
+    def test_server_mode_defaults_to_one_sc_worker_for_local_worker_sc_slots(self, monkeypatch):
+        """server 模式下 SC 投递默认匹配 LocalWorker 单个 SC 槽位。"""
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
 
         from engine.scheduler import PipelineScheduler
 
         scheduler = PipelineScheduler(self.state, self.runner)
 
-        assert scheduler.worker_pool._num_sc_workers == 3
+        assert scheduler.worker_pool._num_sc_workers == 1
 
-    def test_local_mode_keeps_three_sc_workers(self, monkeypatch):
-        """非 server 模式保留本地 SpaceClaim 原有 3 个 SC worker。"""
+    def test_local_mode_defaults_to_one_sc_worker(self, monkeypatch):
+        """非 server 模式也默认单路 SC，避免并发启动多个 SpaceClaim。"""
         monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
 
         from engine.scheduler import PipelineScheduler
 
         scheduler = PipelineScheduler(self.state, self.runner)
 
-        assert scheduler.worker_pool._num_sc_workers == 3
+        assert scheduler.worker_pool._num_sc_workers == 1
 
     def test_start_skips_step_monitor_when_only_meshing_pending(self, caplog):
         """SC/Transfer 已完成时，start 直接恢复 Meshing，不扫描旧 STEP。"""

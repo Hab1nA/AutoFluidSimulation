@@ -105,7 +105,7 @@ def test_local_worker_from_env_uses_reachable_host_metadata(monkeypatch) -> None
     }
 
 
-def test_local_worker_from_env_defaults_to_three_sc_slots(monkeypatch) -> None:
+def test_local_worker_from_env_defaults_to_one_sc_slot(monkeypatch) -> None:
     from engine.local_worker import LocalWorker
 
     monkeypatch.setenv("AUTOFLUID_WORKER_ID", "local-pc-01")
@@ -115,8 +115,8 @@ def test_local_worker_from_env_defaults_to_three_sc_slots(monkeypatch) -> None:
 
     worker = LocalWorker.from_env()
 
-    assert worker.config.capabilities["sc_slots"] == 3
-    assert worker._lane_limit("sc") == 3
+    assert worker.config.capabilities["sc_slots"] == 1
+    assert worker._lane_limit("sc") == 1
 
 
 def test_local_worker_from_env_does_not_reuse_workstation_reachable_metadata(monkeypatch) -> None:

@@ -17,7 +17,7 @@ from typing import Any, Callable
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from engine.config import LOCAL_PATHS, get_step_filename, reload_config_from_toml
+from engine.config import ENGINE_CONFIG, LOCAL_PATHS, get_step_filename, reload_config_from_toml
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -92,7 +92,7 @@ class LocalWorker:
             "sc": True,
             "clean": True,
             "check": True,
-            "sc_slots": 3,
+            "sc_slots": max(1, int(ENGINE_CONFIG.get("sc_max_slots", 1))),
         }
         return cls(
             LocalWorkerConfig(
@@ -301,11 +301,14 @@ class LocalWorker:
         if lane == "sw":
             return 1
         if lane == "sc":
-            raw_slots = self.config.capabilities.get("sc_slots", 3)
+            raw_slots = self.config.capabilities.get(
+                "sc_slots",
+                ENGINE_CONFIG.get("sc_max_slots", 1),
+            )
             try:
                 slots = int(raw_slots)
             except (TypeError, ValueError):
-                slots = 3
+                slots = int(ENGINE_CONFIG.get("sc_max_slots", 1))
             return max(1, slots)
         return 1
 
