@@ -42,6 +42,8 @@ sc_process_appear_timeout = 120
 sc_gui_ready_timeout = 30
 sc_gui_stable_delay = 5
 sc_max_slots = 1
+sc_persistent_enabled = true
+sc_oneshot_fallback_enabled = true
 
 [meshing]
 meshing_timeout = 1800

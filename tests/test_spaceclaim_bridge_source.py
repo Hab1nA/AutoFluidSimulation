@@ -63,6 +63,34 @@ def test_spaceclaim_transit_uses_passed_scdoc_name() -> None:
     assert "model_gen4_{}.scdoc" not in source
 
 
+def test_bridge_treats_pre_gui_exit_with_scdoc_as_success() -> None:
+    source = _source()
+    gui_failure_block_start = source.index("catch (InvalidOperationException ex)")
+    gui_failure_block_end = source.index("finally", gui_failure_block_start)
+    gui_failure_block = source[gui_failure_block_start:gui_failure_block_end]
+
+    assert "TryReturnSuccessIfScdocExists" in gui_failure_block
+    assert "SpaceClaim exited before GUI ready but SCDOC exists" in source
+
+
+def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
+    source = _source()
+
+    assert "NormalizePathEnvironmentVariables" in source
+    assert source.count("NormalizePathEnvironmentVariables(psi);") >= 2
+    assert 'psi.EnvironmentVariables.Remove("PATH")' in source
+
+
+def test_persistent_quit_exits_spaceclaim() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+    quit_block_start = source.index('cmd_data.get("command") == "quit"')
+    quit_block_end = source.index("config_name = str", quit_block_start)
+    quit_block = source[quit_block_start:quit_block_end]
+
+    assert 'Command.Execute("Exit")' in quit_block
+    assert "常驻模式: 正在退出 SpaceClaim" in quit_block
+
+
 def test_persistent_loop_reports_abnormal_exit_codes_and_statuses() -> None:
     source = _source()
 

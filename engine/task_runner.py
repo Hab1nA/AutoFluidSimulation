@@ -433,7 +433,14 @@ class TaskRunner:
         if self._should_delegate_local_steps() and step_name in {"all", "sw", "sc"}:
             ok = self._local_worker_adapter.clean_local_files(step_name, config_name)
             if not ok:
-                raise RuntimeError("LocalWorker 本地文件清理失败")
+                if step_name == "all" and config_name in (None, "all"):
+                    error = str(getattr(self._local_worker_adapter, "last_error", ""))
+                    logger.warning(
+                        "[LocalWorker] 全量本地文件清理未完成%s；继续清理服务器/工作站文件",
+                        f": {error}" if error else "",
+                    )
+                else:
+                    raise RuntimeError("LocalWorker 本地文件清理失败")
         self._cleaner.clean_step_files(step_name, config_name)
 
     def clean_local_step_files(self, step_name, config_name=None):

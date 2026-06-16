@@ -735,6 +735,12 @@ def _persistent_loop():
                     os.remove(cmd_file)
                 except (IOError, OSError):
                     pass
+                try:
+                    logger.info("常驻模式: 正在退出 SpaceClaim...")
+                    Command.Execute("Exit")
+                except Exception as e:
+                    logger.warning("常驻模式: 退出 SpaceClaim 时异常: {}: {}".format(
+                        type(e).__name__, e))
                 break
 
             config_name = str(cmd_data.get("config", ""))

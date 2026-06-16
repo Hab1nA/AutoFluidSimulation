@@ -78,6 +78,11 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.needs_redraw = true;
             AppAction::None
         }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.clear();
+            state.needs_redraw = true;
+            AppAction::None
+        }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.command_buffer.paste_from_clipboard();
             state.needs_redraw = true;
@@ -175,14 +180,19 @@ fn handle_scroll_keys(key: KeyCode, area: &mut dyn ScrollArea) -> bool {
 }
 
 /// 处理非焦点区域的 Enter/Char/Backspace 命令输入（切换到 CommandInput 焦点）
-fn handle_command_passthrough(key: KeyCode, state: &mut AppState) -> AppAction {
-    match key {
+fn handle_command_passthrough(key: KeyEvent, state: &mut AppState) -> AppAction {
+    match key.code {
         KeyCode::Enter => {
             let cmd = state.command_buffer.text.clone();
             if !cmd.is_empty() {
                 state.command_buffer = Default::default();
                 return AppAction::SubmitCommand(cmd);
             }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_buffer.clear();
+            state.focus_zone = FocusZone::CommandInput;
+            state.needs_redraw = true;
         }
         KeyCode::Char(c) => {
             state.command_buffer.input_char(c);
@@ -251,7 +261,7 @@ fn handle_table_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         state.needs_redraw = true;
         return AppAction::None;
     }
-    handle_command_passthrough(key.code, state)
+    handle_command_passthrough(key, state)
 }
 
 fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
@@ -260,7 +270,7 @@ fn handle_info_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         state.needs_redraw = true;
         return AppAction::None;
     }
-    handle_command_passthrough(key.code, state)
+    handle_command_passthrough(key, state)
 }
 
 fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
@@ -275,7 +285,7 @@ fn handle_detail_log_scroll(key: KeyEvent, state: &mut AppState) -> AppAction {
         state.needs_redraw = true;
         return AppAction::None;
     }
-    handle_command_passthrough(key.code, state)
+    handle_command_passthrough(key, state)
 }
 
 /// 处理对话框通用滚动键（Up/Down/PageUp/PageDown/Home/End），返回是否已处理。
@@ -543,5 +553,47 @@ fn handle_settings_text_input(key: KeyEvent, ss: &mut crate::settings::SettingsS
             AppAction::None
         }
         _ => AppAction::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text_buffer::TextBuffer;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn ctrl_u_clears_command_input_before_next_command() {
+        let mut state = AppState::new();
+        state.command_buffer = TextBuffer::with_text("stale".to_string());
+
+        let action = handle_key(
+            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut state,
+        );
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(state.command_buffer.text, "");
+        assert_eq!(state.command_buffer.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_u_from_non_command_focus_clears_and_returns_to_command_input() {
+        let mut state = AppState::new();
+        state.focus_zone = FocusZone::DetailLog;
+        state.command_buffer = TextBuffer::with_text("stale".to_string());
+
+        let action = handle_key(
+            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut state,
+        );
+
+        assert!(matches!(action, AppAction::None));
+        assert_eq!(state.focus_zone, FocusZone::CommandInput);
+        assert_eq!(state.command_buffer.text, "");
+        assert_eq!(state.command_buffer.cursor, 0);
     }
 }

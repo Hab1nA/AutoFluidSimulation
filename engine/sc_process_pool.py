@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import get_session_log_dir, setup_logger
+from utils.process_utils import is_process_alive, run_taskkill
 
 logger = setup_logger(__name__)
 
@@ -122,6 +123,14 @@ class SCProcessPool:
                    pipeline_control: PipelineControl | None = None) -> bool:
         """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
         self.last_error = ""
+        if not self._persistent_enabled():
+            logger.info(
+                "[SC-Pool] 常驻模式已关闭，使用一次性 Bridge 执行构型%s",
+                config_name,
+                extra=self._sc_log_extra(config_name),
+            )
+            return self._run_oneshot_bridge(config_name)
+
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
                 reason = "因暂停或停止暂缓（未启动槽位）"
@@ -142,14 +151,30 @@ class SCProcessPool:
 
                 slot = self._get_or_create_persistent_slot()
                 if slot is None:
-                    return self._fail(self.last_error or "无法获取或创建 SpaceClaim 常驻槽位")
+                    reason = self.last_error or "无法获取或创建 SpaceClaim 常驻槽位"
+                    if self._oneshot_fallback_enabled():
+                        logger.warning(
+                            "[SC-Pool] %s，退回一次性 Bridge 执行构型%s",
+                            reason, config_name,
+                            extra=self._sc_log_extra(config_name),
+                        )
+                        return self._run_oneshot_bridge(config_name)
+                    return self._fail(reason)
 
         # ★ 槽位就绪等待：在锁外执行，避免长时间阻塞其他线程。
         #   新创建的槽位处于 "starting" 状态，需等待 Bridge 写入就绪文件；
         #   已就绪的槽位直接跳过。
         if slot.status == "starting":
             if not self._wait_for_slot_ready(slot):
-                return self._fail(self.last_error or f"常驻槽位{slot.slot_id} 就绪失败")
+                reason = self.last_error or f"常驻槽位{slot.slot_id} 就绪失败"
+                if self._oneshot_fallback_enabled():
+                    logger.warning(
+                        "[SC-Pool] %s，退回一次性 Bridge 执行构型%s",
+                        reason, config_name,
+                        extra=self._sc_log_extra(config_name, slot),
+                    )
+                    return self._run_oneshot_bridge(config_name)
+                return self._fail(reason)
 
         with self._lock:
             # double-check：等待期间槽位可能已被其他操作清理
@@ -191,6 +216,79 @@ class SCProcessPool:
     # 全量清理（首次/末次）
     # ==================================================================
 
+    def _oneshot_fallback_enabled(self) -> bool:
+        return bool(ENGINE_CONFIG.get("sc_oneshot_fallback_enabled", True))
+
+    def _persistent_enabled(self) -> bool:
+        return bool(ENGINE_CONFIG.get("sc_persistent_enabled", True))
+
+    def _run_oneshot_bridge(self, config_name: int) -> bool:
+        """使用一次性 Bridge 执行当前构型，作为常驻启动失败的兜底。"""
+        if not self._bridge_path or not os.path.exists(self._bridge_path):
+            return self._fail("一次性 Bridge 需要 SpaceClaimBridge.exe")
+
+        step_dir = LOCAL_PATHS["step_dir"]
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        scdoc_name = get_step_filename("sc", config_name)
+        if not scdoc_name:
+            return self._fail(f"无法生成构型{config_name} SCDOC 文件名")
+
+        cmd = [
+            self._bridge_path,
+            "--script", self._sc_script,
+            "--config", str(config_name),
+            "--stepdir", step_dir,
+            "--scdocdir", scdoc_dir,
+            "--scdocname", scdoc_name,
+            "--timeout", str(ENGINE_CONFIG["sc_timeout"]),
+            "--sc-exe", LOCAL_PATHS["sc_exe"],
+        ]
+        os.makedirs(scdoc_dir, exist_ok=True)
+        bridge_log_dir = self._build_bridge_log_dir()
+        log_path = self._build_bridge_log_path(0, bridge_log_dir)
+        env = os.environ.copy()
+        env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
+        env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_process_appear_timeout", 120)
+        )
+        env["AUTOFLUID_SC_GUI_READY_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_ready_timeout", 30)
+        )
+        env["AUTOFLUID_SC_GUI_STABLE_DELAY"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_stable_delay", 15)
+        )
+
+        logger.info(
+            "[SC-Pool] 一次性 Bridge stdout/stderr 日志: %s",
+            log_path,
+            extra=self._sc_log_extra(config_name),
+        )
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+                completed = subprocess.run(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    timeout=ENGINE_CONFIG["sc_timeout"] + 90,
+                    env=env,
+                    check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return self._fail(f"一次性 Bridge 执行失败: {exc}")
+
+        if completed.returncode == 0:
+            logger.info(
+                "[SC-Pool] 一次性 Bridge 完成构型%s",
+                config_name,
+                extra=self._sc_log_extra(config_name),
+            )
+            return True
+
+        return self._fail(
+            f"一次性 Bridge 构型{config_name} 失败 "
+            f"({_format_bridge_exit(completed.returncode)})"
+        )
+
     def shutdown_all(self):
         with self._lock:
             self._shutdown_all_internal()
@@ -219,6 +317,38 @@ class SCProcessPool:
             time.sleep(3)
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[SC-Pool] taskkill 异常: {e}")
+        self._cleanup_stale_runningcad_markers()
+
+    def _cleanup_stale_runningcad_markers(self) -> None:
+        """删除 ANSYS RunningCADs 中指向已退出 SpaceClaim PID 的运行态标记。"""
+        running_cads_dir = os.path.join(
+            os.environ.get("TEMP", ""),
+            "Ansys",
+            "RunningCADs",
+        )
+        if not running_cads_dir or not os.path.isdir(running_cads_dir):
+            return
+
+        for root, _dirs, files in os.walk(running_cads_dir):
+            for filename in files:
+                if not filename.endswith(".direct"):
+                    continue
+                marker_path = os.path.join(root, filename)
+                try:
+                    pid = int(os.path.splitext(filename)[0])
+                except ValueError:
+                    continue
+                if is_process_alive(pid):
+                    continue
+                try:
+                    os.remove(marker_path)
+                    logger.debug("[SC-Pool] 已清理 stale RunningCADs 标记: %s", marker_path)
+                except OSError as exc:
+                    logger.debug(
+                        "[SC-Pool] 清理 stale RunningCADs 标记失败: %s (%s)",
+                        marker_path,
+                        exc,
+                    )
 
     def do_first_cleanup(self):
         with self._lock:
@@ -740,9 +870,14 @@ class SCProcessPool:
 
     def _cleanup_persistent_slot(self, slot: PersistentSlot) -> None:
         """清理常驻槽位（终止进程、清理文件）。调用方须持有 _lock。"""
+        if slot.spaceclaim_pid is not None:
+            run_taskkill(slot.spaceclaim_pid)
         if slot.process is not None:
             try:
-                slot.process.kill()
+                if slot.pid is not None:
+                    run_taskkill(slot.pid)
+                else:
+                    slot.process.kill()
             except (ProcessLookupError, OSError):
                 pass
             try:
@@ -771,7 +906,12 @@ class SCProcessPool:
             slot.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             try:
-                slot.process.kill()
+                if slot.spaceclaim_pid is not None:
+                    run_taskkill(slot.spaceclaim_pid)
+                if slot.pid is not None:
+                    run_taskkill(slot.pid)
+                else:
+                    slot.process.kill()
                 slot.process.communicate(timeout=5)
             except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
                 pass

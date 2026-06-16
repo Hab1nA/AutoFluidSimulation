@@ -2150,6 +2150,54 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_server_mode_start_accepts_live_workstation_ssh_without_snapshot(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        class _Ssh:
+            def connection_is_active(self) -> bool:
+                return True
+
+        class _Runner:
+            _ssh_pool = {"WS-A": _Ssh()}
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "secret",
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+            }],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+        daemon._config_warnings = []
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert data is None
+        assert message == "流水线已启动"
+        assert daemon.state.set_status_calls == ["running"]
+        assert daemon.scheduler.start_calls == 1
+
     def test_worker_start_reloads_config_and_drops_stale_ssh(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module

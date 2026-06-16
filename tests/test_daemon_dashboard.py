@@ -1,3 +1,5 @@
+import json
+
 from engine import daemon as daemon_module
 from engine.daemon import PipelineDaemon
 
@@ -26,6 +28,28 @@ class _LogHandler:
             "entries": [],
             "latest_id": 12,
             "total": 0,
+            "has_gap": False,
+            "reset": False,
+        }
+
+
+class _LargeLogHandler:
+    def get_entries(self, **_kwargs):
+        return {
+            "entries": [
+                {
+                    "id": idx,
+                    "timestamp": "2026-06-16 22:00:00",
+                    "level": "INFO",
+                    "source": "remote_ps",
+                    "logger_name": "executor.remote_executor",
+                    "message": "x" * 250_000,
+                    "raw_message": "x" * 250_000,
+                }
+                for idx in range(1, 8)
+            ],
+            "latest_id": 7,
+            "total": 7,
             "has_gap": False,
             "reset": False,
         }
@@ -132,6 +156,33 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "include_lifecycle": False,
         "include_config_scoped": False,
     }]
+
+
+def test_dashboard_trims_large_log_payload(monkeypatch):
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: _LargeLogHandler())
+    monkeypatch.setattr(daemon_module, "WORKSTATIONS", [])
+    monkeypatch.setattr(daemon_module, "_MAX_DASHBOARD_LOG_BYTES", 900_000)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = 1_000.0
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = None
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_001.0)
+    monkeypatch.setattr(daemon_module.time, "strftime", lambda _fmt, _value: "now")
+    monkeypatch.setattr(daemon_module.time, "localtime", lambda value: value)
+
+    ok, data, _ = daemon.handle_get_dashboard({"since_log_id": 0, "log_limit": 7})
+
+    assert ok is True
+    encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    assert len(encoded) <= daemon_module._MAX_DASHBOARD_LOG_BYTES
+    assert data["logs"]["latest_id"] == 7
+    assert data["logs"]["total"] == 7
+    assert data["logs"]["truncated"] is True
+    assert data["logs"]["entries"]
+    assert data["logs"]["entries"][-1]["id"] == 7
 
 
 def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):

@@ -306,6 +306,7 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
                     UseShellExecute = false,
                 };
+                NormalizePathEnvironmentVariables(psi);
                 psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
@@ -386,6 +387,13 @@ namespace AutoFluidSimulation.Bridge
             }
             catch (InvalidOperationException ex)
             {
+                int? earlySuccess = TryReturnSuccessIfScdocExists(
+                    opts,
+                    "SpaceClaim exited before GUI ready but SCDOC exists");
+                if (earlySuccess.HasValue)
+                {
+                    return earlySuccess.Value;
+                }
                 Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
                 return (int)ExitCode.LaunchFailed;
             }
@@ -393,6 +401,45 @@ namespace AutoFluidSimulation.Bridge
             {
                 workingProcess?.Dispose();
             }
+        }
+
+        private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
+        {
+            string? pathValue = null;
+            if (psi.EnvironmentVariables.ContainsKey("Path"))
+            {
+                pathValue = psi.EnvironmentVariables["Path"];
+            }
+            else if (psi.EnvironmentVariables.ContainsKey("PATH"))
+            {
+                pathValue = psi.EnvironmentVariables["PATH"];
+            }
+
+            if (psi.EnvironmentVariables.ContainsKey("PATH"))
+            {
+                psi.EnvironmentVariables.Remove("PATH");
+            }
+            if (psi.EnvironmentVariables.ContainsKey("Path"))
+            {
+                psi.EnvironmentVariables.Remove("Path");
+            }
+            if (pathValue != null)
+            {
+                psi.EnvironmentVariables["Path"] = pathValue;
+            }
+        }
+
+        private static int? TryReturnSuccessIfScdocExists(BridgeOptions opts, string reason)
+        {
+            string scdocFile = GetScdocFilePath(opts);
+            if (!File.Exists(scdocFile))
+            {
+                return null;
+            }
+
+            var fi = new FileInfo(scdocFile);
+            Console.WriteLine($"[BRIDGE] ✓ {reason}: {scdocFile} ({fi.Length} bytes)");
+            return (int)ExitCode.Success;
         }
 
         // ==============================================================
@@ -443,6 +490,7 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False",
                     UseShellExecute = false,
                 };
+                NormalizePathEnvironmentVariables(psi);
                 // Python passes the same slot settings to Bridge; Bridge forwards them
                 // to the child SpaceClaim process that runs spaceclaim_transit.py.
                 psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";

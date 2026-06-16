@@ -160,7 +160,9 @@ class EngineConfig(TypedDict):
     max_retries: int
     state_refresh_interval: float
     sc_max_slots: int
+    sc_persistent_enabled: bool
     sc_persistent_ready_timeout: int
+    sc_oneshot_fallback_enabled: bool
     sc_scdoc_stable_seconds: float
 
 
@@ -437,6 +439,10 @@ ENGINE_CONFIG: EngineConfig = {
     "sc_timeout": _toml_or_default("spaceclaim", "sc_timeout", 300),
     # SpaceClaim 常驻槽位数。默认单槽，避免同一工作站并发启动多个 SpaceClaim 实例。
     "sc_max_slots": _toml_or_default("spaceclaim", "sc_max_slots", 1),
+    # 是否启用 SpaceClaim 常驻 Bridge。关闭时每个构型使用一次性 Bridge。
+    "sc_persistent_enabled": _toml_or_default("spaceclaim", "sc_persistent_enabled", True),
+    # SpaceClaim 常驻启动失败时，退回一次性 Bridge 以保证当前构型可完成。
+    "sc_oneshot_fallback_enabled": _toml_or_default("spaceclaim", "sc_oneshot_fallback_enabled", True),
     # 文件传输超时（秒）
     "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）

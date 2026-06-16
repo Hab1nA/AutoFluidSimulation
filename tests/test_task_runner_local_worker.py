@@ -158,6 +158,37 @@ def test_task_runner_server_mode_delegates_sc_final_cleanup(monkeypatch) -> None
     ]
 
 
+def test_task_runner_server_mode_clean_all_continues_without_local_worker(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | str | None]] = []
+
+        def clean_step_files(self, step_name: str, config_name: int | str | None = None) -> None:
+            self.calls.append((step_name, config_name))
+
+    class _Adapter:
+        last_error = "没有在线 LocalWorker"
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | str | None]] = []
+
+        def clean_local_files(self, step_name: str, config_name: int | str | None = None) -> bool:
+            self.calls.append((step_name, config_name))
+            return False
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._cleaner = _Cleaner()
+    runner._local_worker_adapter = _Adapter()
+
+    runner.clean_step_files("all", None)
+
+    assert runner._local_worker_adapter.calls == [("all", None)]
+    assert runner._cleaner.calls == [("all", None)]
+
+
 def test_task_runner_reports_delegated_sw_task_in_flight_in_server_mode(monkeypatch) -> None:
     from engine.task_runner import TaskRunner
 

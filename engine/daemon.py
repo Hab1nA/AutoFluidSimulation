@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import sys
 import signal
@@ -61,6 +62,7 @@ from utils.process_utils import (
 )
 
 logger = setup_logger("PipelineDaemon")
+_MAX_DASHBOARD_LOG_BYTES = 900_000
 
 # PID 文件路径（与 main.py 保持一致）
 _PID_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
@@ -68,6 +70,10 @@ _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS = 30.0
 _ALERT_WATCHER_STOP_TIMEOUT_SECONDS = 5.0
+
+
+def _json_size_bytes(payload: Any) -> int:
+    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _state_db_config_count(db_path: str) -> int:
@@ -648,6 +654,13 @@ class PipelineDaemon:
         """Return an operator-facing error when the last worker SSH check failed."""
         if not is_server_mode():
             return None
+        try:
+            health = self._build_health_snapshot()
+            if health.get("server_to_workstation_ssh") == "ok":
+                return None
+        except Exception as exc:
+            logger.debug("[ServerMode] 检查工作站 SSH 健康状态失败: %s", exc)
+
         ssh_checks = getattr(self, "_last_worker_ssh_checks", {})
         if not ssh_checks:
             return "server 模式下工作站 SSH 未就绪，不能启动流水线；请先执行 worker start 建立 SSH 连通性。"
@@ -1301,12 +1314,33 @@ class PipelineDaemon:
             _, statuses, _ = self.handle_get_all_status(None)
         _, engine, _ = self.handle_get_engine_status(None)
         _, logs, _ = self.handle_get_log_entries(log_params)
-        return True, {
+        data = {
             "statuses": statuses,
             "engine": engine,
             "health": self._build_health_snapshot(),
             "logs": logs,
-        }, ""
+        }
+        self._trim_dashboard_logs_to_budget(data)
+        return True, data, ""
+
+    @staticmethod
+    def _trim_dashboard_logs_to_budget(data: dict[str, Any]) -> None:
+        """Keep dashboard IPC responses below the Rust client line-size cap."""
+        logs = data.get("logs")
+        if not isinstance(logs, dict):
+            return
+        entries = logs.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return
+        if _json_size_bytes(data) <= _MAX_DASHBOARD_LOG_BYTES:
+            return
+        kept = list(entries)
+        while kept and _json_size_bytes(data) > _MAX_DASHBOARD_LOG_BYTES:
+            kept.pop(0)
+            logs["entries"] = kept
+        if _json_size_bytes(data) > _MAX_DASHBOARD_LOG_BYTES:
+            logs["entries"] = []
+        logs["truncated"] = True
 
     def handle_reset_step(self, params: dict) -> tuple[bool, Any, str]:
         """

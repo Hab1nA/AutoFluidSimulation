@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
-from engine.config import LOCAL_PATHS
+from engine.config import ENGINE_CONFIG, LOCAL_PATHS
 
 
 # ====================================================================
@@ -93,6 +94,10 @@ class TestPersistentSlot:
 
 class TestSCProcessPoolInit:
     """验证 SCProcessPool 初始化。"""
+
+    def test_project_config_keeps_persistent_mode_enabled(self):
+        """项目默认配置应使用常驻 SC，避免每个构型反复冷启动 SpaceClaim。"""
+        assert ENGINE_CONFIG["sc_persistent_enabled"] is True
 
     def test_creates_directories(self, tmp_path, monkeypatch):
         """初始化时应创建 data_dir 和 sc_ipc 目录。"""
@@ -421,3 +426,146 @@ class TestCleanupAndReset:
         pool._load_bridge_monitor_info(slot)
 
         assert slot.spaceclaim_pid == 5678
+
+    def test_cleanup_removes_stale_ansys_runningcad_markers(
+        self, tmp_path, monkeypatch
+    ):
+        """SC 清场应删除指向已退出 PID 的 Ansys RunningCADs 标记。"""
+        data_dir = str(tmp_path / "data")
+        temp_dir = tmp_path / "temp"
+        marker_dir = temp_dir / "Ansys" / "RunningCADs" / "SPICA" / "v231"
+        marker_dir.mkdir(parents=True)
+        stale_marker = marker_dir / "999999.direct"
+        stale_marker.write_text(
+            '<?xml version="1.0"?><plugin name="SpaceClaimModeling" '
+            'pid="999999" port="49014"/>',
+            encoding="utf-8",
+        )
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setenv("TEMP", str(temp_dir))
+        monkeypatch.setattr("engine.sc_process_pool.is_process_alive", lambda _pid: False)
+        monkeypatch.setattr(
+            "engine.sc_process_pool.subprocess.run",
+            lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+        )
+        monkeypatch.setattr("engine.sc_process_pool.time.sleep", lambda _seconds: None)
+
+        from engine.sc_process_pool import SCProcessPool
+
+        pool = SCProcessPool()
+        pool._kill_all_sc_processes()
+
+        assert not stale_marker.exists()
+
+    def test_run_config_falls_back_to_oneshot_when_persistent_ready_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """常驻槽位启动失败时应退回一次性 Bridge。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_persistent_enabled", True)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_oneshot_fallback_enabled", True)
+
+        called = []
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=5, status="starting")
+        pool._persistent_slots[slot.slot_id] = slot
+
+        monkeypatch.setattr(pool, "_get_or_create_persistent_slot", lambda: slot)
+        monkeypatch.setattr(pool, "_wait_for_slot_ready", lambda _slot: False)
+        monkeypatch.setattr(
+            pool,
+            "_run_oneshot_bridge",
+            lambda config_name: called.append(config_name) or True,
+        )
+
+        assert pool.run_config(3) is True
+        assert called == [3]
+
+    def test_run_config_uses_oneshot_when_persistent_disabled(
+        self, tmp_path, monkeypatch
+    ):
+        """配置关闭常驻模式时应直接使用一次性 Bridge。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_persistent_enabled", False)
+
+        called = []
+
+        from engine.sc_process_pool import SCProcessPool
+
+        pool = SCProcessPool()
+        monkeypatch.setattr(
+            pool,
+            "_run_oneshot_bridge",
+            lambda config_name: called.append(config_name) or True,
+        )
+        monkeypatch.setattr(
+            pool,
+            "_get_or_create_persistent_slot",
+            lambda: (_ for _ in ()).throw(AssertionError("persistent path used")),
+        )
+
+        assert pool.run_config(2) is True
+        assert called == [2]
+
+    def test_run_config_respects_disabled_oneshot_fallback(self, tmp_path, monkeypatch):
+        """配置关闭 fallback 时，常驻启动失败仍返回错误。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_persistent_enabled", True)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_oneshot_fallback_enabled", False)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=6, status="starting")
+        pool._persistent_slots[slot.slot_id] = slot
+
+        monkeypatch.setattr(pool, "_get_or_create_persistent_slot", lambda: slot)
+        monkeypatch.setattr(pool, "_wait_for_slot_ready", lambda _slot: False)
+
+        assert pool.run_config(4) is False
+        assert "常驻槽位6 就绪失败" in pool.last_error
+
+    def test_shutdown_persistent_slot_tree_kills_bridge_and_spaceclaim(
+        self, tmp_path, monkeypatch
+    ):
+        """quit 超时后应按进程树清理 Bridge 与 SpaceClaim。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+
+        killed = []
+
+        class _TimedOutPopen:
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("bridge", timeout)
+
+            def communicate(self, timeout=None):
+                return None
+
+        monkeypatch.setattr(
+            "engine.sc_process_pool.run_taskkill",
+            lambda pid: killed.append(pid) or True,
+        )
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=4, cmd_dir=pool._persistent_cmd_dir)
+        slot.process = _TimedOutPopen()
+        slot.pid = 111
+        slot.spaceclaim_pid = 222
+
+        pool._shutdown_persistent_slot(slot)
+
+        assert killed == [222, 111]
+        assert slot.process is None
+        assert slot.pid is None
+        assert slot.spaceclaim_pid is None
+        assert not os.path.exists(
+            os.path.join(pool._persistent_cmd_dir, "sc_cmd_4.json")
+        )
