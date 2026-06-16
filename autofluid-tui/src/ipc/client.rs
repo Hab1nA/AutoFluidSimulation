@@ -9,6 +9,8 @@ const DEFAULT_PORT: u16 = 9527;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// check 命令涉及远程 SSH 自检（含 conda/目录/文件/磁盘/进程检查），需要更长超时。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+/// reset 可能同步清理 SC/SW 资源或等待 LocalWorker，不能使用普通轮询级超时。
+const RESET_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB 行长度上限
 /// 自动重连冷却时间：防止 daemon 不可用时频繁重连。
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
@@ -147,7 +149,7 @@ impl IpcClient {
 
     /// 发送 IPC 请求并等待响应（使用自定义超时）。
     ///
-    /// 用于已知耗时较长的命令（如 `check` 涉及远程 SSH 自检）。
+    /// 用于已知耗时较长的命令（如 `check` 涉及远程 SSH 自检，`reset` 涉及资源清理）。
     /// 任何导致 stream 丢失的错误（超时/读取失败/对端关闭）都会自动尝试重连，
     /// 确保客户端不会永久停留在断连状态。
     pub async fn send_request_with_timeout(
@@ -373,10 +375,13 @@ impl IpcClient {
                 serde_json::Value::String(sn.to_string()),
             );
         }
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_RESET_STEP,
-            serde_json::Value::Object(params),
-        ))
+        self.send_request_with_timeout(
+            &IpcRequest::with_params(
+                super::protocol::CMD_RESET_STEP,
+                serde_json::Value::Object(params),
+            ),
+            RESET_TIMEOUT,
+        )
         .await
     }
 
@@ -528,11 +533,12 @@ fn is_polling_command(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::IpcClient;
+    use super::{IpcClient, DEFAULT_TIMEOUT};
     use serde_json::Value;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -691,6 +697,65 @@ mod tests {
         let result = rt.block_on(client.get_dashboard(17, 75));
 
         assert!(result.is_ok());
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn reset_step_accepts_response_after_default_timeout_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut reset = String::new();
+            reader.read_line(&mut reset).expect("read reset");
+            let request: Value = serde_json::from_str(reset.trim()).expect("reset json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_RESET_STEP)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":null,"message":"已重置所有构型的所有步骤","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write reset response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.reset_step(Value::String("all".to_string()), None));
+
+        assert!(
+            result.is_ok(),
+            "reset should not use the default IPC timeout"
+        );
         rt.block_on(client.disconnect());
         server.join().expect("server thread");
     }

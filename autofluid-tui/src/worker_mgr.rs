@@ -782,6 +782,28 @@ mod tests {
     }
 
     #[test]
+    fn stop_workers_for_project_preserves_server_ipc_tunnel_pid_file() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-server-ipc-pid-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
+        std::fs::write(&pid_file, "999999").expect("write pid");
+
+        let mut log_buffer = LogBuffer::new();
+        let mut worker = WorkerManager::new();
+        let result = worker.stop_workers_for_project(
+            Some(project_dir.to_str().expect("utf8 temp path")),
+            &mut log_buffer,
+        );
+
+        assert!(result);
+        assert!(pid_file.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn worker_ssh_check_log_includes_effective_target() {
         let mut log_buffer = LogBuffer::new();
         let data = serde_json::json!({

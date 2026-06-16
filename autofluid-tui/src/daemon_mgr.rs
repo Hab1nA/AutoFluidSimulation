@@ -121,7 +121,8 @@ impl DaemonManager {
     pub fn stop(&mut self, project_dir: &str) -> Result<(), String> {
         if is_server_mode() {
             self.process = None;
-            log::info!("[Daemon] server 模式下跳过本地 daemon 进程等待");
+            log::info!("[Daemon] server 模式下通过 SSH 兜底停止远端 daemon");
+            self.stop_server_daemon()?;
             return Ok(());
         }
 
@@ -735,12 +736,7 @@ impl ServerDaemonSshCommand {
         let remote_command = match env_non_empty(action.command_env()) {
             Some(command) => command,
             None if matches!(action, ServerDaemonAction::Start) => default_server_start_command(),
-            None => {
-                return Err(format!(
-                    "{} 未配置，且当前 IPC 未连接，无法停止服务器 daemon",
-                    action.command_env()
-                ));
-            }
+            None => default_server_stop_command(),
         };
 
         Ok(Self {
@@ -799,10 +795,7 @@ fn local_daemon_python(project_dir: &str) -> String {
 }
 
 fn default_server_start_command() -> String {
-    let project_dir = env_non_empty("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
-        .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
-        .map(|path| shell_single_quote(&path))
-        .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string());
+    let project_dir = default_server_project_dir();
     let remote_ipc_port = first_env_non_empty(&[
         "AUTOFLUID_SERVER_DAEMON_IPC_PORT",
         "AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT",
@@ -834,6 +827,18 @@ fn default_server_start_command() -> String {
          tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
          exit 1"
     )
+}
+
+fn default_server_stop_command() -> String {
+    let project_dir = default_server_project_dir();
+    format!("cd {project_dir} && .venv/bin/python main.py --stop")
+}
+
+fn default_server_project_dir() -> String {
+    env_non_empty("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
+        .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
+        .map(|path| shell_single_quote(&path))
+        .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string())
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1255,11 +1260,15 @@ mod tests {
     }
 
     #[test]
-    fn restart_does_not_start_server_daemon_when_stop_fails() {
+    fn restart_uses_default_server_stop_command_when_stop_env_missing() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
-        let ssh_exe = fake_success_ssh_exe(&project_dir);
+        let marker = project_dir.join("restart-ssh-marker.txt");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "ssh");
+        let powershell_exe = fake_success_exe(&project_dir, "fake_pwsh");
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
         std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
@@ -1282,16 +1291,41 @@ mod tests {
             project_dir.to_str().expect("utf8 temp path"),
         );
 
+        let marker_text = fs::read_to_string(&marker).expect("read marker");
+        assert_eq!(marker_text.lines().count(), 2);
         assert!(log_buffer
-            .info_messages
-            .iter()
-            .any(|message| message.contains("停止服务器 daemon 失败")));
-        assert!(!log_buffer
             .info_messages
             .iter()
             .any(|message| message.contains("已向服务器发送 daemon 启动命令")));
 
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn stop_sends_server_daemon_stop_command_in_server_mode() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let marker = project_dir.join("ssh-stop-marker.txt");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "stop");
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD", "echo stop");
+
+        let mut daemon = DaemonManager::new();
+        daemon
+            .stop(project_dir.to_str().expect("utf8 temp path"))
+            .expect("server stop should succeed");
+
+        let marker_text = fs::read_to_string(&marker).expect("read marker");
+        assert_eq!(marker_text.trim(), "stop");
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
         std::env::remove_var("AUTOFLUID_SSH_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");

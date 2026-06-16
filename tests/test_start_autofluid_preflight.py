@@ -34,3 +34,19 @@ def test_server_ipc_tunnel_persists_pid_for_cleanup() -> None:
 
     assert "server_ipc_tunnel.pid" in content
     assert "Set-Content -LiteralPath $pidFile" in content
+
+
+def test_server_ipc_tunnel_reuse_refreshes_pid_for_cleanup() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+    reuse_block = content[
+        content.index("if (Test-AutoFluidIpcProtocolEndpoint)"):
+        content.index("$process = Start-ServerTunnel")
+    ]
+
+    assert "Update-ServerTunnelPidFile" in reuse_block
+    assert "Get-NetTCPConnection" in content
+    assert "OwningProcess" in content
+    assert "expectedForward" in content
+    assert "CommandLine -like \"*-L $expectedForward*\"" in content
+    assert "CommandLine -like \"* $TunnelTarget*\"" in content
+    assert "matchingPids[0]" not in content

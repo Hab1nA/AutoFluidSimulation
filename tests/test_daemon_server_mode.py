@@ -409,6 +409,7 @@ def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch
     assert daemon.state.db_path == str(worker_db)
 
     daemon.scheduler = _Scheduler()
+    daemon._last_worker_ssh_checks = {"default": "ok"}
     ok, data, message = daemon.handle_start({})
 
     assert ok is True
@@ -417,6 +418,57 @@ def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch
     assert daemon.state.get_engine_status() == "running"
     assert daemon.scheduler.start_calls == 1
     assert daemon.scheduler.thread_was_set is True
+
+
+def test_local_worker_autostart_sets_reverse_tunnel_worker_metadata(monkeypatch, tmp_path) -> None:
+    from engine import daemon as daemon_module
+    from engine.daemon import PipelineDaemon
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    class _FakeProcess:
+        pid = 12345
+
+        def poll(self) -> None:
+            return None
+
+    popen_calls = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return _FakeProcess()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setattr(daemon_module.sys, "platform", "win32")
+    monkeypatch.setattr(daemon_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        PipelineDaemon,
+        "_local_worker_python_executable",
+        staticmethod(lambda: "python.exe"),
+    )
+    monkeypatch.setattr(daemon_module, "_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(daemon_module, "write_pid_file", lambda _path, _pid: None)
+    monkeypatch.setattr(daemon_module, "worker_pid_file", lambda _kind: str(tmp_path / "worker.pid"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+    monkeypatch.setitem(daemon_module.IPC_CONFIG, "host", "127.0.0.1")
+    monkeypatch.setitem(daemon_module.IPC_CONFIG, "port", 19527)
+    (tmp_path / "main.py").write_text("print('worker')", encoding="utf-8")
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_adapter = object()
+    daemon.local_worker_registry = LocalWorkerRegistry(timeout_seconds=0.0)
+    daemon._local_worker_process = None
+    daemon._local_worker_last_start_attempt = 0.0
+
+    daemon._ensure_local_worker_autostarted()
+
+    assert len(popen_calls) == 1
+    _command, kwargs = popen_calls[0]
+    env = kwargs["env"]
+    assert env["AUTOFLUID_IPC_HOST"] == "127.0.0.1"
+    assert env["AUTOFLUID_IPC_PORT"] == "19527"
+    assert env["AUTOFLUID_WORKER_REACHABLE_HOST"] == "127.0.0.1"
+    assert env["AUTOFLUID_WORKER_SSH_PORT"] == "2223"
+    assert env["AUTOFLUID_WORKER_CONNECTIVITY_MODE"] == "reverse_tunnel"
 
 
 def test_worker_register_configs_are_idempotent(monkeypatch, tmp_path) -> None:

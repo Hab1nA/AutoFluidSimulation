@@ -130,11 +130,51 @@ function Start-ServerTunnel {
         throw "Failed to start AutoFluid server IPC tunnel. $detail"
     }
 
-    $pidFile = Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
-    New-Item -ItemType Directory -Path (Split-Path -Parent $pidFile) -Force | Out-Null
-    Set-Content -LiteralPath $pidFile -Value ([string]$process.Id) -Encoding ASCII
+    Update-ServerTunnelPidFile -TunnelPid $process.Id
 
     return $process
+}
+
+function Update-ServerTunnelPidFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$TunnelPid
+    )
+
+    $pidFile = Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $pidFile) -Force | Out-Null
+    Set-Content -LiteralPath $pidFile -Value ([string]$TunnelPid) -Encoding ASCII
+}
+
+function Get-ServerTunnelListeningPid {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LocalHost,
+        [Parameter(Mandatory = $true)]
+        [int]$LocalPort,
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteHost,
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$TunnelTarget
+    )
+
+    $expectedForward = "${LocalHost}:${LocalPort}:${RemoteHost}:${RemotePort}"
+    $connections = Get-NetTCPConnection -LocalPort $LocalPort -State Listen -ErrorAction SilentlyContinue
+    $matchingPids = @()
+    foreach ($connection in $connections) {
+        if ($connection.LocalAddress -eq $LocalHost -or $connection.LocalAddress -eq "0.0.0.0" -or $connection.LocalAddress -eq "::") {
+            $matchingPids += [int]$connection.OwningProcess
+        }
+    }
+    foreach ($candidatePid in $matchingPids) {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$candidatePid" -ErrorAction SilentlyContinue
+        if ($null -ne $process -and $process.CommandLine -like "*-L $expectedForward*" -and $process.CommandLine -like "* $TunnelTarget*") {
+            return [int]$candidatePid
+        }
+    }
+    return $null
 }
 
 $serverHost = Get-AutoFluidServerHost
@@ -164,6 +204,15 @@ if ($Check) {
 }
 
 if (Test-AutoFluidIpcProtocolEndpoint) {
+    $existingPid = Get-ServerTunnelListeningPid `
+        -LocalHost $serverHost `
+        -LocalPort $serverPort `
+        -RemoteHost $remoteHost `
+        -RemotePort $remotePort `
+        -TunnelTarget $tunnelTarget
+    if ($null -ne $existingPid) {
+        Update-ServerTunnelPidFile -TunnelPid $existingPid
+    }
     Write-Host "AutoFluid server IPC protocol endpoint is already reachable; reuse the existing tunnel."
     exit 0
 }

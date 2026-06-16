@@ -1953,7 +1953,7 @@ class TestPipelineDaemonCleanStep:
         assert popen_calls == []
         assert daemon.scheduler.start_calls == 0
 
-    def test_server_mode_paused_resume_allows_active_local_step_without_online_worker(self, monkeypatch):
+    def test_server_mode_paused_resume_rejects_active_local_step_without_online_worker(self, monkeypatch):
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
 
@@ -1973,10 +1973,10 @@ class TestPipelineDaemonCleanStep:
 
         ok, data, message = daemon.handle_start({})
 
-        assert ok is True
+        assert ok is False
         assert data is None
-        assert message == "流水线已恢复运行"
-        assert daemon.scheduler.resume_calls == 1
+        assert "LocalWorker" in message
+        assert daemon.scheduler.resume_calls == 0
         assert daemon.scheduler.start_calls == 0
 
     def test_start_running_with_dead_pipeline_thread_restarts_scheduler(self, monkeypatch):
@@ -2110,6 +2110,43 @@ class TestPipelineDaemonCleanStep:
         assert data is None
         assert "工作站 SSH 未就绪" in message
         assert "WS-A" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
+
+    def test_server_mode_start_rejects_missing_worker_ssh_snapshot(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "secret",
+            }],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+        daemon._last_worker_ssh_checks = {}
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is False
+        assert data is None
+        assert "工作站 SSH 未就绪" in message
+        assert "worker start" in message
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 

@@ -548,15 +548,7 @@ class PipelineDaemon:
             return True, None, "流水线已在运行中"
 
         if engine_status == "paused":
-            has_active_running_step = (
-                self._find_blocking_running_step(
-                    config_name="all",
-                    step_name="all",
-                    include_downstream=False,
-                )
-                is not None
-            )
-            if self._server_mode_requires_worker() and not has_active_running_step:
+            if self._server_mode_requires_worker():
                 self._ensure_local_worker_autostarted()
                 return self._server_mode_worker_missing_response()
             auth_error = self._server_mode_remote_auth_error()
@@ -658,7 +650,7 @@ class PipelineDaemon:
             return None
         ssh_checks = getattr(self, "_last_worker_ssh_checks", {})
         if not ssh_checks:
-            return None
+            return "server 模式下工作站 SSH 未就绪，不能启动流水线；请先执行 worker start 建立 SSH 连通性。"
         failed_checks = {
             workstation_id: status
             for workstation_id, status in ssh_checks.items()
@@ -712,6 +704,9 @@ class PipelineDaemon:
         env = os.environ.copy()
         env.setdefault("AUTOFLUID_IPC_HOST", str(IPC_CONFIG["host"]))
         env.setdefault("AUTOFLUID_IPC_PORT", str(IPC_CONFIG["port"]))
+        env.setdefault("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1")
+        env.setdefault("AUTOFLUID_WORKER_SSH_PORT", "2223")
+        env.setdefault("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel")
 
         log_dir = str(LOCAL_PATHS.get("log_dir") or os.path.join(_PROJECT_ROOT, "logs"))
         os.makedirs(log_dir, exist_ok=True)

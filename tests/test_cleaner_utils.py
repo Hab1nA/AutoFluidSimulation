@@ -774,6 +774,9 @@ class TestProcessUtils:
         assert process_utils.worker_pid_file("tunnel_localworker") == str(
             tmp_path / "tunnel_localworker.pid"
         )
+        assert process_utils.worker_pid_file("server_ipc_tunnel") == str(
+            tmp_path / "server_ipc_tunnel.pid"
+        )
 
     def test_cleanup_worker_pid_files_kills_alive_processes_and_removes_files(
         self, tmp_path, monkeypatch
