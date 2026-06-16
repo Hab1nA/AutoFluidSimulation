@@ -2249,6 +2249,60 @@ class TestPipelineDaemonCleanStep:
         assert daemon._last_worker_ssh_checks == {"default": "ok"}
         assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
 
+    def test_worker_register_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        class _SSH:
+            def is_connected(self) -> bool:
+                return True
+
+            def connection_is_active(self) -> bool:
+                return True
+
+        class _Runner:
+            def __init__(self, state, local_worker_adapter=None) -> None:
+                self.state = state
+                self.local_worker_adapter = local_worker_adapter
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        class _Scheduler:
+            def __init__(self, state, runner) -> None:
+                self.state = state
+                self.runner = runner
+
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "default"}],
+        )
+        monkeypatch.setattr(daemon_module, "TaskRunner", _Runner)
+        monkeypatch.setattr(daemon_module, "PipelineScheduler", _Scheduler)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon.local_worker_adapter = None
+        daemon.state = None
+        daemon.runner = None
+        daemon.scheduler = None
+        daemon._pipeline_ever_started = False
+        daemon._last_worker_ssh_checks = {}
+        daemon._config_warnings = []
+        daemon._worker_config_fingerprint = None
+
+        ok, _worker, message = daemon.handle_worker_register({
+            "worker_id": "local-pc-01",
+            "capabilities": {"sw": True, "sc": True},
+            "configs": {"1": [1, 2, 3, 4]},
+        })
+
+        assert ok is True
+        assert message == "LocalWorker 已注册"
+        assert daemon._last_worker_ssh_checks == {"default": "ok"}
+        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
+
     def test_worker_start_fails_when_all_workstation_ssh_checks_fail(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module

@@ -823,6 +823,7 @@ class PipelineDaemon:
                 self._load_configs_from_worker(worker_configs)
             except ValueError as e:
                 return False, None, f"LocalWorker 构型数据无效: {e}"
+            self._refresh_workstation_ssh_checks()
         return True, worker, "LocalWorker 已注册"
 
     def _load_configs_from_worker(self, raw_configs: dict[Any, Any]) -> None:
@@ -1058,11 +1059,7 @@ class PipelineDaemon:
     def handle_worker_start(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """启动所有 worker：验证工作站 SSH 连通性，准备 Registry 接受注册。"""
         params = params or {}
-        results: dict[str, Any] = {
-            "ssh_checks": {},
-            "ssh_targets": {},
-            "registry_ready": False,
-        }
+        results: dict[str, Any] = {}
         from engine.config import reload_config_from_toml
 
         if reload_config_from_toml() and self.runner is not None:
@@ -1071,27 +1068,8 @@ class PipelineDaemon:
             except Exception as e:
                 logger.warning("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)
 
-        # 检查并验证到各工作站的 SSH 连通性
-        if self.runner is not None:
-            for ws in WORKSTATIONS:
-                ws_id = str(ws.get("id", "default"))
-                target = self._workstation_ssh_target(ws)
-                results["ssh_targets"][ws_id] = target
-                try:
-                    ssh = self.runner.get_ssh(ws_id)
-                    connected = ssh.is_connected()
-                    results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
-                except Exception as e:
-                    results["ssh_checks"][ws_id] = f"error: {e}"
-                    logger.warning(
-                        "[Worker] 工作站 %s SSH 连通检查失败 "
-                        "(host=%s, port=%s, connectivity_mode=%s): %s",
-                        ws_id,
-                        target["host"],
-                        target["port"],
-                        target["connectivity_mode"],
-                        e,
-                    )
+        results.update(self._refresh_workstation_ssh_checks())
+        results["registry_ready"] = False
 
         ssh_checks = results["ssh_checks"]
         failed_ssh_checks = {
@@ -1100,7 +1078,6 @@ class PipelineDaemon:
             if status != "ok"
         }
         if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
-            self._last_worker_ssh_checks = dict(ssh_checks)
             self.local_worker_registry.clear_online_workers()
             logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
             target_summary = ", ".join(
@@ -1115,12 +1092,43 @@ class PipelineDaemon:
         # 清除旧的在线 worker 标记（允许重新注册）
         self.local_worker_registry.clear_online_workers()
         results["registry_ready"] = True
-        self._last_worker_ssh_checks = dict(ssh_checks)
 
         logger.info("[Worker] worker_start 完成: %s", results)
         if failed_ssh_checks:
             return True, results, f"部分工作站 SSH 连通检查失败: {failed_ssh_checks}"
         return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+
+    def _refresh_workstation_ssh_checks(self) -> dict[str, Any]:
+        """Refresh workstation SSH readiness using the current runner."""
+        results: dict[str, Any] = {
+            "ssh_checks": {},
+            "ssh_targets": {},
+        }
+        if self.runner is None:
+            return results
+
+        for ws in WORKSTATIONS:
+            ws_id = str(ws.get("id", "default"))
+            target = self._workstation_ssh_target(ws)
+            results["ssh_targets"][ws_id] = target
+            try:
+                ssh = self.runner.get_ssh(ws_id)
+                connected = ssh.is_connected()
+                results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
+            except Exception as e:
+                results["ssh_checks"][ws_id] = f"error: {e}"
+                logger.warning(
+                    "[Worker] 工作站 %s SSH 连通检查失败 "
+                    "(host=%s, port=%s, connectivity_mode=%s): %s",
+                    ws_id,
+                    target["host"],
+                    target["port"],
+                    target["connectivity_mode"],
+                    e,
+                )
+
+        self._last_worker_ssh_checks = dict(results["ssh_checks"])
+        return results
 
     def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """停止所有 worker：断开工作站 SSH 连接，清理 Registry 任务队列。"""
