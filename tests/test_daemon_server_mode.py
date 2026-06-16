@@ -191,6 +191,26 @@ def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
     assert daemon._alert_watcher_process is None
 
 
+def test_signal_handler_only_requests_main_loop_shutdown(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    registered = {}
+    shutdown_calls = []
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._running = True
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: shutdown_calls.append("set")})()
+    daemon.shutdown = lambda: shutdown_calls.append("shutdown")  # type: ignore[method-assign]
+
+    monkeypatch.setattr("engine.daemon.signal.signal", lambda sig, handler: registered.setdefault(sig, handler))
+
+    daemon._setup_signal_handlers()
+    handler = next(iter(registered.values()))
+    handler(15, None)
+
+    assert daemon._running is False
+    assert shutdown_calls == ["set"]
+
+
 def test_server_mode_uses_latest_existing_state_db_when_excel_is_missing(
     monkeypatch,
     tmp_path,

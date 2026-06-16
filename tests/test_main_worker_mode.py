@@ -76,3 +76,29 @@ def test_main_stop_cleans_worker_pid_files(monkeypatch) -> None:
     main_module.main()
 
     assert calls == ["pid_cleanup", "stop_daemon"]
+
+
+def test_stop_daemon_subprocess_keeps_pid_file_when_posix_process_survives(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import main as main_module
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("12345", encoding="utf-8")
+    kill_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(main_module, "DAEMON_PID_FILE", str(pid_file))
+    monkeypatch.setattr(main_module.sys, "platform", "linux")
+    monkeypatch.setattr(main_module, "is_process_alive", lambda _pid: True)
+    monkeypatch.setattr(main_module.os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))
+    monkeypatch.setattr(main_module.os, "WNOHANG", 1, raising=False)
+    monkeypatch.setattr(main_module.os, "waitpid", lambda _pid, _options: (0, 0), raising=False)
+    monkeypatch.setattr(main_module.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+
+    main_module._stop_daemon_subprocess()
+
+    assert (12345, main_module.signal.SIGTERM) in kill_calls
+    assert (12345, main_module.signal.SIGKILL) in kill_calls
+    assert pid_file.exists()

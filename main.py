@@ -135,21 +135,39 @@ def _stop_daemon_subprocess() -> None:
     if not is_process_alive(pid):
         print("后台引擎: 未运行")
     else:
+        stopped = False
         try:
             if sys.platform == "win32":
                 if run_taskkill(pid):
                     print(f"后台引擎进程已终止 (PID: {pid})")
+                    stopped = True
                 else:
                     print(f"[警告] 无法终止后台引擎进程 (PID: {pid})")
             else:
                 os.kill(pid, signal.SIGTERM)
-                try:
-                    os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
-                print(f"后台引擎进程已终止 (PID: {pid})")
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if not is_process_alive(pid):
+                        stopped = True
+                        break
+                    time.sleep(0.2)
+                if not stopped:
+                    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                    os.kill(pid, sigkill)
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        if not is_process_alive(pid):
+                            stopped = True
+                            break
+                        time.sleep(0.2)
+                if stopped:
+                    print(f"后台引擎进程已终止 (PID: {pid})")
+                else:
+                    print(f"[警告] 无法终止后台引擎进程 (PID: {pid})")
         except (OSError, ProcessLookupError) as e:
             print(f"[警告] 终止后台引擎进程失败: {e}")
+        if not stopped:
+            return
     remove_pid_file(DAEMON_PID_FILE)
 
 

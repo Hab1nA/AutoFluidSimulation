@@ -369,16 +369,19 @@ impl DaemonManager {
         }
 
         if server_mode {
-            if !stop_sent_over_ipc {
-                match self.stop_server_daemon() {
-                    Ok(()) => {
-                        log_buffer.push_info("✅ 已向服务器发送 daemon 停止命令".to_string());
-                    }
-                    Err(e) => {
-                        log_buffer.push_info(format!("❌ 停止服务器 daemon 失败: {}", e));
-                        state.connected = ipc.is_connected();
-                        return false;
-                    }
+            match self.stop_server_daemon() {
+                Ok(()) => {
+                    let message = if stop_sent_over_ipc {
+                        "✅ 已确认服务器 daemon 停止命令完成"
+                    } else {
+                        "✅ 已向服务器发送 daemon 停止命令"
+                    };
+                    log_buffer.push_info(message.to_string());
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ 停止服务器 daemon 失败: {}", e));
+                    state.connected = ipc.is_connected();
+                    return false;
                 }
             }
             state.connected = false;
@@ -849,6 +852,8 @@ fn shell_single_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::ipc::client::IpcClient;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn unique_temp_project_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1322,6 +1327,67 @@ mod tests {
             .stop(project_dir.to_str().expect("utf8 temp path"))
             .expect("server stop should succeed");
 
+        let marker_text = fs::read_to_string(&marker).expect("read marker");
+        assert_eq!(marker_text.trim(), "stop");
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn stop_with_ipc_still_runs_server_stop_after_successful_full_quit() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let marker = project_dir.join("ssh-stop-after-ipc-marker.txt");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "stop");
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD", "echo stop");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ipc");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept ipc client");
+            let mut buf = [0_u8; 1024];
+            let handshake_bytes = stream.read(&mut buf).expect("read handshake");
+            assert!(handshake_bytes > 0, "connect should send handshake");
+            let _ = stream.write_all(
+                br#"{"status":"ok","data":{"engine_status":"stopped"},"message":"","request_id":"test"}"#,
+            );
+            let _ = stream.write_all(b"\n");
+            let full_quit_bytes = stream.read(&mut buf).expect("read full_quit");
+            assert!(full_quit_bytes > 0, "stop should send full_quit");
+            let _ = stream.write_all(
+                br#"{"status":"ok","data":{},"message":"daemon stopping","request_id":"test"}"#,
+            );
+            let _ = stream.write_all(b"\n");
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(port));
+        rt.block_on(ipc.connect()).expect("connect test ipc");
+        let mut state = AppState::new();
+        state.connected = true;
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = DaemonManager::new();
+
+        let stopped = daemon.stop_with_ipc(
+            &mut ipc,
+            &rt,
+            &mut state,
+            &mut log_buffer,
+            project_dir.to_str().expect("utf8 temp path"),
+        );
+
+        assert!(stopped);
+        server.join().expect("server thread");
         let marker_text = fs::read_to_string(&marker).expect("read marker");
         assert_eq!(marker_text.trim(), "stop");
 
