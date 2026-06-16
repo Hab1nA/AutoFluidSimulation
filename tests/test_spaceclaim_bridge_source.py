@@ -78,7 +78,16 @@ def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
 
     assert "NormalizePathEnvironmentVariables" in source
     assert source.count("NormalizePathEnvironmentVariables(psi);") >= 2
-    assert 'psi.EnvironmentVariables.Remove("PATH")' in source
+    normalize_start = source.index("private static void NormalizePathEnvironmentVariables")
+    normalize_block = source[normalize_start:source.index("private static int? TryReturnSuccessIfScdocExists", normalize_start)]
+    current_env_call = normalize_block.index("NormalizeCurrentProcessPathEnvironment();")
+    child_env_enum = normalize_block.index("psi.EnvironmentVariables.Keys")
+    assert current_env_call < child_env_enum
+    assert 'Environment.SetEnvironmentVariable("PATH", null)' in source
+    assert 'Environment.SetEnvironmentVariable("Path", pathValue)' in source
+    assert 'pathKeys.Add(key);' in source
+    assert "pathKeySet" not in source
+    assert "foreach (string key in pathKeys)" in source
 
 
 def test_persistent_quit_exits_spaceclaim() -> None:

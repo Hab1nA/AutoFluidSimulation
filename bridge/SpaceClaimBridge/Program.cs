@@ -405,27 +405,46 @@ namespace AutoFluidSimulation.Bridge
 
         private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
         {
+            NormalizeCurrentProcessPathEnvironment();
+
             string? pathValue = null;
-            if (psi.EnvironmentVariables.ContainsKey("Path"))
+            var pathKeys = new List<string>();
+            foreach (string key in psi.EnvironmentVariables.Keys)
             {
-                pathValue = psi.EnvironmentVariables["Path"];
-            }
-            else if (psi.EnvironmentVariables.ContainsKey("PATH"))
-            {
-                pathValue = psi.EnvironmentVariables["PATH"];
+                if (string.Equals(key, "Path", StringComparison.OrdinalIgnoreCase))
+                {
+                    pathKeys.Add(key);
+                    if (pathValue == null || string.Equals(key, "Path", StringComparison.Ordinal))
+                    {
+                        pathValue = psi.EnvironmentVariables[key];
+                    }
+                }
             }
 
-            if (psi.EnvironmentVariables.ContainsKey("PATH"))
+            foreach (string key in pathKeys)
             {
-                psi.EnvironmentVariables.Remove("PATH");
+                psi.EnvironmentVariables.Remove(key);
             }
-            if (psi.EnvironmentVariables.ContainsKey("Path"))
-            {
-                psi.EnvironmentVariables.Remove("Path");
-            }
+
             if (pathValue != null)
             {
                 psi.EnvironmentVariables["Path"] = pathValue;
+            }
+        }
+
+        private static void NormalizeCurrentProcessPathEnvironment()
+        {
+            string? pathValue = Environment.GetEnvironmentVariable("Path");
+            if (pathValue == null)
+            {
+                pathValue = Environment.GetEnvironmentVariable("PATH");
+            }
+
+            Environment.SetEnvironmentVariable("PATH", null);
+            Environment.SetEnvironmentVariable("Path", null);
+            if (pathValue != null)
+            {
+                Environment.SetEnvironmentVariable("Path", pathValue);
             }
         }
 
