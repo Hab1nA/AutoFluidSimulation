@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::ipc::client::IpcClient;
 use crate::state::LogBuffer;
-use crate::utils::run_command_with_timeout;
+use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout};
 
 /// 进程终止结果
 enum StopResult {
@@ -992,68 +992,5 @@ mod tests {
             make_executable(&path);
             path
         }
-    }
-}
-
-fn is_pid_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        const STILL_ACTIVE_EXIT_CODE: u32 = 259;
-        unsafe {
-            let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle.is_null() {
-                return false;
-            }
-            let mut exit_code = 0;
-            if GetExitCodeProcess(handle, &mut exit_code) == 0 {
-                CloseHandle(handle);
-                return false;
-            }
-            CloseHandle(handle);
-            exit_code == STILL_ACTIVE_EXIT_CODE
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-}
-
-fn kill_process_tree(pid: u32) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 }

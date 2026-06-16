@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
-use crate::utils::run_command_with_timeout;
+use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout};
 
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
@@ -123,6 +123,7 @@ impl DaemonManager {
             self.process = None;
             log::info!("[Daemon] server 模式下通过 SSH 兜底停止远端 daemon");
             self.stop_server_daemon()?;
+            Self::cleanup_server_ipc_tunnel(project_dir)?;
             return Ok(());
         }
 
@@ -149,6 +150,66 @@ impl DaemonManager {
             Err(format!(
                 "等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)"
             ))
+        }
+    }
+
+    fn server_ipc_tunnel_pid_file(project_dir: &str) -> PathBuf {
+        PathBuf::from(project_dir)
+            .join("data")
+            .join("server_ipc_tunnel.pid")
+    }
+
+    fn cleanup_server_ipc_tunnel(project_dir: &str) -> Result<(), String> {
+        let pid_file = Self::server_ipc_tunnel_pid_file(project_dir);
+        let raw_pid = match fs::read_to_string(&pid_file) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log::debug!("[Daemon] 服务器 IPC 隧道 PID 文件不存在，无需清理");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(format!(
+                    "读取服务器 IPC 隧道 PID 文件失败: {}, error={}",
+                    pid_file.display(),
+                    e
+                ));
+            }
+        };
+
+        let pid = raw_pid.trim().parse::<u32>().map_err(|e| {
+            format!(
+                "服务器 IPC 隧道 PID 文件内容无效: {}, error={}",
+                pid_file.display(),
+                e
+            )
+        })?;
+
+        if pid == 0 {
+            let _ = fs::remove_file(&pid_file);
+            return Ok(());
+        }
+
+        let stopped = kill_process_tree(pid) || !is_pid_alive(pid);
+        if stopped {
+            match fs::remove_file(&pid_file) {
+                Ok(()) => {
+                    log::info!(
+                        "[Daemon] 已清理服务器 IPC 隧道 PID 文件: {}",
+                        pid_file.display()
+                    );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(format!(
+                        "清理服务器 IPC 隧道 PID 文件失败: {}, error={}",
+                        pid_file.display(),
+                        e
+                    ));
+                }
+            }
+            Ok(())
+        } else {
+            Err(format!("停止服务器 IPC 隧道超时或失败: pid={pid}"))
         }
     }
 
@@ -369,7 +430,7 @@ impl DaemonManager {
         }
 
         if server_mode {
-            match self.stop_server_daemon() {
+            match self.stop(project_dir) {
                 Ok(()) => {
                     let message = if stop_sent_over_ipc {
                         "✅ 已确认服务器 daemon 停止命令完成"
@@ -1338,6 +1399,45 @@ mod tests {
     }
 
     #[test]
+    fn stop_cleans_server_ipc_tunnel_pid_in_server_mode() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let marker = project_dir.join("ssh-stop-with-tunnel-marker.txt");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "stop");
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD", "echo stop");
+
+        let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
+        fs::create_dir_all(pid_file.parent().expect("pid parent")).expect("create data dir");
+        let mut child = spawn_live_pid_process(&project_dir);
+        fs::write(&pid_file, child.id().to_string()).expect("write pid");
+
+        let mut daemon = DaemonManager::new();
+        daemon
+            .stop(project_dir.to_str().expect("utf8 temp path"))
+            .expect("server stop should succeed");
+
+        let exited = child.try_wait().expect("query child status").is_some();
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            exited,
+            "server stop should terminate the server IPC tunnel PID"
+        );
+        assert!(!pid_file.exists(), "server IPC tunnel PID file removed");
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn stop_with_ipc_still_runs_server_stop_after_successful_full_quit() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
@@ -1347,6 +1447,10 @@ mod tests {
         std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD", "echo stop");
+        let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
+        fs::create_dir_all(pid_file.parent().expect("pid parent")).expect("create data dir");
+        let mut child = spawn_live_pid_process(&project_dir);
+        fs::write(&pid_file, child.id().to_string()).expect("write pid");
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ipc");
         let port = listener.local_addr().expect("listener addr").port();
@@ -1390,6 +1494,16 @@ mod tests {
         server.join().expect("server thread");
         let marker_text = fs::read_to_string(&marker).expect("read marker");
         assert_eq!(marker_text.trim(), "stop");
+        let exited = child.try_wait().expect("query child status").is_some();
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            exited,
+            "server IPC stop path should terminate the tunnel PID"
+        );
+        assert!(!pid_file.exists(), "server IPC tunnel PID file removed");
 
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
@@ -1475,6 +1589,38 @@ mod tests {
             permissions.set_mode(0o755);
             fs::set_permissions(&path, permissions).expect("chmod fake background holder");
             path
+        }
+    }
+
+    fn spawn_live_pid_process(project_dir: &std::path::Path) -> Child {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_live_pid.cmd");
+            fs::write(&path, "@echo off\r\nping 127.0.0.1 -n 30 >nul\r\n")
+                .expect("write fake live pid cmd");
+            Command::new("cmd")
+                .arg("/C")
+                .arg(&path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn live pid process")
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_live_pid.sh");
+            fs::write(&path, "#!/bin/sh\nsleep 30\n").expect("write fake live pid sh");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake live metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake live");
+            Command::new(&path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn live pid process")
         }
     }
 
