@@ -1165,8 +1165,6 @@ class PipelineDaemon:
 
     def handle_get_engine_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取引擎状态。"""
-        if self.state is None:
-            raise RuntimeError("StateManager 未初始化，请先调用 start()")
         started_at = getattr(self, "_started_at_epoch", None)
         uptime_seconds = None
         started_at_display = None
@@ -1176,6 +1174,18 @@ class PipelineDaemon:
                 "%Y-%m-%d %H:%M:%S",
                 time.localtime(started_at),
             )
+        if self.state is None:
+            status = {
+                "engine_status": "stopped",
+                "sw_macro_started": False,
+                "barrier_passed": False,
+                "pipeline_started": self._pipeline_ever_started,
+                "daemon_started_at": started_at,
+                "daemon_started_at_display": started_at_display,
+                "daemon_uptime_seconds": uptime_seconds,
+                "config_load_error": getattr(self, "_config_load_error", None),
+            }
+            return True, status, ""
         status = {
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
@@ -1275,8 +1285,6 @@ class PipelineDaemon:
 
     def handle_get_dashboard(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """批量获取 TUI 仪表盘所需的状态、引擎信息和日志增量。"""
-        if self.state is None:
-            raise RuntimeError("StateManager 未初始化，请先调用 start()")
         params = params or {}
         log_params = {
             "since_id": params.get("since_log_id", params.get("since_id", 0)),
@@ -1287,7 +1295,10 @@ class PipelineDaemon:
             "include_lifecycle": bool(params.get("include_lifecycle", False)),
             "include_config_scoped": bool(params.get("include_config_scoped", False)),
         }
-        _, statuses, _ = self.handle_get_all_status(None)
+        if self.state is None:
+            statuses = {}
+        else:
+            _, statuses, _ = self.handle_get_all_status(None)
         _, engine, _ = self.handle_get_engine_status(None)
         _, logs, _ = self.handle_get_log_entries(log_params)
         return True, {

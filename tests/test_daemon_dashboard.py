@@ -134,6 +134,58 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
     }]
 
 
+def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):
+    handler = _LogHandler()
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
+    monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "default"}])
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = None
+    daemon.runner = None
+    daemon.local_worker_registry = None
+    daemon._pipeline_ever_started = False
+    daemon._started_at_epoch = 2_000.0
+    daemon._config_load_error = "ServerMode 等待 LocalWorker 提供构型数据"
+    daemon._config_warnings = []
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 2_030.0)
+    monkeypatch.setattr(
+        daemon_module.time,
+        "strftime",
+        lambda fmt, value: "1970-01-01 00:33:20",
+    )
+    monkeypatch.setattr(daemon_module.time, "localtime", lambda value: value)
+
+    ok, data, message = daemon.handle_get_dashboard({
+        "since_log_id": 3,
+        "log_limit": 10,
+    })
+
+    assert ok is True
+    assert message == ""
+    assert data["statuses"] == {}
+    assert data["engine"] == {
+        "engine_status": "stopped",
+        "sw_macro_started": False,
+        "barrier_passed": False,
+        "pipeline_started": False,
+        "daemon_started_at": 2_000.0,
+        "daemon_started_at_display": "1970-01-01 00:33:20",
+        "daemon_uptime_seconds": 30,
+        "config_load_error": "ServerMode 等待 LocalWorker 提供构型数据",
+    }
+    assert data["health"]["local_worker_online"] is False
+    assert data["health"]["server_to_workstation_ssh"] == "unknown"
+    assert data["logs"]["latest_id"] == 12
+    assert handler.calls == [{
+        "since_id": 3,
+        "limit": 10,
+        "level_filter": None,
+        "source_filter": None,
+        "include_polling": False,
+        "include_lifecycle": False,
+        "include_config_scoped": False,
+    }]
+
+
 def test_dashboard_health_reports_server_to_local_from_online_worker(monkeypatch):
     from engine.local_worker_registry import LocalWorkerRegistry
 
