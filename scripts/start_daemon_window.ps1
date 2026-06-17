@@ -27,7 +27,7 @@ if ($Check) {
 }
 
 if (-not $LegacyLocalDaemon) {
-    Write-Error "Local daemon startup is disabled. The daemon now runs on the server. Use start_autofluid.bat to launch LocalWorker and Client, or pass -LegacyLocalDaemon explicitly for local development only."
+    Write-Error "Local daemon startup is disabled. The daemon now runs on the server. Use scripts/start_autofluid_preflight.ps1 to launch LocalWorker and Client, or pass -LegacyLocalDaemon explicitly for local development only."
     exit 2
 }
 

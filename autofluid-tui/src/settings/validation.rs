@@ -232,6 +232,13 @@ fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError
             severity: Severity::Warning,
         });
     }
+    if config.spaceclaim.sc_max_slots == 0 {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_max_slots".to_string(),
+            message: "槽位数必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
 }
 
 fn validate_meshing(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {

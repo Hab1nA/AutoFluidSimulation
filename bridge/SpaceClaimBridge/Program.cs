@@ -198,6 +198,14 @@ namespace AutoFluidSimulation.Bridge
                 }
             }
 
+            if (!string.IsNullOrEmpty(options.ScdocFileName) &&
+                Path.GetFileName(options.ScdocFileName) != options.ScdocFileName)
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] 参数 --scdocname 不能包含路径");
+                PrintUsage();
+                return null;
+            }
+
             return options;
         }
 
@@ -942,10 +950,6 @@ namespace AutoFluidSimulation.Bridge
         /// <returns>SCDOC 文件路径</returns>
         private static string GetScdocFilePath(BridgeOptions opts)
         {
-            if (Path.GetFileName(opts.ScdocFileName) != opts.ScdocFileName)
-            {
-                throw new ArgumentException("SCDOC 输出文件名不能包含路径");
-            }
             return Path.Combine(
                 opts.ScdocDir!,
                 opts.ScdocFileName!);

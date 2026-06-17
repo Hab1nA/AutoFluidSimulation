@@ -2,7 +2,7 @@
 
 > 文档日期：2026-06-10  
 > 适用范围：当前已落地的 daemon 拆分实现  
-> 关联文档：`docs/daemon-split-plan.md`、`docs/architecture-refactoring-plan.md`
+> 关联文档：`docs/architecture-refactoring-plan.md`
 
 本文描述当前代码与实际部署中已经生效的 daemon 工作机制。重点是本次拆分任务涉及的部分：Linux 服务器上的 daemon、Windows 本地 PC 上的 `LocalWorker`、服务器到工作站的 SSH 连接，以及远程 Meshing/Solver 任务的恢复与清理逻辑。
 

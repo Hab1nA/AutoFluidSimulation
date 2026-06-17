@@ -1,3 +1,5 @@
+import ipc
+
 from ipc import protocol
 
 
@@ -111,3 +113,13 @@ def test_ipc_command_constants_complete():
         f"以下 IPC 命令常量在 ipc/protocol.py 中存在但预期集合中缺失: {sorted(extra)}。"
         f"如果这些是新命令，请同时更新 Rust 侧和此测试的 _EXPECTED_COMMANDS。"
     )
+
+
+def test_package_re_exports_all_ipc_command_constants():
+    missing = [
+        name
+        for name in dir(protocol)
+        if name.startswith("CMD_") and not hasattr(ipc, name)
+    ]
+
+    assert not missing

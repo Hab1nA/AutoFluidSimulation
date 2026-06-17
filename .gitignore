@@ -73,10 +73,12 @@ start_codewhale.bat
 Thumbs.db
 Desktop.ini
 ehthumbs.db
+*.lnk
 
 # ============================================================================
 # C# / MSBuild 编译产物
 # ============================================================================
+bridge/SpaceClaimBridge.exe
 bridge/SpaceClaimBridge/bin/
 bridge/SpaceClaimBridge/obj/
 bridge/SpaceClaimBridge/*.csproj.lscache

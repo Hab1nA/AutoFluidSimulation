@@ -19,8 +19,6 @@ enum StopResult {
     AlreadyExited,
     /// 成功终止
     Terminated,
-    /// 等待退出超时
-    Timeout,
     /// 终止过程中出错
     Error(String),
 }
@@ -268,7 +266,7 @@ impl WorkerManager {
 
     /// 终止本地 LocalWorker 子进程。
     fn stop_local_worker(&mut self, log_buffer: &mut LogBuffer) -> bool {
-        let result = Self::stop_child_process(&mut self.worker_process, "本地 Worker", 5);
+        let result = Self::stop_child_process(&mut self.worker_process, "本地 Worker");
         match result {
             StopResult::NoProcess => true,
             StopResult::AlreadyExited => {
@@ -277,10 +275,6 @@ impl WorkerManager {
             }
             StopResult::Terminated => {
                 log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
-                true
-            }
-            StopResult::Timeout => {
-                log_buffer.push_info("⚠️ 等待本地 Worker 退出超时".to_string());
                 true
             }
             StopResult::Error(e) => {
@@ -396,7 +390,7 @@ impl WorkerManager {
     }
 
     fn stop_tunnel_process(proc_slot: &mut Option<Child>, log_buffer: &mut LogBuffer) -> bool {
-        let result = Self::stop_child_process(proc_slot, "SSH 隧道", 5);
+        let result = Self::stop_child_process(proc_slot, "SSH 隧道");
         match result {
             StopResult::NoProcess => true,
             StopResult::AlreadyExited => {
@@ -405,10 +399,6 @@ impl WorkerManager {
             }
             StopResult::Terminated => {
                 log_buffer.push_info("✅ SSH 隧道已终止".to_string());
-                true
-            }
-            StopResult::Timeout => {
-                log_buffer.push_info("⚠️ 等待 SSH 隧道退出超时".to_string());
                 true
             }
             StopResult::Error(e) => {
@@ -420,13 +410,8 @@ impl WorkerManager {
 
     /// 通用进程终止辅助方法。
     ///
-    /// 先检查进程是否已退出，若仍在运行则发送 kill 信号并轮询等待。
-    /// 使用 `try_wait` 轮询替代 `wait()`，避免阻塞主循环。
-    fn stop_child_process(
-        proc_slot: &mut Option<Child>,
-        name: &str,
-        timeout_secs: u64,
-    ) -> StopResult {
+    /// 先检查进程是否已退出，若仍在运行则发送 kill 信号并立即释放管理状态。
+    fn stop_child_process(proc_slot: &mut Option<Child>, name: &str) -> StopResult {
         let Some(ref mut proc) = proc_slot else {
             return StopResult::NoProcess;
         };
@@ -443,28 +428,13 @@ impl WorkerManager {
                     *proc_slot = None;
                     return StopResult::Error(e.to_string());
                 }
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-                while std::time::Instant::now() < deadline {
-                    match proc.try_wait() {
-                        Ok(Some(status)) => {
-                            log::info!("{} 已终止: {}", name, status);
-                            *proc_slot = None;
-                            return StopResult::Terminated;
-                        }
-                        Ok(None) => {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                        Err(e) => {
-                            log::warn!("检查 {} 退出状态失败: {}", name, e);
-                            *proc_slot = None;
-                            return StopResult::Error(e.to_string());
-                        }
-                    }
+                match proc.try_wait() {
+                    Ok(Some(status)) => log::info!("{} 已终止: {}", name, status),
+                    Ok(None) => log::info!("{} 已发送终止信号", name),
+                    Err(e) => log::warn!("检查 {} 退出状态失败: {}", name, e),
                 }
-                log::warn!("等待 {} 退出超时 ({}s)", name, timeout_secs);
                 *proc_slot = None;
-                StopResult::Timeout
+                StopResult::Terminated
             }
             Err(e) => {
                 log::warn!("检查 {} 状态失败: {}", name, e);
@@ -824,6 +794,22 @@ mod tests {
                 && message.contains("reverse_tunnel")
                 && message.contains("timed out")
         }));
+    }
+
+    #[test]
+    fn stop_child_process_has_no_blocking_wait_loop() {
+        let source = include_str!("worker_mgr.rs");
+        let fn_start = source
+            .find("fn stop_child_process(")
+            .expect("stop_child_process should exist");
+        let rest = &source[fn_start..];
+        let fn_end = rest
+            .find("\n    fn pid_file_for")
+            .expect("next helper should mark function end");
+        let function_body = &rest[..fn_end];
+
+        assert!(!function_body.contains("while "));
+        assert!(!function_body.contains("std::thread::sleep"));
     }
 
     #[test]

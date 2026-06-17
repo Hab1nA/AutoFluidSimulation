@@ -111,6 +111,9 @@ pub struct SpaceClaimConfig {
     pub sc_process_appear_timeout: u64,
     pub sc_gui_ready_timeout: u64,
     pub sc_gui_stable_delay: u64,
+    pub sc_max_slots: u64,
+    pub sc_persistent_enabled: bool,
+    pub sc_oneshot_fallback_enabled: bool,
 }
 
 impl Default for SpaceClaimConfig {
@@ -120,7 +123,10 @@ impl Default for SpaceClaimConfig {
             sc_poll_interval: 2.0,
             sc_process_appear_timeout: 120,
             sc_gui_ready_timeout: 30,
-            sc_gui_stable_delay: 15,
+            sc_gui_stable_delay: 5,
+            sc_max_slots: 1,
+            sc_persistent_enabled: true,
+            sc_oneshot_fallback_enabled: true,
         }
     }
 }
@@ -249,7 +255,7 @@ impl SettingCategory {
             SettingCategory::RemoteDirs => 10,
             SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 5,
-            SettingCategory::SpaceClaim => 5,
+            SettingCategory::SpaceClaim => 8,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
             SettingCategory::GlobalSettings => 7,
@@ -309,6 +315,9 @@ impl SettingCategory {
                 2 => "sc_process_appear_timeout",
                 3 => "sc_gui_ready_timeout",
                 4 => "sc_gui_stable_delay",
+                5 => "sc_max_slots",
+                6 => "sc_persistent_enabled",
+                7 => "sc_oneshot_fallback_enabled",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -388,6 +397,9 @@ impl SettingCategory {
                 2 => "进程出现等待(秒)",
                 3 => "窗口就绪超时(秒)",
                 4 => "窗口稳定等待(秒)",
+                5 => "常驻槽位数",
+                6 => "启用常驻Bridge",
+                7 => "常驻失败回退一次性Bridge",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -415,7 +427,8 @@ impl SettingCategory {
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=2)
+        (matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=2))
+            || (matches!(self, SettingCategory::SpaceClaim) && matches!(idx, 6..=7))
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
@@ -586,6 +599,9 @@ impl SettingsState {
                 2 => field_val!(self.config.spaceclaim, sc_process_appear_timeout),
                 3 => field_val!(self.config.spaceclaim, sc_gui_ready_timeout),
                 4 => field_val!(self.config.spaceclaim, sc_gui_stable_delay),
+                5 => field_val!(self.config.spaceclaim, sc_max_slots),
+                6 => field_val!(self.config.spaceclaim, sc_persistent_enabled),
+                7 => field_val!(self.config.spaceclaim, sc_oneshot_fallback_enabled),
                 _ => String::new(),
             },
             SettingCategory::Meshing => match idx {
@@ -702,6 +718,18 @@ impl SettingsState {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.spaceclaim.sc_gui_stable_delay = v;
                     }
+                }
+                5 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_max_slots = v;
+                    }
+                }
+                6 => {
+                    self.config.spaceclaim.sc_persistent_enabled = value == "true" || value == "是"
+                }
+                7 => {
+                    self.config.spaceclaim.sc_oneshot_fallback_enabled =
+                        value == "true" || value == "是"
                 }
                 _ => {}
             },
@@ -1015,6 +1043,48 @@ mod tests {
     }
 
     #[test]
+    fn spaceclaim_settings_expose_persistent_bridge_fields() {
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+
+        let field_names = (0..SettingCategory::SpaceClaim.field_count())
+            .map(|idx| SettingCategory::SpaceClaim.field_name(idx))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            field_names,
+            vec![
+                "sc_timeout",
+                "sc_poll_interval",
+                "sc_process_appear_timeout",
+                "sc_gui_ready_timeout",
+                "sc_gui_stable_delay",
+                "sc_max_slots",
+                "sc_persistent_enabled",
+                "sc_oneshot_fallback_enabled",
+            ]
+        );
+
+        assert!(SettingCategory::SpaceClaim.is_bool_field(6));
+        assert!(SettingCategory::SpaceClaim.is_bool_field(7));
+
+        let mut state = SettingsState::new();
+        state.config = SettingsConfig::default();
+        state.set_field_value(SettingCategory::SpaceClaim, 5, "2");
+        state.set_field_value(SettingCategory::SpaceClaim, 6, "false");
+        state.set_field_value(SettingCategory::SpaceClaim, 7, "false");
+
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 5), "2");
+        assert_eq!(
+            state.get_field_value(SettingCategory::SpaceClaim, 6),
+            "false"
+        );
+        assert_eq!(
+            state.get_field_value(SettingCategory::SpaceClaim, 7),
+            "false"
+        );
+    }
+
+    #[test]
     fn is_password_field_identifies_remote_connection_password() {
         // RemoteConnection.password is at idx 3
         assert!(SettingCategory::RemoteConnection.is_password_field(3));
@@ -1048,7 +1118,7 @@ mod tests {
         assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
-        assert_eq!(SettingCategory::SpaceClaim.field_count(), 5);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
         assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);

@@ -153,12 +153,22 @@ def test_bridge_scdoc_filename_is_argument_driven() -> None:
 
     assert "ScdocFileNamePattern" not in source
     assert "ScdocFileName" in source
-    assert "Path.GetFileName(opts.ScdocFileName)" in source
     assert re.search(
         r"Path\.Combine\(\s*opts\.ScdocDir!?,\s*opts\.ScdocFileName!?\s*\)",
         source,
         re.DOTALL,
     )
+
+
+def test_bridge_rejects_scdoc_path_as_invalid_args() -> None:
+    source = _source()
+
+    parse_start = source.index("private static BridgeOptions? ParseArguments")
+    parse_end = source.index("private static int Execute", parse_start)
+    parse_block = source[parse_start:parse_end]
+
+    assert "Path.GetFileName(options.ScdocFileName) != options.ScdocFileName" in parse_block
+    assert "return null;" in parse_block
 
 
 def test_process_scan_disposes_processes_on_failed_metadata_access() -> None:
