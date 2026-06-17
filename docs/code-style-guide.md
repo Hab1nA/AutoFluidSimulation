@@ -1,6 +1,7 @@
 # AutoFluid 代码写作规范
 
 > 本文档总结了本项目的代码命名和风格约定，适用于所有 Python 和 Rust 代码的编写与审查。
+> 最后更新：2026-06-17
 
 ---
 
@@ -458,5 +459,10 @@ STATUS_ERROR      = "Error"       # 出错
 | `[local_paths]` | `LOCAL_PATHS` | `LocalPaths` | 本地文件/程序路径 |
 | `[remote_config]` | `REMOTE_CONFIG` | `RemoteConfig` | 远程工作站信息 |
 | `[step_file_patterns]` | `STEP_FILE_PATTERNS` | `StepFilePatterns` | 文件名模板 |
-| `[engine_config]` | `ENGINE_CONFIG` | `EngineConfig` | 引擎行为参数 |
-| `[operation_timeouts]` | `OPERATION_TIMEOUTS` | `OperationTimeouts` | 操作超时/轮询参数 |
+| `[solidworks]` | `ENGINE_CONFIG`（合并） | `EngineConfig` | SW 引擎行为参数 |
+| `[spaceclaim]` | `ENGINE_CONFIG`（合并） | `EngineConfig` | SC 引擎行为参数 |
+| `[meshing]` | `ENGINE_CONFIG`（合并） | `EngineConfig` | 网格引擎行为参数 |
+| `[solver]` | `ENGINE_CONFIG`（合并） | `EngineConfig` | 求解引擎行为参数 |
+| `[global_settings]` | `ENGINE_CONFIG`（合并） | `EngineConfig` | 全局引擎行为参数 |
+
+> **向后兼容**：Python 端仍支持旧的 `[engine_config]` / `[operation_timeouts]` 顶级节格式，但当前默认 TOML 文件和 Rust TUI Settings 使用细分节名。详见 4.1 节。

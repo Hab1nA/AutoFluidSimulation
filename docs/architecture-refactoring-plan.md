@@ -1,9 +1,9 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.3  
+> 文档版本：v1.4  
 > 创建日期：2026-05-09  
-> 最后更新：2026-06-14  
-> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.1)
+> 最后更新：2026-06-17  
+> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.2)
 
 ---
 
@@ -93,9 +93,9 @@ SW → SC → Transfer → Meshing → Solver
 | 阶段 | 执行位置 | 技术手段 | 并发模型 |
 |------|---------|---------|---------|
 | SW | 本地 PC | win32com COM API | 批量串行（一次宏导出所有构型） |
-| SC | 本地 PC | C# SpaceClaimBridge.exe 进程检测模式（SCProcessPool 3 槽位池） | 流水线并发（3 Worker + 等待队列） |
-| Transfer | 本地 PC → 工作站 | paramiko SFTP | 流水线并发（3 Worker） |
-| Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（3 Worker）+ MeshingMonitor 串行管理 |
+| SC | 本地 PC | C# SpaceClaimBridge.exe 进程检测模式（SCProcessPool 1 槽位常驻池，可通过 sc_max_slots 配置） | 流水线并发（常驻进程池） |
+| Transfer | 本地 PC → 工作站 | paramiko SFTP | 流水线并发（Worker 线程池） |
+| Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（Worker 线程池）+ MeshingMonitor 串行管理 |
 | Solver | 远程工作站 | SSH + PowerShell Start-Process | 全局屏障后并行启动 |
 
 ### 2.3 关键代码模块清单
@@ -109,7 +109,7 @@ SW → SC → Transfer → Meshing → Solver
 | Scheduler 子包 | `engine/scheduler/` | ~3820 | `barrier.py` 屏障协调、`sw_phase.py` SW 阶段、`worker_pool.py` 3 工作线程池、`meshing_monitor.py` 网格监控、`retry.py` 重试管理、`utils.py` 辅助函数 |
 | TaskRunner | `engine/task_runner.py` | ~420 | 各阶段执行逻辑编排（委托 executor 模块） |
 | StateManager | `engine/state_manager.py` | ~926 | SQLite WAL 持久化状态（configs/steps/engine_state 表） |
-| SCProcessPool | `engine/sc_process_pool.py` | ~782 | 3 槽位常驻进程池（文件协议 IPC，消除 SC 启动开销） |
+| SCProcessPool | `engine/sc_process_pool.py` | ~982 | 1 槽位常驻进程池（文件协议 IPC，消除 SC 启动开销，可通过 sc_max_slots 扩展） |
 | StepFileMonitor | `engine/file_monitor.py` | ~429 | FileStableDetector 文件写入完成检测（多采样稳定性判定） |
 | Config | `engine/config.py` | ~516 | TOML 配置加载 + 环境变量覆盖 + TypedDict 定义 |
 | ConfigFingerprint | `engine/config_fingerprint.py` | ~31 | 配置指纹 MD5 计算（数据库分片，不同构型组合自动切换 DB） |
@@ -147,7 +147,7 @@ SW → SC → Transfer → Meshing → Solver
 | Command Handler | `autofluid-tui/src/event_handler/command.rs` | ~636 | 命令解析与执行 |
 | KeyHandler | `autofluid-tui/src/event_handler/key_handler.rs` | ~547 | 键盘快捷键处理 |
 | MouseHandler | `autofluid-tui/src/event_handler/mouse.rs` | ~1397 | 鼠标交互（悬停、点击、拖拽、滚轮） |
-| Settings | `autofluid-tui/src/settings/mod.rs` | ~1121 | 7 分类 48 字段设置管理 |
+| Settings | `autofluid-tui/src/settings/mod.rs` | ~1121 | 9 分类 48 字段设置管理 |
 | SettingsUI | `autofluid-tui/src/settings/settings_ui.rs` | ~453 | 设置页面渲染 |
 | SettingsIO | `autofluid-tui/src/settings/config_io.rs` | ~135 | TOML 配置读写 |
 | SettingsValidation | `autofluid-tui/src/settings/validation.rs` | ~486 | 字段校验 |

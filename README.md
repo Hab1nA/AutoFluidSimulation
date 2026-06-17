@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.8.1** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.8.2** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -13,10 +13,10 @@ AutoFluid 是一个**全自动 CFD 仿真流水线控制系统**，用于批量�
 - **全自动五阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解全流程
 - **C/S 分离架构**: Python 后台守护进程 (Daemon) + Rust TUI 终端界面，独立部署、独立重启
 - **直接 COM API**: 通过 `win32com` 直接调用 SolidWorks COM 接口导出 STEP，无需宏文件
-- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（9 分类 48 字段在线编辑）
+- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（9 分类 47 字段在线编辑）
 - **SQLite WAL 持久化**: 状态实时落盘，支持断点续传，Daemon 重启不丢失进度
 - **DAG 异步调度**: Producer-Consumer 队列 + 全局 Barrier，边导出边处理的并行流水线
-- **SCProcessPool**: 3 槽位进程池管理 SpaceClaim 并发调用，含等待队列与断点续传
+- **SCProcessPool**: 1 槽位常驻进程池管理 SpaceClaim 并发调用（可通过 sc_max_slots 扩展），含等待队列与断点续传
 - **C# Bridge**: SpaceClaim 通过 C# `SpaceClaimBridge.exe` 进程检测模式调用，三相 GUI 就绪检测
 - **远程编排**: SSH + PowerShell `Start-Process` 在远程工作站启动独立后台进程
 - **优雅关闭**: `quit full` 安全退出，自动断开 SSH、停止监控、清理残留进程
@@ -39,7 +39,7 @@ graph TB
         SM[StateManager<br/>SQLite WAL]
         SCH[PipelineScheduler<br/>DAG + Barrier]
         TR[TaskRunner]
-        SCPOOL[SCProcessPool<br/>3 槽位并发池]
+        SCPOOL[SCProcessPool<br/>1 槽位常驻池]
         FM[StepFileMonitor<br/>文件大小稳定检测]
         LWR[LocalWorkerRegistry<br/>Worker 注册与心跳]
         LWA[LocalWorkerAdapter<br/>Daemon 侧 Worker 代理]
@@ -84,7 +84,7 @@ graph TB
 | **PipelineScheduler** | DAG 调度、Barrier 控制、SW 重试编排         | Producer-Consumer 队列           |
 | **StateManager**      | 持久化状态，并发读写，增量同步              | SQLite WAL                       |
 | **TaskRunner**        | 各阶段执行（SW/SC/Transfer/Meshing/Solver） | win32com / paramiko / subprocess |
-| **SCProcessPool**     | SpaceClaim 3 槽位并发池 + 等待队列          | C# Bridge 进程检测模式           |
+| **SCProcessPool**     | SpaceClaim 1 槽位常驻池 + 等待队列          | C# Bridge 进程检测模式           |
 | **StepFileMonitor**   | STEP 文件稳定性检测                         | 轮询 + 历史采样                  |
 | **LocalWorkerRegistry** | Worker 注册、心跳、任务队列调度           | 内存注册表 + 线程锁              |
 | **LocalWorkerAdapter** | Daemon 侧 Worker 代理，投递 SW/SC 任务    | enqueue/wait 模式                |
@@ -112,7 +112,7 @@ SW 导出 → SC 转换 → Transfer 传输 → Meshing 网格 → Solver 求解
 ### 调度策略
 
 1. **SW 阶段**: 串行遍历所有构型，导出同时文件监控器并行推送下游
-2. **SC → Transfer → Meshing**: 3 个 Worker 线程并发处理
+2. **SC → Transfer → Meshing**: SC + Transfer 各 1 个 Worker 线程组成流水线
 3. **全局 Barrier**: 所有 Meshing 完成后统一解锁 Solver
 4. **Solver 阶段**: 所有构型并行启动求解
 
@@ -141,6 +141,10 @@ AutoFluidSimulation/
 │   ├── config.py            # 配置中心（路径、SSH、引擎参数）
 │   ├── config_fingerprint.py # 配置指纹（数据库分片）
 │   ├── daemon.py            # PipelineDaemon 守护进程
+│   ├── config_assigner.py    # ConfigAssigner 构型→工作站分配
+│   ├── local_worker.py       # LocalWorker 本地 Worker 客户端
+│   ├── local_worker_registry.py # LocalWorkerRegistry 注册与心跳
+│   ├── local_worker_adapter.py  # LocalWorkerAdapter Daemon 侧代理
 │   ├── scheduler/           # PipelineScheduler DAG 调度器（子包）
 │   │   ├── main.py          # 调度主逻辑
 │   │   ├── barrier.py       # 全局屏障协调器
@@ -185,7 +189,8 @@ AutoFluidSimulation/
 ├── autofluid-tui/           # Rust TUI 前端
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs          # 异步主循环
+│       ├── main.rs          # 二进制入口
+│       ├── lib.rs           # 库入口（模块声明 + run_tui）
 │       ├── daemon_mgr.rs    # Daemon 进程管理
 │       ├── worker_mgr.rs    # Worker 进程管理（本地 Worker + SSH 隧道）
 │       ├── event_handler.rs # 事件处理模块入口
@@ -194,7 +199,7 @@ AutoFluidSimulation/
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
 │       ├── state.rs         # 应用状态模块入口
 │       ├── state/           # 应用状态（app_state / filter / log_buffer）
-│       ├── settings/        # 设置页面（9 分类 48 字段）
+│       ├── settings/        # 设置页面（9 分类 47 字段）
 │       ├── text_buffer.rs   # 文本缓冲区
 │       ├── theme.rs         # 主题配色
 │       ├── ui.rs            # UI 渲染模块入口
@@ -215,15 +220,19 @@ AutoFluidSimulation/
 │   ├── start_workstation_reverse_tunnel.ps1 # 工作站反向 SSH 隧道
 │   └── deploy_linux_server.sh # Linux 服务器部署脚本
 │
+├── tools/                   # 服务器 CLI 工具
+│   └── autofluid_cli.py     # 服务器端命令行管理工具
+│
 ├── docs/                    # 项目文档
 │   ├── code-style-guide.md  # 代码规范
 │   ├── architecture-refactoring-plan.md # 远期架构改进计划
 │   ├── current-daemon-architecture.md # 当前 Daemon 架构说明
-│   ├── pause-start-reset-clean-precheck-issues.md # 暂停/启动/重置问题记录
 │   ├── solver-remaining-time-design.md # 求解器剩余时间估算
-│   └── Fluent仿真数据采集与五项研究指标计算报告.docx # 仿真数据采集报告
+│   ├── test-failure-investigation-2026-06-17.md # 测试失败分析
+│   ├── workstation-tunnel-recovery-plan.md # 工作站隧道自恢复方案
+│   └── Fluent仿真数据采集与五项研究指标计算报告.md # 仿真数据采集报告
 │
-└── tests/                   # 测试（35 个测试文件）
+└── tests/                   # 测试（39 个测试文件）
 ```
 
 ---
@@ -867,11 +876,11 @@ compile_noref.bat    # 免引用版本
 
 - 编码规范见 `docs/code-style-guide.md`
 - 远期架构规划见 `docs/architecture-refactoring-plan.md`
-- Daemon 拆分方案见 `docs/daemon-split-plan.md`
+- Daemon 拆分实现见 `docs/current-daemon-architecture.md`
 - 求解器剩余时间设计见 `docs/solver-remaining-time-design.md`
 - Python: ruff linting + mypy 类型检查
 - Rust: `cargo check` + `cargo clippy`
 
 ---
 
-> **版本**: v2.8.1 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.8.2 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
