@@ -935,7 +935,7 @@ class PipelineDaemon:
                 task_id,
                 worker_id,
             )
-            return False, task, "LocalWorker 任务已丢弃: engine stopped"
+            return True, task, "LocalWorker 任务已丢弃: engine stopped"
         try:
             scdoc_metadata = self._persist_worker_scdoc(result)
         except (OSError, TypeError, ValueError, binascii.Error) as exc:
@@ -1039,7 +1039,7 @@ class PipelineDaemon:
                 task_id,
                 worker_id,
             )
-            return False, task, "LocalWorker 任务已丢弃: engine stopped"
+            return True, task, "LocalWorker 任务已丢弃: engine stopped"
         try:
             task = self.local_worker_registry.fail_task(task_id, worker_id, error)
         except KeyError:

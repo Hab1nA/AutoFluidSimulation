@@ -132,7 +132,7 @@ def test_daemon_worker_step_complete_rejects_result_after_engine_stopped(tmp_pat
         "result": {"ok": True},
     })
 
-    assert ok is False
+    assert ok is True
     assert completed["status"] == "error"
     assert completed["error"] == "engine stopped"
     assert message == "LocalWorker 任务已丢弃: engine stopped"
@@ -187,7 +187,7 @@ def test_daemon_worker_step_error_rejects_result_after_engine_stopped(tmp_path) 
         "error": "SpaceClaim ready timeout",
     })
 
-    assert ok is False
+    assert ok is True
     assert failed["status"] == "error"
     assert failed["error"] == "engine stopped"
     assert message == "LocalWorker 任务已丢弃: engine stopped"

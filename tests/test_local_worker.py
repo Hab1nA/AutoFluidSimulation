@@ -195,6 +195,31 @@ def test_local_worker_register_reuses_cached_local_excel_configs(monkeypatch) ->
     assert first["params"]["configs"] == second["params"]["configs"]
 
 
+def test_local_worker_drops_pending_report_after_daemon_ack(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+    from ipc.protocol import CMD_WORKER_STEP_ERROR
+
+    sent_reports: list[dict] = []
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+    report = worker.build_step_error_request("local-19", "SpaceClaim ready timeout")
+    worker._pending_reports.append(report)
+
+    def fake_send_request(request: dict) -> dict:
+        sent_reports.append(request)
+        return {
+            "status": "ok",
+            "data": {"status": "error", "error": "engine stopped"},
+            "message": "LocalWorker 任务已丢弃: engine stopped",
+        }
+
+    monkeypatch.setattr(worker, "_send_request", fake_send_request)
+
+    assert worker._send_next_finished_report() == "error"
+    assert sent_reports == [report]
+    assert report["command"] == CMD_WORKER_STEP_ERROR
+    assert worker._pending_reports == []
+
+
 def test_local_worker_task_runner_reuses_registered_excel_configs(monkeypatch) -> None:
     import engine.local_worker as local_worker_module
     from engine.local_worker import LocalWorker, LocalWorkerConfig
