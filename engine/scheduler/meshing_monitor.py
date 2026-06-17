@@ -48,12 +48,14 @@ class MeshingMonitor:
         paused_event: threading.Event,
         stopped_event: threading.Event,
         get_reset_generation: Callable[[int, str], int] | None = None,
+        on_meshing_completed: Callable[[int], None] | None = None,
     ):
         self.state = state_manager
         self._remote_executor = remote_executor
         self._paused = paused_event
         self._stopped = stopped_event
         self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
+        self._on_meshing_completed = on_meshing_completed
 
         self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: threading.Thread | None = None
@@ -391,6 +393,8 @@ class MeshingMonitor:
         ):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成 ✓")
+            if self._on_meshing_completed is not None:
+                self._on_meshing_completed(config_name)
         else:
             if self._paused.is_set():
                 self.state.set_step_status(

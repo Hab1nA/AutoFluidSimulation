@@ -77,7 +77,7 @@ def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
     source = _source()
 
     assert "NormalizePathEnvironmentVariables" in source
-    assert source.count("NormalizePathEnvironmentVariables(psi);") >= 2
+    assert source.count("PrepareSpaceClaimEnvironment(psi);") >= 2
     normalize_start = source.index("private static void NormalizePathEnvironmentVariables")
     normalize_block = source[normalize_start:source.index("private static int? TryReturnSuccessIfScdocExists", normalize_start)]
     current_env_call = normalize_block.index("NormalizeCurrentProcessPathEnvironment();")

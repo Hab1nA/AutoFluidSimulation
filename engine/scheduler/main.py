@@ -120,6 +120,7 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
             get_reset_generation=self._current_reset_generation,
+            on_meshing_completed=self._on_meshing_completed,
         )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
@@ -403,6 +404,12 @@ class PipelineScheduler:
             )
             self._barrier_thread.start()
 
+    def _on_meshing_completed(self, _config_name: int) -> None:
+        """Meshing 完成后立即尝试收口屏障，避免等待下一轮轮询。"""
+        if self._paused.is_set() or self._stopped.is_set():
+            return
+        self.barrier_coordinator.dispatch_solver_if_ready()
+
     def _finalize_barrier_after_downstream_start(self) -> None:
         """下游组件启动后，收口屏障监控和 Solver 分发。"""
         if not self.barrier_coordinator.dispatch_solver_if_ready():
@@ -537,6 +544,11 @@ class PipelineScheduler:
                         )
                         self._forget_completed_remote_task_if_tracked(cn, step)
                         self.state.reset_config_steps(cn, step)
+                        if STEP_INDEX.get(step, 99) <= STEP_INDEX.get("meshing", 99):
+                            workstation_id = self._workstation_for_config(cn)
+                            self._barrier_passed.clear()
+                            self.barrier_coordinator.clear_workstation_barrier(workstation_id)
+                            self.state.set_global_barrier_met(False)
                         status = STATUS_WAITING
                     else:
                         continue

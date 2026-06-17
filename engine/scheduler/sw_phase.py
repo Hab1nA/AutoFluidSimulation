@@ -215,6 +215,8 @@ class SWPhaseHandler:
                      if self.state.get_step_status(cn, "sw") == STATUS_ERROR]
         sw_running = [cn for cn in all_configs
                       if self.state.get_step_status(cn, "sw") == STATUS_RUNNING]
+        sw_completed = [cn for cn in all_configs
+                        if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
 
         if sw_errors or sw_running:
             # 有构型失败 → 清理 SW 进程；未执行的下游步骤保持 Waiting
@@ -227,8 +229,8 @@ class SWPhaseHandler:
                 for cn in sw_running:
                     logger.warning(f"[SW] 构型{cn} 仍为 Running 状态 (可能导出中断)")
 
-            if not sw_errors:
-                # 无 ERROR 但有 RUNNING → 全部构型均未完成，引擎停止
+            if not sw_completed:
+                # 无任何构型完成 → SW 阶段失败，引擎停止
                 self.state.set_engine_status("stopped")
                 logger.error("[SW] SW 步骤失败，流水线中止")
                 return False
@@ -245,8 +247,6 @@ class SWPhaseHandler:
                 f"（{total_found}/{len(all_configs)} 构型 STEP 就绪）"
             )
 
-        sw_completed = [cn for cn in all_configs
-                        if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
         if sw_completed:
             self._enqueue_server_mode_completed_sw(sw_completed)
             logger.info(

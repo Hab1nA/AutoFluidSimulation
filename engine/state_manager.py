@@ -304,7 +304,14 @@ class StateManager:
                     config_rows.append((config_name, *params))
                     if is_new:
                         for step_name in STEP_NAMES:
-                            new_step_rows.append((config_name, step_name, STATUS_WAITING))
+                            new_step_rows.append(
+                                (
+                                    config_name,
+                                    step_name,
+                                    STATUS_WAITING,
+                                    DEFAULT_WORKSTATION_ID,
+                                )
+                            )
                         added_count += 1
                         logger.debug(f"[State] 新增构型{config_name}: 参数 = {params}")
                     else:
@@ -323,8 +330,10 @@ class StateManager:
 
                 if new_step_rows:
                     conn.executemany("""
-                        INSERT OR IGNORE INTO steps (config_name, step_name, status)
-                        VALUES (?, ?, ?)
+                        INSERT OR IGNORE INTO steps (
+                            config_name, step_name, status, workstation_id
+                        )
+                        VALUES (?, ?, ?, ?)
                     """, new_step_rows)
 
         logger.info(
@@ -671,7 +680,7 @@ class StateManager:
                 else:
                     conn.execute(
                         "UPDATE steps SET status = ?, error_message = '', "
-                        "workstation_id = COALESCE(workstation_id, ?), "
+                        "workstation_id = ?, "
                         "updated_at = strftime('%s','now') "
                         "WHERE config_name = ? AND step_name = ?",
                         (STATUS_RUNNING, workstation_id, config_name, "meshing"),
@@ -858,8 +867,8 @@ class StateManager:
             clauses = ["step_name = ?", "status != ?"]
             params: list[object] = [step_name, STATUS_COMPLETED]
             if workstation_id is not None:
-                clauses.append("workstation_id = ?")
-                params.append(workstation_id)
+                clauses.append("COALESCE(workstation_id, ?) = ?")
+                params.extend([DEFAULT_WORKSTATION_ID, workstation_id])
             if config_names is not None:
                 if not config_names:
                     return True

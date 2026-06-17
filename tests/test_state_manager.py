@@ -749,6 +749,16 @@ class TestAllConfigsCompletedAtStep:
             assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-A") is True
             assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-B") is False
 
+    def test_default_workstation_filter_includes_new_configs(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="default",
+            ) is False
+
     def test_filters_by_config_names(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
