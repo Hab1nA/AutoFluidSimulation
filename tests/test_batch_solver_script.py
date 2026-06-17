@@ -223,6 +223,29 @@ def test_parse_remaining_time_line_accepts_mm_ss(monkeypatch):
     assert progress["remaining_sec"] == 125.0
 
 
+def test_parse_remaining_time_line_accepts_fluent_iteration_table(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    line = (
+        "    10  1.0924e+00  2.2756e-04  1.8022e-05  1.8029e-05  "
+        "6.3507e-03  3.7984e-02  2.3162e-02  3.4976e-03  "
+        "3.7721e-02  0:02:12   15"
+    )
+
+    progress = module._parse_remaining_time_line(
+        line,
+        total_iter=25,
+        config_id=1,
+    )
+
+    assert progress == {
+        "config_name": 1,
+        "current_iter": 10,
+        "total_iter": 25,
+        "remaining_sec": 132.0,
+        "raw_line": line,
+    }
+
+
 def test_write_progress_file_uses_atomic_replace(tmp_path, monkeypatch):
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
     progress_file = tmp_path / "solver_progress_5.json"

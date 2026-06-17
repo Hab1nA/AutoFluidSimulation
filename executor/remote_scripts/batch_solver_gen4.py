@@ -83,6 +83,7 @@ _REMAINING_TIME_RE = re.compile(
     re.IGNORECASE,
 )
 _ITERATION_RE = re.compile(r"\b(?:iter|iteration)\s*[:=]?\s*(\d+)\b", re.IGNORECASE)
+_TIME_TOKEN_RE = re.compile(r"^\d{1,3}:\d{2}(?::\d{2})?$")
 
 
 def _parse_time_to_seconds(value: str) -> float | None:
@@ -108,13 +109,23 @@ def _parse_remaining_time_line(
 ) -> dict[str, object] | None:
     """Parse Fluent transcript progress line into a progress payload."""
     match = _REMAINING_TIME_RE.search(line)
+    current_iter: int | None = None
+    remaining_sec: float
     if match is None:
-        return None
-    remaining_sec = _parse_time_to_seconds(match.group(1))
-    if remaining_sec is None:
-        return None
-    iter_match = _ITERATION_RE.search(line)
-    current_iter = int(iter_match.group(1)) if iter_match else None
+        table_progress = _parse_fluent_iteration_table_progress(
+            line,
+            total_iter=total_iter,
+        )
+        if table_progress is None:
+            return None
+        remaining_sec, current_iter = table_progress
+    else:
+        parsed_remaining_sec = _parse_time_to_seconds(match.group(1))
+        if parsed_remaining_sec is None:
+            return None
+        remaining_sec = parsed_remaining_sec
+        iter_match = _ITERATION_RE.search(line)
+        current_iter = int(iter_match.group(1)) if iter_match else None
     return {
         "config_name": config_id,
         "current_iter": current_iter,
@@ -122,6 +133,31 @@ def _parse_remaining_time_line(
         "remaining_sec": remaining_sec,
         "raw_line": line,
     }
+
+
+def _parse_fluent_iteration_table_progress(
+    line: str,
+    *,
+    total_iter: int,
+) -> tuple[float, int] | None:
+    """Parse Fluent residual table rows ending with remaining time and iterations."""
+    tokens = line.split()
+    if len(tokens) < 3 or not _TIME_TOKEN_RE.match(tokens[-2]):
+        return None
+    try:
+        current_iter = int(tokens[0])
+        remaining_iter = int(tokens[-1])
+    except ValueError:
+        return None
+    if current_iter < 0 or current_iter > total_iter:
+        return None
+    expected_remaining_iter = max(total_iter - current_iter, 0)
+    if remaining_iter != expected_remaining_iter:
+        return None
+    remaining_sec = _parse_time_to_seconds(tokens[-2])
+    if remaining_sec is None:
+        return None
+    return remaining_sec, current_iter
 
 
 def _write_progress_file(progress_file: str, progress: dict[str, object]) -> None:
