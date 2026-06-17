@@ -222,11 +222,6 @@ class BarrierCoordinator:
                 logger.error("=" * 60)
                 logger.error("宏已执行但未产出任何有效 STEP 文件，无法继续。")
                 logger.error("请检查：SW 宏逻辑 / 设计表参数 / STEP 输出路径。")
-                for cn in all_configs:
-                    for step in ["sc", "transfer", "meshing", "solver"]:
-                        if self.state.get_step_status(cn, step) == STATUS_WAITING:
-                            self.state.set_step_status(cn, step, STATUS_ERROR,
-                                                       "SW 步骤失败，后续步骤无法执行")
                 self._stopped.set()
                 self.state.set_engine_status("stopped")
                 break
@@ -248,10 +243,6 @@ class BarrierCoordinator:
                     has_error = True
 
             if all_terminal and has_error:
-                # 将所有 Meshing=Error 的构型的 Solver 也标记为 Error（屏障未通过）
-                for cn in all_configs:
-                    if self.state.get_step_status(cn, "meshing") == STATUS_ERROR:
-                        self.state.set_step_status(cn, "solver", STATUS_ERROR, "网格划分失败，屏障未通过")
                 if any(
                     self.state.get_step_status(cn, "meshing") == STATUS_COMPLETED
                     for cn in all_configs

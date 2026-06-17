@@ -57,7 +57,7 @@ impl DaemonManager {
         let daemon_script = PathBuf::from(project_dir).join("start_daemon.py");
         let python = local_daemon_python(project_dir);
         log::info!(
-            "[Daemon] 准备启动后台引擎: python={}, script={}",
+            "准备启动后台引擎: python={}, script={}",
             python,
             daemon_script.display()
         );
@@ -78,12 +78,12 @@ impl DaemonManager {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                log::info!("[Daemon] 后台引擎进程已启动: pid={}", pid);
+                log::info!("后台引擎进程已启动: pid={}", pid);
                 self.process = Some(child);
                 Ok(pid)
             }
             Err(e) => {
-                log::error!("[Daemon] 启动后台引擎失败: {}", e);
+                log::error!("启动后台引擎失败: {}", e);
                 Err(format!("启动后台引擎失败: {}", e))
             }
         }
@@ -106,22 +106,18 @@ impl DaemonManager {
     fn remove_pid_file(project_dir: &str) {
         let pid_file = Self::pid_file_path(project_dir);
         match fs::remove_file(&pid_file) {
-            Ok(()) => log::info!("[Daemon] 已清理 PID 文件: {}", pid_file.display()),
+            Ok(()) => log::info!("已清理 PID 文件: {}", pid_file.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::debug!("[Daemon] PID 文件不存在，无需清理: {}", pid_file.display());
+                log::debug!("PID 文件不存在，无需清理: {}", pid_file.display());
             }
-            Err(e) => log::warn!(
-                "[Daemon] 清理 PID 文件失败: {}, error={}",
-                pid_file.display(),
-                e
-            ),
+            Err(e) => log::warn!("清理 PID 文件失败: {}, error={}", pid_file.display(), e),
         }
     }
 
     pub fn stop(&mut self, project_dir: &str) -> Result<(), String> {
         if is_server_mode() {
             self.process = None;
-            log::info!("[Daemon] server 模式下通过 SSH 兜底停止远端 daemon");
+            log::info!("server 模式下通过 SSH 兜底停止远端 daemon");
             self.stop_server_daemon()?;
             Self::cleanup_server_ipc_tunnel(project_dir)?;
             return Ok(());
@@ -129,14 +125,14 @@ impl DaemonManager {
 
         // full_quit IPC 命令已在主循环中发送，daemon 的 shutdown() 正在执行。
         // 仅等待进程自行退出，不做额外干预——与 Ctrl+C 行为一致。
-        log::info!("[Daemon] 等待后台引擎退出");
+        log::info!("等待后台引擎退出");
         let stopped = if let Some(mut child) = self.process.take() {
             Self::wait_for_exit(&mut child)
         } else if let Some(pid) = Self::read_pid_file(project_dir) {
-            log::info!("[Daemon] 通过 PID 文件等待后台引擎退出: pid={}", pid);
+            log::info!("通过 PID 文件等待后台引擎退出: pid={}", pid);
             Self::wait_for_pid_exit(project_dir)
         } else {
-            log::info!("[Daemon] 未发现需要等待的后台引擎进程");
+            log::info!("未发现需要等待的后台引擎进程");
             true
         };
         Self::cleanup_pid_file_after_wait(project_dir, stopped)
@@ -164,7 +160,7 @@ impl DaemonManager {
         let raw_pid = match fs::read_to_string(&pid_file) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::debug!("[Daemon] 服务器 IPC 隧道 PID 文件不存在，无需清理");
+                log::debug!("服务器 IPC 隧道 PID 文件不存在，无需清理");
                 return Ok(());
             }
             Err(e) => {
@@ -193,10 +189,7 @@ impl DaemonManager {
         if stopped {
             match fs::remove_file(&pid_file) {
                 Ok(()) => {
-                    log::info!(
-                        "[Daemon] 已清理服务器 IPC 隧道 PID 文件: {}",
-                        pid_file.display()
-                    );
+                    log::info!("已清理服务器 IPC 隧道 PID 文件: {}", pid_file.display());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => {
@@ -222,18 +215,18 @@ impl DaemonManager {
         while Instant::now() < deadline {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    log::info!("[Daemon] 后台引擎已退出: status={}", status);
+                    log::info!("后台引擎已退出: status={}", status);
                     return true;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(200)),
                 Err(e) => {
-                    log::warn!("[Daemon] 检查后台引擎退出状态失败: {}", e);
+                    log::warn!("检查后台引擎退出状态失败: {}", e);
                     return false;
                 }
             }
         }
         // 超时仅记录，不强杀——daemon 可能仍在清理中
-        log::warn!("[Daemon] 等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
+        log::warn!("等待后台引擎退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
         false
     }
 
@@ -251,12 +244,12 @@ impl DaemonManager {
         while Instant::now() < deadline {
             // PID 文件被删除说明 daemon shutdown 已完成
             if !pid_file.exists() {
-                log::info!("[Daemon] 后台引擎已完成退出清理");
+                log::info!("后台引擎已完成退出清理");
                 return true;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        log::warn!("[Daemon] 等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
+        log::warn!("等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
         false
     }
 
@@ -273,7 +266,7 @@ impl DaemonManager {
         state.connected = false;
         state.needs_redraw = true;
         log::info!(
-            "[Daemon] 后台引擎启动后进入分步 IPC 重连: timeout_ms={}",
+            "后台引擎启动后进入分步 IPC 重连: timeout_ms={}",
             Duration::from_secs(IPC_RECONNECT_TIMEOUT_SECS).as_millis()
         );
     }
@@ -371,7 +364,7 @@ impl DaemonManager {
         if ipc.is_connected() {
             state.connected = true;
             self.pending_ipc_reconnect = None;
-            log::info!("[Daemon] IPC 已处于连接状态");
+            log::info!("IPC 已处于连接状态");
             return;
         }
         let now = Instant::now();
@@ -379,7 +372,7 @@ impl DaemonManager {
             self.pending_ipc_reconnect = None;
             state.connected = false;
             state.needs_redraw = true;
-            log::warn!("[Daemon] 后台引擎已启动，但 IPC 暂未就绪");
+            log::warn!("后台引擎已启动，但 IPC 暂未就绪");
             log_buffer.push_info("⚠️ 后台引擎已启动，但 IPC 暂未就绪".to_string());
             return;
         }
@@ -397,7 +390,7 @@ impl DaemonManager {
             state.needs_redraw = true;
             log_buffer.clear_detail();
             log_buffer.push_info("✅ 已连接到后台引擎".to_string());
-            log::info!("[Daemon] 后台引擎 IPC 已就绪");
+            log::info!("后台引擎 IPC 已就绪");
         }
     }
 
@@ -413,7 +406,7 @@ impl DaemonManager {
         let server_mode = is_server_mode();
         let mut stop_sent_over_ipc = false;
         if ipc.is_connected() {
-            log::info!("[Daemon] 发送后台引擎停止请求");
+            log::info!("发送后台引擎停止请求");
             match rt.block_on(ipc.full_quit()) {
                 Ok(resp) if resp.is_ok() => {
                     stop_sent_over_ipc = true;
@@ -473,7 +466,7 @@ impl DaemonManager {
         project_dir: &str,
     ) {
         if is_server_mode() {
-            log::info!("[Daemon] server 模式下重启服务器 daemon");
+            log::info!("server 模式下重启服务器 daemon");
             if !self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir) {
                 return;
             }
@@ -491,7 +484,7 @@ impl DaemonManager {
             }
             return;
         }
-        log::info!("[Daemon] 开始重启后台引擎");
+        log::info!("开始重启后台引擎");
         self.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
         match self.launch(project_dir) {
             Ok(pid) => {
@@ -558,7 +551,7 @@ impl DaemonManager {
     ) -> Result<(), String> {
         send_server_start_stage(progress, "正在检查服务器 IPC 隧道...");
         Self::run_server_ipc_tunnel_script(project_dir)?;
-        log::info!("[Daemon] 服务器 IPC 隧道阶段完成，准备启动远端 daemon");
+        log::info!("服务器 IPC 隧道阶段完成，准备启动远端 daemon");
         send_server_start_stage(progress, "服务器 IPC 隧道已就绪，正在启动远端 daemon...");
         Self::run_server_daemon_command(ServerDaemonAction::Start, progress)
     }
@@ -574,7 +567,7 @@ impl DaemonManager {
         let command = ServerDaemonSshCommand::from_env(action)?;
         let args = command.args();
         log::info!(
-            "[Daemon] 通过 SSH 控制服务器 daemon: action={}, target={}",
+            "通过 SSH 控制服务器 daemon: action={}, target={}",
             action.label(),
             command.target
         );
@@ -591,14 +584,14 @@ impl DaemonManager {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !stdout.is_empty() {
             log::info!(
-                "[Daemon] 服务器 daemon SSH 输出: action={}, stdout={}",
+                "服务器 daemon SSH 输出: action={}, stdout={}",
                 action.label(),
                 stdout
             );
         }
         if !stderr.is_empty() {
             log::warn!(
-                "[Daemon] 服务器 daemon SSH 错误输出: action={}, stderr={}",
+                "服务器 daemon SSH 错误输出: action={}, stderr={}",
                 action.label(),
                 stderr
             );
@@ -649,20 +642,20 @@ impl DaemonManager {
                 Ok((status, stdout, stderr)) if status.success() => {
                     if !stdout.is_empty() {
                         log::info!(
-                            "[Daemon] 服务器 IPC 隧道脚本输出: powershell={}, stdout={}",
+                            "服务器 IPC 隧道脚本输出: powershell={}, stdout={}",
                             powershell,
                             stdout
                         );
                     }
                     if !stderr.is_empty() {
                         log::warn!(
-                            "[Daemon] 服务器 IPC 隧道脚本错误输出: powershell={}, stderr={}",
+                            "服务器 IPC 隧道脚本错误输出: powershell={}, stderr={}",
                             powershell,
                             stderr
                         );
                     }
                     log::info!(
-                        "[Daemon] 服务器 IPC 隧道脚本执行成功: powershell={}, script={}",
+                        "服务器 IPC 隧道脚本执行成功: powershell={}, script={}",
                         powershell,
                         script.display()
                     );

@@ -97,7 +97,7 @@ impl WorkerManager {
     where
         F: FnOnce(&mut LogBuffer) -> bool,
     {
-        log::info!("[Worker] 开始启动 Worker 进程");
+        log::info!("开始启动 Worker 进程");
         self.project_dir = PathBuf::from(project_dir);
 
         // 1. 启动工作站 SSH 反向隧道
@@ -143,7 +143,7 @@ impl WorkerManager {
         if let Some(project_dir) = project_dir {
             self.project_dir = PathBuf::from(project_dir);
         }
-        log::info!("[Worker] 开始停止 Worker 进程");
+        log::info!("开始停止 Worker 进程");
         let mut success = true;
 
         // 1. 终止本地 LocalWorker 进程
@@ -176,7 +176,7 @@ impl WorkerManager {
     /// 重启所有 worker：先停止再启动。
     #[allow(dead_code)]
     pub fn restart_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
-        log::info!("[Worker] 开始重启 Worker 进程");
+        log::info!("开始重启 Worker 进程");
         self.stop_workers(log_buffer);
         std::thread::sleep(Duration::from_secs(1));
         self.start_workers(project_dir, log_buffer)
@@ -218,7 +218,7 @@ impl WorkerManager {
 
         let python = resolve_python_exe(project_dir);
         log::info!(
-            "[Worker] 启动本地 LocalWorker: python={}, script={}",
+            "启动本地 LocalWorker: python={}, script={}",
             python,
             worker_script.display()
         );
@@ -253,13 +253,13 @@ impl WorkerManager {
             Ok(child) => {
                 let pid = child.id();
                 let _ = Self::write_pid_file(project_dir, WorkerPidKind::LocalWorker, pid);
-                log::info!("[Worker] 本地 LocalWorker 已启动: pid={}", pid);
+                log::info!("本地 LocalWorker 已启动: pid={}", pid);
                 log_buffer.push_info(format!("✅ 本地 Worker 已启动 (PID: {})", pid));
                 self.worker_process = Some(child);
                 true
             }
             Err(e) => {
-                log::error!("[Worker] 启动本地 LocalWorker 失败: {}", e);
+                log::error!("启动本地 LocalWorker 失败: {}", e);
                 log_buffer.push_info(format!("❌ 启动本地 Worker 失败: {}", e));
                 false
             }
@@ -319,10 +319,7 @@ impl WorkerManager {
             return false;
         }
 
-        log::info!(
-            "[Worker] 启动 SSH 反向隧道: script={}",
-            tunnel_script.display()
-        );
+        log::info!("启动 SSH 反向隧道: script={}", tunnel_script.display());
 
         let powershell = resolve_powershell_exe();
         let mut cmd = Command::new(&powershell);
@@ -358,7 +355,7 @@ impl WorkerManager {
         match run_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
             Ok(output) if output.status.success() => {
                 log::info!(
-                    "[Worker] {} SSH 反向隧道脚本已确认可达: powershell={}",
+                    "{} SSH 反向隧道脚本已确认可达: powershell={}",
                     tunnel_kind,
                     powershell
                 );
@@ -377,12 +374,12 @@ impl WorkerManager {
                 } else {
                     format!("PowerShell 退出状态: {}, {}", output.status, detail)
                 };
-                log::error!("[Worker] 启动 SSH 反向隧道失败: {}", message);
+                log::error!("启动 SSH 反向隧道失败: {}", message);
                 log_buffer.push_info(format!("⚠️ 启动 SSH 隧道失败: {}", message));
                 false
             }
             Err(e) => {
-                log::error!("[Worker] 启动 SSH 反向隧道失败: {}", e);
+                log::error!("启动 SSH 反向隧道失败: {}", e);
                 log_buffer.push_info(format!("⚠️ 启动 SSH 隧道失败: {}", e));
                 false
             }
@@ -435,14 +432,14 @@ impl WorkerManager {
         };
         match proc.try_wait() {
             Ok(Some(status)) => {
-                log::info!("[Worker] {} 已自行退出: {}", name, status);
+                log::info!("{} 已自行退出: {}", name, status);
                 *proc_slot = None;
                 StopResult::AlreadyExited
             }
             Ok(None) => {
-                log::info!("[Worker] 正在终止 {}...", name);
+                log::info!("正在终止 {}...", name);
                 if let Err(e) = proc.kill() {
-                    log::warn!("[Worker] 终止 {} 失败: {}", name, e);
+                    log::warn!("终止 {} 失败: {}", name, e);
                     *proc_slot = None;
                     return StopResult::Error(e.to_string());
                 }
@@ -451,7 +448,7 @@ impl WorkerManager {
                 while std::time::Instant::now() < deadline {
                     match proc.try_wait() {
                         Ok(Some(status)) => {
-                            log::info!("[Worker] {} 已终止: {}", name, status);
+                            log::info!("{} 已终止: {}", name, status);
                             *proc_slot = None;
                             return StopResult::Terminated;
                         }
@@ -459,18 +456,18 @@ impl WorkerManager {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                         Err(e) => {
-                            log::warn!("[Worker] 检查 {} 退出状态失败: {}", name, e);
+                            log::warn!("检查 {} 退出状态失败: {}", name, e);
                             *proc_slot = None;
                             return StopResult::Error(e.to_string());
                         }
                     }
                 }
-                log::warn!("[Worker] 等待 {} 退出超时 ({}s)", name, timeout_secs);
+                log::warn!("等待 {} 退出超时 ({}s)", name, timeout_secs);
                 *proc_slot = None;
                 StopResult::Timeout
             }
             Err(e) => {
-                log::warn!("[Worker] 检查 {} 状态失败: {}", name, e);
+                log::warn!("检查 {} 状态失败: {}", name, e);
                 *proc_slot = None;
                 StopResult::Error(e.to_string())
             }

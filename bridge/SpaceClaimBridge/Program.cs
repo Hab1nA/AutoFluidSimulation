@@ -361,7 +361,7 @@ namespace AutoFluidSimulation.Bridge
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"[BRIDGE] Warning: 进程状态检查失败: {ex.Message}");
+                        Console.WriteLine($"[BRIDGE_WARN] 进程状态检查失败: {ex.Message}");
                         processAlive = false;
                     }
 
@@ -754,7 +754,7 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: 进程状态检查异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] 进程状态检查异常: {ex.Message}");
                 }
                 Thread.Sleep(PersistentReadyPollIntervalMs);
             }
@@ -834,13 +834,13 @@ namespace AutoFluidSimulation.Bridge
                     catch (Exception ex)
                     {
                         consecutiveProcessCheckFailures++;
-                        Console.Error.WriteLine(
-                            "[BRIDGE] Warning: 进程状态检查异常 "
+                        Console.WriteLine(
+                            "[BRIDGE_WARN] 进程状态检查异常 "
                             + $"({consecutiveProcessCheckFailures}/{MaxConsecutiveProcessCheckFailures}): {ex.Message}");
                         if (consecutiveProcessCheckFailures >= MaxConsecutiveProcessCheckFailures)
                         {
                             Console.Error.WriteLine(
-                                "[BRIDGE] 进程状态检查连续失败，判定 SpaceClaim 已退出");
+                                "[BRIDGE_ERROR] 进程状态检查连续失败，判定 SpaceClaim 已退出");
                             WritePersistentMonitorFile(
                                 opts,
                                 GetProcessIdOrDefault(workingProcess),
@@ -914,8 +914,8 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine(
-                        $"[BRIDGE] Warning: 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
+                    Console.WriteLine(
+                        $"[BRIDGE_WARN] 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
                 }
             }
 
@@ -984,7 +984,7 @@ namespace AutoFluidSimulation.Bridge
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[BRIDGE] Warning: 写入监控信息失败: {ex.Message}");
+                Console.WriteLine($"[BRIDGE_WARN] 写入监控信息失败: {ex.Message}");
             }
         }
 
@@ -1177,7 +1177,7 @@ namespace AutoFluidSimulation.Bridge
                         catch (Exception ex)
                         {
                             // 无权访问进程 StartTime（如跨会话进程），跳过
-                            Console.Error.WriteLine($"[BRIDGE] Warning: 访问进程信息失败 (PID={p.Id}): {ex.Message}");
+                            Console.WriteLine($"[BRIDGE_WARN] 访问进程信息失败 (PID={p.Id}): {ex.Message}");
                         }
                     }
 
@@ -1194,7 +1194,7 @@ namespace AutoFluidSimulation.Bridge
                         }
                         catch (Exception ex)
                         {
-                            Console.Error.WriteLine($"[BRIDGE] Warning: 返回进程失败: {ex.Message}");
+                            Console.WriteLine($"[BRIDGE_WARN] 返回进程失败: {ex.Message}");
                         }
                     }
                 }
@@ -1306,7 +1306,7 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: 主窗口检测异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] 主窗口检测异常: {ex.Message}");
                 }
                 if (!mainWindowFound) Thread.Sleep(ProcessAppearPollIntervalMs);
             }
@@ -1325,7 +1325,7 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: WaitForInputIdle 异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] WaitForInputIdle 异常: {ex.Message}");
                 }
                 Console.WriteLine(
                     $"[BRIDGE] 兜底失败, 使用固定延时 ({GuiFallbackFixedDelayMs / 1000}s)");
@@ -1348,7 +1348,7 @@ namespace AutoFluidSimulation.Bridge
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[BRIDGE] Warning: Phase 2 WaitForInputIdle 异常: {ex.Message}");
+                Console.WriteLine($"[BRIDGE_WARN] Phase 2 WaitForInputIdle 异常: {ex.Message}");
             }
 
             // Phase 3 等待时间可通过环境变量配置（默认 15 秒）

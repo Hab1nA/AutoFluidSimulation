@@ -346,14 +346,7 @@ class WorkerPoolManager:
                 _consecutive_fatal_count = 0
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"SC 步骤处理构型{config_name} 异常: {e}", exc_info=True)
-                for step in ["sc", "transfer"]:
-                    try:
-                        s = self.state.get_step_status(config_name, step)
-                        if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                            self.state.set_step_status(config_name, step, STATUS_ERROR, str(e))
-                    except Exception as mark_err:
-                        logger.debug(f"标记构型{config_name}步骤{step}为Error时异常: {mark_err}")
-                self._mark_meshing_error_if_transfer_failed(config_name, str(e))
+                self._mark_current_step_error(config_name, "sc", str(e))
             except Exception as e:
                 _consecutive_fatal_count += 1
                 if _consecutive_fatal_count >= 3:
@@ -368,16 +361,8 @@ class WorkerPoolManager:
                         f"SC 步骤处理构型{config_name} 致命异常: {type(e).__name__}: {e}",
                         exc_info=True
                     )
-                for step in ["sc", "transfer"]:
-                    try:
-                        s = self.state.get_step_status(config_name, step)
-                        if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                            self.state.set_step_status(config_name, step, STATUS_ERROR,
-                                                        f"致命异常: {type(e).__name__}: {e}")
-                    except Exception:
-                        pass
-                self._mark_meshing_error_if_transfer_failed(
-                    config_name, f"致命异常: {type(e).__name__}: {e}"
+                self._mark_current_step_error(
+                    config_name, "sc", f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
                 self._sc_queue.complete((config_name, _step_file))
@@ -428,9 +413,6 @@ class WorkerPoolManager:
                         self._discard_stale_step_result(config_name, "sc")
                         return
                     if not success:
-                        self._mark_meshing_error_if_transfer_failed(
-                            config_name, "SC 步骤失败"
-                        )
                         return
             else:
                 success = self._retry_manager.execute_with_retry(
@@ -442,9 +424,6 @@ class WorkerPoolManager:
                     self._discard_stale_step_result(config_name, "sc")
                     return
                 if not success:
-                    self._mark_meshing_error_if_transfer_failed(
-                        config_name, "SC 步骤失败"
-                    )
                     return
 
             if self._is_stale_step_result(config_name, "sc", generation):
@@ -509,13 +488,7 @@ class WorkerPoolManager:
                 _consecutive_fatal_count = 0
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"Transfer 步骤处理构型{config_name} 异常: {e}", exc_info=True)
-                try:
-                    s = self.state.get_step_status(config_name, "transfer")
-                    if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                        self.state.set_step_status(config_name, "transfer", STATUS_ERROR, str(e))
-                except Exception as mark_err:
-                    logger.debug(f"标记构型{config_name} Transfer 为 Error 时异常: {mark_err}")
-                self._mark_meshing_error_if_transfer_failed(config_name, str(e))
+                self._mark_current_step_error(config_name, "transfer", str(e))
             except Exception as e:
                 _consecutive_fatal_count += 1
                 if _consecutive_fatal_count >= 3:
@@ -530,15 +503,8 @@ class WorkerPoolManager:
                         f"Transfer 步骤处理构型{config_name} 致命异常: {type(e).__name__}: {e}",
                         exc_info=True
                     )
-                try:
-                    s = self.state.get_step_status(config_name, "transfer")
-                    if s not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
-                        self.state.set_step_status(config_name, "transfer", STATUS_ERROR,
-                                                    f"致命异常: {type(e).__name__}: {e}")
-                except Exception:
-                    pass
-                self._mark_meshing_error_if_transfer_failed(
-                    config_name, f"致命异常: {type(e).__name__}: {e}"
+                self._mark_current_step_error(
+                    config_name, "transfer", f"致命异常: {type(e).__name__}: {e}"
                 )
             finally:
                 self._transfer_queue.complete(config_name)
@@ -583,9 +549,6 @@ class WorkerPoolManager:
                 self._discard_stale_step_result(config_name, "transfer")
                 return
             if not success:
-                self._mark_meshing_error_if_transfer_failed(
-                    config_name, "Transfer 步骤失败"
-                )
                 return
 
             # ★ 执行完成后再次确认状态
@@ -622,14 +585,13 @@ class WorkerPoolManager:
                 f"未提交 MeshingMonitor"
             )
 
-    def _mark_meshing_error_if_transfer_failed(self, config_name: int, reason: str) -> None:
-        """上游步骤（SC 或 Transfer）失败时，将 Meshing 标记为 Error（若尚未完成）。"""
-        meshing_st = self.state.get_step_status(config_name, "meshing")
-        if meshing_st not in (STATUS_COMPLETED, STATUS_ERROR):
-            self.state.set_step_status(
-                config_name, "meshing", STATUS_ERROR,
-                f"上游步骤失败: {reason}",
-            )
-            logger.info(
-                f"构型{config_name} Meshing 因上游步骤失败标记为 Error"
+    def _mark_current_step_error(self, config_name: int, step_name: str, reason: str) -> None:
+        """只标记实际失败的步骤；未执行的下游步骤保持 Waiting。"""
+        try:
+            status = self.state.get_step_status(config_name, step_name)
+            if status not in (STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED):
+                self.state.set_step_status(config_name, step_name, STATUS_ERROR, reason)
+        except Exception as mark_err:
+            logger.debug(
+                f"标记构型{config_name}步骤{step_name}为Error时异常: {mark_err}"
             )

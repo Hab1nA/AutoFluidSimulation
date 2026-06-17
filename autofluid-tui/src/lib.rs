@@ -35,6 +35,29 @@ use ui::layout::AppLayout;
 
 pub use utils::format_local_time;
 
+fn format_log_record(
+    buf: &mut env_logger::fmt::Formatter,
+    record: &log::Record<'_>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    writeln!(
+        buf,
+        "[{}] [{}] [{}] {}",
+        unix_epoch_millis(),
+        record.level(),
+        record.target(),
+        record.args()
+    )
+}
+
+fn unix_epoch_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
 /// 初始化文件日志。
 /// 优先使用 AUTOFLUID_SESSION_LOG_DIR 环境变量（由 Python 启动器设置）；
 /// 若未设置，尝试查找 logs/client/ 下最新的时间戳子目录；
@@ -58,7 +81,7 @@ fn init_file_logger() {
                     env_logger::Builder::new()
                         .filter_level(LevelFilter::Info)
                         .target(env_logger::Target::Pipe(Box::new(file)))
-                        .format_timestamp_millis()
+                        .format(format_log_record)
                         .try_init()
                         .ok();
                     log::info!(
@@ -88,7 +111,7 @@ fn init_stderr_logger() {
             env_logger::Builder::new()
                 .filter_level(log::LevelFilter::Info)
                 .target(env_logger::Target::Pipe(Box::new(file)))
-                .format_timestamp_millis()
+                .format(format_log_record)
                 .try_init()
                 .ok();
             log::info!(
@@ -439,7 +462,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         .map_err(|e| e.to_string())?;
     let project_dir = utils::resolve_project_dir().to_string_lossy().to_string();
     if let Err(e) = utils::import_project_env(&project_dir) {
-        log::warn!("[TUI] 导入项目环境失败: {}", e);
+        log::warn!("导入项目环境失败: {}", e);
     }
 
     let mut ipc = IpcClient::new(None, None);
@@ -567,7 +590,7 @@ fn submit_command(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) -> command::CommandResult {
-    log::info!("[TUI] 用户命令: source={source}, command={cmd:?}");
+    log::info!("用户命令: source={source}, command={cmd:?}");
     log_buffer.push_info(format!("> {}", cmd));
     state.needs_redraw = true;
     rt.block_on(command::dispatch_command(cmd, ipc, state, log_buffer))
@@ -579,7 +602,7 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
             ctx.state.should_quit = true;
         }
         command::CommandResult::FullQuit => {
-            log::info!("[TUI] 收到完全退出请求，准备停止后台引擎并关闭界面");
+            log::info!("收到完全退出请求，准备停止后台引擎并关闭界面");
             *ctx.full_quit = true;
             if ctx.ipc.is_connected() {
                 match ctx.rt.block_on(ctx.ipc.full_quit()) {

@@ -56,7 +56,7 @@ impl IpcClient {
         // 先关闭已有连接，防止连接泄漏导致服务端出现重复连接
         self.disconnect().await;
         let addr = format!("{}:{}", self.host, self.port);
-        log::info!("[IPC] 正在连接后台引擎: {}", addr);
+        log::info!("正在连接后台引擎: {}", addr);
         match tokio::time::timeout(timeout, TcpStream::connect(&addr)).await {
             Ok(Ok(stream)) => {
                 self.stream = Some(stream);
@@ -64,22 +64,22 @@ impl IpcClient {
                     Ok(()) => {
                         self.last_reconnect = None; // 连接成功，清除冷却
                         self.consecutive_failures = 0; // 连接成功，重置失败计数
-                        log::info!("[IPC] 已连接后台引擎: {}", addr);
+                        log::info!("已连接后台引擎: {}", addr);
                         Ok(())
                     }
                     Err(e) => {
                         self.disconnect().await;
-                        log::warn!("[IPC] 连接握手失败: {}, error={}", addr, e);
+                        log::warn!("连接握手失败: {}, error={}", addr, e);
                         Err(format!("连接握手失败: {}", e))
                     }
                 }
             }
             Ok(Err(e)) => {
-                log::warn!("[IPC] 连接失败: {}, error={}", addr, e);
+                log::warn!("连接失败: {}, error={}", addr, e);
                 Err(format!("连接失败: {}", e))
             }
             Err(_) => {
-                log::warn!("[IPC] 连接超时: {}", addr);
+                log::warn!("连接超时: {}", addr);
                 Err("连接超时".to_string())
             }
         }
@@ -88,7 +88,7 @@ impl IpcClient {
     pub async fn disconnect(&mut self) {
         if let Some(mut stream) = self.stream.take() {
             let _ = stream.shutdown().await;
-            log::info!("[IPC] 已断开后台引擎连接");
+            log::info!("已断开后台引擎连接");
         }
     }
 
@@ -163,7 +163,7 @@ impl IpcClient {
             Some(s) => s,
             None => {
                 log::warn!(
-                    "[IPC] 请求暂未发送: command={}, request_id={}, reason=未连接，尝试重连",
+                    "请求暂未发送: command={}, request_id={}, reason=未连接，尝试重连",
                     request.command,
                     request.request_id
                 );
@@ -180,7 +180,7 @@ impl IpcClient {
             // 发送失败：stream 可能已损坏，丢弃连接后自动重连
             self.auto_reconnect("发送失败").await;
             log::warn!(
-                "[IPC] 请求发送失败: command={}, request_id={}, elapsed_ms={}, error={}",
+                "请求发送失败: command={}, request_id={}, elapsed_ms={}, error={}",
                 request.command,
                 request.request_id,
                 started_at.elapsed().as_millis(),
@@ -227,7 +227,7 @@ impl IpcClient {
                         drop(reader);
                         self.auto_reconnect("响应解析失败").await;
                         log::warn!(
-                            "[IPC] 响应解析失败: command={}, request_id={}, elapsed_ms={}",
+                            "响应解析失败: command={}, request_id={}, elapsed_ms={}",
                             request.command,
                             request.request_id,
                             started_at.elapsed().as_millis()
@@ -240,7 +240,7 @@ impl IpcClient {
                 // 对端关闭连接 → stream 已不可用，自动重连
                 self.auto_reconnect("对端关闭").await;
                 log::warn!(
-                    "[IPC] 请求失败: command={}, request_id={}, elapsed_ms={}, reason=连接已断开",
+                    "请求失败: command={}, request_id={}, elapsed_ms={}, reason=连接已断开",
                     request.command,
                     request.request_id,
                     started_at.elapsed().as_millis()
@@ -255,7 +255,7 @@ impl IpcClient {
                 // 直接丢弃 reader（含其内部缓冲区和底层 stream）最安全。
                 self.auto_reconnect("读取失败").await;
                 log::warn!(
-                    "[IPC] 请求读取失败: command={}, request_id={}, elapsed_ms={}, error={}",
+                    "请求读取失败: command={}, request_id={}, elapsed_ms={}, error={}",
                     request.command,
                     request.request_id,
                     started_at.elapsed().as_millis(),
@@ -269,7 +269,7 @@ impl IpcClient {
                 // 新连接获得干净的字节流，不会与旧请求混淆。
                 self.auto_reconnect("请求超时").await;
                 log::warn!(
-                    "[IPC] 请求超时: command={}, request_id={}, timeout_ms={}, elapsed_ms={}",
+                    "请求超时: command={}, request_id={}, timeout_ms={}, elapsed_ms={}",
                     request.command,
                     request.request_id,
                     timeout.as_millis(),
@@ -294,24 +294,24 @@ impl IpcClient {
         if self.consecutive_failures > 0 {
             if let Some(last) = self.last_reconnect {
                 if last.elapsed() < RECONNECT_COOLDOWN {
-                    log::debug!("[IPC] {}，重连冷却中，跳过", reason);
+                    log::debug!("{}，重连冷却中，跳过", reason);
                     return;
                 }
             }
         }
         self.last_reconnect = Some(Instant::now());
-        log::info!("[IPC] {}，尝试自动重连...", reason);
+        log::info!("{}，尝试自动重连...", reason);
         // connect() 内部会先 disconnect()，确保 self.stream 中的旧连接被关闭。
         // 注意：send_request_with_timeout 中 take() 取出的 stream 不受此影响，
         // 旧 stream 的关闭由 BufReader 的 drop 保证。
         match self.connect().await {
             Ok(()) => {
                 self.consecutive_failures = 0; // 成功重连，重置失败计数
-                log::info!("[IPC] 自动重连成功")
+                log::info!("自动重连成功")
             }
             Err(e) => {
                 self.consecutive_failures += 1;
-                log::warn!("[IPC] 自动重连失败: {}", e)
+                log::warn!("自动重连失败: {}", e)
             }
         }
     }
@@ -477,14 +477,14 @@ fn default_port() -> u16 {
 fn log_request_start(request: &IpcRequest, timeout: Duration) {
     if is_polling_command(&request.command) {
         log::debug!(
-            "[IPC] 发送轮询请求: command={}, request_id={}, timeout_ms={}",
+            "发送轮询请求: command={}, request_id={}, timeout_ms={}",
             request.command,
             request.request_id,
             timeout.as_millis()
         );
     } else {
         log::info!(
-            "[IPC] 发送请求: command={}, request_id={}, timeout_ms={}",
+            "发送请求: command={}, request_id={}, timeout_ms={}",
             request.command,
             request.request_id,
             timeout.as_millis()
@@ -495,7 +495,7 @@ fn log_request_start(request: &IpcRequest, timeout: Duration) {
 fn log_request_finish(request: &IpcRequest, response: &IpcResponse, elapsed: Duration) {
     if is_polling_command(&request.command) {
         log::debug!(
-            "[IPC] 收到轮询响应: command={}, request_id={}, status={}, elapsed_ms={}",
+            "收到轮询响应: command={}, request_id={}, status={}, elapsed_ms={}",
             request.command,
             request.request_id,
             response.status,
@@ -503,7 +503,7 @@ fn log_request_finish(request: &IpcRequest, response: &IpcResponse, elapsed: Dur
         );
     } else if response.is_ok() {
         log::info!(
-            "[IPC] 收到响应: command={}, request_id={}, status={}, elapsed_ms={}",
+            "收到响应: command={}, request_id={}, status={}, elapsed_ms={}",
             request.command,
             request.request_id,
             response.status,
@@ -511,7 +511,7 @@ fn log_request_finish(request: &IpcRequest, response: &IpcResponse, elapsed: Dur
         );
     } else {
         log::warn!(
-            "[IPC] 收到失败响应: command={}, request_id={}, status={}, elapsed_ms={}, message={}",
+            "收到失败响应: command={}, request_id={}, status={}, elapsed_ms={}, message={}",
             request.command,
             request.request_id,
             response.status,

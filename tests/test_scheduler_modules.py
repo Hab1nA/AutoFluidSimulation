@@ -1286,18 +1286,16 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "sw") == STATUS_RUNNING
 
-    def test_resume_scan_does_not_requeue_sc_after_downstream_error(self):
-        """下游已有错误历史时，resume 扫描不能把 SC Waiting 重新入队。"""
+    def test_resume_scan_requeues_sc_when_downstream_never_ran(self):
+        """下游仍为 Waiting 时，resume 扫描应恢复 SC 入队。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_step_status(1, "sw", STATUS_COMPLETED)
         self.state.set_step_status(1, "sc", STATUS_WAITING)
-        self.state.set_step_status(1, "meshing", STATUS_ERROR)
-        self.state.set_step_status(1, "solver", STATUS_ERROR)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.state.get_step_status(1, "sc") == STATUS_WAITING
-        assert self.scheduler._sc_queue.qsize() == 0
+        assert self.scheduler._sc_queue.qsize() == 1
 
     def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
         """断点恢复查询远程任务时应使用构型分配的工作站。"""
@@ -1434,6 +1432,47 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler.worker_pool._process_transfer_step(1)
 
         assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_sc_retry_failure_does_not_mark_downstream_error(self, monkeypatch, tmp_path):
+        """SC 最终失败只标记 SC，Transfer/Meshing/Solver 未运行则保持 Waiting。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+
+        def fail_sc(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "sc"
+            self.state.set_step_status(config_name, "sc", STATUS_ERROR, "SC 失败")
+            return False
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = fail_sc
+
+        self.scheduler.worker_pool._process_sc_step(1)
+
+        assert self.state.get_step_status(1, "sc") == STATUS_ERROR
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+
+    def test_transfer_retry_failure_does_not_mark_meshing_error(self):
+        """Transfer 最终失败只标记 Transfer，Meshing/Solver 未运行则保持 Waiting。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        def fail_transfer(config_name: int, step_name: str, _func) -> bool:
+            assert step_name == "transfer"
+            self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "传输失败")
+            return False
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = fail_transfer
+
+        self.scheduler.worker_pool._process_transfer_step(1)
+
+        assert self.state.get_step_status(1, "transfer") == STATUS_ERROR
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
     def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):
         """clean 删除本地产物后，resume 不应继续信任 Completed 状态。"""
@@ -1673,6 +1712,18 @@ class TestPipelineSchedulerStartRecovery:
             "所有待执行步骤均无现成输出文件" in record.getMessage()
             for record in caplog.records
         )
+
+    def test_recursion_limit_marks_only_sw_error(self):
+        """递归深度超限时只标记实际停止的 SW，后续未执行步骤保持 Waiting。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+
+        self.scheduler._handle_recursion_limit_exceeded(3)
+
+        assert self.state.get_step_status(1, "sw") == STATUS_ERROR
+        assert self.state.get_step_status(1, "sc") == STATUS_WAITING
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
 
 def test_task_runner_restores_remote_tasks_from_db_on_init(monkeypatch):
@@ -2860,9 +2911,10 @@ class TestBarrierCoordinator:
 
         assert not self.barrier_passed.is_set()
         assert self.stopped.is_set()
-        # Solver 也被标记为 Error
-        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
-        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
+        assert self.state.get_step_status(1, "meshing") == STATUS_ERROR
+        assert self.state.get_step_status(2, "meshing") == STATUS_ERROR
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
 
     def test_meshing_error_on_one_workstation_does_not_block_ready_workstation_solver(self):
         """某工作站 Meshing 失败时，不应阻断其他已通过工作站的 Solver。"""
@@ -2883,7 +2935,8 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
-        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
+        assert self.state.get_step_status(2, "meshing") == STATUS_ERROR
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
         assert not self.stopped.is_set()
         assert not t.is_alive()
 
@@ -2943,9 +2996,24 @@ class TestBarrierCoordinator:
         t.join(timeout=10)
 
         assert self.stopped.is_set()
-        # 后续步骤被标记为 Error
-        assert self.state.get_step_status(1, "sc") == STATUS_ERROR
-        assert self.state.get_step_status(2, "solver") == STATUS_ERROR
+        # 只有实际失败的 SW 是 Error，未执行的后续步骤保持 Waiting。
+        assert self.state.get_step_status(1, "sw") == STATUS_ERROR
+        assert self.state.get_step_status(1, "sc") == STATUS_WAITING
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_meshing_error_does_not_mark_solver_error(self):
+        """Meshing 失败时，Solver 未运行则保持 Waiting。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_ERROR, "超时")
+
+        t = threading.Thread(target=self.coordinator.monitor_loop, daemon=True)
+        t.start()
+        t.join(timeout=10)
+
+        assert self.stopped.is_set()
+        assert self.state.get_step_status(1, "meshing") == STATUS_ERROR
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
     def test_join_solver_threads(self):
         """join_solver_threads 等待线程退出。"""

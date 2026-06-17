@@ -435,7 +435,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         match fs::write(&filepath, lines.join("\n")) {
             Ok(_) => {
                 log::info!(
-                    "[TUI] 日志导出完成: scope={}, path={}, lines={}",
+                    "日志导出完成: scope={}, path={}, lines={}",
                     scope,
                     filepath.display(),
                     lines.len()
@@ -448,11 +448,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
                 ));
             }
             Err(e) => {
-                log::error!(
-                    "[TUI] 日志导出失败: path={}, error={}",
-                    filepath.display(),
-                    e
-                );
+                log::error!("日志导出失败: path={}, error={}", filepath.display(), e);
                 log_buffer.push_info(format!("❌ 日志导出失败: {}", e));
             }
         }
@@ -471,7 +467,7 @@ pub async fn execute_confirm_action(
             step_name,
         } => {
             log::info!(
-                "[TUI] 确认重置步骤: config={}, step={}",
+                "确认重置步骤: config={}, step={}",
                 config_name,
                 step_name.as_deref().unwrap_or("all")
             );
@@ -501,7 +497,7 @@ pub async fn execute_confirm_action(
             config_name,
         } => {
             log::info!(
-                "[TUI] 确认清理步骤文件: step={}, config={}",
+                "确认清理步骤文件: step={}, config={}",
                 step_name,
                 config_name
                     .as_ref()
@@ -521,19 +517,19 @@ pub async fn execute_confirm_action(
             CommandResult::None
         }
         ConfirmAction::FullQuit => {
-            log::info!("[TUI] 确认完全退出后台引擎和界面");
+            log::info!("确认完全退出后台引擎和界面");
             CommandResult::FullQuit
         }
         ConfirmAction::StopDaemon => {
-            log::info!("[TUI] 确认停止后台引擎");
+            log::info!("确认停止后台引擎");
             CommandResult::StopDaemon
         }
         ConfirmAction::StopWorkers => {
-            log::info!("[TUI] 确认停止所有 Worker");
+            log::info!("确认停止所有 Worker");
             CommandResult::StopWorkers
         }
         ConfirmAction::RestartWorkers => {
-            log::info!("[TUI] 确认重启所有 Worker");
+            log::info!("确认重启所有 Worker");
             CommandResult::RestartWorkers
         }
     }

@@ -217,18 +217,12 @@ class SWPhaseHandler:
                       if self.state.get_step_status(cn, "sw") == STATUS_RUNNING]
 
         if sw_errors or sw_running:
-            # 有构型失败 → 清理 SW 进程并阻断下游
+            # 有构型失败 → 清理 SW 进程；未执行的下游步骤保持 Waiting
             self._prepare_sw_retry()
 
             if sw_errors:
                 for cn in sw_errors:
                     logger.warning(f"[SW] 构型{cn} STEP 导出失败")
-                    for s in ["sc", "transfer", "meshing", "solver"]:
-                        if self.state.get_step_status(cn, s) == STATUS_WAITING:
-                            self.state.set_step_status(
-                                cn, s, STATUS_ERROR,
-                                f"上游 SW 导出失败，{s} 已阻断"
-                            )
             if sw_running:
                 for cn in sw_running:
                     logger.warning(f"[SW] 构型{cn} 仍为 Running 状态 (可能导出中断)")

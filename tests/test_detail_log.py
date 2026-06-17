@@ -201,6 +201,45 @@ def test_handler_emit_and_get():
     print("  ✅ Handler 写入和读取正确")
 
 
+def test_broadcast_handler_strips_manual_message_prefix():
+    """测试手写模块前缀会从消息正文中剥离。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("ipc.server")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.warning("[IPC] IPC 连接数已达上限")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entry = result["entries"][0]
+    assert "[IPC] IPC 连接数已达上限" not in entry["message"]
+    assert entry["message"].endswith("IPC 连接数已达上限")
+    assert entry["raw_message"] == "[ipc.server] IPC 连接数已达上限"
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 手写模块前缀已从消息正文剥离")
+
+
+def test_broadcast_handler_keeps_unprefixed_message_unchanged():
+    """测试无手写模块前缀的消息正文保持不变。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.state_manager")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info("状态数据库已初始化: pipeline_state.db")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entry = result["entries"][0]
+    assert entry["message"].endswith("状态数据库已初始化: pipeline_state.db")
+    assert entry["raw_message"] == (
+        "[engine.state_manager] 状态数据库已初始化: pipeline_state.db"
+    )
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 无手写模块前缀的消息正文保持不变")
+
+
 def test_handler_incremental_query():
     """测试增量查询（since_id）。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -1016,7 +1055,7 @@ def test_periodic_log_queue_health_waiting_suppressed():
 
 
 def test_periodic_log_queue_warning_passes_through():
-    """测试 [队列异常] WARNING 日志（无 broadcast=False）应被放行。"""
+    """测试队列 WARNING 日志（无 broadcast=False）应被放行并剥离手写前缀。"""
     handler = LogBroadcastHandler(capacity=100)
     test_logger = logging.getLogger("engine.scheduler.worker_pool")
     test_logger.addHandler(handler)
@@ -1026,7 +1065,10 @@ def test_periodic_log_queue_warning_passes_through():
 
     result = handler.get_entries(since_id=0, limit=10)
     assert result["total"] == 1, f"[队列异常] WARNING 应被放行，实际 {result['total']} 条"
-    assert "[队列异常]" in result["entries"][0]["message"]
+    assert result["entries"][0]["message"].endswith("构型8 SW 已完成但未入队")
+    assert result["entries"][0]["raw_message"] == (
+        "[engine.scheduler.worker_pool] 构型8 SW 已完成但未入队"
+    )
 
     test_logger.removeHandler(handler)
     print("  ✅ [队列异常] WARNING 日志被正确放行")

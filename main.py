@@ -31,6 +31,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
+from utils.logger import PrefixStrippingFormatter
 from utils.process_utils import (
     check_ipc_ready,
     cleanup_worker_processes_from_pid_files,
@@ -68,8 +69,8 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     if logger.handlers:
         return logger
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
+    formatter = PrefixStrippingFormatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     fh = logging.FileHandler(log_file, encoding="utf-8")

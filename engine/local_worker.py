@@ -32,9 +32,11 @@ from ipc.protocol import (
     serialize,
 )
 from utils.excel_reader import read_model_configs
+from utils.logger import setup_logger
 
 
 DEFAULT_PUBLIC_IP_URL = "https://api.ipify.org"
+logger = setup_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ class LocalWorker:
             try:
                 self.run_once()
             except RuntimeError as exc:
-                print(f"[WARN] {exc}", file=sys.stderr)
+                logger.warning(str(exc))
                 self._register_until_available()
                 self._last_heartbeat_at = time.monotonic()
 
@@ -193,7 +195,7 @@ class LocalWorker:
                 self.register_once()
                 return
             except RuntimeError as exc:
-                print(f"[WARN] {exc}", file=sys.stderr)
+                logger.warning(str(exc))
                 time.sleep(self.config.register_retry_interval)
 
     def run_once(self, now: float | None = None) -> str:
@@ -436,7 +438,7 @@ class LocalWorker:
             elif step == "sc":
                 runner.shutdown_sc_pool()
         except Exception as exc:
-            print(f"[WARN] LocalWorker 超时清理失败: {exc}", file=sys.stderr)
+            logger.warning("LocalWorker 超时清理失败: %s", exc)
 
     def _execute_task(self, step: str, params: dict[str, Any]) -> dict[str, Any]:
         handler = self._task_handlers.get(step)
@@ -696,7 +698,7 @@ def main() -> int:
         worker.run_forever()
         return 0
     except RuntimeError as exc:
-        print(f"[ERROR] {exc}", file=sys.stderr)
+        logger.error(str(exc))
         return 1
 
 

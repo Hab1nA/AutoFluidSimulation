@@ -9,7 +9,11 @@ from __future__ import annotations
 import os
 import re
 import sys
+import logging
 from typing import Any, TypedDict, cast
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -493,9 +497,9 @@ def ensure_directories() -> None:
         try:
             os.makedirs(path, exist_ok=True)
         except PermissionError as e:
-            print(f"[WARNING] 权限不足，无法创建目录: {path}: {e}", file=sys.stderr)
+            logger.warning("权限不足，无法创建目录: %s: %s", path, e)
         except OSError as e:
-            print(f"[WARNING] 无法创建目录 {path}: {e}", file=sys.stderr)
+            logger.warning("无法创建目录 %s: %s", path, e)
 
 
 def _apply_env_overrides():

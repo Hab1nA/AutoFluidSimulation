@@ -239,15 +239,25 @@ impl LogBuffer {
 }
 
 fn log_info_message(message: &str) {
+    match info_message_level(message) {
+        log::Level::Error => log::error!("高级信息: {message}"),
+        log::Level::Warn => log::warn!("高级信息: {message}"),
+        _ => log::info!("高级信息: {message}"),
+    }
+}
+
+fn info_message_level(message: &str) -> log::Level {
     let trimmed = message.trim_start();
-    // ✅ 成功、❌ 错误、⚠ 警告、⏳ 等待中、⏸ 暂停
-    if trimmed.starts_with('❌') || trimmed.contains("失败") || trimmed.contains("错误") {
-        log::error!("[TUI] 高级信息: {message}");
-    } else if trimmed.starts_with('⚠') || trimmed.contains("警告") || trimmed.contains("超时")
-    {
-        log::warn!("[TUI] 高级信息: {message}");
+    if trimmed.starts_with('❌') {
+        log::Level::Error
+    } else if trimmed.starts_with('⚠') || trimmed.starts_with('⏸') {
+        log::Level::Warn
+    } else if trimmed.contains("失败") || trimmed.contains("错误") {
+        log::Level::Error
+    } else if trimmed.contains("警告") || trimmed.contains("超时") {
+        log::Level::Warn
     } else {
-        log::info!("[TUI] 高级信息: {message}");
+        log::Level::Info
     }
 }
 
@@ -325,5 +335,15 @@ mod tests {
             .collect();
 
         assert_eq!(filtered, vec![2]);
+    }
+
+    #[test]
+    fn info_message_level_prefers_warning_emoji_over_error_keywords() {
+        assert_eq!(
+            info_message_level("⚠️ 启动 SSH 隧道失败: timeout"),
+            log::Level::Warn
+        );
+        assert_eq!(info_message_level("⏸️ 流水线已暂停"), log::Level::Warn);
+        assert_eq!(info_message_level("后台引擎启动失败"), log::Level::Error);
     }
 }

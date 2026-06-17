@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import threading
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -60,6 +61,35 @@ _deferred_loggers: list[
 _deferred_lock = threading.Lock()
 _broadcast_logger_names: set[str] = set()
 _broadcast_logger_lock = threading.Lock()
+
+_MANUAL_MESSAGE_PREFIX_RE = re.compile(
+    r"^\[(?=[^\]\r\n]*[A-Za-z\u4e00-\u9fff])[^\]\r\n]{1,40}\]\s*"
+)
+
+
+def _strip_manual_message_prefix(message: str) -> str:
+    """Remove handwritten module/category prefixes from a log message.
+
+    The formatter already includes ``%(name)s`` as the authoritative source, so
+    message text should not repeat tags such as ``[IPC]`` or ``[Scheduler]``.
+    Numeric progress markers like ``[1/3]`` are intentionally preserved.
+    """
+    cleaned = message
+    while True:
+        next_cleaned = _MANUAL_MESSAGE_PREFIX_RE.sub("", cleaned, count=1)
+        if next_cleaned == cleaned:
+            return cleaned
+        cleaned = next_cleaned
+
+
+class PrefixStrippingFormatter(logging.Formatter):
+    """Formatter that removes duplicate handwritten prefixes from message text."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        normalized = copy(record)
+        normalized.msg = _strip_manual_message_prefix(record.getMessage())
+        normalized.args = ()
+        return super().format(normalized)
 
 
 def init_session(process_type: str, timestamp: str | None = None) -> str:
@@ -192,7 +222,7 @@ def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
+    formatter = PrefixStrippingFormatter(
         "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -408,7 +438,7 @@ class LogBroadcastHandler(logging.Handler):
         self._id_counter = itertools.count(1)
         self._lock = threading.Lock()
         self.registered_only = registered_only
-        self._formatter = logging.Formatter(
+        self._formatter = PrefixStrippingFormatter(
             "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
@@ -435,8 +465,9 @@ class LogBroadcastHandler(logging.Handler):
 
     def _entry_from_record(self, record: logging.LogRecord) -> LogEntry:
         """Build a structured entry from a log record."""
+        clean_message = _strip_manual_message_prefix(record.getMessage())
         msg = self._formatter.format(record)
-        raw_msg = f"[{record.name}] {record.getMessage()}"
+        raw_msg = f"[{record.name}] {clean_message}"
         return LogEntry(
             id=next(self._id_counter),
             timestamp=datetime.fromtimestamp(

@@ -85,7 +85,7 @@ impl IpcRequest {
             Err(e) => {
                 // IpcRequest 结构简单且不含自定义序列化逻辑，正常情况不应失败。
                 // 保留 fallback 以防御性处理极端情况（如内存不足）。
-                log::warn!("[IPC] 序列化失败: {e}");
+                log::warn!("序列化失败: {e}");
                 let fallback = format!(
                     r#"{{"command":"error","request_id":"","params":{{"error":"内部序列化错误: {e}"}}}}"#
                 );
@@ -117,7 +117,7 @@ impl IpcResponse {
         match serde_json::from_str(trimmed) {
             Ok(msg) => Some(msg),
             Err(e) => {
-                log::warn!("[IPC] 反序列化失败: {e}, 原始数据: {trimmed}");
+                log::warn!("反序列化失败: {e}, 原始数据: {trimmed}");
                 None
             }
         }
