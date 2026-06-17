@@ -697,6 +697,20 @@ class RemoteExecutor:
         config = remote_config or self._remote_config_for_workstation()
         return f"{config['flag_dir']}/meshing_done_{config_name}.txt".replace("\\", "/")
 
+    def _meshing_mesh_file(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> str | None:
+        """返回 Meshing 输出网格文件路径。"""
+        self._validate_config_name(config_name)
+        mesh_name = get_step_filename("meshing", config_name)
+        if not mesh_name:
+            return None
+        config = remote_config or self._remote_config_for_workstation()
+        msh_dir = str(config["msh_dir"]).replace("\\", "/")
+        return f"{msh_dir}/{mesh_name}"
+
     def _solver_flag_file(
         self,
         config_name: int,
@@ -887,17 +901,10 @@ class RemoteExecutor:
         timeout: float | None = None,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
-        """在 SSH 锁内检查 Meshing 完成标志或网格文件是否已存在。"""
+        """在 SSH 锁内检查 Meshing 网格文件是否已存在。"""
         remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._meshing_flag_file(config_name, remote_config)
-            mesh_name = get_step_filename("meshing", config_name)
-            msh_dir = str(remote_config["msh_dir"]).replace("\\", "/")
-            mesh_file = (
-                f"{msh_dir}/{mesh_name}"
-                if mesh_name
-                else None
-            )
+            mesh_file = self._meshing_mesh_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
@@ -913,9 +920,7 @@ class RemoteExecutor:
         try:
             with self._ssh_lock:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                return _check_remote_file(ssh, flag_file) or (
-                    mesh_file is not None and _check_remote_file(ssh, mesh_file)
-                )
+                return mesh_file is not None and _check_remote_file(ssh, mesh_file)
         except (OSError, ConnectionError) as e:
             logger.warning(f"[Meshing] 检查远程输出文件异常: {e}")
             return False
@@ -933,12 +938,15 @@ class RemoteExecutor:
         remote_config = self._remote_config_for_workstation(workstation_id)
         try:
             flag_file = self._meshing_flag_file(config_name, remote_config)
+            mesh_file = self._meshing_mesh_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         error_flag = f"{flag_file}.error"
         timeout = ENGINE_CONFIG["meshing_timeout"]
         poll_interval = 10
+        file_grace_period = 60
+        done_flag_seen_time: float | None = None
         start_time = self._remote_task_start_time(
             config_name,
             "meshing",
@@ -978,15 +986,41 @@ class RemoteExecutor:
                         )
                         return False
                     if ssh.check_remote_file(flag_file):
-                        logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
-                        ssh.delete_remote_file(flag_file)
-                        self._cleanup_completed_remote_task(
-                            config_name,
-                            "meshing",
-                            ssh,
-                            workstation_id,
+                        mesh_exists = (
+                            mesh_file is not None
+                            and ssh.check_remote_file(mesh_file)
                         )
-                        return True
+                        if mesh_exists:
+                            logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
+                            ssh.delete_remote_file(flag_file)
+                            self._cleanup_completed_remote_task(
+                                config_name,
+                                "meshing",
+                                ssh,
+                                workstation_id,
+                            )
+                            return True
+
+                        if done_flag_seen_time is None:
+                            done_flag_seen_time = time.time()
+                            logger.warning(
+                                f"[Meshing] 构型{config_name}: 标志文件已存在但缺少 "
+                                f"{mesh_file or '网格文件'}，等待 {file_grace_period}s"
+                            )
+
+                        if time.time() - done_flag_seen_time > file_grace_period:
+                            logger.error(
+                                f"[Meshing] 构型{config_name}: 网格文件 "
+                                f"{file_grace_period}s 内未生成，判定为导出错误"
+                            )
+                            ssh.delete_remote_file(flag_file)
+                            self._cleanup_completed_remote_task(
+                                config_name,
+                                "meshing",
+                                ssh,
+                                workstation_id,
+                            )
+                            return False
             except (OSError, ConnectionError) as e:
                 logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
 

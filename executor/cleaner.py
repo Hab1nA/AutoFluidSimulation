@@ -47,6 +47,15 @@ def _has_explicit_reachability(workstation: Mapping[str, object]) -> bool:
     return bool(reachable_host or connectivity_mode in {"vpn", "tailscale", "reverse_tunnel"})
 
 
+def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int) -> list[str]:
+    """Return done/error flag paths for one remote step and config."""
+    flag_dir = str(config.get("flag_dir", "")).replace("\\", "/")
+    if not flag_dir:
+        return []
+    flag_file = f"{flag_dir}/{stem}_{config_name}.txt"
+    return [flag_file, f"{flag_file}.error"]
+
+
 class FileCleaner:
     """文件清理与系统自检器。"""
 
@@ -373,13 +382,23 @@ class FileCleaner:
             "sw":       None,
             "sc":       None,
             "transfer": ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]]),
-            "meshing":  ("msh_dir",    [STEP_FILE_PATTERNS["meshing"]]),
-            "solver":   ("result_dir", [STEP_FILE_PATTERNS["solver"], STEP_FILE_PATTERNS["solverdata"]]),
+            "meshing":  (
+                "msh_dir",
+                [STEP_FILE_PATTERNS["meshing"]],
+                lambda cn, cfg: _remote_flag_paths(cfg, "meshing_done", cn),
+            ),
+            "solver":   (
+                "result_dir",
+                [STEP_FILE_PATTERNS["solver"], STEP_FILE_PATTERNS["solverdata"]],
+                lambda cn, cfg: _remote_flag_paths(cfg, "solver_done", cn),
+            ),
         }
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
         remote_info = remote_patterns.get(step_name)
         if remote_info is not None:
-            dir_key, file_templates = remote_info
+            dir_key = remote_info[0]
+            file_templates = remote_info[1]
+            extra_paths_factory = remote_info[2] if len(remote_info) > 2 else None
             try:
                 with self._ssh_guard():
                     processed_count = 0
@@ -397,9 +416,17 @@ class FileCleaner:
                         remote_config = self._remote_config_for_workstation(workstation_id)
                         target_dir = str(remote_config.get(dir_key, ""))
                         remote_dir = target_dir.replace("\\", "/")
+                        remote_paths = []
                         for file_template in file_templates:
                             filename = str(file_template).format(config=cn)
-                            remote_path = f"{remote_dir}/{filename}"
+                            remote_paths.append(f"{remote_dir}/{filename}")
+                        if callable(extra_paths_factory):
+                            remote_paths.extend(
+                                path
+                                for path in extra_paths_factory(cn, remote_config)
+                                if path
+                            )
+                        for remote_path in remote_paths:
                             if ssh.delete_remote_file(remote_path):
                                 processed_count += 1
                                 logger.info(

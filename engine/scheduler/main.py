@@ -537,9 +537,8 @@ class PipelineScheduler:
 
                 if status == STATUS_COMPLETED:
                     if (
-                        not is_server_mode()
-                        and step in ("sw", "sc")
-                        and not self._check_step_output_exists(
+                        step in {"sw", "sc", "meshing", "solver"}
+                        and not self._completed_step_output_exists(
                             cn, step, step_dir, scdoc_dir
                         )
                     ):
@@ -547,6 +546,7 @@ class PipelineScheduler:
                             f"{log_prefix} 构型{cn} [{step}] 状态为 Completed "
                             "但输出文件缺失，重置为 Waiting"
                         )
+                        self._forget_completed_remote_task_if_tracked(cn, step)
                         self.state.reset_config_steps(cn, step)
                         status = STATUS_WAITING
                     else:
@@ -746,6 +746,57 @@ class PipelineScheduler:
         return check_step_output_exists(
             cn, step, step_dir, scdoc_dir, remote_config, ssh
         )
+
+    def _completed_step_output_exists(
+        self, cn: int, step: str, step_dir: str, scdoc_dir: str
+    ) -> bool:
+        """Validate Completed status against durable artifacts, not only flags."""
+        if step in {"sw", "sc"}:
+            if is_server_mode():
+                return True
+            return self._check_step_output_exists(cn, step, step_dir, scdoc_dir)
+        if step == "meshing":
+            return self._remote_files_exist(cn, ("meshing",))
+        if step == "solver":
+            return self._remote_files_exist(cn, ("solver", "solverdata"))
+        return True
+
+    def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool:
+        workstation_id = self._workstation_for_config(cn)
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        ssh = None
+        try:
+            ssh = self.runner.get_ssh(workstation_id)
+        except Exception:
+            return False
+
+        try:
+            if not ssh.is_connected():
+                return False
+        except Exception:
+            return False
+
+        for output_step in output_steps:
+            filename = get_step_filename(output_step, cn)
+            if not filename:
+                return False
+            directory_key = "msh_dir" if output_step == "meshing" else "result_dir"
+            remote_dir = str(remote_config[directory_key]).replace("\\", "/")
+            remote_path = f"{remote_dir}/{filename}"
+            try:
+                if hasattr(ssh, "get_remote_file_size"):
+                    size = ssh.get_remote_file_size(remote_path, timeout=5.0)
+                    if size is None or size <= 0:
+                        return False
+                    continue
+                if not ssh.check_remote_file(remote_path, timeout=5.0):
+                    return False
+            except TypeError:
+                if not ssh.check_remote_file(remote_path):
+                    return False
+            except Exception:
+                return False
+        return True
 
     def _forget_completed_config_remote_tasks(self, cn: int) -> None:
         """清理已完成构型残留的远程任务元数据。"""

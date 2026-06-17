@@ -366,8 +366,8 @@ class TestSWPhaseHandlerFallback:
         assert config_name == 1
         assert step_file.endswith("model_gen4.SLDPRT_1.step")
 
-    def test_server_mode_defers_worker_pool_until_all_sw_configs_finish(self, monkeypatch):
-        """server 模式下应避免 SW 导出中途启动 SpaceClaim。"""
+    def test_server_mode_starts_worker_pool_before_all_sw_configs_finish(self, monkeypatch):
+        """server 模式下单个 SW 构型完成后应立即允许 SC 消费。"""
         from engine import config as config_module
         from engine.scheduler.sw_phase import SWPhaseHandler
         from engine.scheduler.work_queue import UniqueWorkQueue
@@ -467,9 +467,9 @@ class TestSWPhaseHandlerFallback:
         assert handler._execute_sw_macro([1, 2]) is True
 
         assert runner.second_sw_started_after_first_sc_enqueued is True
-        assert runner.second_sw_started_after_worker_pool is False
-        assert worker_pool.start_count == 1
-        assert meshing_monitor.start_count == 1
+        assert runner.second_sw_started_after_worker_pool is True
+        assert worker_pool.start_count >= 1
+        assert meshing_monitor.start_count >= 1
         assert sc_queue.has_claim(1) is True
         assert sc_queue.has_claim(2) is True
 
@@ -916,6 +916,7 @@ class _MockTaskRunner:
         self._solver_wait_count = 0
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_in_flight = False
+        self._ssh = _MockSSH()
 
     def set_control_events(self, paused_event, stopped_event):
         self._paused_event = paused_event
@@ -965,6 +966,25 @@ class _MockTaskRunner:
 
     def get_remote_executor(self):
         return self._remote_executor
+
+    def get_ssh(self, workstation_id: str = "default"):
+        return self._ssh
+
+
+class _MockSSH:
+    """最小 SSH Mock，用于调度恢复扫描的远程产物检查。"""
+
+    def __init__(self):
+        self.remote_file_sizes: dict[str, int] = {}
+
+    def is_connected(self) -> bool:
+        return True
+
+    def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None) -> int | None:
+        return self.remote_file_sizes.get(remote_path.replace("\\", "/"))
+
+    def check_remote_file(self, remote_path: str, *, timeout: float | None = None) -> bool:
+        return remote_path.replace("\\", "/") in self.remote_file_sizes
 
 
 class _MockRemoteExecutor:
@@ -1222,6 +1242,25 @@ class TestPipelineSchedulerStartRecovery:
         assert cleared_all is True
         assert cleared_workstations == []
 
+    def _record_remote_outputs(
+        self,
+        config_name: int,
+        *,
+        meshing: bool = False,
+        solver: bool = False,
+    ) -> None:
+        if meshing:
+            self.runner._ssh.remote_file_sizes[
+                f"D:/xkz_1020/msh/model_gen4_{config_name}.msh.h5"
+            ] = 1024
+        if solver:
+            self.runner._ssh.remote_file_sizes[
+                f"D:/xkz_1020/case/model_gen4_{config_name}.cas.h5"
+            ] = 1024
+            self.runner._ssh.remote_file_sizes[
+                f"D:/xkz_1020/case/model_gen4_{config_name}.dat.h5"
+            ] = 1024
+
     def test_resume_scan_keeps_running_meshing_when_remote_task_running(self):
         """启动扫描遇到仍在运行的远程 Meshing 时不能重置或入队重启。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -1282,6 +1321,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
+        self._record_remote_outputs(1, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1296,6 +1336,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
+        self._record_remote_outputs(1, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1427,6 +1468,31 @@ class TestPipelineSchedulerStartRecovery:
         assert self.scheduler.meshing_monitor.qsize() == 1
         assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "meshing", "default")]
 
+    def test_completed_remote_meshing_with_missing_mesh_is_reset_on_resume(self):
+        """Meshing Completed 不能只信任状态库，缺少 .msh.h5 时应重新入队。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 1
+
+    def test_completed_remote_solver_with_missing_results_is_reset_on_resume(self):
+        """Solver Completed 缺少 cas/dat 结果时应回到 Waiting 等屏障重新调度。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        self._record_remote_outputs(1, meshing=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+
     def test_resume_scan_completed_remote_solver_forgets_task(self):
         """恢复扫描确认 Solver 已完成时清理远程任务元数据。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -1434,6 +1500,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "completed"
+        self._record_remote_outputs(1, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1456,6 +1523,7 @@ class TestPipelineSchedulerStartRecovery:
             started_at=time.time(),
         )
         self.scheduler._check_step_output_exists = lambda *_args: True
+        self._record_remote_outputs(1, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1476,6 +1544,7 @@ class TestPipelineSchedulerStartRecovery:
             error_flag_file="D:/flags/solver_done_1.txt.error",
             started_at=time.time(),
         )
+        self._record_remote_outputs(1, meshing=True, solver=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -3431,6 +3500,45 @@ class TestUtilsExtended:
             },
             _SSH(),
         ) is True
+
+    def test_remote_output_check_ignores_meshing_done_flag_without_mesh(self):
+        """Meshing done flag 不能替代实际 .msh.h5 输出。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        calls: list[str] = []
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            def check_remote_file(
+                self,
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+            ) -> bool:
+                calls.append(remote_path)
+                return remote_path == "D:/flags/meshing_done_3.txt"
+
+        assert check_step_output_exists(
+            3,
+            "meshing",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+        ) is False
+        assert calls == [
+            "D:/flags/meshing_done_3.txt.error",
+            "D:/msh/model_gen4_3.msh.h5",
+        ]
 
     def test_remote_output_check_treats_solver_error_flag_as_terminal(self):
         """Solver .error flag 应被视为终结输出，避免恢复时重复启动。"""

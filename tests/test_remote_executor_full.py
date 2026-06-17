@@ -510,6 +510,7 @@ class TestExecuteMeshing:
     def test_wait_meshing_completion_cleans_remote_task(self, monkeypatch):
         """Meshing 完成后清理计划任务条目，避免远程任务列表堆积。"""
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 30)
 
         deleted: list[str] = []
@@ -517,7 +518,10 @@ class TestExecuteMeshing:
 
         class _SSH:
             def check_remote_file(self, path: str) -> bool:
-                return path == "D:/flags/meshing_done_4.txt"
+                return path in {
+                    "D:/flags/meshing_done_4.txt",
+                    "D:/msh/model_gen4_4.msh.h5",
+                }
 
             def delete_remote_file(self, path: str) -> bool:
                 deleted.append(path)

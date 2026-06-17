@@ -616,7 +616,11 @@ class TestFileCleanerCleanStepFiles:
             cleaner.clean_step_files("meshing", config_name=2)
 
             assert requested_ids == ["WS-B"]
-            assert ssh.deleted == ["E:/ws_b/msh/model_gen4_2.msh.h5"]
+            assert ssh.deleted == [
+                "E:/ws_b/msh/model_gen4_2.msh.h5",
+                "E:/ws_b/flags/meshing_done_2.txt",
+                "E:/ws_b/flags/meshing_done_2.txt.error",
+            ]
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

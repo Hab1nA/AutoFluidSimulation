@@ -355,9 +355,25 @@ def test_check_meshing_outputs_exist_holds_ssh_lock_and_passes_timeout(monkeypat
     assert executor.check_meshing_outputs_exist(4, timeout=13) is True
     assert lock_entries == ["enter", "exit"]
     assert calls == [
-        ("D:/flags/meshing_done_4.txt", 13, True),
         ("D:/msh/model_gen4_4.msh.h5", 13, True),
     ]
+
+
+def test_check_meshing_outputs_exist_ignores_stale_done_flag_without_mesh(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+
+    calls: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            calls.append(remote_path)
+            return remote_path == "D:/flags/meshing_done_4.txt"
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.check_meshing_outputs_exist(4) is False
+    assert calls == ["D:/msh/model_gen4_4.msh.h5"]
 
 
 def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path, monkeypatch):
@@ -568,6 +584,54 @@ def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeyp
     assert checked == [error_flag]
     assert deleted == [error_flag]
     assert 3 not in executor._remote_tasks
+
+
+def test_wait_meshing_completion_requires_mesh_after_done_flag(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+    monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 120)
+
+    flag_file = "D:/flags/meshing_done_4.txt"
+    mesh_file = "D:/msh/model_gen4_4.msh.h5"
+    checked: list[str] = []
+    deleted: list[str] = []
+    times = iter([0.0, 0.0, 61.0, 61.0])
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            checked.append(remote_path)
+            return remote_path == flag_file
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+        def cleanup_remote_task_entry(self, task_name: str, pid_file: str | None = None) -> bool:
+            return True
+
+    state = _StateRecorder()
+    state.remote_tasks[(4, "meshing")] = {
+        "config_name": 4,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_meshing",
+        "flag_file": flag_file,
+        "error_flag_file": f"{flag_file}.error",
+        "pid_file": "D:/flags/autofluid_bg_meshing.pid",
+        "started_at": 0.0,
+    }
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[4] = "AutoFluid_meshing"
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+    monkeypatch.setattr(remote_executor_module.time, "sleep", lambda _seconds: None)
+
+    assert executor.wait_meshing_completion(4) is False
+    assert checked == [
+        f"{flag_file}.error",
+        flag_file,
+        mesh_file,
+    ]
+    assert deleted == [flag_file]
+    assert (4, "meshing") not in state.remote_tasks
 
 
 def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypatch):

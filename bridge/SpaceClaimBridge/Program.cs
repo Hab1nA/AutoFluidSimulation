@@ -306,7 +306,7 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
                     UseShellExecute = false,
                 };
-                NormalizePathEnvironmentVariables(psi);
+                PrepareSpaceClaimEnvironment(psi);
                 psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
@@ -403,20 +403,66 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        private static void PrepareSpaceClaimEnvironment(ProcessStartInfo psi)
+        {
+            BackfillProcessEnvironment(psi);
+            NormalizePathEnvironmentVariables(psi);
+            EnsureAnsysEnvironmentVariables(psi);
+        }
+
+        private static void BackfillProcessEnvironment(ProcessStartInfo psi)
+        {
+            CopyEnvironmentVariables(
+                psi,
+                Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Machine));
+            CopyEnvironmentVariables(
+                psi,
+                Environment.GetEnvironmentVariables(EnvironmentVariableTarget.User));
+            Console.WriteLine("[BRIDGE] 已补齐系统/用户环境变量");
+        }
+
+        private static void CopyEnvironmentVariables(
+            ProcessStartInfo psi,
+            System.Collections.IDictionary variables)
+        {
+            foreach (System.Collections.DictionaryEntry entry in variables)
+            {
+                string? name = entry.Key as string;
+                string? value = entry.Value as string;
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                if (string.Equals(name, "Path", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (psi.EnvironmentVariables.ContainsKey(name) &&
+                    !string.IsNullOrWhiteSpace(psi.EnvironmentVariables[name]))
+                {
+                    continue;
+                }
+
+                psi.EnvironmentVariables[name] = value;
+            }
+        }
+
         private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
         {
             NormalizeCurrentProcessPathEnvironment();
 
-            string? pathValue = null;
+            string? inheritedPath = null;
             var pathKeys = new List<string>();
             foreach (string key in psi.EnvironmentVariables.Keys)
             {
                 if (string.Equals(key, "Path", StringComparison.OrdinalIgnoreCase))
                 {
                     pathKeys.Add(key);
-                    if (pathValue == null || string.Equals(key, "Path", StringComparison.Ordinal))
+                    if (inheritedPath == null || string.Equals(key, "Path", StringComparison.Ordinal))
                     {
-                        pathValue = psi.EnvironmentVariables[key];
+                        inheritedPath = psi.EnvironmentVariables[key];
                     }
                 }
             }
@@ -426,10 +472,54 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables.Remove(key);
             }
 
-            if (pathValue != null)
+            string pathValue = BuildSpaceClaimPath(inheritedPath);
+            psi.EnvironmentVariables["Path"] = pathValue;
+            Console.WriteLine("[BRIDGE] 已补齐 SpaceClaim 子进程 Path");
+        }
+
+        private static void EnsureAnsysEnvironmentVariables(ProcessStartInfo psi)
+        {
+            string awpRoot = ResolveAwpRoot();
+            SetEnvironmentIfMissing(psi, "AWP_ROOT231", awpRoot);
+            SetEnvironmentIfMissing(psi, "AWP_LOCALE231", "zh");
+            SetEnvironmentIfMissing(psi, "ANSYS231_DIR", Path.Combine(awpRoot, "ANSYS"));
+            SetEnvironmentIfMissing(
+                psi,
+                "ANSYSLIC_DIR",
+                @"C:\Program Files\ANSYS Inc\Shared Files\Licensing");
+            SetEnvironmentIfMissing(psi, "ANSYSLMD_LICENSE_FILE", "1055@localhost");
+            SetEnvironmentIfMissing(
+                psi,
+                "CADOE_LIBDIR231",
+                Path.Combine(awpRoot, @"CommonFiles\Language\zh"));
+            Console.WriteLine("[BRIDGE] 已补齐 ANSYS SpaceClaim 环境变量");
+        }
+
+        private static string ResolveAwpRoot()
+        {
+            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
+            if (!string.IsNullOrWhiteSpace(awpRoot) && Directory.Exists(awpRoot))
             {
-                psi.EnvironmentVariables["Path"] = pathValue;
+                return awpRoot;
             }
+
+            return @"C:\Program Files\ANSYS Inc\v231";
+        }
+
+        private static void SetEnvironmentIfMissing(
+            ProcessStartInfo psi,
+            string name,
+            string value)
+        {
+            if (psi.EnvironmentVariables.ContainsKey(name) &&
+                !string.IsNullOrWhiteSpace(psi.EnvironmentVariables[name]))
+            {
+                return;
+            }
+
+            string? processValue = Environment.GetEnvironmentVariable(name);
+            psi.EnvironmentVariables[name] =
+                !string.IsNullOrWhiteSpace(processValue) ? processValue : value;
         }
 
         private static void NormalizeCurrentProcessPathEnvironment()
@@ -445,6 +535,90 @@ namespace AutoFluidSimulation.Bridge
             if (pathValue != null)
             {
                 Environment.SetEnvironmentVariable("Path", pathValue);
+            }
+        }
+
+        private static string BuildSpaceClaimPath(string? inheritedPath)
+        {
+            var entries = new List<string>();
+            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
+            if (string.IsNullOrWhiteSpace(awpRoot))
+            {
+                awpRoot = @"C:\Program Files\ANSYS Inc\v231";
+            }
+
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"SCDM\Stride"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, "SCDM"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"Addins\ACT\bin\Win64"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"fluent\ntbin\win64"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"commonfiles\CAD\Spatial"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"commonfiles\CAD\bin\winx64"));
+            AddPathIfDirectory(entries, Environment.GetEnvironmentVariable("ANSYSLIC_DIR"));
+
+            AppendPathList(entries, inheritedPath);
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path"));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("PATH"));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User));
+
+            return string.Join(";", DeduplicatePathEntries(entries));
+        }
+
+        private static void AddPathIfDirectory(List<string> entries, string? path)
+        {
+            if (path == null)
+            {
+                return;
+            }
+
+            string pathText = path.Trim();
+            if (pathText.Length == 0)
+            {
+                return;
+            }
+
+            string expanded = Environment.ExpandEnvironmentVariables(pathText);
+            if (Directory.Exists(expanded))
+            {
+                entries.Add(expanded);
+            }
+        }
+
+        private static void AppendPathList(List<string> entries, string? pathValue)
+        {
+            if (pathValue == null)
+            {
+                return;
+            }
+
+            string pathText = pathValue.Trim();
+            if (pathText.Length == 0)
+            {
+                return;
+            }
+
+            foreach (string entry in pathText.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = entry.Trim();
+                if (trimmed.Length > 0)
+                {
+                    entries.Add(trimmed);
+                }
+            }
+        }
+
+        private static IEnumerable<string> DeduplicatePathEntries(IEnumerable<string> entries)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string entry in entries)
+            {
+                string normalized = entry.Trim().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (normalized.Length == 0 || !seen.Add(normalized))
+                {
+                    continue;
+                }
+
+                yield return entry.Trim();
             }
         }
 
@@ -509,7 +683,7 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False",
                     UseShellExecute = false,
                 };
-                NormalizePathEnvironmentVariables(psi);
+                PrepareSpaceClaimEnvironment(psi);
                 // Python passes the same slot settings to Bridge; Bridge forwards them
                 // to the child SpaceClaim process that runs spaceclaim_transit.py.
                 psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";

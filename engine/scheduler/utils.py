@@ -311,15 +311,14 @@ def check_step_output_exists(
 
     if step_name == "meshing":
         flag_dir = str(remote_config["flag_dir"]).replace("\\", "/")
-        flag_file = f"{flag_dir}/meshing_done_{config_name}.txt"
-        error_flag = f"{flag_file}.error"
+        error_flag = f"{flag_dir}/meshing_done_{config_name}.txt.error"
         mesh_name = get_step_filename("meshing", config_name)
         mesh_file = None
         if mesh_name:
             msh_dir = str(remote_config["msh_dir"]).replace("\\", "/")
             mesh_file = f"{msh_dir}/{mesh_name}"
         try:
-            return _check_remote_file(flag_file) or _check_remote_file(error_flag) or (
+            return _check_remote_file(error_flag) or (
                 mesh_file is not None and _check_remote_file(mesh_file)
             )
         except Exception:
