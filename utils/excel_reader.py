@@ -18,21 +18,21 @@ logger = setup_logger(__name__)
 PARAM_COLUMN_RANGE = range(1, 5)
 
 # 延迟导入 openpyxl，仅在函数被调用时才导入，避免在模块导入时失败
-_openpyxl_imported = False
 _openpyxl = None
+
 
 def _import_openpyxl():
     """延迟导入 openpyxl 库"""
-    global _openpyxl_imported, _openpyxl
-    if not _openpyxl_imported:
-        try:
-            import openpyxl as op
-            _openpyxl = op
-            _openpyxl_imported = True
-        except ImportError as e:
-            raise ImportError(
-                "openpyxl 库未安装，请运行：pip install openpyxl"
-            ) from e
+    global _openpyxl
+    if _openpyxl is not None:
+        return _openpyxl
+    try:
+        import openpyxl as op
+        _openpyxl = op
+    except ImportError as e:
+        raise ImportError(
+            "openpyxl 库未安装，请运行：pip install openpyxl"
+        ) from e
     return _openpyxl
 
 

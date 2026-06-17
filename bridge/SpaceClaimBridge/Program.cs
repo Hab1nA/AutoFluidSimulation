@@ -962,7 +962,7 @@ namespace AutoFluidSimulation.Bridge
             int spaceClaimPid,
             string status)
         {
-            if (opts == null || string.IsNullOrEmpty(opts.CmdDir))
+            if (string.IsNullOrEmpty(opts.CmdDir))
             {
                 return;
             }

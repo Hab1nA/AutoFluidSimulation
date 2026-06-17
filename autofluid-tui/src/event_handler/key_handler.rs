@@ -570,10 +570,7 @@ mod tests {
         let mut state = AppState::new();
         state.command_buffer = TextBuffer::with_text("stale".to_string());
 
-        let action = handle_key(
-            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            &mut state,
-        );
+        let action = handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL), &mut state);
 
         assert!(matches!(action, AppAction::None));
         assert_eq!(state.command_buffer.text, "");
@@ -586,10 +583,7 @@ mod tests {
         state.focus_zone = FocusZone::DetailLog;
         state.command_buffer = TextBuffer::with_text("stale".to_string());
 
-        let action = handle_key(
-            key(KeyCode::Char('u'), KeyModifiers::CONTROL),
-            &mut state,
-        );
+        let action = handle_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL), &mut state);
 
         assert!(matches!(action, AppAction::None));
         assert_eq!(state.focus_zone, FocusZone::CommandInput);

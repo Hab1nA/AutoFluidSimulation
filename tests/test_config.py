@@ -4,7 +4,7 @@
 
 覆盖：
 - _env_override: 环境变量覆盖逻辑
-- _expand_dict_env_vars: 字典批量环境变量展开
+- _expand_config_value: 配置值环境变量递归展开
 - _apply_env_overrides: 环境变量覆盖 LOCAL_PATHS/REMOTE_CONFIG
 - LOCAL_PATHS / REMOTE_CONFIG / IPC_CONFIG: 默认值完整性
 - get_step_filename: 全步骤文件名生成
@@ -560,14 +560,14 @@ class TestExpandEnvVars:
         assert _expand_env_vars("just text") == "just text"
 
 
-class TestExpandDictEnvVars:
-    """验证 _expand_dict_env_vars 批量展开。"""
+class TestExpandConfigValue:
+    """验证 _expand_config_value 递归展开。"""
 
     def test_expands_all_values(self, monkeypatch):
         monkeypatch.setenv("AF_DICT_HOST", "192.168.1.1")
         monkeypatch.setenv("AF_DICT_PORT", "8080")
-        from engine.config import _expand_dict_env_vars
-        result = _expand_dict_env_vars({
+        from engine.config import _expand_config_value
+        result = _expand_config_value({
             "host": "${AF_DICT_HOST}",
             "port": "${AF_DICT_PORT}",
             "name": "fixed",
@@ -577,8 +577,8 @@ class TestExpandDictEnvVars:
         assert result["name"] == "fixed"
 
     def test_non_string_values_preserved(self):
-        from engine.config import _expand_dict_env_vars
-        result = _expand_dict_env_vars({"count": 42, "flag": True})
+        from engine.config import _expand_config_value
+        result = _expand_config_value({"count": 42, "flag": True})
         assert result["count"] == 42
         assert result["flag"] is True
 

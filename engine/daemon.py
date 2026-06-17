@@ -1316,6 +1316,7 @@ class PipelineDaemon:
             "include_lifecycle": bool(params.get("include_lifecycle", False)),
             "include_config_scoped": bool(params.get("include_config_scoped", False)),
         }
+        statuses: dict[int, dict[str, str]]
         if self.state is None:
             statuses = {}
         else:

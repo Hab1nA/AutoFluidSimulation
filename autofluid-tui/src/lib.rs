@@ -177,7 +177,6 @@ pub(crate) fn apply_auto_scroll(
     scroll: &mut u16,
     visual_count: usize,
     content_height: usize,
-    _new_logs_arrived: bool,
 ) {
     if visual_count <= content_height {
         *scroll = 0;
@@ -831,14 +830,12 @@ fn do_redraw(
                 &mut state.info_log_scroll,
                 info_visual_count,
                 info_content_height,
-                new_logs_arrived,
             );
             apply_auto_scroll(
                 &mut state.detail_log_auto_scroll,
                 &mut state.detail_log_scroll,
                 detail_visual_count,
                 detail_content_height,
-                new_logs_arrived,
             );
             state.clamp_detail_scroll(detail_visual_count as u16, detail_content_height as u16);
             state.clamp_info_scroll(info_visual_count as u16, info_content_height as u16);
@@ -1174,7 +1171,7 @@ mod tests {
         let mut auto_scroll = false;
         let mut scroll = 90;
 
-        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, false);
+        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10);
 
         assert!(auto_scroll, "手动滚动到底部时应恢复自动滚动");
         assert_eq!(scroll, 90);
@@ -1185,20 +1182,10 @@ mod tests {
         let mut auto_scroll = false;
         let mut scroll = 89;
 
-        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, false);
+        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10);
 
         assert!(!auto_scroll, "未滚动到底部时不应恢复自动滚动");
         assert_eq!(scroll, 89);
-    }
-
-    #[test]
-    fn test_apply_auto_scroll_reenables_when_new_logs_arrive_at_bottom() {
-        let mut auto_scroll = false;
-        let mut scroll = 90;
-
-        apply_auto_scroll(&mut auto_scroll, &mut scroll, 100, 10, true);
-
-        assert!(auto_scroll, "有新日志且停在底部时应恢复自动滚动");
     }
 
     #[test]

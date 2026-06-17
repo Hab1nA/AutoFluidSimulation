@@ -24,7 +24,7 @@ applyTo: ["bridge/**/*.cs", "bridge/**/*.csproj"]
 bridge/SpaceClaimBridge/
 ├── SpaceClaimBridge.csproj    # .NET 4.8 项目文件
 ├── Program.cs                 # 主程序（含完整引用版本）
-├── Program.NoRef.cs           # 主程序（无外部引用版本，用于编译验证）
+├── SpaceClaimBridge.NoRef.csproj # 无引用项目文件（编译验证用）
 ├── compile.bat                # 编译脚本（含引用）
 └── compile_noref.bat          # 编译脚本（无引用）
 ```

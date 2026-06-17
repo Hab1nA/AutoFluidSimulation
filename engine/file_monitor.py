@@ -127,8 +127,6 @@ class StepFileMonitor:
     设计为轮询模式（兼容性好，不依赖第三方文件系统事件库）。
     """
 
-    _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-
     @staticmethod
     def _compile_config_regex(pattern: str) -> re.Pattern | None:
         """
@@ -170,11 +168,6 @@ class StepFileMonitor:
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
-
-        # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
-        if StepFileMonitor._FILENAME_REGEX is None:
-            sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)
 
     @property
     def is_running(self) -> bool:

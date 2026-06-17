@@ -29,7 +29,3 @@ class ConfigAssigner:
     def get_configs(self, workstation_id: str) -> list[int]:
         """Return a copy of configs assigned to one workstation."""
         return list(self._assignment.get(workstation_id, []))
-
-    def as_mapping(self) -> dict[str, list[int]]:
-        """Return a copy of the full workstation-to-config mapping."""
-        return {ws: list(configs) for ws, configs in self._assignment.items()}

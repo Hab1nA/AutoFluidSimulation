@@ -331,15 +331,6 @@ def _effective_workstation_config(workstation: WorkstationConfig) -> Workstation
 # ============================================================================
 STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver"]
 
-# 步骤对应的中文显示名称
-STEP_DISPLAY = {
-    "sw": "SolidWorks导出",
-    "sc": "SpaceClaim转换",
-    "transfer": "文件传输",
-    "meshing": "网格划分",
-    "solver": "仿真求解",
-}
-
 # 步骤顺序索引（用于判断"后续步骤"）
 STEP_INDEX = {name: i for i, name in enumerate(STEP_NAMES)}
 
@@ -617,12 +608,6 @@ def _expand_config_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_expand_config_value(v) for v in value]
     return _expand_env_vars(value)
-
-
-def _expand_dict_env_vars(d: dict) -> dict:
-    """展开字典中所有字符串值的 ${VAR} 环境变量引用。"""
-    return cast(dict, _expand_config_value(d))
-
 
 def _normalize_workstation_config(raw: dict[str, Any], index: int) -> WorkstationConfig:
     """Merge a TOML workstation entry with legacy defaults."""
