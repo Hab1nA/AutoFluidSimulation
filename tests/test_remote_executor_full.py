@@ -645,7 +645,10 @@ class TestExecuteSolver:
         executor._remote_tasks[6] = "AutoFluid_solver_done_task"
 
         assert executor.wait_solver_completion(6) is True
-        assert deleted == ["D:/flags/solver_done_6.txt"]
+        assert deleted == [
+            "D:/flags/solver_done_6.txt",
+            "D:/flags/solver_progress_6.json",
+        ]
         assert cleaned == [
             ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
         ]

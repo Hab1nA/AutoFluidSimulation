@@ -1270,6 +1270,7 @@ class PipelineDaemon:
                 "daemon_started_at_display": started_at_display,
                 "daemon_uptime_seconds": uptime_seconds,
                 "config_load_error": getattr(self, "_config_load_error", None),
+                "solver_progress": None,
             }
             return True, status, ""
         status = {
@@ -1280,6 +1281,7 @@ class PipelineDaemon:
             "daemon_started_at": started_at,
             "daemon_started_at_display": started_at_display,
             "daemon_uptime_seconds": uptime_seconds,
+            "solver_progress": self.state.get_solver_progress(),
         }
         return True, status, ""
 

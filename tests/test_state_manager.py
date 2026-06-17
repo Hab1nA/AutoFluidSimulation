@@ -97,6 +97,7 @@ class TestInit:
             assert sm.get_engine_status() == "stopped"
             assert sm.is_sw_macro_started() is False
             assert sm.is_global_barrier_met() is False
+            assert sm.get_solver_progress() is None
 
     def test_indexes_created(self):
         with _TmpDB() as sm:
@@ -573,11 +574,13 @@ class TestResetAll:
             sm.set_step_status(2, "solver", STATUS_RUNNING)
             sm.set_sw_macro_started(True)
             sm.set_global_barrier_met(True)
+            sm.set_solver_progress({"config_name": 2, "remaining_sec": 90.0})
             sm.reset_all()
             assert sm.get_step_status(1, "sw") == STATUS_WAITING
             assert sm.get_step_status(2, "solver") == STATUS_WAITING
             assert sm.is_sw_macro_started() is False
             assert sm.is_global_barrier_met() is False
+            assert sm.get_solver_progress() is None
 
 
 # ====================================================================
@@ -605,6 +608,45 @@ class TestEngineStatus:
         with _TmpDB() as sm:
             with pytest.raises(ValueError):
                 sm.set_engine_status("invalid")
+
+
+class TestSolverProgress:
+    """验证 Solver progress 状态 CRUD。"""
+
+    def test_set_get_and_clear_solver_progress(self):
+        with _TmpDB() as sm:
+            progress = {
+                "config_name": 5,
+                "current_iter": 350,
+                "total_iter": 1000,
+                "remaining_sec": 5025.0,
+                "updated_at": 1717584000.123,
+            }
+
+            sm.set_solver_progress(progress)
+
+            assert sm.get_solver_progress() == progress
+            sm.clear_solver_progress()
+            assert sm.get_solver_progress() is None
+
+    def test_get_solver_progress_returns_none_for_corrupt_json(self):
+        with _TmpDB() as sm:
+            with sm._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    ("solver_progress", "{not json"),
+                )
+
+            assert sm.get_solver_progress() is None
+
+    def test_reset_from_solver_clears_solver_progress(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.set_solver_progress({"config_name": 1, "remaining_sec": 30.0})
+
+            sm.reset_config_steps(1, from_step="solver")
+
+            assert sm.get_solver_progress() is None
 
 
 # ====================================================================

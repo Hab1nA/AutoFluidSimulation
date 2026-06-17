@@ -114,6 +114,16 @@ pub struct EngineInfo {
     pub daemon_started_at: Option<f64>,
     pub daemon_started_at_display: Option<String>,
     pub daemon_uptime_seconds: Option<u64>,
+    pub solver_progress: Option<SolverProgress>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SolverProgress {
+    pub config_name: u64,
+    pub current_iter: Option<u64>,
+    pub total_iter: u64,
+    pub remaining_sec: f64,
+    pub updated_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -336,6 +346,8 @@ impl AppState {
                 .map(str::to_string);
             self.engine_info.daemon_uptime_seconds =
                 obj.get("daemon_uptime_seconds").and_then(|v| v.as_u64());
+            self.engine_info.solver_progress =
+                obj.get("solver_progress").and_then(parse_solver_progress);
         }
         self.needs_redraw = true;
     }
@@ -381,6 +393,46 @@ impl AppState {
             .and_then(|steps| steps.get(step))
             .map(|s| s.as_str())
             .unwrap_or(STATUS_WAITING)
+    }
+
+    pub fn step_cell_text(&self, config: &str, step: &str) -> String {
+        let status = self.get_step_status(config, step);
+        if self.should_show_solver_progress(config, step, status) {
+            if let Some(progress) = self.engine_info.solver_progress.as_ref() {
+                return format!(
+                    "{} {}",
+                    status_icon(status),
+                    format_remaining_time(progress.remaining_sec)
+                );
+            }
+        }
+        format!("{} {}", status_icon(status), status)
+    }
+
+    pub fn step_cell_color(&self, config: &str, step: &str) -> ratatui::style::Color {
+        let status = self.get_step_status(config, step);
+        if self.should_show_solver_progress(config, step, status) {
+            return self.theme.success;
+        }
+        status_color(status)
+    }
+
+    fn should_show_solver_progress(&self, config: &str, step: &str, status: &str) -> bool {
+        if step != "solver" || status != STATUS_RUNNING {
+            return false;
+        }
+        let Some(progress) = self.engine_info.solver_progress.as_ref() else {
+            return false;
+        };
+        let iteration_is_valid = progress
+            .current_iter
+            .is_none_or(|current| current <= progress.total_iter);
+        let timestamp_is_valid = progress.updated_at.is_none_or(f64::is_finite);
+        progress.remaining_sec.is_finite()
+            && progress.remaining_sec >= 0.0
+            && iteration_is_valid
+            && timestamp_is_valid
+            && config.parse::<u64>().ok() == Some(progress.config_name)
     }
 
     #[cfg(test)]
@@ -615,6 +667,29 @@ pub fn format_uptime(seconds: u64) -> String {
     }
 }
 
+pub fn format_remaining_time(seconds: f64) -> String {
+    let safe_seconds = if seconds.is_finite() && seconds >= 0.0 {
+        seconds.floor() as u64
+    } else {
+        0
+    };
+    let hours = safe_seconds / 3600;
+    let minutes = (safe_seconds % 3600) / 60;
+    let secs = safe_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+fn parse_solver_progress(value: &serde_json::Value) -> Option<SolverProgress> {
+    let obj = value.as_object()?;
+    Some(SolverProgress {
+        config_name: obj.get("config_name")?.as_u64()?,
+        current_iter: obj.get("current_iter").and_then(|v| v.as_u64()),
+        total_iter: obj.get("total_iter").and_then(|v| v.as_u64()).unwrap_or(0),
+        remaining_sec: obj.get("remaining_sec")?.as_f64()?,
+        updated_at: obj.get("updated_at").and_then(|v| v.as_f64()),
+    })
+}
+
 fn expire_click<T>(
     click_time: &mut Option<std::time::Instant>,
     clicked: &mut Option<T>,
@@ -703,6 +778,68 @@ mod tests {
         assert_eq!(format_uptime(8), "8s");
         assert_eq!(format_uptime(65), "1m05s");
         assert_eq!(format_uptime(3_725), "1h02m05s");
+    }
+
+    #[test]
+    fn format_remaining_time_uses_hh_mm_ss() {
+        assert_eq!(format_remaining_time(0.0), "00:00:00");
+        assert_eq!(format_remaining_time(125.0), "00:02:05");
+        assert_eq!(format_remaining_time(5_025.0), "01:23:45");
+        assert_eq!(format_remaining_time(-1.0), "00:00:00");
+        assert_eq!(format_remaining_time(f64::NAN), "00:00:00");
+    }
+
+    #[test]
+    fn update_engine_info_parses_solver_progress() {
+        let mut state = AppState::default();
+        let data = serde_json::json!({
+            "engine_status": "running",
+            "solver_progress": {
+                "config_name": 5,
+                "current_iter": 350,
+                "total_iter": 1000,
+                "remaining_sec": 5025.0,
+                "updated_at": 1717584000.123
+            }
+        });
+
+        state.update_engine_info(&data);
+
+        let progress = state
+            .engine_info
+            .solver_progress
+            .as_ref()
+            .expect("solver progress");
+        assert_eq!(progress.config_name, 5);
+        assert_eq!(progress.current_iter, Some(350));
+        assert_eq!(progress.total_iter, 1000);
+        assert_eq!(progress.remaining_sec, 5025.0);
+        assert_eq!(progress.updated_at, Some(1717584000.123));
+    }
+
+    #[test]
+    fn solver_running_cell_shows_remaining_time_for_matching_config() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "5": {"solver": "Running", "meshing": "Running"},
+            "6": {"solver": "Running"}
+        }));
+        state.update_engine_info(&serde_json::json!({
+            "solver_progress": {
+                "config_name": 5,
+                "total_iter": 1000,
+                "remaining_sec": 5025.0
+            }
+        }));
+
+        assert_eq!(state.step_cell_text("5", "solver"), "⏳ 01:23:45");
+        assert_eq!(state.step_cell_color("5", "solver"), state.theme.success);
+        assert_eq!(state.step_cell_text("5", "meshing"), "⏳ Running");
+        assert_eq!(
+            state.step_cell_color("5", "meshing"),
+            status_color(STATUS_RUNNING)
+        );
+        assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
     }
 
     #[test]

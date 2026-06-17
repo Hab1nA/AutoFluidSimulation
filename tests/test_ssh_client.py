@@ -474,6 +474,46 @@ def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
     assert timeouts == [11, None]
 
 
+def test_read_remote_text_file_applies_timeout_and_decodes_utf8():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _RemoteFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return "剩余时间".encode("utf-8")
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+            self.opened: list[tuple[str, str]] = []
+
+        def get_channel(self):
+            return self.channel
+
+        def open(self, remote_path: str, mode: str):
+            self.opened.append((remote_path, mode))
+            return _RemoteFile()
+
+    sftp = _SFTP()
+    host._sftp = sftp
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        assert host.read_remote_text_file("D:/flags/progress.json", timeout=11) == "剩余时间"
+
+    assert sftp.opened == [("D:/flags/progress.json", "rb")]
+    assert timeouts == [11, None]
+
+
 def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     written: list[tuple[str, str]] = []

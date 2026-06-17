@@ -1324,7 +1324,14 @@ mod tests {
                 "pipeline_started": true,
                 "daemon_started_at": 1718000000.0,
                 "daemon_started_at_display": "2026-06-13 14:03:21",
-                "daemon_uptime_seconds": 65
+                "daemon_uptime_seconds": 65,
+                "solver_progress": {
+                    "config_name": 2,
+                    "current_iter": 3,
+                    "total_iter": 10,
+                    "remaining_sec": 125.0,
+                    "updated_at": 1718000065.0
+                }
             },
             "health": {
                 "local_worker_online": true,
@@ -1364,6 +1371,13 @@ mod tests {
             Some("2026-06-13 14:03:21")
         );
         assert_eq!(state.engine_info.daemon_uptime_seconds, Some(65));
+        let progress = state
+            .engine_info
+            .solver_progress
+            .as_ref()
+            .expect("solver progress");
+        assert_eq!(progress.config_name, 2);
+        assert_eq!(progress.remaining_sec, 125.0);
         assert_eq!(state.health_info.local_worker_online, Some(true));
         assert_eq!(state.health_info.server_to_local_ssh.as_deref(), Some("ok"));
         assert_eq!(

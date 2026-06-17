@@ -6,6 +6,9 @@ from engine.daemon import PipelineDaemon
 
 
 class _State:
+    def __init__(self, solver_progress=None):
+        self.solver_progress = solver_progress
+
     def get_all_statuses(self):
         return {"1": {"sw": "Completed"}}
 
@@ -17,6 +20,9 @@ class _State:
 
     def is_global_barrier_met(self):
         return False
+
+    def get_solver_progress(self):
+        return self.solver_progress
 
 
 class _LogHandler:
@@ -132,6 +138,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
         "daemon_uptime_seconds": 65,
+        "solver_progress": None,
     }
     assert data["health"] == {
         "local_worker_online": False,
@@ -165,6 +172,32 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "include_lifecycle": False,
         "include_config_scoped": False,
     }]
+
+
+def test_handle_get_dashboard_includes_solver_progress(monkeypatch):
+    progress = {
+        "config_name": 5,
+        "current_iter": 350,
+        "total_iter": 1000,
+        "remaining_sec": 5025.0,
+        "updated_at": 1717584000.123,
+    }
+    handler = _LogHandler()
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
+    monkeypatch.setattr(daemon_module, "WORKSTATIONS", [])
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State(solver_progress=progress)
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = None
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = None
+
+    ok, data, message = daemon.handle_get_dashboard({})
+
+    assert ok is True
+    assert message == ""
+    assert data["engine"]["solver_progress"] == progress
 
 
 def test_dashboard_trims_large_log_payload(monkeypatch):
@@ -231,6 +264,7 @@ def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):
         "daemon_started_at_display": "1970-01-01 00:33:20",
         "daemon_uptime_seconds": 30,
         "config_load_error": "ServerMode 等待 LocalWorker 提供构型数据",
+        "solver_progress": None,
     }
     assert data["health"]["local_worker_online"] is False
     assert data["health"]["server_to_workstation_ssh"] == "unknown"

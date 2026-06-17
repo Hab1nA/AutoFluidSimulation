@@ -11,9 +11,12 @@ Fluent Solver 批处理脚本 - 参数化版本
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import sys
+import threading
 import time
 from typing import Any
 
@@ -68,8 +71,164 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--iterate-count', type=int,
                         default=1000,
                         help='迭代次数 (默认: 1000)')
+    parser.add_argument('--progress-file', type=str, default=None,
+                        help='可选：写入 Solver 剩余时间进度的 JSON 文件路径')
 
     return parser.parse_args()
+
+
+_REMAINING_TIME_RE = re.compile(
+    r"(?:estimated\s+time\s+remaining|remaining\s+time|time\s+remaining)"
+    r"\s*[:=]\s*(\d{1,3}:\d{2}(?::\d{2})?)",
+    re.IGNORECASE,
+)
+_ITERATION_RE = re.compile(r"\b(?:iter|iteration)\s*[:=]?\s*(\d+)\b", re.IGNORECASE)
+
+
+def _parse_time_to_seconds(value: str) -> float | None:
+    parts = value.strip().split(":")
+    if len(parts) == 2:
+        hours_text = "0"
+        minutes_text, seconds_text = parts
+    elif len(parts) == 3:
+        hours_text, minutes_text, seconds_text = parts
+    else:
+        return None
+    try:
+        return float(int(hours_text) * 3600 + int(minutes_text) * 60 + int(seconds_text))
+    except ValueError:
+        return None
+
+
+def _parse_remaining_time_line(
+    line: str,
+    *,
+    total_iter: int,
+    config_id: int,
+) -> dict[str, object] | None:
+    """Parse Fluent transcript progress line into a progress payload."""
+    match = _REMAINING_TIME_RE.search(line)
+    if match is None:
+        return None
+    remaining_sec = _parse_time_to_seconds(match.group(1))
+    if remaining_sec is None:
+        return None
+    iter_match = _ITERATION_RE.search(line)
+    current_iter = int(iter_match.group(1)) if iter_match else None
+    return {
+        "config_name": config_id,
+        "current_iter": current_iter,
+        "total_iter": total_iter,
+        "remaining_sec": remaining_sec,
+        "raw_line": line,
+    }
+
+
+def _write_progress_file(progress_file: str, progress: dict[str, object]) -> None:
+    """Atomically write solver progress JSON."""
+    payload = dict(progress)
+    payload["updated_at"] = time.time()
+    parent = os.path.dirname(progress_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_file = f"{progress_file}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp_file, progress_file)
+
+
+def _remove_file_if_exists(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        print(f"[SolverProgress] 删除文件失败: {path}, error: {e}")
+
+
+def _tail_transcript_for_progress(
+    transcript_file: str,
+    progress_file: str,
+    config_id: int,
+    total_iter: int,
+    stop_event: threading.Event,
+) -> None:
+    """Tail Fluent transcript file and publish remaining-time progress."""
+    offset = 0
+    while not stop_event.is_set():
+        try:
+            if os.path.exists(transcript_file):
+                with open(transcript_file, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(offset)
+                    for line in f:
+                        cleaned = line.strip()
+                        progress = _parse_remaining_time_line(
+                            cleaned,
+                            total_iter=total_iter,
+                            config_id=config_id,
+                        )
+                        if progress is not None:
+                            _write_progress_file(progress_file, progress)
+                    offset = f.tell()
+        except OSError as e:
+            print(f"[SolverProgress] 读取 transcript 失败: {e}")
+        time.sleep(0.5)
+
+
+def _start_transcript_progress_monitor(
+    solver_session: Any,
+    progress_file: str | None,
+    config_id: int,
+    total_iter: int,
+) -> tuple[threading.Event | None, threading.Thread | None, str | None, bool]:
+    """Start PyFluent transcript streaming and a parser thread if available."""
+    if not progress_file:
+        return None, None, None, False
+    transcript = getattr(solver_session, "transcript", None)
+    start = getattr(transcript, "start", None)
+    if not callable(start):
+        print("[SolverProgress] 当前 PyFluent 会话不支持 transcript.start，跳过剩余时间显示")
+        return None, None, None, False
+
+    transcript_file = f"{progress_file}.transcript"
+    _remove_file_if_exists(transcript_file)
+    _remove_file_if_exists(progress_file)
+    try:
+        start(file_name=transcript_file, write_to_stdout=True)
+    except Exception as e:
+        print(f"[SolverProgress] 启动 transcript 失败，跳过剩余时间显示: {e}")
+        return None, None, transcript_file, False
+
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_tail_transcript_for_progress,
+        args=(transcript_file, progress_file, config_id, total_iter, stop_event),
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread, transcript_file, True
+
+
+def _stop_transcript_progress_monitor(
+    solver_session: Any,
+    stop_event: threading.Event | None,
+    thread: threading.Thread | None,
+    transcript_file: str | None,
+    transcript_started: bool,
+) -> None:
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None:
+        thread.join(timeout=2.0)
+    if transcript_started:
+        stop = getattr(getattr(solver_session, "transcript", None), "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception as e:
+                print(f"[SolverProgress] 停止 transcript 失败: {e}")
+    _remove_file_if_exists(transcript_file)
 
 
 def _processor_pin_list(processor_count: int) -> str:
@@ -283,6 +442,10 @@ def main() -> None:
         cwd=args.working_dir,
         start_watchdog=False,
     )
+    progress_stop_event: threading.Event | None = None
+    progress_thread: threading.Thread | None = None
+    transcript_file: str | None = None
+    transcript_started = False
 
     try:
         _ensure_session_healthy(solver_session, "启动后")
@@ -299,6 +462,17 @@ def main() -> None:
 
         # 6.3 启动仿真
         print(f"[{config_id}] 正在启动仿真迭代 (共 {args.iterate_count} 步)...")
+        (
+            progress_stop_event,
+            progress_thread,
+            transcript_file,
+            transcript_started,
+        ) = _start_transcript_progress_monitor(
+            solver_session,
+            args.progress_file,
+            config_id,
+            args.iterate_count,
+        )
         solver_session.tui.solve.iterate(args.iterate_count)
         _ensure_session_healthy(solver_session, "迭代后")
 
@@ -322,6 +496,14 @@ def main() -> None:
         raise
 
     finally:
+        _stop_transcript_progress_monitor(
+            solver_session,
+            progress_stop_event,
+            progress_thread,
+            transcript_file,
+            transcript_started,
+        )
+        _remove_file_if_exists(args.progress_file)
         # ★ finally 确保无论成功/异常都执行清理和 Fluent 退出
         # --- 7. 最后的清理工作 (日志 + 工作目录缓存) ---
         print(f"[{config_id}] 正在清理日志文件...")

@@ -289,6 +289,38 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
 
+    def read_remote_text_file(
+        self,
+        remote_path: str,
+        *,
+        timeout: float | None = None,
+    ) -> str | None:
+        """读取远程 UTF-8 小文本文件；不存在或连接异常时返回 None。"""
+        if not self.ensure_connected():
+            return None
+        if self._sftp is None:
+            return None
+        channel = self._sftp.get_channel()
+        previous_timeout = None
+        if timeout is not None:
+            try:
+                previous_timeout = channel.gettimeout()
+            except AttributeError:
+                previous_timeout = None
+            channel.settimeout(timeout)
+        try:
+            with self._sftp.open(remote_path.replace("\\", "/"), "rb") as remote_file:
+                raw: bytes = remote_file.read()
+            return raw.decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return None
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+            logger.debug(f"[SSH] 读取远程文本文件失败: {remote_path}: {e}")
+            return None
+        finally:
+            if timeout is not None:
+                channel.settimeout(previous_timeout)
+
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
         递归创建远程目录（类似 mkdir -p）。
