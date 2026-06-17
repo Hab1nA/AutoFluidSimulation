@@ -316,6 +316,15 @@ def is_server_mode() -> bool:
     return os.environ.get("AUTOFLUID_SERVER_MODE", "").lower() == "server"
 
 
+def get_workstation_ssh_health_interval() -> float:
+    """Return server-mode workstation SSH health interval in seconds."""
+    raw_value = os.environ.get("AUTOFLUID_WORKSTATION_SSH_HEALTH_INTERVAL", "30")
+    try:
+        return float(raw_value)
+    except ValueError:
+        return 30.0
+
+
 def _effective_workstation_config(workstation: WorkstationConfig) -> WorkstationConfig:
     """Return workstation config with server-reachable host applied."""
     result = cast(WorkstationConfig, dict(workstation))

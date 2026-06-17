@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING, STATUS_ERROR,
-    ensure_directories, get_step_filename, is_server_mode, validate_config,
+    ensure_directories, get_step_filename, get_workstation_ssh_health_interval,
+    is_server_mode, validate_config,
 )
 from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
@@ -53,6 +54,7 @@ from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_
 from utils.excel_reader import read_model_configs
 from utils.process_utils import (
     check_ipc_ready,
+    cleanup_tunnel_watchdog_tasks,
     cleanup_worker_processes_from_pid_files,
     is_process_alive,
     read_pid_file,
@@ -194,6 +196,9 @@ class PipelineDaemon:
         self._alert_watcher_process: subprocess.Popen | None = None
         self._started_at_epoch: float | None = None
         self._last_worker_ssh_checks: dict[str, str] = {}
+        self._ssh_health_thread: threading.Thread | None = None
+        self._ssh_health_stop_event = threading.Event()
+        self._ssh_health_interval_seconds = get_workstation_ssh_health_interval()
         self._config_warnings: list[str] = []
 
         # 运行标志
@@ -313,6 +318,7 @@ class PipelineDaemon:
             release_process_lock()
             return
 
+        self._start_workstation_ssh_health_monitor()
         self._start_alert_watcher()
 
         # ---- 4. 注册信号处理 ----
@@ -341,6 +347,7 @@ class PipelineDaemon:
         logger.info("PipelineDaemon 正在关闭...")
         self._running = False
         self._stop_event.set()
+        self._stop_workstation_ssh_health_monitor()
 
         # 停止调度器（内部已包含 disconnect_ssh）
         if self.scheduler:
@@ -361,6 +368,12 @@ class PipelineDaemon:
 
         # 停止 daemon 自动唤起的 LocalWorker，并清理跨会话残留 worker/tunnel PID。
         self._stop_local_worker_process()
+        try:
+            watchdog_results = cleanup_tunnel_watchdog_tasks(_PROJECT_ROOT)
+            if watchdog_results.get("status") != "skipped":
+                logger.info("[Worker] shutdown watchdog 清理结果: %s", watchdog_results)
+        except Exception as e:
+            logger.warning("[Worker] shutdown watchdog 清理异常: %s", e)
         try:
             cleanup_results = cleanup_worker_processes_from_pid_files()
             if cleanup_results:
@@ -1092,6 +1105,7 @@ class PipelineDaemon:
         # 清除旧的在线 worker 标记（允许重新注册）
         self.local_worker_registry.clear_online_workers()
         results["registry_ready"] = True
+        self._start_workstation_ssh_health_monitor()
 
         logger.info("[Worker] worker_start 完成: %s", results)
         if failed_ssh_checks:
@@ -1130,6 +1144,51 @@ class PipelineDaemon:
         self._last_worker_ssh_checks = dict(results["ssh_checks"])
         return results
 
+    def _start_workstation_ssh_health_monitor(self) -> None:
+        """Start the server-mode background workstation SSH health monitor."""
+        if not is_server_mode():
+            return
+        if not hasattr(self, "_ssh_health_stop_event"):
+            self._ssh_health_stop_event = threading.Event()
+        if not hasattr(self, "_ssh_health_interval_seconds"):
+            self._ssh_health_interval_seconds = get_workstation_ssh_health_interval()
+        if not hasattr(self, "_ssh_health_thread"):
+            self._ssh_health_thread = None
+        if self._ssh_health_interval_seconds <= 0:
+            return
+        thread = self._ssh_health_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._ssh_health_stop_event.clear()
+        self._ssh_health_thread = threading.Thread(
+            target=self._workstation_ssh_health_loop,
+            name="AutoFluidWorkstationSshHealth",
+            daemon=True,
+        )
+        self._ssh_health_thread.start()
+
+    def _workstation_ssh_health_loop(self) -> None:
+        while not self._ssh_health_stop_event.wait(self._ssh_health_interval_seconds):
+            self._run_workstation_ssh_health_check_once()
+
+    def _run_workstation_ssh_health_check_once(self) -> dict[str, Any]:
+        if self.runner is None:
+            return {"ssh_checks": {}, "ssh_targets": {}}
+        try:
+            return self._refresh_workstation_ssh_checks()
+        except Exception as exc:
+            logger.warning("[ServerMode] 后台工作站 SSH 健康检查失败: %s", exc)
+            return {"ssh_checks": {}, "ssh_targets": {}}
+
+    def _stop_workstation_ssh_health_monitor(self) -> None:
+        stop_event = getattr(self, "_ssh_health_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
+        thread = getattr(self, "_ssh_health_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._ssh_health_thread = None
+
     def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """停止所有 worker：断开工作站 SSH 连接，清理 Registry 任务队列。"""
         params = params or {}
@@ -1137,6 +1196,7 @@ class PipelineDaemon:
             "ssh_disconnected": [],
             "registry_cleared": False,
         }
+        self._stop_workstation_ssh_health_monitor()
 
         # 断开 TaskRunner 的所有 SSH 连接
         if self.runner is not None:
@@ -1151,6 +1211,11 @@ class PipelineDaemon:
         self.local_worker_registry.clear_pending_tasks()
         results["registry_cleared"] = True
         self._last_worker_ssh_checks = {}
+        try:
+            results["watchdog_cleanup"] = cleanup_tunnel_watchdog_tasks(_PROJECT_ROOT)
+        except Exception as e:
+            logger.warning("[Worker] watchdog 清理异常: %s", e)
+            results["watchdog_cleanup"] = {"status": "failed", "error": str(e)}
         results["process_cleanup"] = cleanup_worker_processes_from_pid_files()
 
         logger.info("[Worker] worker_stop 完成: %s", results)
@@ -1251,6 +1316,11 @@ class PipelineDaemon:
         for workstation in workstation_configs:
             workstation_id = str(workstation.get("id", "default"))
             workstation_targets[workstation_id] = self._workstation_ssh_target(workstation)
+            # Prefer the active health-check result over transport state; stale
+            # Paramiko transports can outlive the reverse tunnel they depend on.
+            if workstation_id in last_worker_checks:
+                workstation_details[workstation_id] = str(last_worker_checks[workstation_id])
+                continue
             ssh = ssh_pool.get(workstation_id)
             if ssh is None:
                 workstation_details[workstation_id] = str(

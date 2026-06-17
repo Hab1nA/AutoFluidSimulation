@@ -1,6 +1,9 @@
 param(
     [switch]$Check,
     [switch]$Monitor,
+    [switch]$InstallWatchdog,
+    [switch]$UninstallWatchdog,
+    [switch]$NoWatchdog,
     [ValidateSet("Workstation", "LocalWorker")]
     [string]$TunnelKind = "Workstation",
     [int]$RestartDelaySeconds = 5,
@@ -105,6 +108,69 @@ function Get-RemoteBindPort {
     }
 
     return Get-EnvInt -Name "AUTOFLUID_SSH_REACHABLE_PORT" -DefaultValue 2222
+}
+
+function Get-TunnelWatchdogTaskName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    return "AutoFluidTunnelWatchdog-$TunnelKind-$RemotePort"
+}
+
+function Install-TunnelWatchdogTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellExe
+    )
+
+    $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
+    $scriptPath = $PSCommandPath
+    $arguments = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$scriptPath`"",
+        "-TunnelKind", $TunnelKind,
+        "-NoWatchdog",
+        "-RestartDelaySeconds", $RestartDelaySeconds
+    ) -join " "
+
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -ne $existing) {
+        return $taskName
+    }
+
+    $action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 1) `
+        -RepetitionDuration ([TimeSpan]::MaxValue)
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+
+    Register-ScheduledTask -TaskName $taskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Settings $settings `
+        -Description "AutoFluid $TunnelKind reverse tunnel watchdog for remote port $RemotePort" `
+        -Force | Out-Null
+    return $taskName
+}
+
+function Uninstall-TunnelWatchdogTask {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    return $taskName
 }
 
 function Get-TargetHost {
@@ -421,13 +487,31 @@ function Get-TunnelStartupDetail {
     return $logLines -join [Environment]::NewLine
 }
 
-$sshExe = Resolve-SshExe
-$tunnelTarget = Get-TunnelSshTarget
 $remoteHost = Get-RemoteBindHost
 $remotePort = Get-RemoteBindPort
 $targetHost = Get-TargetHost
 $targetPort = Get-TargetPort
 $tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Workstation" }
+
+if ($UninstallWatchdog) {
+    $taskName = Uninstall-TunnelWatchdogTask -RemotePort $remotePort
+    Write-Host "Uninstalled AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $taskName"
+    exit 0
+}
+
+if ($InstallWatchdog) {
+    try {
+        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
+        Write-Host "Installed AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $taskName"
+    }
+    catch {
+        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
+    }
+    exit 0
+}
+
+$sshExe = Resolve-SshExe
+$tunnelTarget = Get-TunnelSshTarget
 
 Write-Host "$tunnelLabel tunnel SSH target: $tunnelTarget"
 Write-Host "$tunnelLabel tunnel remote endpoint: ${remoteHost}:${remotePort}"
@@ -442,6 +526,16 @@ if ($Monitor) {
         -TargetHost $targetHost `
         -TargetPort $targetPort
     exit 0
+}
+
+if (-not $Check -and -not $NoWatchdog) {
+    try {
+        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
+        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
+    }
+    catch {
+        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
+    }
 }
 
 if (-not (Test-TcpEndpoint -HostName $targetHost -Port $targetPort)) {

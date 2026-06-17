@@ -165,6 +165,8 @@ impl WorkerManager {
             }
         }
 
+        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
+
         if success {
             log_buffer.push_info("✅ 所有 Worker 已停止".to_string());
         }
@@ -473,6 +475,72 @@ impl WorkerManager {
         }
         success
     }
+
+    fn uninstall_tunnel_watchdogs_for_path(
+        project_dir: &std::path::Path,
+        log_buffer: &mut LogBuffer,
+    ) {
+        let tunnel_script = project_dir
+            .join("scripts")
+            .join("start_workstation_reverse_tunnel.ps1");
+        if !tunnel_script.exists() {
+            return;
+        }
+
+        for tunnel_kind in ["Workstation", "LocalWorker"] {
+            let mut cmd = watchdog_uninstall_command(&tunnel_script, tunnel_kind);
+            cmd.current_dir(project_dir);
+            match run_command_with_timeout(&mut cmd, Duration::from_secs(10)) {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let detail = if stderr.is_empty() { stdout } else { stderr };
+                    log::warn!(
+                        "{} watchdog 卸载失败: status={}, detail={}",
+                        tunnel_kind,
+                        output.status,
+                        detail
+                    );
+                    log_buffer.push_info(format!("⚠️ {} watchdog 卸载失败", tunnel_kind));
+                }
+                Err(err) => {
+                    log::warn!("{} watchdog 卸载失败: {}", tunnel_kind, err);
+                    log_buffer.push_info(format!("⚠️ {} watchdog 卸载失败", tunnel_kind));
+                }
+            }
+        }
+    }
+}
+
+fn watchdog_uninstall_command(tunnel_script: &std::path::Path, tunnel_kind: &str) -> Command {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let powershell = resolve_powershell_exe();
+        let mut cmd = Command::new(&powershell);
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            &tunnel_script.to_string_lossy(),
+        ]);
+        cmd
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = Command::new(tunnel_script);
+
+    cmd.args(["-TunnelKind", tunnel_kind, "-UninstallWatchdog"]);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    cmd
 }
 
 fn resolve_python_exe(project_dir: &str) -> String {
@@ -767,6 +835,79 @@ mod tests {
 
         assert!(result);
         assert!(pid_file.exists());
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn stop_workers_for_project_uninstalls_tunnel_watchdogs() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-watchdog-cleanup-{}",
+            crate::generate_request_id()
+        ));
+        let scripts_dir = project_dir.join("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let marker = project_dir.join("watchdog_calls.txt");
+
+        #[cfg(target_os = "windows")]
+        let fake_powershell = {
+            let script_path = project_dir.join("fake-powershell.cmd");
+            let script_body = format!(
+                "@echo off\r\necho %*>> \"{}\"\r\nexit /b 0\r\n",
+                marker.display()
+            );
+            std::fs::write(&script_path, script_body).expect("write fake powershell");
+            script_path
+        };
+
+        #[cfg(target_os = "windows")]
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &fake_powershell);
+
+        #[cfg(not(target_os = "windows"))]
+        let fake_powershell = {
+            let script_path = project_dir.join("fake-powershell.sh");
+            let script_body = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+                marker.display()
+            );
+            std::fs::write(&script_path, script_body).expect("write fake powershell");
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod fake powershell");
+            script_path
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &fake_powershell);
+
+        let script_path = scripts_dir.join("start_workstation_reverse_tunnel.ps1");
+        std::fs::write(&script_path, "").expect("write fake tunnel script");
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod fake script");
+        }
+
+        let mut log_buffer = LogBuffer::new();
+        let mut worker = WorkerManager::new();
+        let result = worker.stop_workers_for_project(
+            Some(project_dir.to_str().expect("utf8 temp path")),
+            &mut log_buffer,
+        );
+
+        assert!(result);
+        let calls = std::fs::read_to_string(&marker).expect("read marker");
+        assert!(calls.contains("-TunnelKind Workstation -UninstallWatchdog"));
+        assert!(calls.contains("-TunnelKind LocalWorker -UninstallWatchdog"));
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         let _ = std::fs::remove_dir_all(project_dir);
     }
 

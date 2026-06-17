@@ -7,6 +7,8 @@ from __future__ import annotations
 ===============================================================================
 """
 import os
+import logging
+import shutil
 import sys
 import socket
 import subprocess
@@ -21,6 +23,8 @@ WORKER_PID_KINDS = (
     "tunnel_localworker",
     "server_ipc_tunnel",
 )
+TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
+logger = logging.getLogger(__name__)
 
 
 def is_process_alive(pid: int) -> bool:
@@ -152,6 +156,53 @@ def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[
         if status != "failed":
             remove_pid_file(pid_file)
         results[kind] = {"pid": pid, "status": status}
+    return results
+
+
+def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, dict[str, str] | str]:
+    """Uninstall Windows Task Scheduler watchdogs for reverse SSH tunnels."""
+    if sys.platform != "win32":
+        return {"status": "skipped", "reason": "non_windows"}
+
+    project_root = project_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_path = os.path.join(project_root, "scripts", "start_workstation_reverse_tunnel.ps1")
+    if not os.path.exists(script_path):
+        return {"status": "skipped", "reason": "script_missing"}
+
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
+    results: dict[str, dict[str, str] | str] = {}
+    for tunnel_kind in TUNNEL_WATCHDOG_KINDS:
+        try:
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script_path,
+                    "-TunnelKind",
+                    tunnel_kind,
+                    "-UninstallWatchdog",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if completed.returncode == 0:
+                results[tunnel_kind] = {"status": "uninstalled"}
+            else:
+                results[tunnel_kind] = {
+                    "status": "failed",
+                    "returncode": str(completed.returncode),
+                    "stderr": completed.stderr.strip(),
+                    "stdout": completed.stdout.strip(),
+                }
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("[Worker] %s tunnel watchdog cleanup failed: %s", tunnel_kind, exc)
+            results[tunnel_kind] = {"status": "failed", "error": str(exc)}
     return results
 
 

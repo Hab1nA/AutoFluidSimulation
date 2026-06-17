@@ -1,4 +1,5 @@
 import json
+import threading
 
 from engine import daemon as daemon_module
 from engine.daemon import PipelineDaemon
@@ -82,6 +83,14 @@ class _Runner:
 
     def get_ssh(self, workstation_id="default"):
         raise AssertionError("dashboard health must not create SSH connections")
+
+
+class _RefreshRunner:
+    def __init__(self, ssh_by_id):
+        self._ssh_by_id = ssh_by_id
+
+    def get_ssh(self, workstation_id="default"):
+        return self._ssh_by_id[workstation_id]
 
 
 def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
@@ -353,3 +362,75 @@ def test_dashboard_health_reports_last_failed_workstation_target(monkeypatch):
         },
     }
     assert health["config_warnings"] == ["工作站 WS-A 在 server 模式下缺少 reachable_host"]
+
+
+def test_ssh_health_check_once_refreshes_last_worker_checks(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{
+            "id": "WS-A",
+            "host": "172.17.135.240",
+            "port": 22,
+            "reachable_host": "127.0.0.1",
+            "reachable_port": 2222,
+            "connectivity_mode": "reverse_tunnel",
+        }],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = _RefreshRunner({"WS-A": _Ssh(True)})
+    daemon._last_worker_ssh_checks = {"WS-A": "disconnected"}
+
+    result = daemon._run_workstation_ssh_health_check_once()
+
+    assert result["ssh_checks"] == {"WS-A": "ok"}
+    assert daemon._last_worker_ssh_checks == {"WS-A": "ok"}
+
+
+def test_ssh_health_monitor_disabled_when_interval_zero(monkeypatch):
+    monkeypatch.setattr(daemon_module, "is_server_mode", lambda: True)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._ssh_health_interval_seconds = 0.0
+    daemon._ssh_health_thread = None
+    daemon._ssh_health_stop_event = threading.Event()
+
+    daemon._start_workstation_ssh_health_monitor()
+
+    assert daemon._ssh_health_thread is None
+
+
+def test_ssh_health_monitor_stops_on_shutdown(monkeypatch):
+    monkeypatch.setattr(daemon_module, "is_server_mode", lambda: True)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._ssh_health_interval_seconds = 30.0
+    daemon._ssh_health_thread = None
+    daemon._ssh_health_stop_event = threading.Event()
+
+    daemon._start_workstation_ssh_health_monitor()
+    thread = daemon._ssh_health_thread
+
+    assert thread is not None
+    assert thread.is_alive()
+
+    daemon._stop_workstation_ssh_health_monitor()
+
+    assert not thread.is_alive()
+    assert daemon._ssh_health_thread is None
+
+
+def test_dashboard_uses_latest_background_ssh_check(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "WS-A", "host": "172.17.135.240", "port": 22}],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({"WS-A": _TransportOnlySsh(False)})
+    daemon._last_worker_ssh_checks = {"WS-A": "ok"}
+    daemon._config_warnings = []
+
+    health = daemon._build_health_snapshot()
+
+    assert health["server_to_workstation_ssh"] == "ok"
+    assert health["workstation_ssh_details"] == {"WS-A": "ok"}
