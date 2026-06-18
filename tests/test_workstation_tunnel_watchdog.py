@@ -23,6 +23,45 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "-NoWatchdog" in source
 
 
+def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "[TimeSpan]::MaxValue" not in source
+    assert "New-TimeSpan -Days 3650" in source
+
+
+def test_tunnel_watchdog_has_default_pid_file_for_scheduled_task_runs() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Get-TunnelPidFile" in source
+    assert "tunnel_localworker.pid" in source
+    assert "tunnel_workstation.pid" in source
+    assert "AUTOFLUID_TUNNEL_PID_FILE" in source
+
+
+def test_tunnel_watchdog_rebuilds_monitor_when_endpoint_is_reachable() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "reverse SSH tunnel endpoint is reachable but no supervisor monitor was found" in source
+    assert "Start-ReverseTunnelSupervisor -RemotePort $remotePort" in source
+
+
+def test_tunnel_watchdog_replaces_monitor_when_endpoint_is_down() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort" in source
+    assert "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable." in source
+
+
+def test_tunnel_watchdog_uninstall_stops_orphan_reverse_ssh_processes() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Stop-ReverseTunnelSshProcesses" in source
+    assert "ssh.exe" in source
+    assert '$remoteForwardPattern = "(^|\\s)-R\\s+\\S+:${RemotePort}:"' in source
+    assert "Stopped AutoFluid $tunnelLabel reverse SSH tunnel monitor" in source
+
+
 def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_both_tunnel_kinds(
     monkeypatch,
     tmp_path,

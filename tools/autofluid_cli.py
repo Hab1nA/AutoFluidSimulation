@@ -28,6 +28,7 @@ from ipc.protocol import (
     create_request,
     serialize,
 )
+from utils import process_utils
 
 DEFAULT_IPC_HOST = "127.0.0.1"
 DEFAULT_IPC_PORT = 9527
@@ -143,6 +144,25 @@ def _ipc_result(command: str, response: dict[str, Any]) -> CliResult:
         data=response.get("data"),
         exit_code=exit_code,
     )
+
+
+def _add_local_worker_stop_cleanup(response: dict[str, Any]) -> dict[str, Any]:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        data = {"remote_data": data}
+        response["data"] = data
+
+    try:
+        data["local_watchdog_cleanup"] = process_utils.cleanup_tunnel_watchdog_tasks()
+    except Exception as exc:
+        data["local_watchdog_cleanup"] = {"status": "failed", "error": str(exc)}
+
+    try:
+        data["local_process_cleanup"] = process_utils.cleanup_worker_processes_from_pid_files()
+    except Exception as exc:
+        data["local_process_cleanup"] = {"status": "failed", "error": str(exc)}
+
+    return response
 
 
 def _safe_int_or_all(value: str) -> int | str:
@@ -388,7 +408,10 @@ def run_cli(
                 "restart": CMD_WORKER_RESTART,
             }
             command = worker_commands[args.action]
-            return _ipc_result(f"worker {args.action}", client.request(command))
+            response = client.request(command)
+            if args.action == "stop":
+                response = _add_local_worker_stop_cleanup(response)
+            return _ipc_result(f"worker {args.action}", response)
         if args.command == "clean":
             step = str(args.step).lower()
             if step in LOCALWORKER_OWNED_STEPS:
@@ -427,6 +450,19 @@ def run_cli(
                 now,
             )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        if getattr(args, "command", None) == "worker" and getattr(args, "action", None) == "stop":
+            response = _add_local_worker_stop_cleanup({
+                "status": "error",
+                "message": str(exc),
+                "data": {},
+            })
+            return _json_result(
+                ok=False,
+                command="worker stop",
+                message=str(exc),
+                data=response.get("data"),
+                exit_code=1,
+            )
         return _json_result(
             ok=False,
             command=str(getattr(args, "command", "unknown")),

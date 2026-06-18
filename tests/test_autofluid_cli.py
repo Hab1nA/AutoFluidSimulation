@@ -101,6 +101,70 @@ def test_worker_restart_sends_worker_restart():
     assert client.calls == [("worker_restart", {}, None)]
 
 
+def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
+    client = _FakeClient([
+        {
+            "status": "ok",
+            "data": {"remote": "stopped"},
+            "message": "stopped",
+        }
+    ])
+
+    monkeypatch.setattr(
+        autofluid_cli.process_utils,
+        "cleanup_tunnel_watchdog_tasks",
+        lambda: {"Workstation": {"status": "uninstalled"}},
+    )
+    monkeypatch.setattr(
+        autofluid_cli.process_utils,
+        "cleanup_worker_processes_from_pid_files",
+        lambda: {"tunnel_workstation": {"pid": 1234, "status": "terminated"}},
+    )
+
+    result, payload = _run(["worker", "stop"], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [("worker_stop", {}, None)]
+    assert payload["data"]["remote"] == "stopped"
+    assert payload["data"]["local_watchdog_cleanup"] == {
+        "Workstation": {"status": "uninstalled"},
+    }
+    assert payload["data"]["local_process_cleanup"] == {
+        "tunnel_workstation": {"pid": 1234, "status": "terminated"},
+    }
+
+
+def test_worker_stop_still_cleans_local_resources_when_ipc_is_down(monkeypatch):
+    class _FailingClient:
+        def request(self, *_args, **_kwargs):
+            raise OSError("ipc unavailable")
+
+    monkeypatch.setattr(
+        autofluid_cli.process_utils,
+        "cleanup_tunnel_watchdog_tasks",
+        lambda: {"LocalWorker": {"status": "uninstalled"}},
+    )
+    monkeypatch.setattr(
+        autofluid_cli.process_utils,
+        "cleanup_worker_processes_from_pid_files",
+        lambda: {"tunnel_localworker": {"pid": 5678, "status": "terminated"}},
+    )
+
+    result, payload = _run(["worker", "stop"], client=_FailingClient())
+
+    assert result.exit_code == 1
+    assert payload["ok"] is False
+    assert payload["command"] == "worker stop"
+    assert payload["message"] == "ipc unavailable"
+    assert payload["data"]["local_watchdog_cleanup"] == {
+        "LocalWorker": {"status": "uninstalled"},
+    }
+    assert payload["data"]["local_process_cleanup"] == {
+        "tunnel_localworker": {"pid": 5678, "status": "terminated"},
+    }
+
+
 def test_daemon_restart_uses_configured_systemd_service():
     calls = []
 
