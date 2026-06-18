@@ -2574,6 +2574,141 @@ class TestPipelineDaemonCleanStep:
         assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
         assert daemon.local_worker_registry.has_online_worker() is False
 
+    def test_workstation_ssh_refresh_warns_when_disconnected_connection_recovers(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def ensure_connected(self) -> bool:
+                return True
+
+            def is_connected(self) -> bool:
+                return False
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+            }],
+        )
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {"WS-A": "disconnected"}
+
+        with caplog.at_level(logging.WARNING):
+            result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "ok"}
+        assert daemon._last_worker_ssh_checks == {"WS-A": "ok"}
+        assert any(
+            "工作站 WS-A SSH 连接已恢复" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_workstation_ssh_refresh_warns_when_error_connection_recovers(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def ensure_connected(self) -> bool:
+                return True
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {"WS-A": "error: connect timed out"}
+
+        with caplog.at_level(logging.WARNING):
+            result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "ok"}
+        assert any(
+            "工作站 WS-A SSH 连接已恢复" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_workstation_ssh_refresh_does_not_warn_for_existing_ok_connection(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def ensure_connected(self) -> bool:
+                return True
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {"WS-A": "ok"}
+
+        with caplog.at_level(logging.WARNING):
+            result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "ok"}
+        assert not any(
+            "SSH 连接已恢复" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_workstation_ssh_refresh_does_not_warn_for_initial_ok_connection(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def ensure_connected(self) -> bool:
+                return True
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+
+        with caplog.at_level(logging.WARNING):
+            result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "ok"}
+        assert not any(
+            "SSH 连接已恢复" in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
