@@ -1,0 +1,41 @@
+; Fluent 2024 R1 metrics export journal template.
+; Replace {{CASE_DATA_PATH}} and {{EXPORT_DIR}} before execution.
+; The companion compute_metrics_gen4.py script owns final metric formulas.
+
+/file/set-tui-version "24.1"
+/file/read-case-data "{{CASE_DATA_PATH}}"
+
+; Required zones confirmed on model_gen4_1.cas.h5:
+; inlets: inlet_oxidizer, inlet_fuel
+; outlet: outlet
+; fluid: s------6.5076
+; walls: wall_chamber, wall_nozzle, wall_throat, wall_top, wall_gap, s------6
+; scalar fields: temperature, fmean, heat-release-rate, cell-volume, heat-flux
+; face fields: pressure, density, x-velocity, x-face-area, face-area-magnitude
+
+; Core report values to capture into metrics_reports.csv by wrapper/parser:
+/report/surface-integrals/mass-flow-rate inlet_oxidizer ()
+/report/surface-integrals/mass-flow-rate inlet_fuel ()
+/report/surface-integrals/mass-flow-rate outlet ()
+/report/surface-integrals/area outlet ()
+/report/surface-integrals/area wall_chamber wall_nozzle wall_throat wall_top wall_gap s------6 ()
+/report/surface-integrals/area-weighted-avg wall_chamber wall_nozzle wall_throat wall_top wall_gap s------6 () temperature
+/report/surface-integrals/facet-max wall_throat () temperature
+/report/surface-integrals/facet-max wall_chamber wall_nozzle wall_throat wall_top wall_gap s------6 () temperature
+/report/volume-integrals/volume s------6.5076 ()
+/report/volume-integrals/volume-integral s------6.5076 () heat-release-rate
+
+; Raw exports for Python-side formulas. If native journal prompt behavior differs
+; on a target machine, generate these same tables through PyFluent settings API:
+; file.export.ascii(file_name=..., surface_name_list=[...], cell_func_domain=[...])
+;
+; Expected output schemas:
+; metrics_reports.csv: name,value
+; exit_surface.csv: density,x_velocity,pressure,x_face_area
+; chamber_cells.csv: temperature,fmean,cell_volume
+; wall_faces.csv: zone,temperature,face_area_magnitude,heat_flux
+
+; Suggested field sets:
+; exit outlet: density, x-velocity, pressure, x-face-area
+; fluid s------6.5076: temperature, fmean, cell-volume, heat-release-rate
+; walls: temperature, face-area-magnitude, heat-flux

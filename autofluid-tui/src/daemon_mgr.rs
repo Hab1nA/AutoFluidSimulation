@@ -138,6 +138,16 @@ impl DaemonManager {
         Self::cleanup_pid_file_after_wait(project_dir, stopped)
     }
 
+    pub fn finish_after_successful_ipc_stop(&mut self, project_dir: &str) -> Result<(), String> {
+        if is_server_mode() {
+            self.process = None;
+            log::info!("server 模式下已通过 IPC 请求停止远端 daemon，仅清理本地 IPC 隧道");
+            Self::cleanup_server_ipc_tunnel(project_dir)
+        } else {
+            self.stop(project_dir)
+        }
+    }
+
     fn cleanup_pid_file_after_wait(project_dir: &str, stopped: bool) -> Result<(), String> {
         if stopped {
             Self::remove_pid_file(project_dir);
@@ -428,10 +438,15 @@ impl DaemonManager {
         }
 
         if server_mode {
-            match self.stop(project_dir) {
+            let stop_result = if stop_sent_over_ipc {
+                self.finish_after_successful_ipc_stop(project_dir)
+            } else {
+                self.stop(project_dir)
+            };
+            match stop_result {
                 Ok(()) => {
                     let message = if stop_sent_over_ipc {
-                        "✅ 已确认服务器 daemon 停止命令完成"
+                        "✅ 已通过 IPC 请求服务器 daemon 停止"
                     } else {
                         "✅ 已向服务器发送 daemon 停止命令"
                     };
@@ -1437,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_with_ipc_still_runs_server_stop_after_successful_full_quit() {
+    fn stop_with_ipc_skips_server_stop_after_successful_full_quit() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
@@ -1491,8 +1506,10 @@ mod tests {
 
         assert!(stopped);
         server.join().expect("server thread");
-        let marker_text = fs::read_to_string(&marker).expect("read marker");
-        assert_eq!(marker_text.trim(), "stop");
+        assert!(
+            !marker.exists(),
+            "successful IPC stop should not issue a second SSH stop"
+        );
         let exited = child.try_wait().expect("query child status").is_some();
         if !exited {
             let _ = child.kill();
@@ -1500,7 +1517,7 @@ mod tests {
         }
         assert!(
             exited,
-            "server IPC stop path should terminate the tunnel PID"
+            "server IPC stop path should still terminate the tunnel PID"
         );
         assert!(!pid_file.exists(), "server IPC tunnel PID file removed");
 

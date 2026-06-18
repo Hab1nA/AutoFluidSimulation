@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 研究对象 | 液氧/甲烷推力室及直流式双流体同轴喷注器算例 |
-| 软件环境 | ANSYS Fluent；建议结合 PyFluent 或 Fluent Journal 进行自动化后处理 |
+| 软件环境 | 已在工作站 172.17.135.240 上验证 ANSYS Fluent 2024 R1 v241 与 PyFluent 0.37.2；后处理采用 Fluent journal / PyFluent 导出数据，Python 统一计算指标 |
 | 目标输出 | Isp、ηc、φ̄/σφ、Twall、Tmax 五类指标及其伴随质量控制数据 |
 | 数据用途 | 构建喷注器几何参数到性能/热负荷/混合均匀性的代理模型训练标签 |
 
@@ -56,33 +56,34 @@ $$
 
 为了保证不同喷注器构型的后处理结果具有一致性，几何建模和网格划分阶段应保持边界命名完全统一。建议不要依赖 Fluent 自动生成的 face-id 或 zone-id，因为参数化建模后这些编号可能发生变化。所有自动化脚本应通过边界名称访问数据。
 
-| 建议名称 | 位置 | 需要导出的数据 | 用途 |
-| --- | --- | --- | --- |
-| ox_inlet 或 ox_inlet_* | 液氧入口 | 质量流量、入口温度、入口总压/静压、O2 质量分数或氧化剂流混合分数边界值 | 用于总流量、O/F、入口边界核验 |
-| fuel_inlet 或 ch4_inlet_* | 甲烷入口 | 质量流量、入口温度、CH4 质量分数或燃料流混合分数边界值 | 用于总流量、理论热输入、O/F 核验 |
-| nozzle_exit | 喷管出口截面 | ρ、速度矢量、轴向速度、静压、面法向、面积元素 | 用于推力和 Isp 计算 |
-| injector_face_wall | 喷注器面及喷嘴唇口附近壁面 | 壁温、壁面热流、面积元素 | 用于 Twall 分区统计和热点识别 |
-| chamber_wall | 燃烧室直段/收敛段壁面 | 壁温、壁面热流、面积元素 | 用于燃烧室热负荷统计 |
-| nozzle_wall | 喷管扩张段壁面 | 壁温、壁面热流、面积元素 | 用于喷管热负荷统计 |
-| throat_wall | 喉部及喉部圆角附近壁面 | 壁温、壁面热流、面积元素 | 用于 Tmax 优先监控 |
-| all_reactive_fluid | 全部参与反应的流体区域 | 热释放率、温度、组分/混合分数、单元体积 | 用于 ηc、φ 统计与全局守恒检查 |
-| combustion_chamber_fluid | 燃烧室主体流体区域，不含远下游出口缓冲区 | 温度、混合分数或物种质量分数、体积 | 用于 φ 高温区统计 |
+本轮已在 `D:\xkz_1020\case\model_gen4_1.cas.h5` / `model_gen4_1.dat.h5` 上通过 PyFluent 读取真实算例并确认当前 Gen4 模型的命名如下。后续脚本应优先使用“当前算例实际名称”，若几何或网格流程改名，再在配置层做映射，而不要在计算公式中写死 zone-id。
 
-需要在 Fluent 中可访问的主要场变量包括：Density、Static Pressure、Velocity components、Static Temperature、Wall Temperature、Wall Heat Flux、Heat Release Rate、Species Mass Fraction 或 Mixture Fraction、Cell Volume、Face Area、Face Normal。若使用非预混燃烧模型，应优先导出 mixture fraction 或 mean mixture fraction；若使用组份输运模型，则至少应导出 O2 与 CH4 的质量分数，并建议同时设置惰性守恒标量或流股追踪量以避免反应消耗导致局部 O2/CH4 质量分数失真。
+| 抽象角色 | 当前算例实际名称 | Fluent 类型 | 需要导出的数据 | 用途 |
+| --- | --- | --- | --- | --- |
+| 氧化剂入口 | `inlet_oxidizer` | `mass-flow-inlet` | Mass Flow Rate、入口温度、入口混合分数边界值 | 总流量、O/F 与入口边界核验 |
+| 燃料入口 | `inlet_fuel` | `mass-flow-inlet` | Mass Flow Rate、入口温度、入口混合分数边界值 | 总流量、理论热输入 |
+| 喷管出口截面 | `outlet` | `pressure-outlet` | `density`、`x-velocity`、`pressure`、`x-face-area`、`face-area-magnitude` | 推力和 Isp 计算 |
+| 燃烧室壁面 | `wall_chamber` | `wall` | `temperature`、`wall-temperature`、`heat-flux`、`face-area-magnitude` | Twall 分区统计 |
+| 喷管壁面 | `wall_nozzle` | `wall` | `temperature`、`wall-temperature`、`heat-flux`、`face-area-magnitude` | Twall 分区统计 |
+| 喉部壁面 | `wall_throat` | `wall` | `temperature`、`wall-temperature`、`heat-flux`、`face-area-magnitude` | Tmax 优先监控 |
+| 其他壁面 | `wall_top`、`wall_gap`、`s------6` | `wall` | `temperature`、`heat-flux`、`face-area-magnitude` | 全壁面 Tmax、P99.5 与总壁温统计 |
+| 反应流体域 | `s------6.5076` | `fluid` | `temperature`、`fmean`、`heat-release-rate`、`cell-volume` | ηc、φ 统计与体积权重 |
+
+当前 Fluent/PDF 燃烧模型中已经确认的关键场变量为：`temperature`、`density`、`pressure`、`x-velocity`、`fmean`、`heat-release-rate`、`cell-volume`、`face-area-magnitude`、`x-face-area`、`heat-flux`。其中 `fmean` 是 Mean Mixture Fraction，适合作为 φ 统计的优先数据源；`heat-release-rate` 是 Heat Release Rate，可通过 Volume Integral 得到实际热释放功率。
 
 ## 3 通用后处理流程与数据文件组织
 
-建议将每个 Fluent 算例后处理拆成“收敛检查—面/体积分—场数据导出—外部脚本计算—结果归档”五步。这样可以把 Fluent 作为场量积分和数据导出的工具，把复杂统计计算放在 Python 或 MATLAB 中完成，从而减少手工操作误差，也便于后续批量生成深度学习数据集。
+当前方案将每个 Fluent 算例后处理拆成“读取结果—Fluent 报告量采集—必要场数据导出—Python 统一计算—质量控制归档”五步。设计原则是：Fluent 只负责读取 case/data、执行成熟的 surface/volume integral、导出必要原始场量；五项研究指标的最终公式全部由 `executor/remote_scripts/compute_metrics_gen4.py` 负责，避免在 journal/TUI/Scheme 中堆叠复杂且难测试的数学逻辑。
 
 | 步骤 | 任务 | 采集内容 | 输出 |
 | --- | --- | --- | --- |
-| 1 | 收敛检查 | 残差、质量守恒、能量守恒、出口压力/温度/推力曲线是否稳定 | 不合格算例不进入训练集，或标记为 suspect |
-| 2 | Fluent 面积分/体积分 | 入口质量流量、出口动量相关积分、热释放率积分、壁面面积加权平均温度、壁面最大温度 | 得到可直接使用的全局量 |
-| 3 | 导出局部场数据 | 出口面数据、壁面面元数据、燃烧室单元数据 | 用于外部复算推力、φ 统计、异常热点筛查 |
-| 4 | 外部计算 | 按统一公式计算 Isp、ηc、φ̄、σφ、Twall、Tmax | 保证全部算例使用同一算法 |
-| 5 | 归档 | case_id、设计变量、边界条件、网格量级、收敛指标、五项研究指标 | 形成代理模型训练表 |
+| 1 | 读取 Fluent 结果 | `model_gen4_<id>.cas.h5` 和对应 `.dat.h5` | 已加载的 solver session |
+| 2 | Fluent 报告量采集 | `mdot_oxidizer`、`mdot_fuel`、`mdot_outlet`、壁面面积/平均温度/最大温度、`qdot_actual` | `metrics_reports.csv` |
+| 3 | 必要场数据导出 | 出口面、反应流体域、壁面面元的最小字段集合 | `exit_surface.csv`、`chamber_cells.csv`、`wall_faces.csv` |
+| 4 | Python 统一计算 | Isp、ηc、φ̄、σφ、Twall、Tmax、质量控制量 | `metrics_summary.csv` |
+| 5 | 质量控制与归档 | 质量守恒误差、热释放合理性、高温区体积、壁温极值 | 训练标签与 suspect 标记 |
 
-> 建议每个算例保留两类结果：summary.csv 存放五项指标和质量控制量；field_export/ 文件夹存放出口截面、燃烧室体数据和壁面面元数据。这样既能直接训练 DNN，也能在发现异常标签时回溯原始场量。
+建议每个算例保留三类结果：`metrics_summary.csv` 存放最终指标，`metrics_reports.csv` 存放 Fluent report 原始数值，`field_export/` 存放出口截面、反应流体域和壁面面元数据。这样既能直接训练代理模型，也能在发现异常标签时回溯原始场量。
 
 ## 4 五项研究指标的数据采集与计算方法
 
@@ -109,7 +110,17 @@ $$
 I_{sp} = \frac{F_x}{\dot{m}g_0}, \quad g_0 = 9.80665\ \mathrm{m/s^2}
 $$
 
-若 nozzle_exit 截面与发动机轴线垂直，且面法向与推力方向一致，可采用近似式 Fx ≈ ∫Ae ρ ux² dA + ∫Ae (p - pa)dA。对于出口压力分布接近均匀的情况，第二项可进一步写成 (p̄e - pa)Ae。批量后处理中仍建议使用面元积分形式，以免不同喷注器构型造成出口流动畸变时引入系统误差。
+当前 Gen4 算例中出口面为 `outlet`，出口截面坐标显示其法向与发动机轴向可按 x 方向处理。因此当前落地脚本采用 `x-face-area` 作为带符号面积分量，计算：
+
+$$
+F_{momentum} = \sum_i \rho_i u_{x,i}^2 A_{x,i}
+$$
+
+$$
+F_{pressure} = \sum_i (p_i - p_a) A_{x,i}
+$$
+
+对于出口压力分布接近均匀的情况，压力项可近似为 `(p̄e - pa)Ae`；批量后处理中仍应优先使用面元积分形式，以免不同喷注器构型造成出口流动畸变时引入系统误差。
 
 > 质量守恒检查：应同时比较入口总质量流量和出口质量流量，误差 eps_m = |m_dotin - m_dotout| / m_dotin。稳态算例建议 eps_m < 0.5% 或按课题统一阈值执行；超过阈值的 Isp 不应直接进入训练集。
 
@@ -119,9 +130,9 @@ $$
 
 | 采集位置 | Fluent 操作/变量 | 符号 | 说明 |
 | --- | --- | --- | --- |
-| all_reactive_fluid | Heat Release Rate 或 Volumetric Heat Release Rate | q_dot_chem,i [W/m³] | 体积热释放率；不同 Fluent 版本变量名称可能略有差异 |
-| all_reactive_fluid | Cell Volume | Vi | 用于外部积分；也可直接使用 Fluent Volume Integral |
-| fuel_inlet_* | Mass Flow Rate | m_dot_CH4 | 理论热输入应采用甲烷质量流量 |
+| `s------6.5076` | `heat-release-rate` | q_dot_chem,i [W/m³] | 当前算例已确认的热释放率字段 |
+| `s------6.5076` | `cell-volume` | Vi | 用于外部积分；也可直接使用 Fluent Volume Integral |
+| `inlet_fuel` | Mass Flow Rate | m_dot_CH4 | 理论热输入应采用甲烷质量流量 |
 | 常数 | LHVCH4 | 50.0 MJ/kg | 与中期报告中的甲烷低位热值保持一致 |
 
 $$
@@ -146,10 +157,10 @@ $$
 
 | 采集位置 | Fluent 操作/变量 | 符号 | 说明 |
 | --- | --- | --- | --- |
-| combustion_chamber_fluid | Static Temperature | Ti | 用于筛选高温燃烧统计区 Ti > Tcomb |
-| combustion_chamber_fluid | Mixture Fraction Z 或 Mean Mixture Fraction | Zi | 非预混燃烧模型下优先使用；反映局部来自燃料流的质量分数 |
-| combustion_chamber_fluid | O2 与 CH4 质量分数 | YO2,i、YCH4,i | 无混合分数时使用；需注意反应消耗会影响其解释 |
-| combustion_chamber_fluid | Cell Volume | Vi | 用于体积加权平均和标准差 |
+| `s------6.5076` | `temperature` | Ti | 用于筛选高温燃烧统计区 Ti > Tcomb |
+| `s------6.5076` | `fmean` | Zi | 当前算例已确认的 Mean Mixture Fraction |
+| `s------6.5076` | `o2`、`ch4` 等质量分数 | YO2,i、YCH4,i | 仅作为无混合分数时的备选，不作为当前优先方案 |
+| `s------6.5076` | `cell-volume` | Vi | 用于体积加权平均和标准差 |
 
 $$
 V_{hot} = \{ i \mid T_i > T_{comb} \}
@@ -186,11 +197,11 @@ $$
 
 | 采集位置 | Fluent 操作/变量 | 符号 | 说明 |
 | --- | --- | --- | --- |
-| injector_face_wall | Area-Weighted Average of Wall Temperature | Twall,inj | 喷注面热环境；关注喷嘴唇口附近热点 |
-| chamber_wall | Area-Weighted Average of Wall Temperature | Twall,chamber | 燃烧室主体热负荷 |
-| nozzle_wall | Area-Weighted Average of Wall Temperature | Twall,nozzle | 喷管热负荷；可反映下游燃气热状态 |
-| 以上三者合并 | Area-Weighted Average 或外部面积加权 | Twall,total | 作为优化目标时使用的总平均壁温 |
-| 以上三者 | Area、Wall Heat Flux | Aj、q_wall | 用于复核热负荷，特别是固定壁温边界情况下 |
+| `wall_chamber` | Area-Weighted Average of Wall Temperature | Twall,chamber | 燃烧室主体热负荷 |
+| `wall_nozzle` | Area-Weighted Average of Wall Temperature | Twall,nozzle | 喷管热负荷；可反映下游燃气热状态 |
+| `wall_throat` | Area-Weighted Average of Wall Temperature | Twall,throat | 喉部平均热负荷 |
+| `wall_top`、`wall_gap`、`s------6` | Area-Weighted Average 或外部面积加权 | Twall,other | 全壁面统计的补充区域 |
+| 全部壁面合并 | Area、Wall Heat Flux | Aj、q_wall | 用于复核热负荷，特别是固定壁温边界情况下 |
 
 $$
 T_{wall,j} = \frac{\int_{A_j} T_w\,dA}{A_j}
@@ -208,8 +219,8 @@ Tmax 用于识别局部热结构风险。液体火箭推力室中喉部通常是
 
 | 采集位置 | Fluent 操作/变量 | 符号 | 说明 |
 | --- | --- | --- | --- |
-| throat_wall | Surface Maximum of Wall Temperature | Tmax,throat | 主热风险指标；喉部区域应在几何中单独命名 |
-| injector_face_wall + chamber_wall + nozzle_wall | Surface Maximum of Wall Temperature | Tmax,all | 防止非喉部区域出现更高热点而被遗漏 |
+| `wall_throat` | Surface Maximum of Wall Temperature | Tmax,throat | 主热风险指标；当前算例已有独立喉部壁面 |
+| `wall_chamber` + `wall_nozzle` + `wall_throat` + `wall_top` + `wall_gap` + `s------6` | Surface Maximum of Wall Temperature | Tmax,all | 防止非喉部区域出现更高热点而被遗漏 |
 | 全部壁面面元 | Wall Temperature 分布 | P99 或 P99.5 | 作为抗网格噪声的稳健辅助指标 |
 | 热点位置 | 面元坐标 x,y,z 与 Tw | hotspot location | 用于判断热点是否稳定、是否由网格畸变或局部数值振荡导致 |
 
@@ -225,17 +236,23 @@ $$
 
 ## 5 自动化实施建议：Fluent / PyFluent 后处理任务拆分
 
-为了服务深度学习数据集构建，后处理流程应写成可重复执行的脚本。推荐的实现方式是：Fluent 内部完成标准报告量输出和场数据导出，外部 Python 脚本统一读取 CSV 并计算最终指标。这样即使后续更换求解模型，五项指标计算逻辑也保持不变。
+为了服务深度学习数据集构建，后处理流程应写成可重复执行的脚本。本仓库当前已落地两个文件：
+
+- `executor/remote_scripts/metrics_export_gen4.jou`：记录 Fluent 2024 R1 journal 模板、当前真实 zone/field 名称和 report/export 设计。
+- `executor/remote_scripts/compute_metrics_gen4.py`：读取 Fluent 导出的 CSV，统一计算五项指标和质量控制量。
+
+当前方案不是让 journal 直接计算五项指标，而是把 journal 限定为“Fluent 数据采集层”，把指标公式放在可单元测试的 Python 脚本中。原因是 Isp 需要面元级动量/压力积分，φ 需要高温区体积加权统计，Twall/Tmax 需要分区和全壁面组合逻辑，这些逻辑在 Python 中更容易测试、维护和复算。
 
 | 模块 | 任务 | 输出 |
 | --- | --- | --- |
-| Fluent report definitions | 创建入口质量流量、出口质量流量、热释放率积分、壁面平均温度、最大壁温等 report | 单算例基础 report 文件 |
-| Surface export | 导出 nozzle_exit 的 ρ、p、ux、uy、uz、坐标和面积/法向信息 | exit_surface.csv |
-| Volume export | 导出 combustion_chamber_fluid 的 T、Z 或 YO2/YCH4、cell volume | chamber_cells.csv |
-| Wall export | 导出壁面 Tw、qʺ、面积、坐标 | wall_faces.csv |
-| External postprocess | 读取上述数据，计算五项指标和质量控制量 | metrics_summary.csv |
+| Fluent/PyFluent 读取层 | 读取 `model_gen4_<id>.cas.h5` 和 `.dat.h5`，确认 solver server 健康 | 已加载会话 |
+| Fluent report 层 | 采集 `mdot_oxidizer`、`mdot_fuel`、`mdot_outlet`、`qdot_actual`、壁面面积/平均温度/最大温度 | `metrics_reports.csv` |
+| 出口面导出 | 导出 `outlet` 上的 `density`、`x-velocity`、`pressure`、`x-face-area` | `exit_surface.csv` |
+| 反应域导出 | 导出 `s------6.5076` 中的 `temperature`、`fmean`、`cell-volume`、`heat-release-rate` | `chamber_cells.csv` |
+| 壁面导出 | 导出所有壁面分区的 `zone`、`temperature`、`face-area-magnitude`、`heat-flux` | `wall_faces.csv` |
+| Python 指标计算 | 读取上述 CSV，按统一公式计算五项指标和质量控制量 | `metrics_summary.csv` |
 
-> PyFluent 或 Journal 脚本中应避免硬编码 zone-id。所有面和体区域必须按名称调用；每次仿真前检查所需边界名称是否存在，不存在则终止后处理并返回错误状态。
+建议实际批处理时优先使用 PyFluent settings API 生成 CSV，因为远程探测表明 Fluent TUI ASCII 导出命令在 journal prompt 顺序上较脆弱；journal 文件保留为可追溯的 Fluent 操作模板和 report 命令记录。PyFluent 或 journal 均应避免硬编码 zone-id，所有面和体区域必须按名称调用；每次后处理前检查所需名称是否存在，不存在则终止并返回错误状态。
 
 ## 6 计算结果检查、收敛判据与异常处理
 
@@ -258,33 +275,38 @@ $$
 | --- | --- | --- |
 | case_id | 字符串 | 算例编号，与几何参数文件和 Fluent case/data 文件对应 |
 | N1,N2,N3,N4 或其他设计变量 | 整数/浮点 | 喷注器参数化设计变量 |
-| mdot_ox, mdot_ch4, mdot_total | kg/s | 入口流量和总流量 |
+| mdot_oxidizer, mdot_fuel, mdot_total, mdot_outlet | kg/s | 入口流量、总入口流量和出口流量 |
 | F_momentum, F_pressure, F_total | N | 动量推力、压力推力、总推力 |
 | Isp | s | 比冲 |
 | Qdot_actual, Qdot_theoretical, eta_c | W, W, - | 实际热释放、理论热输入、燃烧效率 |
 | phi_mean, phi_std, hot_volume | -, -, m³ | 高温区等效混合比均值、标准差和统计体积 |
-| Twall_inj, Twall_chamber, Twall_nozzle, Twall_total | K | 分区和总壁面平均温度 |
+| Twall_chamber, Twall_nozzle, Twall_throat, Twall_total | K | 分区和总壁面平均温度 |
+| wall_area | m² | 用于 Twall_total 复核的总壁面面积 |
 | Tmax_throat, Tmax_all, T_p995_wall | K | 喉部最大壁温、全壁面最大壁温、稳健高分位温度 |
 | mass_imbalance, residual_status, convergence_flag | -, 字符串, 0/1 | 质量控制字段 |
 
 ## 8 结论
 
-本报告给出的 Fluent 后处理方案，将五项研究指标分别映射到明确的数据采集位置和计算公式：Isp 来自入口总质量流量和喷管出口推力积分；ηc 来自反应域体积热释放率和甲烷理论热输入；φ̄ 与 σφ 来自燃烧室高温区混合分数或氧/燃质量分数的体积加权统计；Twall 来自喷注器面、燃烧室壁面和喷管壁面的面积加权平均；Tmax 来自喉部和全壁面的最大壁温统计。
+本报告给出的 Fluent 后处理方案，已经从概念性“建议命名”更新为当前 Gen4 算例可执行的“数据采集层 + Python 计算层”方案。五项研究指标分别映射为：Isp 来自 `inlet_oxidizer`、`inlet_fuel` 和 `outlet` 面元推力积分；ηc 来自 `s------6.5076` 的 `heat-release-rate` 体积分和 `inlet_fuel` 甲烷质量流量；φ̄ 与 σφ 来自 `s------6.5076` 高温区 `fmean` 和 `cell-volume` 的体积加权统计；Twall 来自 `wall_chamber`、`wall_nozzle`、`wall_throat` 等壁面分区的面积加权温度；Tmax 来自 `wall_throat` 和全壁面温度最大值。
 
-在自动化仿真体系中，应把 Fluent 计算结果统一转化为 metrics_summary.csv，并保留出口面、燃烧室体单元和壁面面元的原始导出数据。这样既能满足代理模型训练对结构化标签的需求，也能在后续误差分析、异常算例复查和物理一致性验证中追溯原始流场依据。
+在自动化仿真体系中，应把 Fluent 计算结果统一转化为 `metrics_summary.csv`，并保留 `metrics_reports.csv`、`exit_surface.csv`、`chamber_cells.csv`、`wall_faces.csv` 等原始导出数据。这样既能满足代理模型训练对结构化标签的需求，也能在后续误差分析、异常算例复查和物理一致性验证中追溯原始流场依据。
 
-## 附录 A：单算例后处理伪代码
+## 附录 A：当前单算例后处理步骤
 
-- 输入：case_id、Fluent case/data 文件、边界名称列表、Tcomb、pa、LHVCH4
-1. 检查必要边界：ox_inlet_*、fuel_inlet_*、nozzle_exit、chamber_wall、nozzle_wall、throat_wall 是否存在。
-2. 从入口面读取 m_dot_ox、m_dot_CH4，计算 m_dot_total。
-3. 从 nozzle_exit 导出 ρ、ux、uy、uz、p、面法向 n、面元面积 dA，计算 Fmomentum、Fpressure、Ftotal 和 Isp。
-4. 对 all_reactive_fluid 积分 Heat Release Rate，得到 Q_dot_actual；用 m_dot_CH4 LHVCH4 得到 Q_dot_theoretical，计算 ηc。
-5. 从 combustion_chamber_fluid 导出 T、Z 或 Yox/Yfuel、cell volume；筛选 T>Tcomb 的单元，计算 φ̄ 与 σφ。
-6. 对 injector_face_wall、chamber_wall、nozzle_wall 分别计算面积加权平均壁温，再计算 Twall,total。
-7. 对 throat_wall 和全部壁面求壁温最大值，同时输出 P99.5 壁温和热点坐标。
-8. 计算质量守恒误差、统计区体积、关键物理量范围，写入 convergence_flag。
-9. 输出 metrics_summary.csv，并保存 exit_surface.csv、chamber_cells.csv、wall_faces.csv。
+输入：`case_id`、Fluent case/data 文件、`Tcomb`、`pa`、`LHVCH4`。
+
+1. 在 Fluent 2024 R1 solver 模式中读取 `D:\xkz_1020\case\model_gen4_<id>.cas.h5`，Fluent 会自动读取配套 `.dat.h5`。
+2. 检查必要 zone：`inlet_oxidizer`、`inlet_fuel`、`outlet`、`s------6.5076`、`wall_chamber`、`wall_nozzle`、`wall_throat`、`wall_top`、`wall_gap`、`s------6`。
+3. 通过 Fluent report 获取 `mdot_oxidizer`、`mdot_fuel`、`mdot_outlet`、壁面面积、壁面面积加权温度、壁面最大温度、`qdot_actual`。
+4. 导出 `exit_surface.csv`：`density`、`x_velocity`、`pressure`、`x_face_area`。
+5. 导出 `chamber_cells.csv`：`temperature`、`fmean`、`cell_volume`，必要时同时保留 `heat_release_rate`。
+6. 导出 `wall_faces.csv`：`zone`、`temperature`、`face_area_magnitude`、`heat_flux`。
+7. 运行 `compute_metrics_gen4.py`，读取上述 CSV 和 `metrics_reports.csv`。
+8. Python 计算入口总流量、出口质量守恒误差、出口动量推力、压力推力、总推力和 Isp。
+9. Python 用 `qdot_actual / (mdot_fuel * LHVCH4)` 计算 ηc。
+10. Python 筛选 `temperature > Tcomb` 的反应域单元，用 `phi=((1-fmean)/fmean)/4` 和 `cell_volume` 计算 φ̄、σφ 与 `hot_volume`。
+11. Python 用壁面面元温度和面积计算 `Twall_total`、`Tmax_throat`、`Tmax_all`、`T_p995_wall`。
+12. 输出 `metrics_summary.csv`，并保留中间 CSV 供复核。
 
 ## 附录 B：常见错误及修正方式
 

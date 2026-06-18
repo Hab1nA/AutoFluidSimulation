@@ -27,6 +27,7 @@ pub struct MouseRuntime<'a> {
     pub worker: &'a mut WorkerManager,
     pub project_dir: &'a str,
     pub full_quit: &'a mut bool,
+    pub full_quit_stop_sent: &'a mut bool,
 }
 
 // ====================================================================
@@ -1175,6 +1176,7 @@ pub fn handle_dialog_button_click(
                         rt: runtime.rt,
                         project_dir: runtime.project_dir,
                         full_quit: runtime.full_quit,
+                        full_quit_stop_sent: runtime.full_quit_stop_sent,
                     };
                     actions::handle_confirm_result(result, &mut ctx);
                 }

@@ -425,6 +425,7 @@ pub(crate) struct EventContext<'a> {
     rt: &'a tokio::runtime::Runtime,
     project_dir: &'a str,
     full_quit: &'a mut bool,
+    full_quit_stop_sent: &'a mut bool,
 }
 
 struct CheckTask {
@@ -534,6 +535,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     }
 
     let mut full_quit = false;
+    let mut full_quit_stop_sent = false;
     let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = initial_ipc_poll_timestamp();
@@ -549,6 +551,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         rt: &rt,
         project_dir: &project_dir,
         full_quit: &mut full_quit,
+        full_quit_stop_sent: &mut full_quit_stop_sent,
     };
 
     loop {
@@ -615,7 +618,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     if *ctx.full_quit {
         ctx.worker
             .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
-        let _ = ctx.daemon.stop(ctx.project_dir);
+        let result = if *ctx.full_quit_stop_sent {
+            ctx.daemon.finish_after_successful_ipc_stop(ctx.project_dir)
+        } else {
+            ctx.daemon.stop(ctx.project_dir)
+        };
+        if let Err(e) = result {
+            log::warn!("完全退出清理后台引擎失败: {}", e);
+        }
     }
 
     Ok(())
@@ -646,6 +656,7 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
             if ctx.ipc.is_connected() {
                 match ctx.rt.block_on(ctx.ipc.full_quit()) {
                     Ok(resp) if resp.is_ok() => {
+                        *ctx.full_quit_stop_sent = true;
                         ctx.log_buffer.push_info(format!("✅ {}", resp.message));
                     }
                     Ok(resp) => {
@@ -657,9 +668,6 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                     }
                 }
             }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
-            ctx.rt.block_on(ctx.ipc.disconnect());
             ctx.state.should_quit = true;
         }
         command::CommandResult::StartCheck => {
@@ -809,6 +817,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     worker: ctx.worker,
                     project_dir: ctx.project_dir,
                     full_quit: ctx.full_quit,
+                    full_quit_stop_sent: ctx.full_quit_stop_sent,
                 },
             );
         }
@@ -1457,6 +1466,54 @@ mod tests {
             state.needs_redraw,
             "submitting a command must repaint log/input changes without waiting for resize"
         );
+    }
+
+    #[test]
+    fn test_full_quit_confirm_defers_worker_cleanup_to_shutdown_phase() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-full-quit-defers-cleanup-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let worker_pid_file = project_dir.join("data").join("local_worker.pid");
+        std::fs::write(&worker_pid_file, "999999").expect("write worker pid");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = false;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        event_handler::actions::handle_confirm_result(command::CommandResult::FullQuit, &mut ctx);
+
+        assert!(state.should_quit);
+        assert!(full_quit);
+        assert!(
+            worker_pid_file.exists(),
+            "FullQuit handling should not perform worker PID cleanup before the shutdown phase"
+        );
+
+        std::fs::remove_dir_all(project_dir).ok();
     }
 
     #[test]
