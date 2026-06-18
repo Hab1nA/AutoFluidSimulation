@@ -196,10 +196,8 @@ pub(crate) fn should_poll_ipc(last_poll: Instant, interval: Duration) -> bool {
     last_poll.elapsed() >= interval
 }
 
-pub(crate) fn initial_ipc_poll_timestamp(interval: Duration) -> Instant {
+pub(crate) fn initial_ipc_poll_timestamp() -> Instant {
     Instant::now()
-        .checked_sub(interval)
-        .unwrap_or_else(Instant::now)
 }
 
 pub(crate) fn apply_log_entries_response(
@@ -317,6 +315,30 @@ fn refresh_dashboard_once(
         }
         _ => false,
     }
+}
+
+fn handle_startup_connect_failure(
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    ipc_host: &str,
+) {
+    state.update_local_ipc_tunnel(ipc_host, false);
+    daemon.begin_ipc_reconnect_wait(state);
+    log_buffer.push_info(
+        "❌ 暂未连接到后台引擎，正在后台自动重连；请检查远端 daemon 和 IPC 隧道".to_string(),
+    );
+    log_buffer.push_info("提示: 界面将在无后台连接的情况下运行，连接恢复后会自动刷新".to_string());
+}
+
+fn handle_startup_connect_success(
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    ipc_host: &str,
+) {
+    state.connected = true;
+    state.update_local_ipc_tunnel(ipc_host, true);
+    log_buffer.push_info("✅ 已连接到后台引擎".to_string());
 }
 
 fn wait_for_worker_health_refresh(
@@ -483,26 +505,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     // 主线程直接连接 IPC（单连接架构，轮询在主循环中进行）
     match rt.block_on(ipc.connect()) {
         Ok(()) => {
-            state.connected = true;
-            state.update_local_ipc_tunnel(ipc.host(), true);
-            log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+            handle_startup_connect_success(&mut state, &mut log_buffer, ipc.host());
         }
         Err(_) => {
-            state.connected = false;
-            state.update_local_ipc_tunnel(ipc.host(), false);
-            log_buffer.push_info(
-                "❌ 无法连接到后台引擎，请检查远端 daemon 是否运行以及 AUTOFLUID_IPC_HOST 配置"
-                    .to_string(),
-            );
-            log_buffer
-                .push_info("提示: 界面将在无后台连接的情况下运行，部分功能不可用".to_string());
+            handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, ipc.host());
         }
     }
 
     let mut full_quit = false;
     let ipc_poll_interval = Duration::from_secs(1);
     let clock_interval = Duration::from_millis(500);
-    let mut last_ipc_poll = initial_ipc_poll_timestamp(ipc_poll_interval);
+    let mut last_ipc_poll = initial_ipc_poll_timestamp();
     let mut last_clock_refresh = Instant::now();
 
     let mut ctx = EventContext {
@@ -1189,11 +1202,28 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_ipc_poll_timestamp_is_due_immediately() {
-        let interval = Duration::from_secs(1);
-        let last_poll = initial_ipc_poll_timestamp(interval);
+    fn test_initial_ipc_poll_timestamp_waits_one_interval() {
+        let interval = Duration::from_secs(60);
+        let last_poll = initial_ipc_poll_timestamp();
 
-        assert!(should_poll_ipc(last_poll, interval));
+        assert!(!should_poll_ipc(last_poll, interval));
+    }
+
+    #[test]
+    fn test_startup_connection_failure_begins_reconnect_wait() {
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, "127.0.0.1");
+
+        assert!(!state.connected);
+        assert!(state.needs_redraw);
+        assert!(daemon.has_pending_ipc_reconnect());
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("自动重连")));
     }
 
     #[test]

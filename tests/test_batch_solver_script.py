@@ -310,6 +310,35 @@ def test_exit_failure_tries_force_exit(tmp_path, monkeypatch):
     assert session.force_exit_calls == 1
 
 
+def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_path, monkeypatch):
+    session = _SuccessfulSolverSession()
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
+    args = _make_args(tmp_path)
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    Path(args.working_dir_v).mkdir(parents=True)
+    Path(args.working_dir_t).mkdir(parents=True)
+    Path(args.working_dir_v, "animation-v.mp4").write_bytes(b"velocity")
+    Path(args.working_dir_t, "animation-t.mp4").write_bytes(b"temperature")
+    Path(args.working_dir, "fluent-20260618-115935-21428.trn").write_text(
+        "transcript", encoding="utf-8"
+    )
+    Path(args.working_dir, "report-def-v-rfile_2_1.out").write_text(
+        "report", encoding="utf-8"
+    )
+    Path(args.working_dir, "keep.dat").write_text("keep", encoding="utf-8")
+
+    module.main()
+
+    assert Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").read_bytes() == b"velocity"
+    assert Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").read_bytes() == b"temperature"
+    assert not Path(args.working_dir, "fluent-20260618-115935-21428.trn").exists()
+    assert not Path(args.working_dir, "report-def-v-rfile_2_1.out").exists()
+    assert Path(args.working_dir, "keep.dat").exists()
+
+
 def test_mesh_read_falls_back_to_read_case_when_needed(tmp_path, monkeypatch):
     session = _SuccessfulSolverSession()
     delattr(session.tui.file, "read_mesh")

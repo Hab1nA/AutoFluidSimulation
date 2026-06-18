@@ -1032,6 +1032,7 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
             "scripts_dir": r"E:\ws-a scripts",
             "msh_dir": r"E:\ws-a msh",
             "result_dir": r"E:\ws-a result",
+            "animation_dir": r"E:\ws-a animation",
             "working_dir": r"E:\ws-a work",
             "flag_dir": r"E:\ws-a flags",
         },
@@ -1067,8 +1068,38 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
     assert "E:\\ws-a scripts/batch_solver_gen4.py" in str(calls[0]["command"])
     assert '"E:\\ws-a msh"' in str(calls[0]["command"])
     assert '"E:\\ws-a result"' in str(calls[0]["command"])
+    assert '--anim-dir "E:\\ws-a animation"' in str(calls[0]["command"])
     assert '"E:\\ws-a work"' in str(calls[0]["command"])
     assert '--progress-file "E:/ws-a flags/solver_progress_6.json"' in str(calls[0]["command"])
+
+
+def test_cleanup_solver_runtime_flag_artifacts_deletes_only_completed_wrapper_logs(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    deleted: list[str] = []
+
+    class _SSH:
+        def list_remote_directory(self, remote_dir: str):
+            assert remote_dir == r"D:\flags"
+            return [
+                "autofluid_bg_done.cmd",
+                "autofluid_bg_done.log",
+                "autofluid_bg_done.pid",
+                "solver_done_1.txt",
+                "solver_progress_1.json",
+                "other.log",
+            ]
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.cleanup_solver_runtime_flag_artifacts() == {"deleted": 2, "failed": 0}
+    assert deleted == [
+        "D:/flags/autofluid_bg_done.cmd",
+        "D:/flags/autofluid_bg_done.log",
+    ]
 
 
 def test_wait_solver_completion_reads_progress_and_updates_state(monkeypatch):

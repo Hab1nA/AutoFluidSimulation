@@ -130,6 +130,7 @@ function Install-TunnelWatchdogTask {
     $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
     $scriptPath = $PSCommandPath
     $arguments = @(
+        "-WindowStyle", "Hidden",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", "`"$scriptPath`"",
@@ -137,11 +138,6 @@ function Install-TunnelWatchdogTask {
         "-NoWatchdog",
         "-RestartDelaySeconds", $RestartDelaySeconds
     ) -join " "
-
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-        return $taskName
-    }
 
     $action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `

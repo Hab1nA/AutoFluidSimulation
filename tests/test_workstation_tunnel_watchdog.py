@@ -21,6 +21,7 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "Register-ScheduledTask" in source
     assert "Unregister-ScheduledTask" in source
     assert "-NoWatchdog" in source
+    assert '"-WindowStyle", "Hidden"' in source
 
 
 def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:

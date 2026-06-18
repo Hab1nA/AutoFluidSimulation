@@ -1088,11 +1088,7 @@ class RemoteExecutor:
         iteration_count = ENGINE_CONFIG["solver_iteration_count"]
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
-        # ★ --anim-dir 使用 normpath 消除 .. 相对路径段，确保在 schtasks
-        #   默认 CWD (System32) 下也能正确解析
-        anim_dir = os.path.normpath(
-            os.path.join(str(config["working_dir"]), "..", "animation")
-        )
+        anim_dir = str(config["animation_dir"])
         command = " ".join([
             _cmd_arg(conda_exe, force_quote=True),
             "run",
@@ -1129,6 +1125,48 @@ class RemoteExecutor:
             _cmd_arg(progress_file, force_quote=True),
         ])
         return command, flag_file
+
+    def cleanup_solver_runtime_flag_artifacts(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> dict[str, int]:
+        """清理全部 Solver 成功后 flags 中残留的后台 wrapper 脚本和日志。"""
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        flag_dir = str(remote_config["flag_dir"])
+        deleted = 0
+        failed = 0
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh_for_workstation(workstation_id)
+                list_remote_directory = getattr(ssh, "list_remote_directory", None)
+                if not callable(list_remote_directory):
+                    logger.warning("[Solver] SSH 客户端不支持列举 flags 目录，跳过运行产物清理")
+                    return {"deleted": deleted, "failed": 1}
+
+                flag_dir_base = flag_dir.rstrip("/\\")
+                for filename in list_remote_directory(flag_dir):
+                    lower = filename.lower()
+                    if not (
+                        lower.startswith("autofluid_bg_")
+                        and lower.endswith((".cmd", ".log"))
+                    ):
+                        continue
+                    remote_path = f"{flag_dir_base}/{filename}".replace("\\", "/")
+                    try:
+                        if ssh.delete_remote_file(remote_path):
+                            deleted += 1
+                        else:
+                            failed += 1
+                    except (OSError, ConnectionError) as e:
+                        failed += 1
+                        logger.debug(f"[Solver] 清理 flags 运行产物失败: {remote_path}: {e}")
+            except (OSError, ConnectionError) as e:
+                logger.warning(f"[Solver] 清理 flags 运行产物异常: {e}")
+                failed += 1
+
+        logger.info(f"[Solver] flags 运行产物清理完成: deleted={deleted}, failed={failed}")
+        return {"deleted": deleted, "failed": failed}
 
     def execute_solver(
         self,

@@ -105,6 +105,7 @@ class RemoteConfig(TypedDict):
     scdoc_dir: str
     msh_dir: str
     result_dir: str
+    animation_dir: str
     flag_dir: str
     conda_env: str
     conda_exe: str
@@ -252,6 +253,8 @@ REMOTE_CONFIG: RemoteConfig = {
     "msh_dir": _toml_or_default("remote_config", "msh_dir", r"D:\xkz_1020\msh"),
     # 远程仿真求解输出目录 (.cas.h5, .dat.h5)
     "result_dir": _toml_or_default("remote_config", "result_dir", r"D:\xkz_1020\case"),
+    # 远程动画输出目录 (.mp4)
+    "animation_dir": _toml_or_default("remote_config", "animation_dir", r"D:\xkz_1020\animation"),
     # 仿真标志目录（用于轮询判断任务完成）
     "flag_dir": _toml_or_default("remote_config", "flag_dir", r"D:\xkz_1020\flags"),
     # Conda 环境名称

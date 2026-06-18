@@ -480,6 +480,28 @@ class RemoteWorkstation:
                     failed_count += 1
         return (deleted_count, failed_count)
 
+    def list_remote_directory(self, remote_dir: str) -> list[str]:
+        """返回远程目录下的直接子项名称；目录不存在时返回空列表。"""
+        if not self.ensure_connected():
+            return []
+        if self._sftp is None:
+            logger.error(f"[SSH] SFTP 未就绪，无法列出远程目录: {remote_dir}")
+            return []
+
+        normalized = remote_dir.replace("\\", "/").rstrip("/")
+        try:
+            return [
+                entry.filename
+                for entry in self._sftp.listdir_attr(normalized)
+                if entry.filename not in {".", ".."}
+            ]
+        except FileNotFoundError:
+            logger.info(f"[SSH] 远程目录不存在（跳过列举）: {remote_dir}")
+            return []
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 列出远程目录失败: {remote_dir}: {e}")
+            return []
+
     # ------------------------------------------------------------------
     # 远程命令执行
     # ------------------------------------------------------------------

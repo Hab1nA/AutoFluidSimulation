@@ -257,7 +257,7 @@ impl DaemonManager {
     // IPC 生命周期集成方法
     // ------------------------------------------------------------------
 
-    fn begin_ipc_reconnect_wait(&mut self, state: &mut AppState) {
+    pub(crate) fn begin_ipc_reconnect_wait(&mut self, state: &mut AppState) {
         let now = Instant::now();
         self.pending_ipc_reconnect = Some(PendingIpcReconnect {
             deadline: now + Duration::from_secs(IPC_RECONNECT_TIMEOUT_SECS),
@@ -392,6 +392,11 @@ impl DaemonManager {
             log_buffer.push_info("✅ 已连接到后台引擎".to_string());
             log::info!("后台引擎 IPC 已就绪");
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_ipc_reconnect(&self) -> bool {
+        self.pending_ipc_reconnect.is_some()
     }
 
     /// 停止后台引擎并通过 IPC 通知对端退出，然后断开 IPC。

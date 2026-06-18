@@ -358,6 +358,7 @@ class TestBuildSolverCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\Auto Fluid\scripts")
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\Auto Fluid\animation%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\Auto Fluid\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
@@ -369,6 +370,7 @@ class TestBuildSolverCommand:
 
         assert '"C:\\Program Files\\conda.exe"' in command
         assert '--working-dir "D:\\Auto Fluid\\work%%ROOT%%"' in command
+        assert '--anim-dir "D:\\Auto Fluid\\animation%%ROOT%%"' in command
         assert '--working-dir-t "D:\\Auto Fluid\\work%%ROOT%%/animation-t"' in command
 
     def test_invalid_solver_processor_count_falls_back_to_default(self, monkeypatch):

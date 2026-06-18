@@ -11,6 +11,7 @@ Fluent Solver 批处理脚本 - 参数化版本
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -378,7 +379,7 @@ def cleanup_working_dirs(config_id: int, working_dirs: list[str]) -> None:
 
 
 def cleanup_log_files(config_id: int, log_dir: str) -> None:
-    """清理 Fluent 写入的 report 日志文件。
+    """清理 Fluent 写入的 transcript/report 临时文件。
 
     Args:
         config_id: 构型编号
@@ -386,13 +387,19 @@ def cleanup_log_files(config_id: int, log_dir: str) -> None:
                   因为 .set 文件中 report 路径为相对路径，
                   Fluent 会写入其 CWD）
     """
-    files_to_delete = [
-        "report-def-p-rfile.out",
-        "report-def-v-rfile.out",
-        "report-def-t-rfile.out",
+    patterns_to_delete = [
+        "fluent-*.trn",
+        "*.out",
     ]
+    try:
+        filenames = os.listdir(log_dir)
+    except OSError as e:
+        print(f"[{config_id}] 列出日志目录失败 {log_dir}: {e}")
+        return
 
-    for f in files_to_delete:
+    for f in filenames:
+        if not any(fnmatch.fnmatchcase(f.lower(), pattern) for pattern in patterns_to_delete):
+            continue
         path = os.path.join(log_dir, f)
         if os.path.exists(path):
             try:
@@ -400,8 +407,6 @@ def cleanup_log_files(config_id: int, log_dir: str) -> None:
                 print(f"[{config_id}] 已删除日志: {f}")
             except Exception as e:
                 print(f"[{config_id}] 删除日志失败 {f}: {e}")
-        else:
-            print(f"[{config_id}] 未找到日志: {f}")
 
 
 def close_solver_session(config_id: int, solver_session: Any) -> None:

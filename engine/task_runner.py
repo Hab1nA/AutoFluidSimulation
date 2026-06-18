@@ -398,6 +398,24 @@ class TaskRunner:
             workstation_id=self._workstation_for_config(config_name),
         )
 
+    def cleanup_solver_runtime_flag_artifacts(self) -> dict[str, int]:
+        """全部 Solver 成功完成后清理工作站 flags 中的后台 wrapper 产物。"""
+        totals = {"deleted": 0, "failed": 0}
+        workstation_ids = {
+            self._workstation_for_config(config_name)
+            for config_name in self.state.get_all_configs()
+        }
+        if not workstation_ids:
+            workstation_ids = {DEFAULT_WORKSTATION_ID}
+
+        for workstation_id in workstation_ids:
+            result = self._remote_executor.cleanup_solver_runtime_flag_artifacts(
+                workstation_id=workstation_id,
+            )
+            totals["deleted"] += int(result.get("deleted", 0))
+            totals["failed"] += int(result.get("failed", 0))
+        return totals
+
     # ------------------------------------------------------------------
     # 系统自检 & 文件清理（委托给 FileCleaner）
     # ------------------------------------------------------------------
