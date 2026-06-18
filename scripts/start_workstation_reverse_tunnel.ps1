@@ -570,16 +570,6 @@ if ($Monitor) {
     exit 0
 }
 
-if (-not $Check -and -not $NoWatchdog) {
-    try {
-        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
-        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
-    }
-    catch {
-        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
-    }
-}
-
 if (-not (Test-TcpEndpoint -HostName $targetHost -Port $targetPort)) {
     throw "$tunnelLabel SSH target is not reachable from this machine: ${targetHost}:${targetPort}"
 }

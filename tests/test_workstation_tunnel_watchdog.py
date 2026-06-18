@@ -24,6 +24,14 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert '"-WindowStyle", "Hidden"' in source
 
 
+def test_tunnel_watchdog_is_not_installed_by_default_startup() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "if (-not $Check -and -not $NoWatchdog) {" not in source
+    assert "Install-TunnelWatchdogTask" in source
+    assert "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready" not in source
+
+
 def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
