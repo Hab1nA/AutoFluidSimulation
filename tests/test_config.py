@@ -168,6 +168,13 @@ class TestStepFilePatterns:
         filename = pattern.format(config=7)
         assert filename == "model_gen4_7.dat.h5"
 
+    def test_postprocess_pattern(self):
+        from engine.config import STEP_FILE_PATTERNS
+        pattern = STEP_FILE_PATTERNS["postprocess"]
+        assert pattern is not None
+        filename = pattern.format(config=7)
+        assert filename == "postprocess_done_7.txt"
+
 
 # ====================================================================
 # STEP_NAMES / ALL_STATUSES / STEP_INDEX 常量
@@ -178,7 +185,7 @@ class TestConstants:
 
     def test_step_names_complete(self):
         from engine.config import STEP_NAMES
-        expected = ["sw", "sc", "transfer", "meshing", "solver"]
+        expected = ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]
         assert STEP_NAMES == expected
 
     def test_all_statuses_complete(self):

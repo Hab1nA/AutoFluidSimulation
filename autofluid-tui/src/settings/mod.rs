@@ -72,6 +72,8 @@ pub struct StepFilePatterns {
     pub solver: String,
     #[serde(rename = "solverdata")]
     pub solver_dat: String,
+    #[serde(rename = "postprocess", default)]
+    pub postprocess: String,
 }
 
 impl Default for StepFilePatterns {
@@ -82,6 +84,7 @@ impl Default for StepFilePatterns {
             meshing: "model_gen4_{config}.msh.h5".to_string(),
             solver: "model_gen4_{config}.cas.h5".to_string(),
             solver_dat: "model_gen4_{config}.dat.h5".to_string(),
+            postprocess: "postprocess_done_{config}.txt".to_string(),
         }
     }
 }
@@ -256,7 +259,7 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 11,
-            SettingCategory::StepPatterns => 5,
+            SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 8,
             SettingCategory::Meshing => 2,
@@ -303,6 +306,7 @@ impl SettingCategory {
                 2 => "meshing",
                 3 => "solver",
                 4 => "solverdata",
+                5 => "postprocess",
                 _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
@@ -386,6 +390,7 @@ impl SettingCategory {
                 2 => "Meshing模板",
                 3 => "Solver模板",
                 4 => "Solver数据模板",
+                5 => "PostProcess模板",
                 _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
@@ -589,6 +594,7 @@ impl SettingsState {
                 2 => field_val!(self.config.step_file_patterns, meshing, string),
                 3 => field_val!(self.config.step_file_patterns, solver, string),
                 4 => field_val!(self.config.step_file_patterns, solver_dat, string),
+                5 => field_val!(self.config.step_file_patterns, postprocess, string),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -676,6 +682,7 @@ impl SettingsState {
                 2 => self.config.step_file_patterns.meshing = value.to_string(),
                 3 => self.config.step_file_patterns.solver = value.to_string(),
                 4 => self.config.step_file_patterns.solver_dat = value.to_string(),
+                5 => self.config.step_file_patterns.postprocess = value.to_string(),
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {
@@ -1004,7 +1011,7 @@ mod tests {
 
     #[test]
     fn step_patterns_do_not_expose_transfer_field() {
-        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::StepPatterns.field_name(2), "meshing");
         assert_eq!(
             SettingCategory::StepPatterns.field_full_name(2),
@@ -1026,6 +1033,16 @@ mod tests {
         assert_eq!(
             state.config.step_file_patterns.meshing,
             "mesh_{config}.msh.h5"
+        );
+
+        assert_eq!(SettingCategory::StepPatterns.field_name(5), "postprocess");
+        assert_eq!(
+            SettingCategory::StepPatterns.field_full_name(5),
+            "step_file_patterns.postprocess"
+        );
+        assert_eq!(
+            state.get_field_value(SettingCategory::StepPatterns, 5),
+            "postprocess_done_{config}.txt"
         );
     }
 
@@ -1123,7 +1140,7 @@ mod tests {
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
         assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
-        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);

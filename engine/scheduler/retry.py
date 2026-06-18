@@ -102,8 +102,8 @@ class RetryManager:
                     #   但 Transfer 等同步步骤无法中途检测 pause，因此在此统一保护。
                     if self._guard.mark_paused_on_success(config_name, step_name):
                         return False
-                    # 对于 Meshing 和 Solver，状态由调用者设置（因为需要等待远程完成）
-                    if step_name not in ("meshing", "solver"):
+                    # 对于远程异步步骤，状态由调用者等待完成信号后设置。
+                    if step_name not in ("meshing", "solver", "postprocess"):
                         self.state.set_step_status(config_name, step_name, STATUS_COMPLETED)
                     return True
                 else:

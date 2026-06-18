@@ -512,12 +512,37 @@ class TestResetConfigSteps:
             sm.set_step_status(1, "transfer", STATUS_RUNNING)
             sm.set_step_status(1, "meshing", STATUS_RUNNING)
             sm.set_step_status(1, "solver", STATUS_WAITING)
+            sm.set_step_status(1, "postprocess", STATUS_RUNNING)
             sm.reset_config_steps(1, from_step="sc")
             assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
             assert sm.get_step_status(1, "sc") == STATUS_WAITING
             assert sm.get_step_status(1, "transfer") == STATUS_WAITING
             assert sm.get_step_status(1, "meshing") == STATUS_WAITING
             assert sm.get_step_status(1, "solver") == STATUS_WAITING
+            assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
+
+    def test_reset_from_solver_resets_postprocess(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+                sm.set_step_status(1, step, STATUS_COMPLETED)
+
+            sm.reset_config_steps(1, from_step="solver")
+
+            assert sm.get_step_status(1, "meshing") == STATUS_COMPLETED
+            assert sm.get_step_status(1, "solver") == STATUS_WAITING
+            assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
+
+    def test_reset_from_postprocess_only_resets_postprocess(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+                sm.set_step_status(1, step, STATUS_COMPLETED)
+
+            sm.reset_config_steps(1, from_step="postprocess")
+
+            assert sm.get_step_status(1, "solver") == STATUS_COMPLETED
+            assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
 
     def test_reset_all_configs(self):
         with _TmpDB() as sm:

@@ -17,14 +17,15 @@ pub const STATUS_ERROR: &str = "Error";
 pub const SETTINGS_LOCKED_MESSAGE: &str =
     "⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置";
 
-pub const STEP_NAMES: [&str; 5] = ["sw", "sc", "transfer", "meshing", "solver"];
+pub const STEP_NAMES: [&str; 6] = ["sw", "sc", "transfer", "meshing", "solver", "postprocess"];
 
-pub const STEP_DISPLAY: [(&str, &str); 5] = [
+pub const STEP_DISPLAY: [(&str, &str); 6] = [
     ("sw", "SolidWorks导出"),
     ("sc", "SpaceClaim转换"),
     ("transfer", "文件传输"),
     ("meshing", "网格划分"),
     ("solver", "仿真求解"),
+    ("postprocess", "后处理"),
 ];
 
 pub fn step_display_name(step: &str) -> &str {
@@ -855,6 +856,15 @@ mod tests {
             status_color(STATUS_RUNNING)
         );
         assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
+    }
+
+    #[test]
+    fn step_names_include_postprocess() {
+        assert_eq!(
+            STEP_NAMES,
+            ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]
+        );
+        assert_eq!(step_display_name("postprocess"), "后处理");
     }
 
     #[test]

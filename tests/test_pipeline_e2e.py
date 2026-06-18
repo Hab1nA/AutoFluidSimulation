@@ -81,11 +81,17 @@ class _E2ETaskRunner:
     def execute_solver(self, config_name: int) -> bool:
         return self._execute_step("solver", config_name)
 
+    def execute_postprocess(self, config_name: int) -> bool:
+        return self._execute_step("postprocess", config_name)
+
     def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         return self._step_results.get("meshing", True)
 
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         return self._step_results.get("solver", True)
+
+    def wait_postprocess_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        return self._step_results.get("postprocess", True)
 
     def get_remote_executor(self):
         return self
@@ -128,9 +134,9 @@ class TestPipelineStateTransitions:
             result = runner.execute_sw_per_config(cn)
             state.set_step_status(cn, "sw", STATUS_COMPLETED if result else STATUS_ERROR)
 
-        # 模拟 SC→Transfer→Meshing→Solver
+        # 模拟 SC→Transfer→Meshing→Solver→PostProcess
         for cn in [1, 2]:
-            for step in ["sc", "transfer", "meshing", "solver"]:
+            for step in STEP_NAMES[1:]:
                 state.set_step_status(cn, step, STATUS_RUNNING)
                 result = runner._execute_step(step, cn)
                 state.set_step_status(cn, step, STATUS_COMPLETED if result else STATUS_ERROR)

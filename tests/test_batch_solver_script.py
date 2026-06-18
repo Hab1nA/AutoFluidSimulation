@@ -56,15 +56,12 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
     msh_dir.mkdir()
     mpi_bin_dir.mkdir(parents=True)
     journal_path = scripts_dir / "solver_gen4.jou"
-    post_journal_path = scripts_dir / "solver_post_gen4.jou"
     journal_path.write_text("/file/set-tui-version \"24.1\"", encoding="utf-8")
-    post_journal_path.write_text("/file/set-tui-version \"24.1\"", encoding="utf-8")
     (msh_dir / f"model_gen4_{config_id}.msh.h5").write_text("mesh", encoding="utf-8")
     return argparse.Namespace(
         config_id=config_id,
         mpi_bin_dir=str(mpi_bin_dir),
         journal_path=str(journal_path),
-        post_journal_path=str(post_journal_path),
         msh_dir=str(msh_dir),
         output_dir=str(output_dir),
         anim_dir=str(anim_dir),
@@ -293,6 +290,7 @@ def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeyp
         str(Path(args.msh_dir, f"model_gen4_{args.config_id}.msh.h5"))
     ]
     assert session.read_case_calls == []
+    assert session.read_journal_calls == [args.journal_path]
     assert session.iterate_calls == [10]
     assert session.exit_calls == 1
 
@@ -311,7 +309,7 @@ def test_exit_failure_tries_force_exit(tmp_path, monkeypatch):
     assert session.force_exit_calls == 1
 
 
-def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_path, monkeypatch):
+def test_main_leaves_animation_for_postprocess_and_cleans_solver_logs(tmp_path, monkeypatch):
     session = _SuccessfulSolverSession()
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
     args = _make_args(tmp_path)
@@ -334,8 +332,8 @@ def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_pa
 
     module.main()
 
-    assert Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").read_bytes() == b"velocity"
-    assert Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").read_bytes() == b"temperature"
+    assert not Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").exists()
+    assert not Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").exists()
     assert not Path(args.working_dir, "fluent-20260618-115935-21428.trn").exists()
     assert not Path(args.working_dir, "report-def-v-rfile_2_1.out").exists()
     assert Path(args.working_dir, "user-result.out").exists()
@@ -374,3 +372,19 @@ def test_journal_failure_does_not_print_success_message(tmp_path, monkeypatch, c
 
     assert "仿真计算完成" not in capsys.readouterr().out
     assert session.exit_calls == 1
+
+
+def test_solver_does_not_execute_postprocess_journal(tmp_path, monkeypatch):
+    session = _SuccessfulSolverSession()
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
+    args = _make_args(tmp_path)
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert session.read_journal_calls == [args.journal_path]
+    assert session.write_case_data_calls == [
+        str(Path(args.output_dir, f"model_gen4_{args.config_id}.cas.h5"))
+    ]

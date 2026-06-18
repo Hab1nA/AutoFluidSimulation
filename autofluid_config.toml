@@ -28,6 +28,7 @@ sc = "model_gen4_{config}.scdoc"
 meshing = "model_gen4_{config}.msh.h5"
 solver = "model_gen4_{config}.cas.h5"
 solverdata = "model_gen4_{config}.dat.h5"
+postprocess = "postprocess_done_{config}.txt"
 
 [solidworks]
 sw_macro_timeout = 3600
@@ -54,6 +55,9 @@ meshing_processor_count = 8
 solver_timeout = 10800
 solver_processor_count = 128
 solver_iteration_count = 25
+
+[postprocess]
+postprocess_timeout = 3600
 
 [global_settings]
 watchdog_interval = 1.0

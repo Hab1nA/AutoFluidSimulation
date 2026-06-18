@@ -382,6 +382,14 @@ class BarrierCoordinator:
                 STATUS_RETRYING,
             ):
                 return cn
+            postprocess_status = self.state.get_step_status(cn, "postprocess")
+            if solver_status == STATUS_COMPLETED and postprocess_status in (
+                STATUS_WAITING,
+                STATUS_RUNNING,
+                STATUS_PAUSED,
+                STATUS_RETRYING,
+            ):
+                return cn
         return None
 
     def _solver_dispatch_loop(
@@ -420,6 +428,10 @@ class BarrierCoordinator:
             return False
 
         generation = self._step_generation(config_name, "solver")
+        if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+            self._execute_or_recover_postprocess_for_config(config_name)
+            return True
+
         if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
@@ -439,6 +451,7 @@ class BarrierCoordinator:
                     workstation_id=workstation_id,
                 )
                 logger.info(f"[Solver] 构型{config_name} 重启后检测到完成标志")
+                self._execute_postprocess_for_config(config_name)
                 return True
             if remote_status == "failed":
                 self.state.set_step_status(
@@ -462,6 +475,8 @@ class BarrierCoordinator:
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
+                if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                    self._execute_postprocess_for_config(config_name)
                 return True
             if remote_status == "unknown":
                 self._record_unknown_remote_status(config_name, "solver")
@@ -489,7 +504,65 @@ class BarrierCoordinator:
             if self._is_stale_step_result(config_name, "solver", generation):
                 self._discard_stale_step_result(config_name, "solver")
                 return False
+            if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                self._execute_postprocess_for_config(config_name)
         return True
+
+    def _execute_or_recover_postprocess_for_config(self, config_name: int) -> None:
+        """恢复或启动 Solver 之后的 PostProcess 步骤。"""
+        postprocess_status = self.state.get_step_status(config_name, "postprocess")
+        if postprocess_status == STATUS_COMPLETED:
+            return
+        if postprocess_status == STATUS_ERROR:
+            return
+
+        if postprocess_status == STATUS_RUNNING:
+            remote_executor = self.runner.get_remote_executor()
+            workstation_id = self._workstation_for_config(config_name)
+            remote_status = remote_executor.query_remote_task_status(
+                config_name,
+                "postprocess",
+                workstation_id=workstation_id,
+            )
+            if remote_status == "completed":
+                self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+                remote_executor.forget_remote_task(
+                    config_name,
+                    "postprocess",
+                    workstation_id=workstation_id,
+                )
+                return
+            if remote_status == "failed":
+                self.state.set_step_status(
+                    config_name,
+                    "postprocess",
+                    STATUS_ERROR,
+                    "远程后处理任务失败",
+                )
+                remote_executor.forget_remote_task(
+                    config_name,
+                    "postprocess",
+                    workstation_id=workstation_id,
+                )
+                return
+            if remote_status == "running":
+                logger.info(f"[PostProcess] 构型{config_name} 远程任务仍在运行，恢复轮询")
+                self._wait_for_postprocess_completion(config_name)
+                return
+            if remote_status == "unknown":
+                self._record_unknown_remote_status(config_name, "postprocess")
+                return
+            self.state.set_step_status(config_name, "postprocess", STATUS_WAITING)
+            remote_executor.forget_remote_task(
+                config_name,
+                "postprocess",
+                workstation_id=workstation_id,
+            )
+            logger.warning(
+                f"[PostProcess] 构型{config_name} 远程任务已丢失，重置为 Waiting 后重新启动"
+            )
+
+        self._execute_postprocess_for_config(config_name)
 
     def _wait_for_solver_completion(self, config_name: int) -> None:
         """轮询等待 Solver 完成，并按控制状态更新数据库。"""
@@ -517,8 +590,57 @@ class BarrierCoordinator:
                     config_name, "solver", STATUS_ERROR, "求解超时"
                 )
 
+    def _execute_postprocess_for_config(self, config_name: int) -> None:
+        """执行单个构型的后处理步骤。"""
+        if self._guard.check_should_abort():
+            return
+        generation = self._step_generation(config_name, "postprocess")
+        logger.info(f"[PostProcess] 构型{config_name} 开始后处理...")
+        if self._retry_manager.execute_with_retry(
+            config_name,
+            "postprocess",
+            self.runner.execute_postprocess,
+        ):
+            if self._guard.check_should_abort():
+                return
+            self._wait_for_postprocess_completion(config_name)
+            if self._is_stale_step_result(config_name, "postprocess", generation):
+                self._discard_stale_step_result(config_name, "postprocess")
+
+    def _wait_for_postprocess_completion(self, config_name: int) -> None:
+        """轮询等待 PostProcess 完成，并按控制状态更新数据库。"""
+        if self.runner.wait_postprocess_completion(
+            config_name,
+            paused_event=self._paused,
+            stopped_event=self._stopped,
+        ):
+            self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+            logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
+        else:
+            if self._paused.is_set():
+                self.state.set_step_status(
+                    config_name,
+                    "postprocess",
+                    STATUS_PAUSED,
+                    "等待后处理期间暂停",
+                )
+            elif self._stopped.is_set():
+                self.state.set_step_status(
+                    config_name,
+                    "postprocess",
+                    STATUS_PAUSED,
+                    "引擎已停止",
+                )
+            else:
+                self.state.set_step_status(
+                    config_name,
+                    "postprocess",
+                    STATUS_ERROR,
+                    "后处理超时",
+                )
+
     def _report_solver_terminal_if_ready(self) -> None:
-        """Solver 全部终结时报告流水线自然完成或失败终态。"""
+        """PostProcess 全部终结时报告流水线自然完成或失败终态。"""
         if self._solver_terminal_reported or self._paused.is_set() or self._stopped.is_set():
             return
         all_configs = self.state.get_all_configs()
@@ -527,11 +649,12 @@ class BarrierCoordinator:
 
         has_error = False
         for cn in all_configs:
-            status = self.state.get_step_status(cn, "solver")
-            if status == STATUS_ERROR:
+            solver_status = self.state.get_step_status(cn, "solver")
+            postprocess_status = self.state.get_step_status(cn, "postprocess")
+            if solver_status == STATUS_ERROR or postprocess_status == STATUS_ERROR:
                 has_error = True
                 continue
-            if status != STATUS_COMPLETED:
+            if solver_status != STATUS_COMPLETED or postprocess_status != STATUS_COMPLETED:
                 return
 
         outcome = "failed" if has_error else "completed"

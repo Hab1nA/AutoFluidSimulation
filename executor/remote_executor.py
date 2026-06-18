@@ -49,11 +49,13 @@ def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
 REMOTE_SCRIPT_FILES = [
     "batch_meshing_gen4.py",
     "batch_solver_gen4.py",
+    "batch_postprocess_gen4.py",
     "meshing_gen4.wft",
     "meshing_gen4.jou",
     "solver_gen4.jou",
     "solver_gen4.set",
     "solver_post_gen4.jou",
+    "postprocess_extra_gen4.jou",
 ]
 
 # 远程仿真引用文件列表（部署到 ref_files_dir）
@@ -96,6 +98,7 @@ class RemoteExecutor:
         "transfer": "[Transfer]",
         "meshing": "[Meshing]",
         "solver": "[Solver]",
+        "postprocess": "[PostProcess]",
     }
 
     @classmethod
@@ -731,6 +734,18 @@ class RemoteExecutor:
         config = remote_config or self._remote_config_for_workstation()
         return f"{config['flag_dir']}/solver_progress_{config_name}.json".replace("\\", "/")
 
+    def _postprocess_flag_file(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> str:
+        """返回 PostProcess 完成标志文件路径。"""
+        self._validate_config_name(config_name)
+        config = remote_config or self._remote_config_for_workstation()
+        pattern = STEP_FILE_PATTERNS.get("postprocess", "postprocess_done_{config}.txt")
+        filename = str(pattern).format(config=config_name)
+        return f"{config['flag_dir']}/{filename}".replace("\\", "/")
+
     def _build_meshing_command(
         self,
         config_name: int,
@@ -1103,8 +1118,6 @@ class RemoteExecutor:
             _cmd_arg(config["mpi_bin_dir"], force_quote=True),
             "--journal-path",
             _cmd_arg(f"{scripts_dir}/solver_gen4.jou", force_quote=True),
-            "--post-journal-path",
-            _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
             "--msh-dir",
             _cmd_arg(config["msh_dir"], force_quote=True),
             "--output-dir",
@@ -1123,6 +1136,53 @@ class RemoteExecutor:
             str(iteration_count),
             "--progress-file",
             _cmd_arg(progress_file, force_quote=True),
+        ])
+        return command, flag_file
+
+    def _build_postprocess_command(
+        self,
+        config_name: int,
+        remote_config: dict[str, object] | None = None,
+    ) -> tuple[str, str]:
+        """构建远程后处理命令和标志文件路径。"""
+        config = remote_config or self._remote_config_for_workstation()
+        flag_file = self._postprocess_flag_file(config_name, config)
+        conda_env = config["conda_env"]
+        conda_exe = config["conda_exe"]
+        scripts_dir = config["scripts_dir"]
+        postprocess_output_dir = str(
+            config.get("postprocess_output_dir")
+            or config.get("result_dir")
+            or config.get("working_dir")
+        )
+        command = " ".join([
+            _cmd_arg(conda_exe, force_quote=True),
+            "run",
+            "--no-capture-output",
+            "-n",
+            _cmd_arg(conda_env),
+            "python",
+            "-u",
+            _cmd_arg(f"{scripts_dir}/batch_postprocess_gen4.py", force_quote=True),
+            str(config_name),
+            "--case-dir",
+            _cmd_arg(config["result_dir"], force_quote=True),
+            "--post-journal-path",
+            _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
+            "--extra-post-journal-path",
+            _cmd_arg(f"{scripts_dir}/postprocess_extra_gen4.jou", force_quote=True),
+            "--postprocess-output-dir",
+            _cmd_arg(postprocess_output_dir, force_quote=True),
+            "--flag-file",
+            _cmd_arg(flag_file),
+            "--anim-dir",
+            _cmd_arg(config["animation_dir"], force_quote=True),
+            "--working-dir",
+            _cmd_arg(config["working_dir"], force_quote=True),
+            "--working-dir-t",
+            _cmd_arg(f"{config['working_dir']}/animation-t", force_quote=True),
+            "--working-dir-v",
+            _cmd_arg(f"{config['working_dir']}/animation-v", force_quote=True),
         ])
         return command, flag_file
 
@@ -1230,6 +1290,63 @@ class RemoteExecutor:
                     return False
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Solver] 仿真求解启动异常: {e}")
+                return False
+
+    def execute_postprocess(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        """在远程工作站启动后处理后台任务。"""
+        try:
+            self._validate_config_name(config_name)
+        except ValueError:
+            logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        if not self.sync_scripts(workstation_id=workstation_id):
+            logger.error("[PostProcess] 远程脚本同步失败，无法启动后处理")
+            return False
+
+        try:
+            command, flag_file = self._build_postprocess_command(config_name, remote_config)
+        except ValueError as e:
+            logger.error(f"[PostProcess] 远程后处理命令构建失败: {e}")
+            return False
+
+        logger.info(f"[PostProcess] 启动远程后处理: 构型{config_name}")
+        logger.debug(f"[PostProcess] 远程命令: {command}")
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh_for_workstation(workstation_id)
+                success, task_name = ssh.exec_background(
+                    command,
+                    flag_file,
+                    working_dir=str(remote_config["working_dir"]),
+                    interactive=True,
+                )
+                if not success:
+                    logger.error(f"[PostProcess] 远程后处理启动失败: 构型{config_name}")
+                    return False
+                self._remember_remote_task(
+                    config_name,
+                    "postprocess",
+                    task_name,
+                    workstation_id,
+                )
+                self._persist_remote_task(
+                    workstation_id=workstation_id,
+                    config_name=config_name,
+                    step_name="postprocess",
+                    task_name=task_name,
+                    flag_file=flag_file,
+                )
+                logger.info(f"[PostProcess] 后处理后台任务已启动: 构型{config_name}")
+                return True
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[PostProcess] 后处理启动异常: {e}")
                 return False
 
     def _read_solver_progress(
@@ -1432,6 +1549,79 @@ class RemoteExecutor:
                 self._clear_solver_progress(progress_file, ssh)
             except (OSError, ConnectionError):
                 self._clear_solver_progress(progress_file)
+        return False
+
+    def wait_postprocess_completion(
+        self,
+        config_name: int,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        """轮询等待后处理完成。
+
+        PostProcess 的业务输出文件名尚未稳定，本阶段只以独立完成 flag
+        表示工作站本地后处理结束；后续服务器上传阶段独立扫描输出目录。
+        """
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        try:
+            flag_file = self._postprocess_flag_file(config_name, remote_config)
+        except ValueError:
+            logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
+        error_flag = f"{flag_file}.error"
+
+        timeout = ENGINE_CONFIG["postprocess_timeout"]
+        poll_interval = 30
+        start_time = self._remote_task_start_time(
+            config_name,
+            "postprocess",
+            workstation_id,
+        )
+
+        logger.info(f"[PostProcess] 开始轮询构型{config_name} 后处理状态 (超时: {timeout}s)")
+
+        while time.time() - start_time < timeout:
+            if paused_event is not None:
+                pause_start = time.time()
+                if not wait_unless_paused_or_stopped(paused_event, stopped_event or threading.Event()):
+                    return False
+                pause_duration = time.time() - pause_start
+                if pause_duration > 0:
+                    start_time += pause_duration
+            if stopped_event is not None and stopped_event.is_set():
+                return False
+
+            try:
+                with self._ssh_lock:
+                    ssh = self._get_ssh_for_workstation(workstation_id)
+                    if ssh.check_remote_file(error_flag):
+                        logger.error(f"[PostProcess] 构型{config_name} 后处理远程任务执行失败")
+                        ssh.delete_remote_file(error_flag)
+                        self._cleanup_completed_remote_task(
+                            config_name,
+                            "postprocess",
+                            ssh,
+                            workstation_id,
+                        )
+                        return False
+                    if ssh.check_remote_file(flag_file):
+                        ssh.delete_remote_file(flag_file)
+                        self._cleanup_completed_remote_task(
+                            config_name,
+                            "postprocess",
+                            ssh,
+                            workstation_id,
+                        )
+                        logger.info(f"[PostProcess] 构型{config_name} 后处理完成")
+                        return True
+            except (OSError, ConnectionError) as e:
+                logger.warning(f"[PostProcess] 轮询构型{config_name} 后处理状态异常: {e}")
+
+            time.sleep(poll_interval)
+
+        logger.error(f"[PostProcess] 构型{config_name} 后处理超时 ({timeout}s)")
+        self._kill_remote_task_for_config(config_name, "postprocess", workstation_id)
         return False
 
     # ------------------------------------------------------------------

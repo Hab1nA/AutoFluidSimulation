@@ -3,7 +3,7 @@ Fluent Solver 批处理脚本 - 参数化版本
 
 用法:
     python batch_solver_gen4.py <config_id> --mpi-bin-dir <path> --journal-path <path>
-        --post-journal-path <path> --msh-dir <path> --output-dir <path>
+        --msh-dir <path> --output-dir <path>
         --anim-dir <path> --working-dir <path> --working-dir-t <path>
         --working-dir-v <path>
 """
@@ -48,8 +48,6 @@ def parse_args() -> argparse.Namespace:
     # 文件路径参数（必需）
     parser.add_argument('--journal-path', type=str, required=True,
                         help='求解 Journal 文件路径 (.jou)')
-    parser.add_argument('--post-journal-path', type=str, required=True,
-                        help='后处理 Journal 文件路径 (.jou)')
 
     # 目录路径参数（必需）
     parser.add_argument('--msh-dir', type=str, required=True,
@@ -445,7 +443,6 @@ def main() -> None:
     config_id = args.config_id
     import_file_name = os.path.join(args.msh_dir, f"model_gen4_{config_id}.msh.h5")
     _require_file(args.journal_path, "求解 Journal 文件")
-    _require_file(args.post_journal_path, "后处理 Journal 文件")
     _require_file(import_file_name, "网格文件")
 
     # 设置环境变量
@@ -455,7 +452,6 @@ def main() -> None:
     print(f"[配置] 模型编号: {args.config_id}")
     print(f"[配置] MPI bin 目录: {args.mpi_bin_dir}")
     print(f"[配置] 求解 Journal: {args.journal_path}")
-    print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 网格目录: {args.msh_dir}")
     print(f"[配置] 输出目录: {args.output_dir}")
     print(f"[配置] 动画目录: {args.anim_dir}")
@@ -521,15 +517,7 @@ def main() -> None:
         solver_session.tui.solve.iterate(args.iterate_count)
         _ensure_session_healthy(solver_session, "迭代后")
 
-        # 6.4 执行后处理 journal
-        print(f"[{config_id}] 正在执行后处理 Journal: {args.post_journal_path}")
-        solver_session.tui.file.read_journal(args.post_journal_path)
-        _ensure_session_healthy(solver_session, "执行后处理 Journal 后")
-
-        time.sleep(2)
-        move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
-
-        # 6.5 保存算例
+        # 6.4 保存算例。后处理已拆分到独立 PostProcess 步骤。
         case_file_name = f"model_gen4_{config_id}.cas.h5"
         case_full_path = os.path.join(args.output_dir, case_file_name)
         print(f"[{config_id}] 正在保存算例: {case_full_path}")

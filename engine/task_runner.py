@@ -8,6 +8,7 @@
 3. Transfer → 委托给 executor/remote_executor.py (RemoteExecutor)
 4. Meshing → 委托给 executor/remote_executor.py (RemoteExecutor)
 5. Solver  → 委托给 executor/remote_executor.py (RemoteExecutor)
+6. PostProcess → 委托给 executor/remote_executor.py (RemoteExecutor)
 
 每个任务执行后会更新 StateManager 中的状态。
 ===============================================================================
@@ -392,6 +393,31 @@ class TaskRunner:
     ) -> bool:
         """等待求解完成（委托给 RemoteExecutor）。"""
         return self._remote_executor.wait_solver_completion(
+            config_name,
+            paused_event,
+            stopped_event,
+            workstation_id=self._workstation_for_config(config_name),
+        )
+
+    # ------------------------------------------------------------------
+    # 阶段 6: 后处理（委托给 RemoteExecutor）
+    # ------------------------------------------------------------------
+
+    def execute_postprocess(self, config_name: int) -> bool:
+        """执行 PostProcess 步骤（委托给 RemoteExecutor）。"""
+        return self._remote_executor.execute_postprocess(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
+
+    def wait_postprocess_completion(
+        self,
+        config_name: int,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
+    ) -> bool:
+        """等待后处理完成（委托给 RemoteExecutor）。"""
+        return self._remote_executor.wait_postprocess_completion(
             config_name,
             paused_event,
             stopped_event,

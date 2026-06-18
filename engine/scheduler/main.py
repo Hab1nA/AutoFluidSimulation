@@ -427,7 +427,7 @@ class PipelineScheduler:
 
     def _has_downstream_errors(self) -> bool:
         """检查是否存在需先由恢复扫描处理的下游 Error 状态。"""
-        downstream_steps = ("sc", "transfer", "meshing", "solver")
+        downstream_steps = ("sc", "transfer", "meshing", "solver", "postprocess")
         return any(
             self.state.get_step_status(cn, step) == STATUS_ERROR
             for cn in self.state.get_all_configs()
@@ -584,7 +584,7 @@ class PipelineScheduler:
                 # ---- 找到第一个非 COMPLETED 步骤 ----
 
                 if status == STATUS_RUNNING:
-                    if step in ("meshing", "solver"):
+                    if step in ("meshing", "solver", "postprocess"):
                         remote_executor = self.runner.get_remote_executor()
                         workstation_id = self._workstation_for_config(cn)
                         remote_status = remote_executor.query_remote_task_status(
@@ -631,7 +631,7 @@ class PipelineScheduler:
                         continue
                     else:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
-                        if step in ("meshing", "solver"):
+                        if step in ("meshing", "solver", "postprocess"):
                             self.runner.get_remote_executor().forget_remote_task(
                                 cn,
                                 step,
@@ -692,6 +692,8 @@ class PipelineScheduler:
             elif step == "solver":
                 # Solver 由屏障调度器统一管理，保持当前状态等屏障通过后处理
                 pass
+            elif step == "postprocess":
+                self.barrier_coordinator.dispatch_solver_if_ready()
 
         for cn, step in normal_enqueue:
             if step == "sc":
@@ -704,6 +706,8 @@ class PipelineScheduler:
                     self.meshing_monitor.submit(cn)
             elif step == "solver":
                 pass
+            elif step == "postprocess":
+                self.barrier_coordinator.dispatch_solver_if_ready()
 
     def _record_unknown_remote_status(
         self,
@@ -749,7 +753,7 @@ class PipelineScheduler:
         ssh = None
         workstation_id = self._workstation_for_config(cn)
         remote_config = self._remote_config_for_workstation(workstation_id)
-        if step in {"transfer", "meshing", "solver"}:
+        if step in {"transfer", "meshing", "solver", "postprocess"}:
             try:
                 ssh = self.runner.get_ssh(workstation_id)
             except Exception:
@@ -770,6 +774,8 @@ class PipelineScheduler:
             return self._remote_files_exist(cn, ("meshing",))
         if step == "solver":
             return self._remote_files_exist(cn, ("solver", "solverdata"))
+        if step == "postprocess":
+            return True
         return True
 
     def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool:
@@ -792,6 +798,8 @@ class PipelineScheduler:
             if not filename:
                 return False
             directory_key = "msh_dir" if output_step == "meshing" else "result_dir"
+            if output_step == "postprocess":
+                directory_key = "flag_dir"
             remote_dir = str(remote_config[directory_key]).replace("\\", "/")
             remote_path = f"{remote_dir}/{filename}"
             try:
@@ -811,12 +819,12 @@ class PipelineScheduler:
 
     def _forget_completed_config_remote_tasks(self, cn: int) -> None:
         """清理已完成构型残留的远程任务元数据。"""
-        for step in ("meshing", "solver"):
+        for step in ("meshing", "solver", "postprocess"):
             self._forget_completed_remote_task_if_tracked(cn, step)
 
     def _forget_completed_remote_task_if_tracked(self, cn: int, step: str) -> None:
         """只在状态库仍跟踪远程任务时清理完成步骤的元数据。"""
-        if step not in {"meshing", "solver"}:
+        if step not in {"meshing", "solver", "postprocess"}:
             return
         workstation_id = self._workstation_for_config(cn)
         get_remote_task = getattr(self.state, "get_remote_task", None)
@@ -834,7 +842,7 @@ class PipelineScheduler:
         """Return true when any step after SC has already left Waiting."""
         return any(
             self.state.get_step_status(config_name, step) != STATUS_WAITING
-            for step in ("transfer", "meshing", "solver")
+            for step in ("transfer", "meshing", "solver", "postprocess")
         )
 
     def _is_step_in_flight(self, cn: int, step: str) -> bool:

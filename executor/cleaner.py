@@ -392,6 +392,11 @@ class FileCleaner:
                 [STEP_FILE_PATTERNS["solver"], STEP_FILE_PATTERNS["solverdata"]],
                 lambda cn, cfg: _remote_flag_paths(cfg, "solver_done", cn),
             ),
+            "postprocess": (
+                "flag_dir",
+                [STEP_FILE_PATTERNS["postprocess"]],
+                lambda cn, cfg: _remote_flag_paths(cfg, "postprocess_done", cn),
+            ),
         }
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
         remote_info = remote_patterns.get(step_name)

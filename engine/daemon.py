@@ -1537,7 +1537,7 @@ class PipelineDaemon:
         # 判断是否需要后台线程（远程步骤 + 清理范围大）
         needs_background = (
             config_name in (None, "all")
-            and (step_name == "all" or step_name in {"meshing", "solver"})
+            and (step_name == "all" or step_name in {"meshing", "solver", "postprocess"})
         )
 
         if self.runner is None:
@@ -1707,7 +1707,7 @@ class PipelineDaemon:
 
     @staticmethod
     def _affected_remote_steps(step_name: str | None, include_downstream: bool) -> set[str]:
-        remote_steps = {"meshing", "solver"}
+        remote_steps = {"meshing", "solver", "postprocess"}
         if step_name in (None, "all", "cache"):
             return remote_steps
         if step_name not in STEP_NAMES:

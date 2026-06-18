@@ -60,6 +60,13 @@ class PipelineControl:
 
     @contextmanager
     def external_start(self) -> Iterator[bool]:
-        """锁定一个外部副作用启动窗口，并返回当前是否允许启动。"""
+        """Return whether a new external side effect may start.
+
+        The control lock is held only while checking the current state. Long
+        operations such as COM calls or file polling must not block pause()
+        acknowledgement; once admitted, the step observes pause/stop via the
+        shared events and reaches its own safe boundary.
+        """
         with self._transition_lock:
-            yield not self._paused.is_set() and not self._stopped.is_set()
+            allowed = not self._paused.is_set() and not self._stopped.is_set()
+        yield allowed

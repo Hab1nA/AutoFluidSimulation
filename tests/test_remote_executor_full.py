@@ -333,7 +333,46 @@ class TestBuildSolverCommand:
         assert "batch_solver_gen4.py" in command
         assert "run --no-capture-output -n pyfluent python -u" in command
         assert "--processor-count 128" in command
-        assert "solver_done_2.txt" in flag_file
+
+
+class TestBuildPostprocessCommand:
+    """验证远程 PostProcess 命令构建。"""
+
+    def test_postprocess_flag_file_normalizes_path(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+
+        assert executor._postprocess_flag_file(6) == "D:/flags/postprocess_done_6.txt"
+
+    def test_build_rejects_non_int_config_name(self):
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+
+        with pytest.raises(ValueError, match="构型名称必须是整数"):
+            executor._build_postprocess_command("6")
+
+    def test_command_runs_postprocess_script_with_journal_paths(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, flag_file = executor._build_postprocess_command(2)
+
+        assert "batch_postprocess_gen4.py" in command
+        assert "--case-dir" in command
+        assert '"D:\\result"' in command
+        assert "--post-journal-path" in command
+        assert "solver_post_gen4.jou" in command
+        assert "--extra-post-journal-path" in command
+        assert "postprocess_extra_gen4.jou" in command
+        assert '--postprocess-output-dir "D:\\post"' in command
+        assert "--flag-file D:/flags/postprocess_done_2.txt" in command
+        assert flag_file == "D:/flags/postprocess_done_2.txt"
 
     def test_command_uses_configured_solver_processor_count(self, monkeypatch):
         """Solver 命令使用配置的核心数。"""
@@ -655,3 +694,124 @@ class TestExecuteSolver:
             ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
         ]
         assert 6 not in executor._remote_tasks
+
+
+class TestExecutePostprocess:
+    """PostProcess 步骤测试（mock SSH）。"""
+
+    def test_non_int_config_returns_false(self):
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        assert executor.execute_postprocess("1") is False
+        assert executor.execute_postprocess(1.5) is False
+
+    def test_execute_postprocess_uses_interactive_scheduled_task(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+        captured: dict[str, str | None] = {}
+
+        class _SSH:
+            def exec_background(
+                self,
+                command: str,
+                flag_file: str,
+                *,
+                working_dir: str | None = None,
+                interactive: bool = False,
+            ) -> tuple[bool, str]:
+                captured["command"] = command
+                captured["flag_file"] = flag_file
+                captured["working_dir"] = working_dir
+                captured["interactive"] = str(interactive)
+                return (True, "AutoFluid_postprocess")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
+
+        assert executor.execute_postprocess(2) is True
+        assert captured["working_dir"] == r"D:\working"
+        assert captured["interactive"] == "True"
+        assert "batch_postprocess_gen4.py" in str(captured["command"])
+        assert captured["flag_file"] == "D:/flags/postprocess_done_2.txt"
+
+    def test_wait_postprocess_completion_cleans_remote_task(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_timeout", 30)
+
+        deleted: list[str] = []
+        cleaned: list[tuple[str, str | None]] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                return path == "D:/flags/postprocess_done_6.txt"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                cleaned.append((task_name, pid_file))
+                return True
+
+        state = _StateRecorder()
+        state.remote_tasks[(6, "postprocess")] = {
+            "config_name": 6,
+            "step_name": "postprocess",
+            "task_name": "AutoFluid_postprocess_done_task",
+            "flag_file": "D:/flags/postprocess_done_6.txt",
+            "error_flag_file": "D:/flags/postprocess_done_6.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_postprocess_done.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+        executor._remember_remote_task(6, "postprocess", "AutoFluid_postprocess_done_task")
+
+        assert executor.wait_postprocess_completion(6) is True
+        assert deleted == ["D:/flags/postprocess_done_6.txt"]
+        assert cleaned == [
+            ("AutoFluid_postprocess_done_task", "D:/flags/autofluid_bg_postprocess_done.pid")
+        ]
+
+    def test_wait_postprocess_completion_returns_false_on_error_flag(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_timeout", 30)
+
+        deleted: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                return path == "D:/flags/postprocess_done_4.txt.error"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                return True
+
+        state = _StateRecorder()
+        state.remote_tasks[(4, "postprocess")] = {
+            "config_name": 4,
+            "step_name": "postprocess",
+            "task_name": "AutoFluid_postprocess_error_task",
+            "flag_file": "D:/flags/postprocess_done_4.txt",
+            "error_flag_file": "D:/flags/postprocess_done_4.txt.error",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+        assert executor.wait_postprocess_completion(4) is False
+        assert deleted == ["D:/flags/postprocess_done_4.txt.error"]

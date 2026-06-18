@@ -65,6 +65,13 @@ class TestRetryManager:
         assert call_count == 1
         assert self.state.get_step_status(1, "sc") == STATUS_COMPLETED
 
+    def test_execute_postprocess_success_waits_for_completion_poll(self):
+        """PostProcess 启动成功后应保持 Running，等待轮询完成信号。"""
+        result = self.retry_mgr.execute_with_retry(1, "postprocess", lambda _cn: True)
+
+        assert result is True
+        assert self.state.get_step_status(1, "postprocess") == STATUS_RUNNING
+
     def test_execute_success_after_retry(self):
         """首次失败、第二次成功应返回 True。"""
         call_count = 0
@@ -915,6 +922,9 @@ class _MockTaskRunner:
         self._solver_wait_result = True
         self._solver_wait_count = 0
         self._solver_flag_cleanup_count = 0
+        self._postprocess_dispatched = []
+        self._postprocess_wait_result = True
+        self._postprocess_wait_count = 0
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_in_flight = False
         self._ssh = _MockSSH()
@@ -964,6 +974,14 @@ class _MockTaskRunner:
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         self._solver_wait_count += 1
         return self._solver_wait_result
+
+    def execute_postprocess(self, config_name: int) -> bool:
+        self._postprocess_dispatched.append(config_name)
+        return True
+
+    def wait_postprocess_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+        self._postprocess_wait_count += 1
+        return self._postprocess_wait_result
 
     def cleanup_solver_runtime_flag_artifacts(self) -> dict[str, int]:
         self._solver_flag_cleanup_count += 1
@@ -1577,7 +1595,7 @@ class TestPipelineSchedulerStartRecovery:
     def test_resume_scan_completed_config_forgets_stale_remote_tasks(self):
         """全步骤 Completed 但仍有远程任务元数据时应清理残留记录。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.save_remote_task(
             workstation_id="default",
@@ -1593,6 +1611,15 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
+
+    def test_downstream_errors_include_postprocess(self):
+        """PostProcess Error 应阻止启动前屏障抢跑，先交给恢复扫描处理。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_ERROR, "后处理失败")
+
+        assert self.scheduler._has_downstream_errors() is True
 
     def test_finalize_pipeline_completed_sets_stopped_without_pausing_completed_steps(self):
         """自然完成收尾应停止后台循环，但保持 Completed 步骤不被改为 Paused。"""
@@ -3082,6 +3109,7 @@ class TestBarrierCoordinator:
         deadline = time.time() + 5
         while time.time() < deadline and not self.runner._solver_dispatched:
             time.sleep(0.05)
+        self.coordinator.join_solver_threads(timeout=5)
         t.join(timeout=1)
 
         assert self.runner._solver_dispatched == [1]
@@ -3216,8 +3244,8 @@ class TestBarrierCoordinator:
         assert self.state.is_global_barrier_met() is False
         assert self.runner._sc_cleanup_called is False
 
-    def test_all_solver_completed_reports_completed_terminal(self):
-        """全部 Solver Completed 后应报告自然完成终态。"""
+    def test_all_postprocess_completed_reports_completed_terminal(self):
+        """全部 PostProcess Completed 后应报告自然完成终态。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -3227,10 +3255,41 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=5)
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.runner._postprocess_dispatched == [1]
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
         assert self.solver_terminal_outcomes == ["completed"]
 
-    def test_solver_terminal_with_error_reports_failed_terminal(self):
-        """全部 Solver 终结但存在 Error 时应报告失败终态。"""
+    def test_solver_completed_dispatches_waiting_postprocess(self):
+        """Solver 已完成但 PostProcess Waiting 时应直接进入后处理。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert self.runner._postprocess_dispatched == [1]
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_postprocess_error_reports_failed_terminal(self):
+        """Solver 完成后 PostProcess 失败时应报告失败终态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._postprocess_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "postprocess") == STATUS_ERROR
+        assert self.solver_terminal_outcomes == ["failed"]
+
+    def test_solver_error_reports_failed_without_postprocess(self):
+        """Solver 失败时不应启动 PostProcess。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -3241,6 +3300,8 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=5)
 
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.state.get_step_status(1, "postprocess") == STATUS_WAITING
+        assert self.runner._postprocess_dispatched == []
         assert self.solver_terminal_outcomes == ["failed"]
 
     def test_running_solver_with_remote_task_recovers_wait_without_restart(self):

@@ -60,8 +60,8 @@ def test_pause_arriving_during_resume_wins_after_reconciliation() -> None:
     assert control.paused_event.is_set() is True
 
 
-def test_external_start_window_serializes_pause_acknowledgement() -> None:
-    """pause 返回前允许已进入启动窗口的副作用完成，返回后禁止新启动。"""
+def test_external_start_does_not_block_pause_acknowledgement() -> None:
+    """pause 不等待已准入的长耗时副作用完成，后续副作用会被拒绝。"""
     control = PipelineControl()
     pause_finished = threading.Event()
 
@@ -73,7 +73,7 @@ def test_external_start_window_serializes_pause_acknowledgement() -> None:
         assert allowed is True
         pause_thread = threading.Thread(target=pause)
         pause_thread.start()
-        assert pause_finished.wait(timeout=0.05) is False
+        assert pause_finished.wait(timeout=1) is True
 
     pause_thread.join(timeout=1)
     assert pause_finished.is_set() is True

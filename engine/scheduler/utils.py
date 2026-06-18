@@ -342,4 +342,16 @@ def check_step_output_exists(
         except Exception:
             return False
 
+    if step_name == "postprocess":
+        flag_dir = str(remote_config["flag_dir"]).replace("\\", "/")
+        flag_name = get_step_filename("postprocess", config_name)
+        if not flag_name:
+            return False
+        flag_file = f"{flag_dir}/{flag_name}"
+        error_flag = f"{flag_file}.error"
+        try:
+            return _check_remote_file(flag_file) or _check_remote_file(error_flag)
+        except Exception:
+            return False
+
     return False

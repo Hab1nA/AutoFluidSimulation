@@ -37,8 +37,8 @@ CHECK_TIMEOUT_SECONDS = 60.0
 DEFAULT_ALERT_LIMIT = 50
 DEFAULT_ALERT_INTERVAL_SECONDS = 5.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 600.0
-REMOTE_CLEAN_STEPS = {"transfer", "meshing", "solver", "solverdata", "cache"}
-REMOTE_RESET_STEPS = {"transfer", "meshing", "solver", "solverdata"}
+REMOTE_CLEAN_STEPS = {"transfer", "meshing", "solver", "solverdata", "postprocess", "cache"}
+REMOTE_RESET_STEPS = {"transfer", "meshing", "solver", "solverdata", "postprocess"}
 LOCALWORKER_OWNED_STEPS = {"all", "sw", "sc"}
 
 

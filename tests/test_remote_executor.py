@@ -1073,6 +1073,60 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
     assert '--progress-file "E:/ws-a flags/solver_progress_6.json"' in str(calls[0]["command"])
 
 
+def test_execute_postprocess_uses_workstation_specific_paths(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\default scripts")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\default result")
+    monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\default animation")
+    monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\default work")
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\default flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\default post")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scripts_dir": r"E:\ws-a scripts",
+            "result_dir": r"E:\ws-a result",
+            "animation_dir": r"E:\ws-a animation",
+            "working_dir": r"E:\ws-a work",
+            "flag_dir": r"E:\ws-a flags",
+            "postprocess_output_dir": r"E:\ws-a post",
+        },
+    )
+
+    calls: list[dict[str, str | None]] = []
+
+    class _SSH:
+        def exec_background(
+            self,
+            command: str,
+            flag_file: str,
+            *,
+            working_dir: str | None,
+            interactive: bool,
+        ):
+            calls.append(
+                {
+                    "command": command,
+                    "flag_file": flag_file,
+                    "working_dir": working_dir,
+                }
+            )
+            return True, "AutoFluid_postprocess_ws_a"
+
+    executor = RemoteExecutor(_StateRecorder(), lambda _ws: _SSH(), threading.RLock())
+    monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id=DEFAULT_WORKSTATION_ID: True)
+
+    assert executor.execute_postprocess(6, workstation_id="WS-A") is True
+
+    assert calls[0]["flag_file"] == "E:/ws-a flags/postprocess_done_6.txt"
+    assert calls[0]["working_dir"] == r"E:\ws-a work"
+    assert "E:\\ws-a scripts/batch_postprocess_gen4.py" in str(calls[0]["command"])
+    assert '"E:\\ws-a result"' in str(calls[0]["command"])
+    assert '--postprocess-output-dir "E:\\ws-a post"' in str(calls[0]["command"])
+
+
 def test_cleanup_solver_runtime_flag_artifacts_deletes_only_completed_wrapper_logs(monkeypatch):
     monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
     deleted: list[str] = []

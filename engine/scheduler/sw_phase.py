@@ -459,9 +459,11 @@ class SWPhaseHandler:
                     continue
                 if step == "solver" and self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
                     continue
+                if step == "postprocess" and self.state.get_step_status(cn, "solver") != STATUS_COMPLETED:
+                    continue
 
                 # ---- 远程步骤需要 SSH ----
-                if step in ("transfer", "meshing", "solver") and ssh is None:
+                if step in ("transfer", "meshing", "solver", "postprocess") and ssh is None:
                     continue
 
                 if check_step_output_exists(cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh):

@@ -162,6 +162,7 @@ class EngineConfig(TypedDict):
     solver_timeout: int
     solver_processor_count: int
     solver_iteration_count: int
+    postprocess_timeout: int
     max_retries: int
     state_refresh_interval: float
     sc_max_slots: int
@@ -341,7 +342,7 @@ def _effective_workstation_config(workstation: WorkstationConfig) -> Workstation
 # ============================================================================
 # 步骤名称枚举（与状态表和命令系统对应）
 # ============================================================================
-STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver"]
+STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]
 
 # 步骤顺序索引（用于判断"后续步骤"）
 STEP_INDEX = {name: i for i, name in enumerate(STEP_NAMES)}
@@ -367,6 +368,7 @@ STEP_FILE_PATTERNS = {
     "meshing": "model_gen4_{config}.msh.h5",
     "solver": "model_gen4_{config}.cas.h5",
     "solverdata": "model_gen4_{config}.dat.h5",
+    "postprocess": "postprocess_done_{config}.txt",
 }
 
 # ============================================================================
@@ -462,6 +464,8 @@ ENGINE_CONFIG: EngineConfig = {
     "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
     "solver_iteration_count": _toml_or_default("solver", "solver_iteration_count", 1000),
+    # 后处理超时（秒）。后处理是工作站本地结果生成，不包含后续服务器上传。
+    "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 3600),
     # 最大重试次数
     "max_retries": _toml_or_default("global_settings", "max_retries", 3),
     # 全局状态刷新间隔（秒）
@@ -692,6 +696,11 @@ def reload_config_from_toml() -> bool:
         if "solver" in toml_data:
             ENGINE_CONFIG.update(
                 cast(EngineConfig, {k: v for k, v in toml_data["solver"].items()
+                 if k in ENGINE_CONFIG})
+            )
+        if "postprocess" in toml_data:
+            ENGINE_CONFIG.update(
+                cast(EngineConfig, {k: v for k, v in toml_data["postprocess"].items()
                  if k in ENGINE_CONFIG})
             )
         if "global_settings" in toml_data:

@@ -125,6 +125,7 @@ class MockTaskRunner:
         self._solver_delay = 0.05
         self._solver_active_count = 0
         self._solver_max_active_count = 0
+        self._postprocess_dispatched: list[int] = []
         self._solver_lock = threading.Lock()
         self._pause_check_callback = None
         self._sc_pool = _MockSCPool()
@@ -197,6 +198,15 @@ class MockTaskRunner:
 
     def wait_solver_completion(self, config_name: int,
                                 paused_event=None, stopped_event=None) -> bool:
+        time.sleep(0.1)
+        return True
+
+    def execute_postprocess(self, config_name: int) -> bool:
+        self._postprocess_dispatched.append(config_name)
+        return True
+
+    def wait_postprocess_completion(self, config_name: int,
+                                    paused_event=None, stopped_event=None) -> bool:
         time.sleep(0.1)
         return True
 
