@@ -1120,14 +1120,28 @@ class PipelineDaemon:
         if self.runner is None:
             return results
 
+        previous_checks = dict(getattr(self, "_last_worker_ssh_checks", {}))
         for ws in WORKSTATIONS:
             ws_id = str(ws.get("id", "default"))
             target = self._workstation_ssh_target(ws)
             results["ssh_targets"][ws_id] = target
             try:
                 ssh = self.runner.get_ssh(ws_id)
-                connected = ssh.is_connected()
+                ensure_connected = getattr(ssh, "ensure_connected", None)
+                if callable(ensure_connected):
+                    connected = bool(ensure_connected())
+                else:
+                    connected = bool(ssh.is_connected())
                 results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
+                if connected and previous_checks.get(ws_id) not in (None, "ok"):
+                    logger.warning(
+                        "[Worker] 工作站 %s SSH 连接已恢复 "
+                        "(host=%s, port=%s, connectivity_mode=%s)",
+                        ws_id,
+                        target["host"],
+                        target["port"],
+                        target["connectivity_mode"],
+                    )
             except Exception as e:
                 results["ssh_checks"][ws_id] = f"error: {e}"
                 logger.warning(
