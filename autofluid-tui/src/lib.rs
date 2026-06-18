@@ -10,7 +10,6 @@ mod utils;
 mod worker_mgr;
 
 use std::io;
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -341,25 +340,21 @@ fn handle_startup_connect_success(
     log_buffer.push_info("✅ 已连接到后台引擎".to_string());
 }
 
-fn wait_for_worker_health_refresh(
+/// 非阻塞地尝试刷新一次 Worker 健康信息。
+///
+/// 启动 Worker 后立即调用，将最新状态拉取到 UI。
+/// 若健康信息尚未就绪，正常的 1 秒 IPC 轮询会自动捕获后续更新，
+/// 无需阻塞事件循环等待。
+fn try_refresh_worker_health_once(
     rt: &tokio::runtime::Runtime,
     ipc: &mut IpcClient,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) {
-    const ATTEMPTS: usize = 5;
-    const DELAY: Duration = Duration::from_millis(250);
-
-    for attempt in 0..ATTEMPTS {
-        if refresh_dashboard_once(rt, ipc, state, log_buffer) && worker_health_is_visible(state) {
-            return;
-        }
-        if attempt + 1 < ATTEMPTS {
-            sleep(DELAY);
-        }
-    }
+    refresh_dashboard_once(rt, ipc, state, log_buffer);
 }
 
+#[cfg(test)]
 fn worker_health_is_visible(state: &AppState) -> bool {
     state.health_info.local_worker_online == Some(true)
         && matches!(
@@ -677,7 +672,7 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                         worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
                     });
             if started {
-                wait_for_worker_health_refresh(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
+                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
             }
         }
         command::CommandResult::StopWorkers => {
@@ -719,7 +714,7 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                         worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
                     });
             if started {
-                wait_for_worker_health_refresh(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
+                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
             }
         }
         command::CommandResult::None => {}
