@@ -1,8 +1,8 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.4  
-> 创建日期：2026-05-09  
-> 最后更新：2026-06-17  
+> 文档版本：v1.5<br>
+> 创建日期：2026-05-09<br>
+> 最后更新：2026-06-18<br>
 > 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.2)
 
 ---
@@ -268,9 +268,11 @@ LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC
 | `worker_step_error` | LocalWorker → Daemon | 上报步骤执行失败 | ✅ 已实现 |
 | `worker_execute` | Daemon → LocalWorker | 下发执行指令（SW/SC） | ❌ 未实现（当前通过 poll 模式） |
 | `worker_file_ready` | LocalWorker → Daemon | 上报 STEP 文件就绪 | ❌ 未实现 |
-| `worker_scdoc_uploaded` | LocalWorker → Daemon | 上报 SCDOC 已上传到服务器 A | ❌ 未实现 |
+| `worker_scdoc_uploaded` | LocalWorker → Daemon | 上报 SCDOC 已上传到服务器 A | ❌ 未实现（SCDOC 随 `worker_step_complete` 上传） |
 | `collect_results` | LocalWorker → Daemon | 请求拉取暂存结果 | ❌ 未实现 |
 | `collect_ack` | LocalWorker → Daemon | 确认结果已接收 | ❌ 未实现 |
+
+> **2026-06-18 状态更新**：前 5 个命令（`worker_register` ~ `worker_step_error`）已在 `ipc/protocol.py` 中定义并在 daemon 侧注册处理器。`LocalWorker`、`LocalWorkerRegistry`、`LocalWorkerAdapter`、`ConfigAssigner` 均已实现。剩余 5 个命令为远期规划功能，对应 PostProcess/Collect 阶段。
 
 #### 4.1.3 服务器 A 的 Daemon 改造
 
@@ -774,13 +776,13 @@ class WorkstationMesher:
 
 **4. 状态持久化**：
 
-`steps` 表需新增字段：
+`steps` 表当前已有字段（✅ 已实现）和远期需新增字段（❌ 未实现）：
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `workstation_id` | TEXT | 构型分配到的工作站ID |
-| `slot_id` | INTEGER | 槽位编号（0-2） |
-| `processed` | INTEGER | 是否已在此工作站处理（用于恢复） |
+| 字段 | 类型 | 说明 | 状态 |
+|------|------|------|:----:|
+| `workstation_id` | TEXT | 构型分配到的工作站ID | ✅ 已实现（`state_manager.py` L209） |
+| `slot_id` | INTEGER | 槽位编号（0-2） | ✅ 已实现（`state_manager.py` L209） |
+| `processed` | INTEGER | 是否已在此工作站处理（用于恢复） | ❌ 未实现 |
 
 #### 4.3.4 与现有架构的集成
 
@@ -990,13 +992,13 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 
 | 文件 | 影响程度 | 改动类型 | 详细说明 |
 |------|:--------:|---------|---------|
-| `engine/config.py` | 🔴 重度 | 结构变更 | `REMOTE_CONFIG` → `WORKSTATIONS` 列表；`STEP_NAMES` 增加 PostProcess/Collect；`IPC_CONFIG["host"]` 改为 `0.0.0.0`；新增 `STAGING_DIR`、`LOCAL_WORKER_CONFIG` 等配置；`STEP_FILE_PATTERNS` 增加 PostProcess/Collect 条目；`STEP_INDEX` 自动扩展 |
-| `engine/daemon.py` | 🔴 重度 | 架构重构 | 新增 `LocalWorkerAdapter`；新增 `handle_collect_results` / `handle_worker_register` / `handle_worker_heartbeat` 等 IPC 命令处理器；`_load_excel_data()` 需触发构型分配；`handle_start()` 需区分本地 Worker 在线/离线场景 |
+| `engine/config.py` | � 中度 | 结构扩展 | ✅ `REMOTE_CONFIG` 已扩展为 `WORKSTATIONS` 列表（向后兼容）；`STEP_NAMES` 增加 PostProcess/Collect（远期）；✅ `IPC_CONFIG["host"]` 已支持环境变量覆盖为 `0.0.0.0`；新增 `STAGING_DIR`、`LOCAL_WORKER_CONFIG` 等配置（远期）；`STEP_FILE_PATTERNS` 增加 PostProcess/Collect 条目（远期） |
+| `engine/daemon.py` | � 中度 | 功能扩展 | ✅ `LocalWorkerAdapter` 已实现；✅ `handle_worker_register` / `handle_worker_heartbeat` / `handle_worker_poll` / `handle_worker_step_complete` / `handle_worker_step_error` 已实现；✅ `_assign_config_workstations()` 已实现；❌ `handle_collect_results` 等 Collect 阶段处理器（远期）；`handle_start()` 需区分本地 Worker 在线/离线场景（已部分实现） |
 | `engine/scheduler/` | 🔴 重度 | 核心逻辑重写 | `_barrier_passed` 改为 dict；`_barrier_monitor_loop` 改为每工作站一个；`_dispatch_solver_tasks` 增加工作站参数；Solver/PostProcess 完成判断改为基于结果文件（.cas/.dat/后处理输出）轮询而非进程退出；`_worker_loop` 中 `_process_single_config` 需感知工作站分配；`_on_step_file_ready` 改为接收 RPC 上报；`reset_config` 需处理多工作站屏障重置 |
 | `engine/task_runner.py` | 🔴 重度 | 接口重构 | `self._ssh` → `self._ssh_pool`；`get_ssh()` 增加 `workstation_id` 参数；`execute_transfer()` 需指定目标工作站；`execute_meshing()` / `execute_solver()` 增加 `workstation_id` 参数；`wait_solver_completion()` / `wait_postprocess_completion()` 改为基于结果文件轮询；`collect_results_from_workstation(ws_id)` 新增；`clean_step_files()` 需遍历所有工作站；`run_system_check()` 需检查所有工作站 |
-| `engine/state_manager.py` | 🟡 中度 | 表结构扩展 | `steps` 表新增 `workstation_id` 列；新增 `result_delivery` 表；新增 `mark_result_staged()` / `get_undelivered_results()` / `mark_result_delivered()` 方法；`all_configs_completed_at_step()` 增加 `config_names` 过滤参数；`load_configs()` 需同步构型分配信息 |
+| `engine/state_manager.py` | � 轻度 | 表结构已就绪 | ✅ `steps` 表已有 `workstation_id`、`slot_id` 列；❌ 新增 `result_delivery` 表（远期）；✅ `all_configs_completed_at_step()` 已支持 `workstation_id` 和 `config_names` 过滤参数；✅ `set_config_workstation()` / `get_config_workstation()` 已实现 |
 | `engine/file_monitor.py` | 🟡 中度 | 运行模式变更 | 在 LocalWorker 侧保持原有逻辑不变；Daemon 侧不再需要此模块，改为接收 RPC 上报事件 |
-| `ipc/protocol.py` | 🟡 中度 | 协议扩展 | 新增 9 个命令常量（`CMD_WORKER_REGISTER` 等）；新增 `CMD_COLLECT_RESULTS` / `CMD_COLLECT_ACK` |
+| `ipc/protocol.py` | � 轻度 | 协议扩展 | ✅ 已有 20 个命令常量（含 5 个 Worker 命令 + 3 个 Worker 生命周期命令）；❌ 远期新增 `CMD_COLLECT_RESULTS` / `CMD_COLLECT_ACK` |
 | `ipc/server.py` | 🟡 中度 | 功能扩展 | 监听地址改为 `0.0.0.0`；注册新的 Worker 相关命令处理器；可能需要区分 TUI Client 连接和 LocalWorker 连接 |
 | `utils/ssh_client.py` | 🟢 轻度 | 接口微调 | `RemoteWorkstation` 类本身无需修改，但调用方式从单实例变为池化管理 |
 | `utils/logger.py` | 🟢 轻度 | 无变更 | 日志广播机制可复用 |
@@ -1026,15 +1028,16 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 
 ### 5.4 新增模块
 
-| 模块 | 文件 | 预估行数 | 职责 |
-|------|------|---------|------|
-| LocalWorker | `engine/local_worker.py` | ~400 | 本地 PC 侧 Worker 进程：执行 SW/SC、监控 STEP 文件、上传 SCDOC、拉取结果 |
-| ConfigAssigner | `engine/config_assigner.py` | ~80 | 构型分配器：将构型按策略分配到工作站 |
-| LocalWorkerAdapter | `engine/local_worker_adapter.py` | ~200 | Daemon 侧适配器：替代 TaskRunner 中直接调用 SW/SC 的逻辑 |
-| ResultCollector | `engine/result_collector.py` | ~250 | 服务器 A 侧结果收集：从工作站拉取、暂存管理、推送本地 PC |
-| StagingManager | `engine/staging_manager.py` | ~150 | 暂存区管理：文件存储、交付追踪、定期清理 |
-| WorkerProtocol | `ipc/worker_protocol.py` | ~100 | Worker RPC 协议定义（复用 IPC 协议框架） |
-| ResultFetcher | `client/result_fetcher.py` | ~150 | 本地 PC 侧结果拉取：连接 Daemon、接收文件、确认交付 |
+| 模块 | 文件 | 预估行数 | 职责 | 状态 |
+|------|------|---------|------|:----:|
+| LocalWorker | `engine/local_worker.py` | ~350 | 本地 PC 侧 Worker 进程：执行 SW/SC、监控 STEP 文件、上传 SCDOC、拉取结果 | ✅ 已实现 |
+| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型分配器：将构型按策略分配到工作站 | ✅ 已实现 |
+| LocalWorkerAdapter | `engine/local_worker_adapter.py` | ~180 | Daemon 侧适配器：替代 TaskRunner 中直接调用 SW/SC 的逻辑 | ✅ 已实现 |
+| LocalWorkerRegistry | `engine/local_worker_registry.py` | ~120 | Worker 注册、心跳、任务队列调度 | ✅ 已实现 |
+| ResultCollector | `engine/result_collector.py` | ~250 | 服务器 A 侧结果收集：从工作站拉取、暂存管理、推送本地 PC | ❌ 远期 |
+| StagingManager | `engine/staging_manager.py` | ~150 | 暂存区管理：文件存储、交付追踪、定期清理 | ❌ 远期 |
+| WorkerProtocol | `ipc/worker_protocol.py` | ~100 | Worker RPC 协议定义（复用 IPC 协议框架） | ❌ 远期（当前复用 `ipc/protocol.py`） |
+| ResultFetcher | `client/result_fetcher.py` | ~150 | 本地 PC 侧结果拉取：连接 Daemon、接收文件、确认交付 | ❌ 远期 |
 
 ---
 
@@ -1197,8 +1200,8 @@ P1: 工作站级屏障 ◄──────────────────
 | 单工作站配置 | `engine/config.py` | `REMOTE_CONFIG` | 单字典 SSH 连接信息 |
 | IPC 本地监听 | `engine/config.py` | `IPC_CONFIG` | `"host": "127.0.0.1"` |
 | 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["sw", "sc", "transfer", "meshing", "solver"]` |
-| 全局屏障检查 | `engine/scheduler/main.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成 |
-| 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `dict[str, threading.Event]`（每工作站一个） |
+| 全局屏障检查 | `engine/scheduler/barrier.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成（已支持按 workstation_id 过滤） |
+| 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `threading.Event`（全局）+ `_workstation_barriers_passed` set |
 | Worker 线程数 | `engine/scheduler/worker_pool.py` | `_num_workers` | `= 3` |
 | 动态分配器 | `engine/scheduler/meshing_assigner.py` | `MeshingAssigner` | 动态任务分配核心逻辑 |
 | 工作站 Mesher | `engine/scheduler/workstation_mesher.py` | `WorkstationMesher` | 工作站 Meshing 状态管理 |
@@ -1207,7 +1210,7 @@ P1: 工作站级屏障 ◄──────────────────
 | Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | `STEP_NAMES` | `pub const STEP_NAMES: [&str; 5]` |
 | Rust IPC 默认地址 | `autofluid-tui/src/ipc/client.rs` | `DEFAULT_HOST` | `"127.0.0.1"` |
 | Rust Daemon 管理 | `autofluid-tui/src/daemon_mgr.rs` | `DaemonManager` | 本地启动 Daemon 子进程 |
-| Python IPC 协议 | `ipc/protocol.py` | `CMD_` | 命令常量定义（11 个） |
+| Python IPC 协议 | `ipc/protocol.py` | `CMD_` | 命令常量定义（20 个，含 Worker 命令和 Worker 生命周期命令） |
 | Rust IPC 协议 | `autofluid-tui/src/ipc/protocol.rs` | `CMD_` | 命令常量定义（与 Python 同步） |
 | 数据库表结构 | `engine/state_manager.py` | `CREATE TABLE` | `configs` + `steps` + `engine_state` 表 |
 | 全局屏障查询方法 | `engine/state_manager.py` | `all_configs_completed_at_step` | 按步骤查询完成状态 |
