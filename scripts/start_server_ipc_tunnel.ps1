@@ -89,8 +89,15 @@ function Start-ServerTunnel {
     )
 
     $forwardSpec = "${LocalHost}:${LocalPort}:${RemoteHost}:${RemotePort}"
-    $stdoutLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-server-ipc-tunnel-${LocalPort}.out.log"
-    $stderrLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-server-ipc-tunnel-${LocalPort}.err.log"
+    $logDir = Join-Path $ProjectDir "logs/local/tunnels/server-ipc"
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    catch {
+        $logDir = [System.IO.Path]::GetTempPath()
+    }
+    $stdoutLogPath = Join-Path $logDir "${LocalPort}.out.log"
+    $stderrLogPath = Join-Path $logDir "${LocalPort}.err.log"
     foreach ($logPath in @($stdoutLogPath, $stderrLogPath)) {
         if (Test-Path -LiteralPath $logPath -PathType Leaf) {
             Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue

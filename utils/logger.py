@@ -24,6 +24,7 @@ import threading
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from utils.log_paths import get_log_root, session_log_dir
 
 _session_type: str | None = None
 _session_timestamp: str | None = None
@@ -118,8 +119,7 @@ def init_session(process_type: str, timestamp: str | None = None) -> str:
     _session_type = process_type
     _session_timestamp = timestamp
 
-    base_log_dir = _resolve_base_log_dir()
-    _session_log_dir = os.path.join(base_log_dir, process_type, timestamp)
+    _session_log_dir = session_log_dir(process_type, timestamp)
     os.makedirs(_session_log_dir, exist_ok=True)
 
     # 会话目录已就绪，将之前缓冲的日志回写到文件
@@ -141,8 +141,7 @@ def build_session_log_dir(process_type: str, timestamp: str) -> str:
     Returns:
         会话日志目录的绝对路径
     """
-    base_log_dir = _resolve_base_log_dir()
-    return os.path.join(base_log_dir, process_type, timestamp)
+    return session_log_dir(process_type, timestamp)
 
 
 def get_session_log_dir() -> str | None:
@@ -162,16 +161,7 @@ def get_session_type() -> str | None:
 
 def _resolve_base_log_dir() -> str:
     """解析日志根目录路径。"""
-    try:
-        from engine.config import LOCAL_PATHS as _cfg_local_paths
-        base = _cfg_local_paths.get("log_dir", "")
-    except (ImportError, AttributeError):
-        base = ""
-    if not base:
-        base = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
-        )
-    return base
+    return get_log_root()
 
 
 def _infer_log_category(name: str) -> str:

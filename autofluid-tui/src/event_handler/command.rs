@@ -415,7 +415,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     };
 
     let log_dir = match std::env::current_dir() {
-        Ok(dir) => dir.join("logs"),
+        Ok(dir) => dir.join("logs").join("local").join("exports"),
         Err(e) => {
             log_buffer.push_info(format!("❌ 获取当前目录失败: {}", e));
             return CommandResult::None;
@@ -641,5 +641,38 @@ mod tests {
         assert!(matches!(result, CommandResult::None));
         assert_eq!(state.ui_mode, UiMode::Settings);
         assert!(state.settings_state.is_some());
+    }
+
+    #[tokio::test]
+    async fn export_command_writes_to_structured_export_dir() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-export-test-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create temp project dir");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set temp cwd");
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        log_buffer.push_info("export me".to_string());
+
+        let result = dispatch_command(
+            "export all structured-export",
+            &mut ipc,
+            &mut state,
+            &mut log_buffer,
+        )
+        .await;
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        assert!(matches!(result, CommandResult::None));
+        assert!(project_dir
+            .join("logs")
+            .join("local")
+            .join("exports")
+            .join("structured-export.log")
+            .is_file());
+        std::fs::remove_dir_all(project_dir).ok();
     }
 }

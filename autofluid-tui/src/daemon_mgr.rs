@@ -864,8 +864,8 @@ fn default_server_start_command() -> String {
     ])
     .unwrap_or_else(|| "9527".to_string());
     format!(
-        "cd {project_dir} && mkdir -p logs && \
-         {{ env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/autofluid-daemon.out 2>&1 < /dev/null & \
+        "cd {project_dir} && mkdir -p logs/server/services/daemon-bootstrap && \
+         {{ env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/server/services/daemon-bootstrap/autofluid-daemon.out 2>&1 < /dev/null & \
          daemon_pid=$!; }}; \
          ready_count=0; \
          for i in $(seq 1 60); do \
@@ -880,13 +880,13 @@ fn default_server_start_command() -> String {
              fi; \
              if ! kill -0 \"$daemon_pid\" 2>/dev/null && [ \"$ready_count\" -eq 0 ]; then \
                  echo 'AutoFluid daemon exited before IPC became ready' >&2; \
-                 tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
+                  tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; \
                  exit 1; \
              fi; \
              sleep 1; \
          done; \
          echo 'AutoFluid daemon IPC readiness timeout' >&2; \
-         tail -n 80 logs/autofluid-daemon.out >&2 2>/dev/null || true; \
+         tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; \
          exit 1"
     )
 }
@@ -1142,7 +1142,8 @@ mod tests {
         assert!(command.contains("socket.create_connection(('127.0.0.1', 9527)"));
         assert!(command.contains("command='get_engine_status'"));
         assert!(command.contains("ready_count=$((ready_count + 1))"));
-        assert!(command.contains("tail -n 80 logs/autofluid-daemon.out"));
+        assert!(command
+            .contains("tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out"));
         assert!(!command.contains("setsid -f"));
         assert!(!command.contains("&& env AUTOFLUID_SERVER_MODE=server nohup"));
     }

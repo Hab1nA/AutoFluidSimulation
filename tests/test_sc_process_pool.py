@@ -266,6 +266,28 @@ class TestMaxSlots:
         assert slot.bridge_log_path is not None
         assert os.path.dirname(slot.bridge_log_path) == expected_log_dir
 
+    def test_bridge_log_dir_falls_back_to_spaceclaim_service_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """没有会话目录时，Bridge/transit 日志应进入 SpaceClaim 服务目录。"""
+        data_dir = str(tmp_path / "data")
+        log_dir = str(tmp_path / "logs")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "log_dir", log_dir)
+        monkeypatch.setattr("engine.sc_process_pool.get_session_log_dir", lambda: None)
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+
+        from engine.sc_process_pool import SCProcessPool
+
+        pool = SCProcessPool()
+
+        assert pool._build_bridge_log_dir() == os.path.join(
+            log_dir,
+            "local",
+            "services",
+            "spaceclaim",
+        )
+
     def test_get_slot_balances_ready_slots_and_cleans_dead_idle_slot(
         self, tmp_path, monkeypatch
     ):

@@ -50,6 +50,7 @@ from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
+from utils.log_paths import service_log_file
 from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
 from utils.process_utils import (
@@ -458,9 +459,8 @@ class PipelineDaemon:
         if auth_token:
             env["AUTOFLUID_IPC_AUTH_TOKEN"] = auth_token
 
-        log_dir = str(LOCAL_PATHS.get("log_dir") or os.path.join(_PROJECT_ROOT, "logs"))
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "alert_watcher.log")
+        log_path = service_log_file("alert-watcher", "alert_watcher.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW
@@ -734,9 +734,8 @@ class PipelineDaemon:
         env.setdefault("AUTOFLUID_WORKER_SSH_PORT", "2223")
         env.setdefault("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel")
 
-        log_dir = str(LOCAL_PATHS.get("log_dir") or os.path.join(_PROJECT_ROOT, "logs"))
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, "local_worker_autostart.log")
+        log_path = service_log_file("local-worker", "local_worker_autostart.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
         creationflags = 0
         if sys.platform == "win32":
             creationflags = subprocess.CREATE_NO_WINDOW

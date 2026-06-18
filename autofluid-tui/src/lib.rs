@@ -59,7 +59,7 @@ fn unix_epoch_millis() -> u128 {
 
 /// 初始化文件日志。
 /// 优先使用 AUTOFLUID_SESSION_LOG_DIR 环境变量（由 Python 启动器设置）；
-/// 若未设置，尝试查找 logs/client/ 下最新的时间戳子目录；
+/// 若未设置，尝试查找结构化 client 会话目录，再兼容旧的 logs/client/；
 /// 若均不可用，回退到临时文件，避免 stderr 污染 TUI alternate screen。
 fn init_file_logger() {
     use log::LevelFilter;
@@ -128,13 +128,23 @@ fn init_stderr_logger() {
     }
 }
 
-/// 查找 logs/client/ 下最新的时间戳子目录
+/// 查找最新的 client 会话目录，优先使用结构化日志布局。
 fn find_latest_client_session_dir() -> Option<std::path::PathBuf> {
-    let client_dir = std::env::current_dir().ok()?.join("logs").join("client");
+    let cwd = std::env::current_dir().ok()?;
+    latest_session_dir(
+        &cwd.join("logs")
+            .join("local")
+            .join("sessions")
+            .join("client"),
+    )
+    .or_else(|| latest_session_dir(&cwd.join("logs").join("client")))
+}
+
+fn latest_session_dir(client_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     if !client_dir.is_dir() {
         return None;
     }
-    let mut entries: Vec<_> = std::fs::read_dir(&client_dir)
+    let mut entries: Vec<_> = std::fs::read_dir(client_dir)
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -338,6 +348,22 @@ fn handle_startup_connect_success(
     state.connected = true;
     state.update_local_ipc_tunnel(ipc_host, true);
     log_buffer.push_info("✅ 已连接到后台引擎".to_string());
+}
+
+fn handle_dashboard_poll_connection_state(
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+    ipc_host: &str,
+    was_connected: bool,
+    is_connected: bool,
+) {
+    state.connected = is_connected;
+    state.update_local_ipc_tunnel(ipc_host, is_connected);
+    if was_connected && !is_connected {
+        daemon.begin_ipc_reconnect_wait(state);
+        log_buffer.push_info("⚠️ 连接中断，正在后台自动重连...".to_string());
+    }
 }
 
 /// 非阻塞地尝试刷新一次 Worker 健康信息。
@@ -563,11 +589,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
             // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
+            let was_connected = ctx.ipc.is_connected();
             refresh_dashboard_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-
-            ctx.state.connected = ctx.ipc.is_connected();
-            ctx.state
-                .update_local_ipc_tunnel(ctx.ipc.host(), ctx.state.connected);
+            let is_connected = ctx.ipc.is_connected();
+            handle_dashboard_poll_connection_state(
+                ctx.daemon,
+                ctx.state,
+                ctx.log_buffer,
+                ctx.ipc.host(),
+                was_connected,
+                is_connected,
+            );
             last_ipc_poll = Instant::now();
             ctx.state.needs_redraw = true;
         }
@@ -1122,6 +1154,22 @@ pub(crate) fn point_in_rect(col: u16, row: u16, rect: ratatui::layout::Rect) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    fn write_ipc_response(stream: &mut std::net::TcpStream, request: &str, data: &str) {
+        let request: Value = serde_json::from_str(request.trim()).expect("request json");
+        let request_id = request
+            .get("request_id")
+            .and_then(Value::as_str)
+            .expect("request id");
+        let response =
+            format!(r#"{{"status":"ok","data":{data},"message":"","request_id":"{request_id}"}}"#);
+        stream
+            .write_all(format!("{response}\n").as_bytes())
+            .expect("write ipc response");
+    }
 
     #[test]
     fn test_format_local_time_time_format() {
@@ -1155,6 +1203,55 @@ mod tests {
         assert!(month >= 1 && month <= 12, "月份应在1-12之间");
         let day: u32 = parts[0][6..8].parse().expect("日期应为数字");
         assert!(day >= 1 && day <= 31, "日期应在1-31之间");
+    }
+
+    #[test]
+    fn find_latest_client_session_prefers_structured_log_layout() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir =
+            std::env::temp_dir().join(format!("autofluid-tui-log-test-{}", generate_request_id()));
+        let structured = project_dir
+            .join("logs")
+            .join("local")
+            .join("sessions")
+            .join("client")
+            .join("2026-06-18_12-30-00");
+        let legacy = project_dir
+            .join("logs")
+            .join("client")
+            .join("2099-01-01_00-00-00");
+        std::fs::create_dir_all(&structured).expect("create structured log dir");
+        std::fs::create_dir_all(&legacy).expect("create legacy log dir");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set temp cwd");
+
+        let result = find_latest_client_session_dir();
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        std::fs::remove_dir_all(project_dir).ok();
+        assert_eq!(result.as_deref(), Some(structured.as_path()));
+    }
+
+    #[test]
+    fn find_latest_client_session_falls_back_to_legacy_log_layout() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-log-legacy-test-{}",
+            generate_request_id()
+        ));
+        let legacy = project_dir
+            .join("logs")
+            .join("client")
+            .join("2026-06-18_12-30-00");
+        std::fs::create_dir_all(&legacy).expect("create legacy log dir");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set temp cwd");
+
+        let result = find_latest_client_session_dir();
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        std::fs::remove_dir_all(project_dir).ok();
+        assert_eq!(result.as_deref(), Some(legacy.as_path()));
     }
 
     #[test]
@@ -1219,6 +1316,118 @@ mod tests {
             .info_messages
             .iter()
             .any(|message| message.contains("自动重连")));
+    }
+
+    #[test]
+    fn test_dashboard_poll_connection_loss_begins_reconnect_wait() {
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut state = AppState {
+            connected: false,
+            ..Default::default()
+        };
+        let mut log_buffer = LogBuffer::new();
+
+        handle_dashboard_poll_connection_state(
+            &mut daemon,
+            &mut state,
+            &mut log_buffer,
+            "127.0.0.1",
+            true,
+            false,
+        );
+
+        assert!(!state.connected);
+        assert!(state.needs_redraw);
+        assert!(daemon.has_pending_ipc_reconnect());
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("后台自动重连")));
+    }
+
+    #[test]
+    fn test_dashboard_poll_connection_loss_reconnects_to_finished_daemon() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut first_stream, _) = listener.accept().expect("accept first client");
+            let mut first_reader = BufReader::new(first_stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            first_reader
+                .read_line(&mut handshake)
+                .expect("read first handshake");
+            write_ipc_response(
+                &mut first_stream,
+                &handshake,
+                r#"{"engine_status":"stopped","pipeline_started":true}"#,
+            );
+
+            let mut dashboard = String::new();
+            first_reader
+                .read_line(&mut dashboard)
+                .expect("read dashboard");
+            let dashboard_request: Value =
+                serde_json::from_str(dashboard.trim()).expect("dashboard json");
+            assert_eq!(
+                dashboard_request.get("command").and_then(Value::as_str),
+                Some(ipc::protocol::CMD_GET_DASHBOARD)
+            );
+            drop(first_stream);
+
+            let (mut reconnect_stream, _) = listener.accept().expect("accept reconnect client");
+            let mut reconnect_reader =
+                BufReader::new(reconnect_stream.try_clone().expect("clone reconnect"));
+            let mut reconnect_handshake = String::new();
+            reconnect_reader
+                .read_line(&mut reconnect_handshake)
+                .expect("read reconnect handshake");
+            write_ipc_response(
+                &mut reconnect_stream,
+                &reconnect_handshake,
+                r#"{"engine_status":"stopped","pipeline_started":true}"#,
+            );
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(port));
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut state = AppState::default();
+        let mut log_buffer = LogBuffer::new();
+
+        rt.block_on(ipc.connect()).expect("initial connect");
+        state.connected = true;
+        let was_connected = ipc.is_connected();
+        assert!(!refresh_dashboard_once(
+            &rt,
+            &mut ipc,
+            &mut state,
+            &mut log_buffer
+        ));
+        let after_dashboard = ipc.is_connected();
+        handle_dashboard_poll_connection_state(
+            &mut daemon,
+            &mut state,
+            &mut log_buffer,
+            ipc.host(),
+            was_connected,
+            after_dashboard,
+        );
+        assert!(daemon.has_pending_ipc_reconnect());
+
+        daemon.poll_ipc_reconnect(&rt, &mut ipc, &mut state, &mut log_buffer);
+
+        assert!(state.connected);
+        assert!(ipc.is_connected());
+        assert!(!daemon.has_pending_ipc_reconnect());
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("已连接到后台引擎")));
+        rt.block_on(ipc.disconnect());
+        server.join().expect("server thread");
     }
 
     #[test]

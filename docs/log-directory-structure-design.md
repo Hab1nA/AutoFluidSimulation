@@ -1,10 +1,9 @@
 # Log Directory Structure Design
 
-> **状态：设计提案（尚未实施）**<br>
+> **状态：实施中**<br>
 > 最后更新：2026-06-18<br>
-> 当前日志系统仍使用 `utils/logger.py` 中的扁平结构（`logs/<process_type>/<timestamp>/`），
-> 未实现本文档描述的 machine-scope 分层布局（`logs/local/`、`logs/server/`、`logs/workstations/`）。
-> 下文为完整设计方案，待后续迭代落地。
+> 第一阶段已开始落地 machine-scope 分层布局。远程工作站任务产物仍保留在
+> `flag_dir`，后续如需迁移应按远程任务契约单独设计。
 
 ## Background
 

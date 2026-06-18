@@ -332,10 +332,17 @@ function Get-TunnelLogPaths {
     )
 
     $tunnelName = if ($TunnelKind -eq "LocalWorker") { "local-worker" } else { "workstation" }
+    $logDir = Join-Path $ProjectDir "logs/local/tunnels/$tunnelName"
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+    catch {
+        $logDir = [System.IO.Path]::GetTempPath()
+    }
     return @{
-        Stdout = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.out.log"
-        Stderr = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.err.log"
-        Supervisor = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.supervisor.log"
+        Stdout = Join-Path $logDir "${RemotePort}.out.log"
+        Stderr = Join-Path $logDir "${RemotePort}.err.log"
+        Supervisor = Join-Path $logDir "${RemotePort}.supervisor.log"
     }
 }
 

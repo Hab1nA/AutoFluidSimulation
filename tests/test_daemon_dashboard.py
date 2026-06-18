@@ -200,6 +200,44 @@ def test_handle_get_dashboard_includes_solver_progress(monkeypatch):
     assert data["engine"]["solver_progress"] == progress
 
 
+def test_handle_get_dashboard_after_pipeline_completed(monkeypatch):
+    handler = _LogHandler()
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
+    monkeypatch.setattr(daemon_module, "WORKSTATIONS", [])
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = 1_000.0
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = None
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_090.0)
+    monkeypatch.setattr(
+        daemon_module.time,
+        "strftime",
+        lambda fmt, value: "1970-01-01 00:16:40",
+    )
+    monkeypatch.setattr(daemon_module.time, "localtime", lambda value: value)
+    daemon.state.get_engine_status = lambda: "stopped"
+
+    ok, data, message = daemon.handle_get_dashboard({})
+
+    assert ok is True
+    assert message == ""
+    assert data["statuses"] == {"1": {"sw": "Completed"}}
+    assert data["engine"] == {
+        "engine_status": "stopped",
+        "sw_macro_started": True,
+        "barrier_passed": False,
+        "pipeline_started": True,
+        "daemon_started_at": 1_000.0,
+        "daemon_started_at_display": "1970-01-01 00:16:40",
+        "daemon_uptime_seconds": 90,
+        "solver_progress": None,
+    }
+    assert data["logs"]["latest_id"] == 12
+
+
 def test_dashboard_trims_large_log_payload(monkeypatch):
     monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: _LargeLogHandler())
     monkeypatch.setattr(daemon_module, "WORKSTATIONS", [])
