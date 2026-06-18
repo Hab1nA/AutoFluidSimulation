@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 SW 阶段处理模块。
 
@@ -10,6 +12,7 @@ import os
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
     LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
+    is_server_mode,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -152,9 +155,9 @@ class SWPhaseHandler:
 
         # ★ 提前启动文件监控和工作线程池（在 SW 宏执行前启动，
         #    以便在宏逐文件导出 STEP 时实时检测文件写入完成，
-        #    实现边导出边处理的并行流水线）
-        #    同时启动 MeshingMonitor 消费线程，确保 Worker 完成 Transfer
-        #    后提交的构型能被及时消费，而非堆积到 SW 阶段结束后。
+        #    实现边导出边处理的并行流水线）。server 模式下不启动
+        #    STEP 监控，但仍需提前启动下游 worker，让单构型 SW 完成后
+        #    推入的 SC 任务立即被 LocalWorker 消费。
         self._ensure_file_monitor_running()
         if self.worker_pool_manager:
             self.worker_pool_manager.start_if_needed()
@@ -177,6 +180,8 @@ class SWPhaseHandler:
             ok = self._retry_manager.execute_with_retry(
                 cn, "sw", self.runner.execute_sw_per_config,
             )
+            if ok and not self._paused.is_set() and not self._stopped.is_set():
+                self._enqueue_server_mode_completed_sw([cn])
             if not ok and not self._paused.is_set() and not self._stopped.is_set():
                 # 构型所有重试均失败（非暂停/停止导致）→ 断开缓存连接，
                 # 使下一个构型重新建立连接（若 SW 进程已崩溃可快速失败）
@@ -210,26 +215,22 @@ class SWPhaseHandler:
                      if self.state.get_step_status(cn, "sw") == STATUS_ERROR]
         sw_running = [cn for cn in all_configs
                       if self.state.get_step_status(cn, "sw") == STATUS_RUNNING]
+        sw_completed = [cn for cn in all_configs
+                        if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
 
         if sw_errors or sw_running:
-            # 有构型失败 → 清理 SW 进程并阻断下游
+            # 有构型失败 → 清理 SW 进程；未执行的下游步骤保持 Waiting
             self._prepare_sw_retry()
 
             if sw_errors:
                 for cn in sw_errors:
                     logger.warning(f"[SW] 构型{cn} STEP 导出失败")
-                    for s in ["sc", "transfer", "meshing", "solver"]:
-                        if self.state.get_step_status(cn, s) == STATUS_WAITING:
-                            self.state.set_step_status(
-                                cn, s, STATUS_ERROR,
-                                f"上游 SW 导出失败，{s} 已阻断"
-                            )
             if sw_running:
                 for cn in sw_running:
                     logger.warning(f"[SW] 构型{cn} 仍为 Running 状态 (可能导出中断)")
 
-            if not sw_errors:
-                # 无 ERROR 但有 RUNNING → 全部构型均未完成，引擎停止
+            if not sw_completed:
+                # 无任何构型完成 → SW 阶段失败，引擎停止
                 self.state.set_engine_status("stopped")
                 logger.error("[SW] SW 步骤失败，流水线中止")
                 return False
@@ -246,9 +247,8 @@ class SWPhaseHandler:
                 f"（{total_found}/{len(all_configs)} 构型 STEP 就绪）"
             )
 
-        sw_completed = [cn for cn in all_configs
-                        if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED]
         if sw_completed:
+            self._enqueue_server_mode_completed_sw(sw_completed)
             logger.info(
                 f"[SW] SW 阶段完成: {len(sw_completed)}/{len(all_configs)} 个构型 STEP 就绪"
             )
@@ -309,6 +309,12 @@ class SWPhaseHandler:
             return False  # 需要外部递归调用 start_pipeline
 
         self._call_runner_cleanup("do_sw_final_cleanup")
+        sw_completed = [
+            cn for cn in all_configs
+            if self.state.get_step_status(cn, "sw") == STATUS_COMPLETED
+        ]
+        if sw_completed:
+            self._enqueue_server_mode_completed_sw(sw_completed)
 
         return True
 
@@ -318,12 +324,57 @@ class SWPhaseHandler:
         if callable(cleanup):
             cleanup()
 
+    def _enqueue_server_mode_completed_sw(self, config_names: list[int]) -> None:
+        """server 模式下将 LocalWorker 已完成的 SW 构型推入 SC 队列。"""
+        if not is_server_mode():
+            return
+        if self._stopped.is_set():
+            logger.info("[SW] 收到停止信号，跳过 server 模式 SW 收尾入队")
+            return
+        if self._paused.is_set():
+            logger.info("[SW] 当前处于暂停状态，跳过 server 模式 SW 收尾入队")
+            return
+
+        step_dir = LOCAL_PATHS.get("step_dir", "")
+        for config_name in config_names:
+            sc_status = self.state.get_step_status(config_name, "sc")
+            downstream_statuses = {
+                step: self.state.get_step_status(config_name, step)
+                for step in ("transfer", "meshing", "solver")
+            }
+            if sc_status in (STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR):
+                continue
+            if any(
+                status in (
+                    STATUS_RUNNING,
+                    STATUS_PAUSED,
+                    STATUS_COMPLETED,
+                    STATUS_ERROR,
+                    STATUS_RETRYING,
+                )
+                for status in downstream_statuses.values()
+            ):
+                continue
+
+            step_filename = get_step_filename("sw", config_name)
+            if not step_filename:
+                continue
+
+            step_file = os.path.join(step_dir, step_filename)
+            if self._sc_queue.submit((config_name, step_file)):
+                logger.info(
+                    f"[SW] 构型{config_name} 已推入 SC 处理队列 "
+                    "(server 模式 LocalWorker 完成)"
+                )
+
     def _ensure_file_monitor_running(self):
         """确保文件监控器正在运行。
 
         优先使用由 PipelineScheduler 注入的共享实例（通过 set_file_monitor()），
         仅在未注入时回退为自行创建（独立测试场景）。
         """
+        if is_server_mode():
+            return
         if self._file_monitor is None:
             # 防御性回退：未注入时自行创建（独立测试场景）
             # 注意：回退创建的监控器使用简化的回退回调，生产环境应始终由
@@ -452,10 +503,7 @@ class SWPhaseHandler:
         if self._paused.is_set():
             logger.info("[SW] 重试准备中检测到暂停标志，跳过进程清理")
             if self._file_monitor is not None:
-                self._file_monitor._processed_files.clear()
-                self._file_monitor._known_files.clear()
-                self._file_monitor._detector._history.clear()
-                self._file_monitor._detector._first_seen.clear()
+                self._file_monitor.clear_tracking()
                 logger.info("[SW] 文件监控器状态已重置（暂停期间仍清理，确保恢复后可检测新文件）")
             return
 
@@ -471,8 +519,5 @@ class SWPhaseHandler:
 
         # 重置文件监控器状态，避免重试时同名文件被跳过
         if self._file_monitor is not None:
-            self._file_monitor._processed_files.clear()
-            self._file_monitor._known_files.clear()
-            self._file_monitor._detector._history.clear()
-            self._file_monitor._detector._first_seen.clear()
+            self._file_monitor.clear_tracking()
             logger.info("[SW] 文件监控器状态已重置（准备 SW 步骤重试）")

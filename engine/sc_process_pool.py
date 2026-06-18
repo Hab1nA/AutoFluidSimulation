@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
 from utils.logger import get_session_log_dir, setup_logger
+from utils.process_utils import is_process_alive, run_taskkill
 
 logger = setup_logger(__name__)
 
@@ -76,7 +77,7 @@ class SCProcessPool:
     通过文件协议 IPC 与 Bridge 通信，消除每次 15-30s 的 GUI 启动开销。
     """
 
-    MAX_SLOTS = 3
+    MAX_SLOTS = 1
 
     def __init__(self):
         self._data_dir = LOCAL_PATHS.get("data_dir", "data")
@@ -87,11 +88,30 @@ class SCProcessPool:
 
         self._bridge_path = LOCAL_PATHS.get("sc_bridge", "")
         self._sc_script = LOCAL_PATHS.get("sc_script", "")
+        self._max_slots = max(1, int(ENGINE_CONFIG.get("sc_max_slots", self.MAX_SLOTS)))
 
         self._persistent_slots: dict[int, PersistentSlot] = {}
         self._persistent_cmd_dir = os.path.join(self._data_dir, "sc_ipc")
         os.makedirs(self._persistent_cmd_dir, exist_ok=True)
         self._next_slot_id = 1  # 自增槽位 ID 计数器
+        self.last_error = ""
+
+    @staticmethod
+    def _sc_log_extra(config_name: int, slot: PersistentSlot | None = None) -> dict[str, str]:
+        """构造 SC 步骤日志的结构化上下文。"""
+        extra = {
+            "log_category": "step",
+            "config_name": str(config_name),
+            "step_name": "sc",
+        }
+        if slot is not None:
+            extra["worker_id"] = f"sc-slot-{slot.slot_id}"
+        return extra
+
+    def _fail(self, reason: str) -> bool:
+        """Record the last SC failure reason and return False."""
+        self.last_error = reason
+        return False
 
     # ==================================================================
     # 执行入口
@@ -102,10 +122,23 @@ class SCProcessPool:
                    stopped_event: threading.Event | None = None,
                    pipeline_control: PipelineControl | None = None) -> bool:
         """执行 SC 转换：获取/创建常驻槽位 -> 等待就绪 -> 发送命令 -> 等待结果。"""
+        self.last_error = ""
+        if not self._persistent_enabled():
+            logger.info(
+                "[SC-Pool] 常驻模式已关闭，使用一次性 Bridge 执行构型%s",
+                config_name,
+                extra=self._sc_log_extra(config_name),
+            )
+            return self._run_oneshot_bridge(config_name)
+
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未启动槽位）")
-                return False
+                reason = "因暂停或停止暂缓（未启动槽位）"
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} {reason}",
+                    extra=self._sc_log_extra(config_name),
+                )
+                return self._fail(reason)
             with self._lock:
                 # ★ 首次 SC 全体清理：延迟到第一个构型实际进入 SC 步骤时才触发，
                 #   而非在 SW 阶段或 start_pipeline 时过早执行。
@@ -118,26 +151,51 @@ class SCProcessPool:
 
                 slot = self._get_or_create_persistent_slot()
                 if slot is None:
-                    return False
+                    reason = self.last_error or "无法获取或创建 SpaceClaim 常驻槽位"
+                    if self._oneshot_fallback_enabled():
+                        logger.warning(
+                            "[SC-Pool] %s，退回一次性 Bridge 执行构型%s",
+                            reason, config_name,
+                            extra=self._sc_log_extra(config_name),
+                        )
+                        return self._run_oneshot_bridge(config_name)
+                    return self._fail(reason)
 
         # ★ 槽位就绪等待：在锁外执行，避免长时间阻塞其他线程。
         #   新创建的槽位处于 "starting" 状态，需等待 Bridge 写入就绪文件；
         #   已就绪的槽位直接跳过。
         if slot.status == "starting":
             if not self._wait_for_slot_ready(slot):
-                return False
+                reason = self.last_error or f"常驻槽位{slot.slot_id} 就绪失败"
+                if self._oneshot_fallback_enabled():
+                    logger.warning(
+                        "[SC-Pool] %s，退回一次性 Bridge 执行构型%s",
+                        reason, config_name,
+                        extra=self._sc_log_extra(config_name, slot),
+                    )
+                    return self._run_oneshot_bridge(config_name)
+                return self._fail(reason)
 
         with self._lock:
             # double-check：等待期间槽位可能已被其他操作清理
             if slot.slot_id not in self._persistent_slots:
-                logger.error(f"[SC-Pool] 槽位{slot.slot_id} 在等待期间被清理")
-                return False
+                reason = f"槽位{slot.slot_id} 在等待期间被清理"
+                logger.error(f"[SC-Pool] {reason}")
+                return self._fail(reason)
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因停止取消（未发送 SC 命令）")
-                return False
+                reason = "因停止取消（未发送 SC 命令）"
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} {reason}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
+                return self._fail(reason)
             if paused_event is not None and paused_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停暂缓（未发送 SC 命令）")
-                return False
+                reason = "因暂停暂缓（未发送 SC 命令）"
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} {reason}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
+                return self._fail(reason)
             slot.status = "busy"
             slot.current_config = config_name
 
@@ -157,6 +215,79 @@ class SCProcessPool:
     # ==================================================================
     # 全量清理（首次/末次）
     # ==================================================================
+
+    def _oneshot_fallback_enabled(self) -> bool:
+        return bool(ENGINE_CONFIG.get("sc_oneshot_fallback_enabled", True))
+
+    def _persistent_enabled(self) -> bool:
+        return bool(ENGINE_CONFIG.get("sc_persistent_enabled", True))
+
+    def _run_oneshot_bridge(self, config_name: int) -> bool:
+        """使用一次性 Bridge 执行当前构型，作为常驻启动失败的兜底。"""
+        if not self._bridge_path or not os.path.exists(self._bridge_path):
+            return self._fail("一次性 Bridge 需要 SpaceClaimBridge.exe")
+
+        step_dir = LOCAL_PATHS["step_dir"]
+        scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        scdoc_name = get_step_filename("sc", config_name)
+        if not scdoc_name:
+            return self._fail(f"无法生成构型{config_name} SCDOC 文件名")
+
+        cmd = [
+            self._bridge_path,
+            "--script", self._sc_script,
+            "--config", str(config_name),
+            "--stepdir", step_dir,
+            "--scdocdir", scdoc_dir,
+            "--scdocname", scdoc_name,
+            "--timeout", str(ENGINE_CONFIG["sc_timeout"]),
+            "--sc-exe", LOCAL_PATHS["sc_exe"],
+        ]
+        os.makedirs(scdoc_dir, exist_ok=True)
+        bridge_log_dir = self._build_bridge_log_dir()
+        log_path = self._build_bridge_log_path(0, bridge_log_dir)
+        env = os.environ.copy()
+        env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
+        env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_process_appear_timeout", 120)
+        )
+        env["AUTOFLUID_SC_GUI_READY_TIMEOUT"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_ready_timeout", 30)
+        )
+        env["AUTOFLUID_SC_GUI_STABLE_DELAY"] = str(
+            OPERATION_TIMEOUTS.get("sc_gui_stable_delay", 15)
+        )
+
+        logger.info(
+            "[SC-Pool] 一次性 Bridge stdout/stderr 日志: %s",
+            log_path,
+            extra=self._sc_log_extra(config_name),
+        )
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as log_file:
+                completed = subprocess.run(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    timeout=ENGINE_CONFIG["sc_timeout"] + 90,
+                    env=env,
+                    check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return self._fail(f"一次性 Bridge 执行失败: {exc}")
+
+        if completed.returncode == 0:
+            logger.info(
+                "[SC-Pool] 一次性 Bridge 完成构型%s",
+                config_name,
+                extra=self._sc_log_extra(config_name),
+            )
+            return True
+
+        return self._fail(
+            f"一次性 Bridge 构型{config_name} 失败 "
+            f"({_format_bridge_exit(completed.returncode)})"
+        )
 
     def shutdown_all(self):
         with self._lock:
@@ -186,6 +317,38 @@ class SCProcessPool:
             time.sleep(3)
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[SC-Pool] taskkill 异常: {e}")
+        self._cleanup_stale_runningcad_markers()
+
+    def _cleanup_stale_runningcad_markers(self) -> None:
+        """删除 ANSYS RunningCADs 中指向已退出 SpaceClaim PID 的运行态标记。"""
+        running_cads_dir = os.path.join(
+            os.environ.get("TEMP", ""),
+            "Ansys",
+            "RunningCADs",
+        )
+        if not running_cads_dir or not os.path.isdir(running_cads_dir):
+            return
+
+        for root, _dirs, files in os.walk(running_cads_dir):
+            for filename in files:
+                if not filename.endswith(".direct"):
+                    continue
+                marker_path = os.path.join(root, filename)
+                try:
+                    pid = int(os.path.splitext(filename)[0])
+                except ValueError:
+                    continue
+                if is_process_alive(pid):
+                    continue
+                try:
+                    os.remove(marker_path)
+                    logger.debug("[SC-Pool] 已清理 stale RunningCADs 标记: %s", marker_path)
+                except OSError as exc:
+                    logger.debug(
+                        "[SC-Pool] 清理 stale RunningCADs 标记失败: %s (%s)",
+                        marker_path,
+                        exc,
+                    )
 
     def do_first_cleanup(self):
         with self._lock:
@@ -268,8 +431,8 @@ class SCProcessPool:
             if s.status in ("starting", "ready", "busy")
             and (s.process is None or s.process.poll() is None)
         )
-        if active_slots >= self.MAX_SLOTS:
-            logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self.MAX_SLOTS})")
+        if active_slots >= self._max_slots:
+            logger.warning(f"[SC-Pool] 常驻槽位已满 ({active_slots}/{self._max_slots})")
             return None
 
         slot_id = self._next_slot_id
@@ -285,8 +448,9 @@ class SCProcessPool:
     def _launch_persistent_process(self, slot: PersistentSlot) -> bool:
         """启动常驻 Bridge 进程。调用方须持有 _lock。"""
         if not self._bridge_path or not os.path.exists(self._bridge_path):
-            logger.error("[SC-Pool] 常驻模式需要 Bridge (SpaceClaimBridge.exe)")
-            return False
+            reason = "常驻模式需要 Bridge (SpaceClaimBridge.exe)"
+            logger.error("[SC-Pool] %s", reason)
+            return self._fail(reason)
 
         cmd = [
             self._bridge_path,
@@ -303,6 +467,8 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_PERSISTENT"] = "1"
         sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
         sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
+        bridge_log_dir = self._build_bridge_log_dir()
+        sc_env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
 
         # 传递 SC 启动超时配置给 Bridge
         sc_env["AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT"] = str(
@@ -319,7 +485,7 @@ class SCProcessPool:
         )
 
         logger.info(f"[SC-Pool] 启动常驻 Bridge: 槽位{slot.slot_id}")
-        logger.debug(f"[SC-Pool]   命令: {' '.join(cmd)}")
+        logger.debug(f"[SC-Pool] 命令: {' '.join(cmd)}")
 
         self._cleanup_ipc_files(slot.slot_id)
 
@@ -336,7 +502,7 @@ class SCProcessPool:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            bridge_log_path = self._build_bridge_log_path(slot.slot_id)
+            bridge_log_path = self._build_bridge_log_path(slot.slot_id, bridge_log_dir)
             slot.bridge_log_path = bridge_log_path
             logger.info(f"[SC-Pool] Bridge stdout/stderr 日志: {bridge_log_path}")
             with open(bridge_log_path, "a", encoding="utf-8", errors="replace") as log_file:
@@ -351,9 +517,10 @@ class SCProcessPool:
             return True
 
         except OSError as e:
-            logger.error(f"[SC-Pool] 常驻 Bridge 启动失败: {e}")
+            reason = f"常驻 Bridge 启动失败: {e}"
+            logger.error(f"[SC-Pool] {reason}")
             self._cleanup_persistent_slot(slot)
-            return False
+            return self._fail(reason)
 
     def _wait_for_slot_ready(self, slot: PersistentSlot) -> bool:
         """等待槽位就绪（不持有 _lock，由调用方在锁外调用）。
@@ -373,13 +540,16 @@ class SCProcessPool:
         while time.time() < deadline:
             # 进程存活检查
             if slot.process is not None and slot.process.poll() is not None:
-                logger.error(
-                    f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 启动失败 "
+                reason = (
+                    f"常驻 Bridge 槽位{slot.slot_id} 启动失败 "
                     f"({_format_bridge_exit(slot.process.returncode)})"
+                )
+                logger.error(
+                    f"[SC-Pool] {reason}"
                 )
                 with self._lock:
                     self._cleanup_persistent_slot(slot)
-                return False
+                return self._fail(reason)
             # ready 文件检查
             if os.path.exists(ready_file):
                 logger.info(f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪")
@@ -389,12 +559,11 @@ class SCProcessPool:
                 return True
             time.sleep(2)
 
-        logger.error(
-            f"[SC-Pool] 常驻槽位{slot.slot_id} 就绪超时 ({ready_timeout}s)"
-        )
+        reason = f"常驻槽位{slot.slot_id} 就绪超时 ({ready_timeout}s)"
+        logger.error(f"[SC-Pool] {reason}")
         with self._lock:
             self._cleanup_persistent_slot(slot)
-        return False
+        return self._fail(reason)
 
     # ==================================================================
     # 命令发送与结果等待
@@ -435,8 +604,12 @@ class SCProcessPool:
         scdoc_name = get_step_filename("sc", config_name)
 
         if not scdoc_name:
-            logger.error(f"[SC-Pool] 无法生成构型{config_name} SCDOC 文件名")
-            return False
+            reason = f"无法生成构型{config_name} SCDOC 文件名"
+            logger.error(
+                f"[SC-Pool] {reason}",
+                extra=self._sc_log_extra(config_name, slot),
+            )
+            return self._fail(reason)
 
         scdoc_file = os.path.join(scdoc_dir, scdoc_name)
         os.makedirs(scdoc_dir, exist_ok=True)
@@ -453,21 +626,33 @@ class SCProcessPool:
             "config": config_name,
             "stepdir": step_dir,
             "scdocdir": scdoc_dir,
+            "scdocname": scdoc_name,
         }
         with self._external_start(pipeline_control, paused_event, stopped_event) as allowed:
             if not allowed:
-                logger.info(f"[SC-Pool] 构型{config_name} 因暂停或停止暂缓（未发送 SC 命令）")
-                return False
+                reason = "因暂停或停止暂缓（未发送 SC 命令）"
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} {reason}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
+                return self._fail(reason)
             # 仅接受命令发送后创建或修改的 SCDOC 文件。
             command_sent_at = time.time()
             try:
                 with open(cmd_file, "w") as f:
                     json.dump(cmd_data, f)
             except OSError as e:
-                logger.error(f"[SC-Pool] 写入命令文件失败: {e}")
-                return False
+                reason = f"写入命令文件失败: {e}"
+                logger.error(
+                    f"[SC-Pool] {reason}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
+                return self._fail(reason)
 
-        logger.info(f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})")
+        logger.info(
+            f"[SC-Pool] 构型{config_name} 命令已发送 (槽位{slot.slot_id}, run={run_id})",
+            extra=self._sc_log_extra(config_name, slot),
+        )
 
         timeout = ENGINE_CONFIG["sc_timeout"]
         deadline = time.time() + timeout
@@ -482,10 +667,13 @@ class SCProcessPool:
         while True:
             # ---- 进程存活检查 ----
             if slot.process is not None and slot.process.poll() is not None:
-                logger.error(f"[SC-Pool] 常驻 Bridge 槽位{slot.slot_id} 意外退出 "
-                             f"({_format_bridge_exit(slot.process.returncode)})")
+                reason = (
+                    f"常驻 Bridge 槽位{slot.slot_id} 意外退出 "
+                    f"({_format_bridge_exit(slot.process.returncode)})"
+                )
+                logger.error(f"[SC-Pool] {reason}")
                 self._cleanup_run_files(slot.slot_id, run_id)
-                return False
+                return self._fail(reason)
 
             # ---- 停止检查 ----
             # pause 语义：命令一旦发送给 SpaceClaim，当前构型继续跑完；
@@ -494,14 +682,19 @@ class SCProcessPool:
                 if not pause_logged:
                     logger.info(
                         f"[SC-Pool] 构型{config_name} (run={run_id}) 已收到暂停，"
-                        "等待当前 SpaceClaim 命令自然完成（不中断进行中的转换）"
+                        "等待当前 SpaceClaim 命令自然完成（不中断进行中的转换）",
+                        extra=self._sc_log_extra(config_name, slot),
                     )
                     pause_logged = True
 
             if stopped_event is not None and stopped_event.is_set():
-                logger.info(f"[SC-Pool] 构型{config_name} (run={run_id}) 因停止取消")
+                reason = "因停止取消"
+                logger.info(
+                    f"[SC-Pool] 构型{config_name} (run={run_id}) {reason}",
+                    extra=self._sc_log_extra(config_name, slot),
+                )
                 self._cleanup_run_files(slot.slot_id, run_id)
-                return False
+                return self._fail(reason)
 
             # ---- 错误提前信号：脚本写入 success=false 的结果文件 ----
             if os.path.exists(result_file):
@@ -515,8 +708,12 @@ class SCProcessPool:
                     except OSError:
                         pass
                     if not success:
-                        logger.error(f"[SC-Pool] FAIL 构型{config_name} 脚本报错: {message}")
-                        return False
+                        reason = f"脚本报错: {message}"
+                        logger.error(
+                            f"[SC-Pool] FAIL 构型{config_name} {reason}",
+                            extra=self._sc_log_extra(config_name, slot),
+                        )
+                        return self._fail(reason)
                 except (ValueError, IOError, OSError):
                     try:
                         os.remove(result_file)
@@ -548,8 +745,11 @@ class SCProcessPool:
                     last_size_stable_since = now
                 elif now - last_size_stable_since >= scdoc_stable_seconds:
                     # SCDOC 文件大小已稳定 → SaveAs 完成
-                    logger.info(f"[SC-Pool] OK 构型{config_name} SCDOC: "
-                                f"{os.path.basename(scdoc_file)} ({file_size} bytes)")
+                    logger.info(
+                        f"[SC-Pool] OK 构型{config_name} SCDOC: "
+                        f"{os.path.basename(scdoc_file)} ({file_size} bytes)",
+                        extra=self._sc_log_extra(config_name, slot),
+                    )
                     self._cleanup_run_files(slot.slot_id, run_id)
                     return True
 
@@ -563,14 +763,17 @@ class SCProcessPool:
                         if mt >= command_sent_at - 1.0 and sz > 0:
                             logger.warning(
                                 f"[SC-Pool] 构型{config_name} 超时但 SCDOC 已存在，接受 "
-                                f"({sz} bytes)")
+                                f"({sz} bytes)",
+                                extra=self._sc_log_extra(config_name, slot),
+                            )
                             self._cleanup_run_files(slot.slot_id, run_id)
                             return True
                     except OSError:
                         pass
-                logger.error(f"[SC-Pool] 构型{config_name} 超时 ({timeout}s), run={run_id}")
+                reason = f"构型{config_name} 超时 ({timeout}s), run={run_id}"
+                logger.error(f"[SC-Pool] {reason}", extra=self._sc_log_extra(config_name, slot))
                 self._cleanup_run_files(slot.slot_id, run_id)
-                return False
+                return self._fail(reason)
 
             time.sleep(poll_interval)
 
@@ -589,11 +792,17 @@ class SCProcessPool:
             except OSError:
                 pass
 
-    def _build_bridge_log_path(self, slot_id: int) -> str:
-        """构建 Bridge stdout/stderr 捕获日志路径。"""
+    def _build_bridge_log_dir(self) -> str:
+        """构建 Bridge 与 transit 共用的会话日志目录。"""
         base_log_dir = get_session_log_dir() or LOCAL_PATHS.get("log_dir", "logs")
         bridge_log_dir = os.path.join(base_log_dir, "bridge")
         os.makedirs(bridge_log_dir, exist_ok=True)
+        return bridge_log_dir
+
+    def _build_bridge_log_path(self, slot_id: int, bridge_log_dir: str | None = None) -> str:
+        """构建 Bridge stdout/stderr 捕获日志路径。"""
+        if bridge_log_dir is None:
+            bridge_log_dir = self._build_bridge_log_dir()
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         return os.path.join(
             bridge_log_dir,
@@ -661,9 +870,14 @@ class SCProcessPool:
 
     def _cleanup_persistent_slot(self, slot: PersistentSlot) -> None:
         """清理常驻槽位（终止进程、清理文件）。调用方须持有 _lock。"""
+        if slot.spaceclaim_pid is not None:
+            run_taskkill(slot.spaceclaim_pid)
         if slot.process is not None:
             try:
-                slot.process.kill()
+                if slot.pid is not None:
+                    run_taskkill(slot.pid)
+                else:
+                    slot.process.kill()
             except (ProcessLookupError, OSError):
                 pass
             try:
@@ -692,7 +906,12 @@ class SCProcessPool:
             slot.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             try:
-                slot.process.kill()
+                if slot.spaceclaim_pid is not None:
+                    run_taskkill(slot.spaceclaim_pid)
+                if slot.pid is not None:
+                    run_taskkill(slot.pid)
+                else:
+                    slot.process.kill()
                 slot.process.communicate(timeout=5)
             except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
                 pass
@@ -711,7 +930,7 @@ class SCProcessPool:
             ready_count = sum(1 for s in self._persistent_slots.values() if s.status == "ready")
             busy_count = sum(1 for s in self._persistent_slots.values() if s.status == "busy")
             return {
-                "max_slots": self.MAX_SLOTS,
+                "max_slots": self._max_slots,
                 "ready": ready_count,
                 "busy": busy_count,
                 "slots": {

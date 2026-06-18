@@ -43,6 +43,10 @@ def test_build_background_cmd_script_interactive_calls_command_directly():
     )
     assert "call conda run python script.py" in script
     assert "Start-Process" not in script
+    assert "wmic process where" in script
+    assert "AF_WRAPPER_PID" in script
+    assert "ParentProcessId" not in script
+    assert r'> "%AF_PID_FILE%"' in script
 
 
 def test_build_background_cmd_script_with_working_dir():
@@ -128,7 +132,7 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
                         "_write_remote_text_file",
                         side_effect=lambda path, content: written.append((path, content)),
                     ):
-                        result, _ = host.exec_background(
+                        result, task_name = host.exec_background(
                             r"conda run python meshing.py",
                             r"D:/flags/job.done",
                             interactive=True,
@@ -141,6 +145,34 @@ def test_exec_background_interactive_creates_interactive_scheduled_task():
     assert calls[2][0].endswith('" /DISABLE')
     assert "call conda run python meshing.py" in written[0][1]
     assert "Start-Process" not in written[0][1]
+    assert host._task_pid_files[task_name].startswith("D:/flags/autofluid_bg_")
+    assert host._task_pid_files[task_name].endswith(".pid")
+
+
+def test_exec_background_deletes_created_task_when_run_fails():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        if command.startswith('schtasks /Run /TN "AutoFluid_'):
+            return ("", "run failed", 1)
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with patch.object(host, "_ensure_remote_dir"):
+                    with patch.object(host, "_write_remote_text_file"):
+                        result, task_name = host.exec_background(
+                            r"conda run python meshing.py",
+                            r"D:/flags/job.done",
+                            interactive=True,
+                        )
+
+    assert result is False
+    assert task_name.startswith("AutoFluid_")
+    assert calls[-1] == (f'schtasks /Delete /TN "{task_name}" /F', 15)
 
 
 def test_solver_background_task_is_disabled_after_run():
@@ -234,6 +266,36 @@ def test_kill_remote_task_kills_recorded_child_pid():
         ('schtasks /Delete /TN "AutoFluid_job" /F', 15),
     ]
     assert deleted == [r"D:/flags/autofluid_bg_job.pid"]
+
+
+def test_cleanup_remote_task_entry_deletes_task_without_reading_pid():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    calls: list[tuple[str, int]] = []
+    deleted: list[str] = []
+
+    def fake_exec(command: str, timeout: int = 30):
+        calls.append((command, timeout))
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(
+                host,
+                "_read_remote_pid_file",
+                side_effect=AssertionError("completed cleanup must not read pid"),
+            ):
+                with patch.object(
+                    host,
+                    "delete_remote_file",
+                    side_effect=lambda path: deleted.append(path) or True,
+                ):
+                    assert host.cleanup_remote_task_entry(
+                        "AutoFluid_done",
+                        r"D:/flags/autofluid_bg_done.pid",
+                    ) is True
+
+    assert calls == [('schtasks /Delete /TN "AutoFluid_done" /F', 15)]
+    assert deleted == [r"D:/flags/autofluid_bg_done.pid"]
 
 
 def test_upload_file_applies_sftp_channel_timeout():
@@ -456,7 +518,8 @@ def test_get_remote_file_hashes_uses_cmd_batch_and_parses_certutil_output():
     assert script_path.startswith("C:/Windows/Temp/_af_hash_files_")
     assert script_path.endswith(".bat")
     assert deleted == [script_path]
-    assert commands == [(f'cmd /c "{script_path.replace("/", "\\")}"', 60)]
+    cmd_script_path = script_path.replace("/", "\\")
+    assert commands == [(f'cmd /c "{cmd_script_path}"', 60)]
     assert "powershell" not in commands[0][0].lower()
     assert 'certutil -hashfile "D:/remote/alpha.txt" MD5' in script_content
     assert '__AF_HASH_MISSING__1' in script_content

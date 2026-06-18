@@ -37,6 +37,13 @@ impl TextBuffer {
         }
     }
 
+    /// 清空缓冲区文本、光标和选区。
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+        self.selection_anchor = None;
+    }
+
     // ── 字符输入 ──────────────────────────────────────────────────
 
     /// 在光标位置插入单个字符（如有选区则先替换）。

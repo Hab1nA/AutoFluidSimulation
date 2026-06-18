@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 import pytest
 
@@ -25,6 +26,7 @@ from executor.remote_executor import RemoteExecutor
 class _StateRecorder:
     def __init__(self) -> None:
         self.status_updates: list[tuple[int, str, str, str]] = []
+        self.remote_tasks: dict[tuple[int, str], dict[str, object]] = {}
 
     def set_step_status(
         self,
@@ -34,6 +36,19 @@ class _StateRecorder:
         error_message: str = "",
     ) -> None:
         self.status_updates.append((config_name, step_name, status, error_message))
+
+    def save_remote_task(self, **kwargs: object) -> None:
+        key = (int(kwargs["config_name"]), str(kwargs["step_name"]))
+        self.remote_tasks[key] = dict(kwargs)
+
+    def get_remote_task(self, config_name: int, step_name: str) -> dict[str, object] | None:
+        return self.remote_tasks.get((config_name, step_name))
+
+    def get_all_remote_tasks(self) -> list[dict[str, object]]:
+        return list(self.remote_tasks.values())
+
+    def delete_remote_task(self, config_name: int, step_name: str) -> None:
+        self.remote_tasks.pop((config_name, step_name), None)
 
 
 # ====================================================================
@@ -84,23 +99,50 @@ class TestTransferEdgeCases:
         assert executor.execute_transfer(6) is False
 
     def test_remote_file_exists_skips_upload(self, tmp_path, monkeypatch):
-        """远程文件已存在且大小 > 0 → 跳过上传（断点续传）。"""
+        """远程文件已存在且大小一致 → 跳过上传（断点续传）。"""
         scdoc_dir = tmp_path / "scdoc"
         scdoc_dir.mkdir()
         (scdoc_dir / "model_gen4_7.scdoc").write_bytes(b"data")
 
         monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(scdoc_dir))
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote")
 
         class _SSH:
             def get_remote_file_size(self, remote_path: str):
-                return 1024  # 远程文件已存在
+                return 4  # 远程文件大小与本地一致
 
             def upload_file(self, *a, **kw):
-                raise AssertionError("should skip upload when remote exists")
+                raise AssertionError("should skip upload when remote size matches")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
         assert executor.execute_transfer(7) is True
+
+    def test_remote_file_size_mismatch_uploads_again(self, tmp_path, monkeypatch):
+        """远程文件大小不一致 → 覆盖上传，避免复用陈旧 SCDOC。"""
+        scdoc_dir = tmp_path / "scdoc"
+        scdoc_dir.mkdir()
+        scdoc_file = scdoc_dir / "model_gen4_7.scdoc"
+        scdoc_file.write_bytes(b"data")
+
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(scdoc_dir))
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(scdoc_dir))
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote")
+
+        uploads: list[tuple[str, str]] = []
+
+        class _SSH:
+            def get_remote_file_size(self, remote_path: str):
+                return 1024
+
+            def upload_file(self, local_path: str, remote_path: str, **_kwargs) -> bool:
+                uploads.append((local_path, remote_path))
+                return True
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+        assert executor.execute_transfer(7) is True
+        assert uploads == [(str(scdoc_file), "D:/remote/model_gen4_7.scdoc")]
 
     def test_missing_local_file_sets_error(self, tmp_path, monkeypatch):
         """本地文件不存在时标记 Error。"""
@@ -173,6 +215,8 @@ class TestBuildMeshingCommand:
         assert "--workflow-path" in command
         assert "--journal-path" in command
         assert "--scdoc-dir" in command
+        assert "--scdoc-name" in command
+        assert "model_gen4_1.scdoc" in command
         assert "--output-dir" in command
         assert '--working-dir "D:\\working"' in command
         assert "--processor-count 4" in command
@@ -213,7 +257,7 @@ class TestBuildMeshingCommand:
                 raise AssertionError("invalid command should not reach SSH")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor._run_meshing_command(1) is False
 
@@ -456,7 +500,7 @@ class TestExecuteMeshing:
                 return (True, "AutoFluid_meshing")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor._run_meshing_command(2) is True
         assert captured["working_dir"] == r"D:\working"
@@ -466,29 +510,49 @@ class TestExecuteMeshing:
     def test_wait_meshing_completion_cleans_remote_task(self, monkeypatch):
         """Meshing 完成后清理计划任务条目，避免远程任务列表堆积。"""
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_timeout", 30)
 
         deleted: list[str] = []
-        killed: list[str] = []
+        cleaned: list[tuple[str, str | None]] = []
 
         class _SSH:
             def check_remote_file(self, path: str) -> bool:
-                return path == "D:/flags/meshing_done_4.txt"
+                return path in {
+                    "D:/flags/meshing_done_4.txt",
+                    "D:/msh/model_gen4_4.msh.h5",
+                }
 
             def delete_remote_file(self, path: str) -> bool:
                 deleted.append(path)
                 return True
 
-            def kill_remote_task(self, task_name: str) -> bool:
-                killed.append(task_name)
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                cleaned.append((task_name, pid_file))
                 return True
 
-        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        state = _StateRecorder()
+        state.remote_tasks[(4, "meshing")] = {
+            "config_name": 4,
+            "step_name": "meshing",
+            "task_name": "AutoFluid_done_task",
+            "flag_file": "D:/flags/meshing_done_4.txt",
+            "error_flag_file": "D:/flags/meshing_done_4.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_done.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
         executor._remote_tasks[4] = "AutoFluid_done_task"
 
         assert executor.wait_meshing_completion(4) is True
         assert deleted == ["D:/flags/meshing_done_4.txt"]
-        assert killed == ["AutoFluid_done_task"]
+        assert cleaned == [
+            ("AutoFluid_done_task", "D:/flags/autofluid_bg_done.pid")
+        ]
         assert 4 not in executor._remote_tasks
 
 
@@ -530,7 +594,7 @@ class TestExecuteSolver:
                 return (True, "AutoFluid_solver")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda: True)
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
 
         assert executor.execute_solver(2) is True
         assert captured["working_dir"] == r"D:\working"
@@ -545,7 +609,7 @@ class TestExecuteSolver:
         monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 30)
 
         deleted: list[str] = []
-        killed: list[str] = []
+        cleaned: list[tuple[str, str | None]] = []
 
         class _SSH:
             def check_remote_file(self, path: str) -> bool:
@@ -559,14 +623,30 @@ class TestExecuteSolver:
                 deleted.append(path)
                 return True
 
-            def kill_remote_task(self, task_name: str) -> bool:
-                killed.append(task_name)
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                cleaned.append((task_name, pid_file))
                 return True
 
-        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+        state = _StateRecorder()
+        state.remote_tasks[(6, "solver")] = {
+            "config_name": 6,
+            "step_name": "solver",
+            "task_name": "AutoFluid_solver_done_task",
+            "flag_file": "D:/flags/solver_done_6.txt",
+            "error_flag_file": "D:/flags/solver_done_6.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_solver_done.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
         executor._remote_tasks[6] = "AutoFluid_solver_done_task"
 
         assert executor.wait_solver_completion(6) is True
         assert deleted == ["D:/flags/solver_done_6.txt"]
-        assert killed == ["AutoFluid_solver_done_task"]
+        assert cleaned == [
+            ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
+        ]
         assert 6 not in executor._remote_tasks

@@ -27,33 +27,33 @@ if exist "%TARGET_DIR%" (
     echo     正在删除 target 目录...
     rmdir /s /q "%TARGET_DIR%" 2>nul
     if exist "%TARGET_DIR%" (
-        echo     [警告] target 目录部分清理失败，继续执行...
+        echo     [WARN] target 目录部分清理失败，继续执行...
     ) else (
-        echo     [完成] 已删除 Rust 编译产物
+        echo     [DONE] 已删除 Rust 编译产物
     )
 ) else (
-    echo     [跳过] target 目录不存在
+    echo     [SKIP] target 目录不存在
 )
 
 :: --- Rust flycheck 缓存 ---
 if exist "%TUI_DIR%\flycheck0" (
     rmdir /s /q "%TUI_DIR%\flycheck0" 2>nul
-    echo     [完成] 已删除 flycheck 缓存
+    echo     [DONE] 已删除 flycheck 缓存
 )
 
 :: --- C# 编译产物 ---
 echo   [C#]
 if exist "%BRIDGE_DIR%\bin" (
     rmdir /s /q "%BRIDGE_DIR%\bin" 2>nul
-    echo     [完成] 已删除 bin 目录
+    echo     [DONE] 已删除 bin 目录
 )
 if exist "%BRIDGE_DIR%\obj" (
     rmdir /s /q "%BRIDGE_DIR%\obj" 2>nul
-    echo     [完成] 已删除 obj 目录
+    echo     [DONE] 已删除 obj 目录
 )
 if exist "%BRIDGE_EXE%" (
     del /f /q "%BRIDGE_EXE%" 2>nul
-    echo     [完成] 已删除 SpaceClaimBridge.exe
+    echo     [DONE] 已删除 SpaceClaimBridge.exe
 )
 
 :: --- Python __pycache__ 目录 ---
@@ -65,7 +65,7 @@ for /d /r "%PROJECT_ROOT%" %%D in (__pycache__) do (
         set /a PYCACHE_COUNT+=1
     )
 )
-echo     [完成] 已清理 !PYCACHE_COUNT! 个 __pycache__ 目录
+echo     [DONE] 已清理 !PYCACHE_COUNT! 个 __pycache__ 目录
 
 :: --- Python 孤立 .pyc 文件 ---
 set "PYC_COUNT=0"
@@ -73,19 +73,19 @@ for /r "%PROJECT_ROOT%" %%F in (*.pyc) do (
     del /f /q "%%F" 2>nul
     set /a PYC_COUNT+=1
 )
-if !PYC_COUNT! gtr 0 echo     [完成] 已清理 !PYC_COUNT! 个 .pyc 文件
+if !PYC_COUNT! gtr 0 echo     [DONE] 已清理 !PYC_COUNT! 个 .pyc 文件
 
 :: --- pytest / mypy / ruff 缓存 ---
 for %%C in (".pytest_cache" ".mypy_cache" ".ruff_cache" ".tox") do (
     set "CACHE_DIR=%PROJECT_ROOT%%%C"
     if exist "!CACHE_DIR!" (
         rmdir /s /q "!CACHE_DIR!" 2>nul
-        echo     [完成] 已删除 %%~C
+        echo     [DONE] 已删除 %%~C
     )
 )
 
 echo.
-echo [完成] 第 1 步：全项目编译产物清理完毕
+echo [DONE] 第 1 步：全项目编译产物清理完毕
 echo.
 
 :: =============================================================================
@@ -98,25 +98,25 @@ echo.
 echo   [Rust TUI] 编译 Release 模式...
 cd /d "%TUI_DIR%"
 if !errorlevel! neq 0 (
-    echo [错误] 无法进入 TUI 目录: %TUI_DIR%
+    echo [ERROR] 无法进入 TUI 目录: %TUI_DIR%
     pause
     exit /b 1
 )
 
 cargo build --release
 if !errorlevel! neq 0 (
-    echo [错误] Rust TUI 编译失败！错误代码: !errorlevel!
+    echo [ERROR] Rust TUI 编译失败！错误代码: !errorlevel!
     pause
     exit /b !errorlevel!
 )
-echo     [完成] Rust TUI 编译成功
+echo     [DONE] Rust TUI 编译成功
 echo.
 
 :: --- 编译 C# Bridge ---
 echo   [C# Bridge] 编译 SpaceClaimBridge...
 cd /d "%BRIDGE_DIR%"
 if !errorlevel! neq 0 (
-    echo [错误] 无法进入 Bridge 目录: %BRIDGE_DIR%
+    echo [ERROR] 无法进入 Bridge 目录: %BRIDGE_DIR%
     pause
     exit /b 1
 )
@@ -140,7 +140,7 @@ for %%p in (
     )
 )
 
-echo [错误] 未找到 MSBuild
+echo [ERROR] 未找到 MSBuild
 echo     请安装 Visual Studio 2019+ 或 VS Build Tools 2022
 pause
 exit /b 1
@@ -149,20 +149,20 @@ exit /b 1
 echo     使用 MSBuild: !MSBUILD!
 "!MSBUILD!" SpaceClaimBridge.csproj -restore /p:Configuration=Release /v:minimal
 if !errorlevel! neq 0 (
-    echo [错误] C# Bridge 编译失败！
+    echo [ERROR] C# Bridge 编译失败！
     pause
     exit /b !errorlevel!
 )
 if exist "bin\Release\net48\SpaceClaimBridge.exe" (
     copy /Y "bin\Release\net48\SpaceClaimBridge.exe" "%BRIDGE_EXE%" >nul 2>&1
 )
-echo     [完成] C# Bridge 编译成功（MSBuild）
+echo     [DONE] C# Bridge 编译成功（MSBuild）
 set "BRIDGE_BUILT=1"
 
 :bridge_build_done
 echo.
 cd /d "%PROJECT_ROOT%"
-echo [完成] 第 2 步：全部编译完成
+echo [DONE] 第 2 步：全部编译完成
 echo.
 
 :: =============================================================================
@@ -181,7 +181,7 @@ for %%F in (%BIN_FILES%) do (
 )
 
 if !FOUND_COUNT! equ 0 (
-    echo     [警告] 未找到 Rust 编译产物，跳过暂存
+    echo     [WARN] 未找到 Rust 编译产物，跳过暂存
     goto :skip_rust_staging
 )
 
@@ -200,7 +200,7 @@ for %%F in (%BIN_FILES%) do (
 :: 删除整个 target 目录
 rmdir /s /q "%TARGET_DIR%" 2>nul
 if exist "%TARGET_DIR%" (
-    echo     [警告] target 目录部分残留，尝试强制清理...
+    echo     [WARN] target 目录部分残留，尝试强制清理...
     timeout /t 2 /nobreak >nul
     rmdir /s /q "%TARGET_DIR%" 2>nul
 )
@@ -211,7 +211,7 @@ if !BACKUP_COUNT! gtr 0 (
     for %%F in ("%STAGING_DIR%\*") do (
         copy /y "%%F" "%RELEASE_DIR%\%%~nxF" >nul 2>&1
     )
-    echo     [完成] 已保留 !BACKUP_COUNT! 个 Rust 编译产物
+    echo     [DONE] 已保留 !BACKUP_COUNT! 个 Rust 编译产物
 )
 rmdir /s /q "%STAGING_DIR%" 2>nul
 
@@ -221,16 +221,16 @@ rmdir /s /q "%STAGING_DIR%" 2>nul
 echo   [C#] 清理编译中间产物...
 if exist "%BRIDGE_DIR%\obj" (
     rmdir /s /q "%BRIDGE_DIR%\obj" 2>nul
-    echo     [完成] 已删除 obj 目录
+    echo     [DONE] 已删除 obj 目录
 )
 if exist "%BRIDGE_DIR%\bin" (
     rmdir /s /q "%BRIDGE_DIR%\bin" 2>nul
-    echo     [完成] 已删除 bin 目录
+    echo     [DONE] 已删除 bin 目录
 )
 if exist "%BRIDGE_EXE%" (
-    echo     [完成] 已保留 SpaceClaimBridge.exe
+    echo     [DONE] 已保留 SpaceClaimBridge.exe
 ) else (
-    echo     [警告] 未找到 SpaceClaimBridge.exe
+    echo     [WARN] 未找到 SpaceClaimBridge.exe
 )
 
 :: --- Python：二次清理（编译过程中可能重新生成） ---
@@ -241,7 +241,7 @@ for /d /r "%PROJECT_ROOT%" %%D in (__pycache__) do (
 for /r "%PROJECT_ROOT%" %%F in (*.pyc) do del /f /q "%%F" 2>nul
 
 echo.
-echo [完成] 第 3 步：中间产物清理完毕
+echo [DONE] 第 3 步：中间产物清理完毕
 echo.
 
 :: =============================================================================

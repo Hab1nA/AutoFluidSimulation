@@ -3,9 +3,9 @@
 SolidWorks Export 工作流通用验证测试脚本
 无需实际 SolidWorks — 通过 Mock 全面验证：
   1. 模型导入 (OpenDoc6) 的正确调用参数
-  2. 设计表导入 (InsertFamilyTableOpen) 及 COM 降级策略
+  2. 使用模型内已链接设计表，不主动导入 Excel 或写入参数
   3. 配置枚举 (GetConfigurationNames / IGetConfigurationNames)
-  4. 逐构型 STEP 导出 (ShowConfiguration2 → EditRebuild3 → SaveAs)
+  4. 逐构型 STEP 导出 (ShowConfiguration2 → Rebuild → SaveAs)
   5. SW 文档关闭与 COM 资源清理 (CoUninitialize)
   6. 文件监控器 (FileStableDetector / StepFileMonitor)
   7. 配置过渡与状态管理
@@ -23,8 +23,9 @@ import sys
 import time
 import tempfile
 import shutil
+import types
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -44,13 +45,37 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 os.environ["AUTOFLUID_DATA_DIR"] = _TEST_DATA_DIR
 
 
+class _FakePythoncom(types.ModuleType):
+    VT_BYREF = 0x4000
+    VT_DISPATCH = 9
+    VT_I4 = 3
+
+    def __init__(self) -> None:
+        super().__init__("pythoncom")
+        self.initialized = 0
+        self.uninitialized = 0
+
+    def CoInitialize(self) -> None:
+        self.initialized += 1
+
+    def CoUninitialize(self) -> None:
+        self.uninitialized += 1
+
+    def CoFreeUnusedLibraries(self) -> None:
+        pass
+
+
+class _FakeVariant:
+    def __init__(self, _variant_type: int, value):
+        self.value = value
+
+
 # ============================================================================
 # 测试辅助：创建模拟 SW COM 对象
 # ============================================================================
 
 def create_mock_sw_app(config_names: list[str] | None = None,
                         open_doc_succeeds: bool = True,
-                        insert_dt_succeeds: bool = True,
                         save_as_succeeds: bool = True):
     """创建模拟 SolidWorks COM 应用对象。"""
     if config_names is None:
@@ -86,29 +111,6 @@ def create_mock_sw_app(config_names: list[str] | None = None,
         mock_app.OpenDoc6.return_value = mock_doc
     else:
         mock_app.OpenDoc6.return_value = None
-
-    # 设计表
-    # InsertFamilyTableEdit 模拟"无设计表"场景（抛出异常使 _model_has_design_table 返回 False）
-    mock_doc.InsertFamilyTableEdit.side_effect = Exception("No design table")
-    if insert_dt_succeeds:
-        mock_doc.InsertFamilyTableOpen.return_value = True
-    else:
-        mock_doc.InsertFamilyTableOpen.return_value = False
-
-    # 参数访问
-    def make_param(name):
-        p = MagicMock()
-        p.Name = name
-        p.Value = 100.0
-        p.SystemValue = 0.1
-        return p
-
-    mock_doc.Parameter.side_effect = make_param
-
-    # GetDesignTable
-    mock_dt = MagicMock()
-    mock_doc.GetDesignTable.return_value = mock_dt
-    mock_doc.DeleteDesignTable.return_value = True
 
     return mock_app, mock_doc
 
@@ -555,11 +557,11 @@ class TestFileMonitor(unittest.TestCase):
 
 
 # ============================================================================
-# 测试类 6: 设计表导入策略 (COM 降级)
+# 测试类 6: 已链接设计表契约
 # ============================================================================
 
 class TestDesignTableImportStrategy(unittest.TestCase):
-    """测试设计表导入的两种策略：InsertFamilyTableOpen 和 COM 直接设参。"""
+    """测试链接设计表场景下不主动导入或写入参数。"""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sw_test_dti_")
@@ -573,96 +575,60 @@ class TestDesignTableImportStrategy(unittest.TestCase):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _create_param_excel(self, param_names, config_data, filename="params.xlsx"):
-        filepath = os.path.join(self.tmpdir, filename)
-        wb = openpyxl.Workbook()
-        ws = wb.active
+    def test_linked_design_table_no_import_or_com_param_write(self):
+        """模型已链接设计表时，SW 初始化不应导入 Excel 或直接写参数。"""
+        mock_app, mock_doc = create_mock_sw_app(config_names=["0"])
+        step_dir = os.path.join(self.tmpdir, "step")
+        os.makedirs(step_dir)
+        step_path = os.path.join(step_dir, "model_gen4.SLDPRT_0.step")
+        calls = []
 
-        ws.cell(row=1, column=1, value="Design Table for: model_gen4.SLDPRT")
-        ws.cell(row=2, column=1, value="Config")
-        for i, pn in enumerate(param_names, 2):
-            ws.cell(row=2, column=i, value=pn)
+        def save_as_side_effect(filepath, *_args):
+            calls.append("save")
+            with open(filepath, "wb") as f:
+                f.write(b"STEP")
+            return True
 
-        for r, (cfg_name, vals) in enumerate(config_data.items(), 3):
-            ws.cell(row=r, column=1, value=cfg_name)
-            for c, val in enumerate(vals, 2):
-                ws.cell(row=r, column=c, value=val)
+        mock_doc.ShowConfiguration2.side_effect = lambda name: calls.append(f"show:{name}") or True
+        mock_doc.Extension.Rebuild.side_effect = lambda _option: calls.append("rebuild") or True
+        mock_doc.Extension.SaveAs.side_effect = save_as_side_effect
+        fake_pythoncom = _FakePythoncom()
+        fake_win32com = types.ModuleType("win32com")
+        fake_win32com_client = types.ModuleType("win32com.client")
+        fake_win32com_client.VARIANT = _FakeVariant
+        fake_win32com.client = fake_win32com_client
 
-        wb.save(filepath)
-        return filepath
+        with (
+            patch.object(self.runner._sw_executor, "_connect_sw", return_value=mock_app),
+            patch.object(self.runner._sw_executor, "_open_sw_model", return_value=mock_doc),
+            patch.dict(
+                "executor.sw_executor.LOCAL_PATHS",
+                {
+                    "sw_model": os.path.join(self.tmpdir, "model_gen4.SLDPRT"),
+                    "excel": os.path.join(self.tmpdir, "params.xlsx"),
+                    "step_dir": step_dir,
+                },
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "pythoncom": fake_pythoncom,
+                    "win32com": fake_win32com,
+                    "win32com.client": fake_win32com_client,
+                },
+            ),
+        ):
+            result = self.runner._sw_executor._export_sw_per_config_admitted(0)
 
-    def test_apply_params_via_com_success(self):
-        excel_path = self._create_param_excel(
-            param_names=["$PRP@Dim1", "$PRP@Dim2"],
-            config_data={
-                0: [100.0, 200.0],
-                1: [150.0, 250.0],
-            },
-        )
-
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=["0", "1"],
-        )
-
-        result = self.runner._sw_executor._apply_params_via_com(mock_doc, excel_path)
-        self.assertTrue(result, "COM direct param setting should succeed")
-        self.assertGreaterEqual(mock_doc.ShowConfiguration2.call_count, 2)
-
-    def test_apply_params_via_com_no_matching_params(self):
-        excel_path = self._create_param_excel(
-            param_names=["$PRP@Nonexistent1", "$PRP@Nonexistent2"],
-            config_data={
-                0: [100.0, 200.0],
-            },
-        )
-
-        mock_app, mock_doc = create_mock_sw_app()
-        mock_doc.Parameter.side_effect = Exception("Parameter not found")
-
-        result = self.runner._sw_executor._apply_params_via_com(mock_doc, excel_path)
-        self.assertFalse(result,
-                         "Should return False when no params match model")
-
-    def test_apply_params_via_com_missing_row2(self):
-        filepath = os.path.join(self.tmpdir, "no_row2.xlsx")
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.cell(row=1, column=1, value="Design Table")
-        wb.save(filepath)
-
-        mock_app, mock_doc = create_mock_sw_app()
-        result = self.runner._sw_executor._apply_params_via_com(mock_doc, filepath)
-        self.assertFalse(result, "Should return False when row 2 is missing")
-
-    def test_post_process_design_table(self):
-        mock_app, mock_doc = create_mock_sw_app()
-        mock_dt = mock_doc.GetDesignTable()
-
-        self.runner._sw_executor._post_process_design_table(mock_doc, "fake.xlsx")
-
-        mock_dt.Updatable = PropertyMock()
-        mock_dt.UpdateModel.assert_called()
-
-    def test_cleanup_tmp_excel(self):
-        tmp = os.path.join(self.tmpdir, "tmp_copy.xlsx")
-        orig = os.path.join(self.tmpdir, "original.xlsx")
-
-        with open(tmp, "w") as f:
-            f.write("test")
-        with open(orig, "w") as f:
-            f.write("test")
-
-        self.runner._sw_executor._cleanup_tmp_excel(tmp, orig)
-        self.assertFalse(os.path.exists(tmp), "Temp copy should be deleted")
-        self.assertTrue(os.path.exists(orig), "Original should be preserved")
-
-    def test_cleanup_tmp_excel_same_path(self):
-        orig = os.path.join(self.tmpdir, "same.xlsx")
-        with open(orig, "w") as f:
-            f.write("test")
-
-        self.runner._sw_executor._cleanup_tmp_excel(orig, orig)
-        self.assertTrue(os.path.exists(orig), "Original should not be deleted when tmp==orig")
+        self.assertTrue(result)
+        mock_doc.InsertFamilyTableOpen.assert_not_called()
+        mock_doc.Parameter.assert_not_called()
+        mock_doc.GetDesignTable.assert_not_called()
+        mock_doc.Extension.HasDesignTable.assert_not_called()
+        mock_doc.ShowConfiguration2.assert_called_once_with("0")
+        mock_doc.Extension.SaveAs.assert_called_once()
+        self.assertEqual(calls, ["show:0", "rebuild", "save"])
+        self.assertTrue(os.path.exists(step_path))
 
 
 # ============================================================================
@@ -738,78 +704,7 @@ class TestConfigTransition(unittest.TestCase):
 
 
 # ============================================================================
-# 测试类 8: 错误处理与边界情况
-# ============================================================================
-
-class TestErrorHandling(unittest.TestCase):
-    """测试错误处理与边界情况。"""
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="sw_test_err_")
-        from engine.state_manager import StateManager
-        self._db_path = os.path.join(self.tmpdir, "test_state.db")
-        self.state = StateManager(db_path=self._db_path)
-        from engine.task_runner import TaskRunner
-        self.runner = TaskRunner(self.state)
-
-    def tearDown(self):
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_design_table_existing_skip_import(self):
-        """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
-        excel_path = os.path.join(self.tmpdir, "nonexistent_params.xlsx")
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.cell(row=1, column=1, value="Design Table")
-        ws.cell(row=2, column=1, value="Config")
-        ws.cell(row=2, column=2, value="$PRP@GhostParam")
-        ws.cell(row=3, column=1, value=0)
-        ws.cell(row=3, column=2, value=100.0)
-        wb.save(excel_path)
-
-        mock_app, mock_doc = create_mock_sw_app(insert_dt_succeeds=False)
-        mock_doc.GetDesignTable.return_value = MagicMock()
-        mock_doc.Parameter.side_effect = Exception("Parameter not found")
-
-        result = self.runner._sw_executor._import_design_table_with_retry(
-            mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
-        )
-        self.assertTrue(result, "Should return True when model has design table (skip import)")
-        mock_app.CloseDoc.assert_not_called()
-
-    @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
-    def test_export_empty_config_list(self):
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=[],
-        )
-        mock_doc.GetConfigurationNames.return_value = []
-
-        from engine.task_runner import TaskRunner
-        runner = TaskRunner(self.state)
-        success, fail, _ = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
-        self.assertEqual(success, 0)
-        self.assertEqual(fail, 0)
-
-    @patch("os.path.exists", return_value=True)
-    @patch("os.path.getsize", return_value=2048)
-    @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
-    def test_export_config_with_non_int_name(self, mock_size, mock_exists):
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=["Default", "0"],
-        )
-
-        from engine.task_runner import TaskRunner
-        runner = TaskRunner(self.state)
-        success, fail, fail_list = runner._sw_executor._export_all_configs_to_step(mock_doc, "C:\\step")
-
-        self.assertEqual(success, 1, "Only config 0 should succeed")
-        self.assertEqual(fail, 1, "Default should be in fail_list")
-        self.assertIn("Default", fail_list or [None])
-
-
-# ============================================================================
-# 测试类 9: 端到端工作流 (Mock)
+# 测试类 8: 端到端工作流 (Mock)
 # ============================================================================
 
 class TestEndToEndWorkflow(unittest.TestCase):
@@ -850,13 +745,12 @@ class TestEndToEndWorkflow(unittest.TestCase):
         return filepath
 
     def test_full_export_workflow_mocked(self):
-        """模拟完整 SW 导出工作流：打开模型 → 导入设计表 → 导出 STEP → 退出。"""
+        """模拟完整 SW 导出工作流：打开模型 → 逐构型重建 → 导出 STEP。"""
         self._create_e2e_excel(num_configs=5)
 
         mock_app, mock_doc = create_mock_sw_app(
             config_names=["0", "1", "2", "3", "4"],
             open_doc_succeeds=True,
-            insert_dt_succeeds=True,
             save_as_succeeds=True,
         )
 
@@ -873,45 +767,6 @@ class TestEndToEndWorkflow(unittest.TestCase):
 
         self.assertEqual(mock_doc.ShowConfiguration2.call_count, 5)
         self.assertEqual(mock_doc.EditRebuild3.call_count, 5)
-
-    def test_workflow_with_com_fallback(self):
-        """模拟 InsertFamilyTableOpen 失败但 COM 降级成功的场景。"""
-        excel_path = self._create_e2e_excel(num_configs=3)
-
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=["0", "1", "2"],
-            insert_dt_succeeds=False,
-        )
-
-        result = self.runner._sw_executor._import_design_table_with_retry(
-            mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
-        )
-        self.assertTrue(result, "COM fallback should succeed when InsertFamilyTableOpen fails")
-
-    def test_workflow_existing_design_table_skip_import(self):
-        """测试当模型已有设计表时，函数正确返回 True（跳过导入）。"""
-        excel_path = os.path.join(self.tmpdir, "bad_params.xlsx")
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.cell(row=1, column=1, value="Design Table")
-        ws.cell(row=2, column=1, value="Config")
-        ws.cell(row=2, column=2, value="$PRP@GhostParam")
-        ws.cell(row=3, column=1, value=0)
-        ws.cell(row=3, column=2, value=100.0)
-        wb.save(excel_path)
-
-        mock_app, mock_doc = create_mock_sw_app(
-            insert_dt_succeeds=False,
-        )
-        mock_doc.GetDesignTable.return_value = MagicMock()
-        mock_doc.Parameter.side_effect = Exception("not found")
-
-        result = self.runner._sw_executor._import_design_table_with_retry(
-            mock_doc, mock_app, excel_path, r"C:\fake\model.SLDPRT"
-        )
-        self.assertTrue(result, "Should return True when model has design table (skip import)")
-        mock_app.CloseDoc.assert_not_called()
-
 
 # ============================================================================
 # 测试类 10: STEP 文件名生成
@@ -963,7 +818,7 @@ class TestComBindingCompatibility(unittest.TestCase):
     """测试 pywin32 动态 Dispatch 的 property/method 兼容性处理。
 
     注意：_safe_com_call / _com_rebuild / _com_get_config_names 已重构为内联代码，
-    此处改为测试 _export_all_configs_to_step 和 _apply_params_via_com 中的内联逻辑。
+    此处改为测试 export_sw_per_config 中的内联逻辑。
     """
 
     def setUp(self):
@@ -979,10 +834,10 @@ class TestComBindingCompatibility(unittest.TestCase):
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    # ---- GetConfigurationNames 兼容性（内联于 _export_all_configs_to_step） ----
+    # ---- GetConfigurationNames 兼容性（内联于 export_sw_per_config） ----
 
     def test_com_get_config_names_tuple(self):
-        """GetConfigurationNames 返回正常 tuple（通过 _export_all_configs_to_step 内联逻辑）。"""
+        """GetConfigurationNames 返回正常 tuple（通过 export_sw_per_config 内联逻辑）。"""
         mock_doc = MagicMock()
         mock_doc.GetConfigurationNames.return_value = ("0", "1", "2")
         mock_doc._FlagAsMethod = MagicMock()
@@ -1118,42 +973,6 @@ class TestComBindingCompatibility(unittest.TestCase):
         mock_obj = MagicMock(spec=[])
         self.assertFalse(self.SWExecutor._verify_com_object(mock_obj, "DeadObj"))
 
-    # ---- SaveAs 后置文件验证测试（_export_all_configs_to_step 行为） ----
-
-    @patch("os.path.exists", return_value=True)
-    @patch("os.path.getsize", return_value=2048)
-    @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
-    def test_export_step_file_verification_success(self, mock_size, mock_exists):
-        """SaveAs 返回 True 且文件系统验证通过。"""
-        runner = self.runner
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=["0", "1"],
-            save_as_succeeds=True,
-        )
-
-        step_dir = self.tmpdir
-        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
-
-        self.assertGreater(success, 0)
-        self.assertEqual(fail, 0)
-
-    @patch("os.path.exists", return_value=False)
-    @patch("os.path.getsize", return_value=0)
-    @unittest.skipIf(sys.platform != "win32", "需要 Windows COM 环境")
-    def test_export_step_file_verification_fail_missing_file(self, mock_size, mock_exists):
-        """SaveAs 返回 True 但文件不存在 → 标记为失败。"""
-        runner = self.runner
-        mock_app, mock_doc = create_mock_sw_app(
-            config_names=["0", "1"],
-            save_as_succeeds=True,
-        )
-
-        step_dir = self.tmpdir
-        success, fail, failed = runner._sw_executor._export_all_configs_to_step(mock_doc, step_dir)
-
-        self.assertEqual(success, 0)
-        self.assertGreater(fail, 0)
-
 
 # ============================================================================
 # 主入口
@@ -1175,7 +994,6 @@ def main():
         TestFileMonitor,
         TestDesignTableImportStrategy,
         TestConfigTransition,
-        TestErrorHandling,
         TestEndToEndWorkflow,
         TestStepFilenameGeneration,
         TestComBindingCompatibility,

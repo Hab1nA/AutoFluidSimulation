@@ -7,16 +7,24 @@ IPC 服务器模块 (IPC Server)
 """
 from __future__ import annotations
 
+import hmac
 import socket
 import threading
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from engine.daemon import PipelineDaemon
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
-    CMD_GET_LOG_ENTRIES, CMD_RELOAD_CONFIG,
+    CMD_GET_LOG_ENTRIES, CMD_GET_DASHBOARD, CMD_RELOAD_CONFIG,
+    CMD_WORKER_REGISTER, CMD_WORKER_HEARTBEAT,
+    CMD_WORKER_POLL, CMD_WORKER_STEP_COMPLETE, CMD_WORKER_STEP_ERROR,
+    CMD_WORKER_START, CMD_WORKER_STOP, CMD_WORKER_RESTART,
 )
 from engine.config import IPC_CONFIG
 from utils.logger import setup_logger
@@ -32,9 +40,14 @@ class IPCServer:
     收到命令后，调用注册的回调函数进行处理。
     """
 
-    MAX_BUFFER_BYTES = 1_000_000
+    MAX_BUFFER_BYTES = 5 * 1024 * 1024
 
-    def __init__(self, host: str | None = None, port: int | None = None):
+    def __init__(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        auth_token: str | None = None,
+    ):
         """
         初始化 IPC 服务器。
 
@@ -45,6 +58,7 @@ class IPCServer:
         self.host = host or IPC_CONFIG["host"]
         self.port = port or IPC_CONFIG["port"]
         self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
+        self._auth_token = auth_token if auth_token is not None else IPC_CONFIG.get("auth_token", "")
         self._socket: socket.socket | None = None
         self._running = False
         self._server_thread: threading.Thread | None = None
@@ -69,7 +83,7 @@ class IPCServer:
         self._handlers[command] = handler
         logger.debug(f"[IPC] 注册命令处理器: {command}")
 
-    def register_default_handlers(self, daemon):
+    def register_default_handlers(self, daemon: PipelineDaemon) -> None:
         """
         注册所有默认命令处理器，绑定到 daemon 实例。
 
@@ -87,6 +101,7 @@ class IPCServer:
         self.register_handler(CMD_GET_STATISTICS, daemon.handle_get_statistics)
         self.register_handler(CMD_GET_ENGINE_STATUS, daemon.handle_get_engine_status)
         self.register_handler(CMD_GET_LOG_ENTRIES, daemon.handle_get_log_entries)
+        self.register_handler(CMD_GET_DASHBOARD, daemon.handle_get_dashboard)
 
         # 重置
         self.register_handler(CMD_RESET_STEP, daemon.handle_reset_step)
@@ -96,6 +111,18 @@ class IPCServer:
 
         # 配置重载
         self.register_handler(CMD_RELOAD_CONFIG, daemon.handle_reload_config)
+
+        # LocalWorker
+        self.register_handler(CMD_WORKER_REGISTER, daemon.handle_worker_register)
+        self.register_handler(CMD_WORKER_HEARTBEAT, daemon.handle_worker_heartbeat)
+        self.register_handler(CMD_WORKER_POLL, daemon.handle_worker_poll)
+        self.register_handler(CMD_WORKER_STEP_COMPLETE, daemon.handle_worker_step_complete)
+        self.register_handler(CMD_WORKER_STEP_ERROR, daemon.handle_worker_step_error)
+
+        # Worker 生命周期管理
+        self.register_handler(CMD_WORKER_START, daemon.handle_worker_start)
+        self.register_handler(CMD_WORKER_STOP, daemon.handle_worker_stop)
+        self.register_handler(CMD_WORKER_RESTART, daemon.handle_worker_restart)
 
     # ------------------------------------------------------------------
     # 服务器生命周期
@@ -171,7 +198,7 @@ class IPCServer:
                         continue
                     self._active_connections += 1
 
-                logger.info(f"[IPC] IPC 客户端连接: {addr}")
+                logger.debug(f"[IPC] IPC 客户端连接: {addr}", extra={"broadcast": False})
                 # 每个客户端在独立线程中处理
                 client_thread = threading.Thread(
                     target=self._handle_client,
@@ -187,7 +214,7 @@ class IPCServer:
                     logger.error("[IPC] IPC 服务器 accept 异常")
                 break
 
-    def _handle_client(self, client_sock: socket.socket, addr: tuple):
+    def _handle_client(self, client_sock: socket.socket, addr: tuple[str, int]) -> None:
         """
         处理单个客户端连接。
 
@@ -240,7 +267,7 @@ class IPCServer:
             with self._conn_lock:
                 self._active_connections = max(0, self._active_connections - 1)
             if has_sent_valid_message:
-                logger.info(f"[IPC] IPC 客户端断开: {addr}")
+                logger.debug(f"[IPC] IPC 客户端断开: {addr}", extra={"broadcast": False})
             else:
                 # 连接未发送任何有效 IPC 消息即断开——可能是端口探测、
                 # 客户端 connect() 超时后丢弃、或连接泄漏产生的孤儿连接。
@@ -249,7 +276,7 @@ class IPCServer:
                     extra={"broadcast": False},
                 )
 
-    def _process_message(self, data: bytes) -> dict | None:
+    def _process_message(self, data: bytes) -> dict[str, Any] | None:
         """
         处理单条消息。
 
@@ -268,6 +295,14 @@ class IPCServer:
         request_id = msg.get("request_id", "")
 
         logger.debug(f"[IPC] 收到命令: {command}, params={params}")
+
+        if self._auth_token:
+            incoming_token = msg.get("auth_token", "")
+            if not isinstance(incoming_token, str) or not hmac.compare_digest(
+                incoming_token,
+                self._auth_token,
+            ):
+                return create_response("error", request_id, message="认证失败")
 
         handler = self._handlers.get(command)
         if handler is None:

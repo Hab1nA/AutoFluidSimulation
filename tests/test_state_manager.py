@@ -82,6 +82,7 @@ class TestInit:
             assert "configs" in tables
             assert "steps" in tables
             assert "engine_state" in tables
+            assert "remote_tasks" in tables
 
     def test_wal_mode(self):
         with _TmpDB() as sm:
@@ -107,6 +108,146 @@ class TestInit:
             conn.close()
             assert "idx_steps_config" in indexes
             assert "idx_steps_status" in indexes
+            assert "idx_remote_tasks_step" in indexes
+
+    def test_workstation_columns_created(self):
+        with _TmpDB() as sm:
+            import sqlite3
+            conn = sqlite3.connect(sm.db_path)
+            steps_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(steps)").fetchall()
+            }
+            remote_task_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(remote_tasks)").fetchall()
+            }
+            conn.close()
+
+            assert {"workstation_id", "slot_id"} <= steps_columns
+            assert "workstation_id" in remote_task_columns
+
+
+class TestRemoteTasks:
+    """验证远程后台任务元数据持久化。"""
+
+    def test_save_get_list_and_delete_remote_task(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_abc123",
+                flag_file="D:/flags/meshing_done_1.txt",
+                error_flag_file="D:/flags/meshing_done_1.txt.error",
+                log_file="D:/flags/autofluid_bg_abc123.log",
+                pid_file="D:/flags/autofluid_bg_abc123.pid",
+                script_file="D:/flags/autofluid_bg_abc123.cmd",
+                started_at=123.5,
+            )
+
+            task = sm.get_remote_task(1, "meshing")
+            assert task == {
+                "workstation_id": "default",
+                "config_name": 1,
+                "step_name": "meshing",
+                "task_name": "AutoFluid_abc123",
+                "flag_file": "D:/flags/meshing_done_1.txt",
+                "error_flag_file": "D:/flags/meshing_done_1.txt.error",
+                "log_file": "D:/flags/autofluid_bg_abc123.log",
+                "pid_file": "D:/flags/autofluid_bg_abc123.pid",
+                "script_file": "D:/flags/autofluid_bg_abc123.cmd",
+                "started_at": 123.5,
+            }
+            assert sm.get_all_remote_tasks() == [task]
+
+            sm.delete_remote_task(1, "meshing")
+            assert sm.get_remote_task(1, "meshing") is None
+            assert sm.get_all_remote_tasks() == []
+
+    def test_save_remote_task_upserts_same_config_and_step(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_old",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_new",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                log_file="D:/flags/autofluid_bg_new.log",
+                started_at=20.0,
+            )
+
+            tasks = sm.get_all_remote_tasks()
+            assert len(tasks) == 1
+            assert tasks[0]["task_name"] == "AutoFluid_new"
+            assert tasks[0]["started_at"] == 20.0
+
+    def test_remote_tasks_are_isolated_by_workstation(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                workstation_id="WS-A",
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_a",
+                flag_file="D:/flags/a.txt",
+                error_flag_file="D:/flags/a.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                workstation_id="WS-B",
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_b",
+                flag_file="D:/flags/b.txt",
+                error_flag_file="D:/flags/b.txt.error",
+                started_at=20.0,
+            )
+
+            task_a = sm.get_remote_task(1, "meshing", workstation_id="WS-A")
+            task_b = sm.get_remote_task(1, "meshing", workstation_id="WS-B")
+
+            assert task_a is not None
+            assert task_b is not None
+            assert task_a["task_name"] == "AutoFluid_a"
+            assert task_b["task_name"] == "AutoFluid_b"
+            assert len(sm.get_all_remote_tasks()) == 2
+
+            sm.delete_remote_task(1, "meshing", workstation_id="WS-A")
+            assert sm.get_remote_task(1, "meshing", workstation_id="WS-A") is None
+            assert sm.get_remote_task(1, "meshing", workstation_id="WS-B") is not None
+
+    def test_reset_config_steps_deletes_downstream_remote_tasks(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_meshing",
+                flag_file="D:/flags/meshing_done_1.txt",
+                error_flag_file="D:/flags/meshing_done_1.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_solver",
+                flag_file="D:/flags/solver_done_1.txt",
+                error_flag_file="D:/flags/solver_done_1.txt.error",
+                started_at=20.0,
+            )
+
+            sm.reset_config_steps(1, "solver")
+
+            assert sm.get_remote_task(1, "meshing") is not None
+            assert sm.get_remote_task(1, "solver") is None
 
 # ====================================================================
 # load_configs 测试
@@ -330,6 +471,20 @@ class TestSetMeshingRunningIfIdle:
             sm.set_meshing_running_if_idle(1)
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
             assert sm.set_meshing_running_if_idle(2) is True
+
+    def test_different_workstations_can_run_meshing_concurrently(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+
+            assert sm.set_meshing_running_if_idle(1, workstation_id="WS-A") is True
+            assert sm.set_meshing_running_if_idle(2, workstation_id="WS-B") is True
+
+    def test_same_workstation_rejects_second_meshing(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+
+            assert sm.set_meshing_running_if_idle(1, workstation_id="WS-A") is True
+            assert sm.set_meshing_running_if_idle(2, workstation_id="WS-A") is False
 
 
 # ====================================================================
@@ -583,6 +738,59 @@ class TestAllConfigsCompletedAtStep:
     def test_empty_configs_returns_true(self):
         with _TmpDB() as sm:
             assert sm.all_configs_completed_at_step("meshing") is True
+
+    def test_filters_by_workstation(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_config_workstation(1, "WS-A")
+            sm.set_config_workstation(2, "WS-B")
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+
+            assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-A") is True
+            assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-B") is False
+
+    def test_default_workstation_filter_includes_new_configs(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="default",
+            ) is False
+
+    def test_filters_by_config_names(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+
+            assert sm.all_configs_completed_at_step("meshing", config_names=[1]) is True
+            assert sm.all_configs_completed_at_step("meshing", config_names=[1, 2]) is False
+
+    def test_filters_by_workstation_and_config_names(self):
+        with _TmpDB() as sm:
+            sm.load_configs({
+                1: [1.0, 2.0, 3.0, 4.0],
+                2: [5.0, 6.0, 7.0, 8.0],
+                3: [9.0, 10.0, 11.0, 12.0],
+            })
+            sm.set_config_workstation(1, "WS-A")
+            sm.set_config_workstation(2, "WS-B")
+            sm.set_config_workstation(3, "WS-A")
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(2, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(3, "meshing", STATUS_WAITING)
+
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="WS-A",
+                config_names=[1],
+            ) is True
+            assert sm.all_configs_completed_at_step(
+                "meshing",
+                workstation_id="WS-A",
+                config_names=[1, 3],
+            ) is False
 
 
 # ====================================================================

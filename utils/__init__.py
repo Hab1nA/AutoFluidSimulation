@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from utils.logger import get_session_log_dir, init_session, setup_logger
 
 __all__ = [

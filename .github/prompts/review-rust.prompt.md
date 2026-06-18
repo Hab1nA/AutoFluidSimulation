@@ -1,3 +1,8 @@
+---
+description: "Use when: 全面审查 Rust TUI 代码质量、规范性和健壮性，迭代修复直至通过所有检查。触发词：审查 Rust、review rust、Rust 代码审查、Rust code review。"
+agent: "agent"
+---
+
 # Rust 代码全面审查与修复
 
 > **本 Prompt 仅审查 Rust 代码。** Python 代码请使用 `review-python.prompt.md`，C# 代码请使用 `review-csharp.prompt.md`。
@@ -5,7 +10,7 @@
 ## 审查前准备
 
 1. 阅读 `.github/instructions/rust.instructions.md`，掌握 Rust 代码规范
-2. 阅读 `.github/instructions/implementation-planning.instructions.md` 中的架构概览，理解项目结构
+2. 阅读 `AGENTS.md` 了解项目架构、关键交互逻辑和高风险兼容区
 3. 阅读 `README.md` 和 `docs/code-style-guide.md`（Rust 命名规范部分），了解项目全貌
 
 ## 🚫 语言隔离规则

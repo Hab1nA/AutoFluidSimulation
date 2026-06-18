@@ -1,3 +1,5 @@
+import ipc
+
 from ipc import protocol
 
 
@@ -9,6 +11,12 @@ def test_create_request_and_response_roundtrip():
     resp = protocol.create_response("ok", req["request_id"], data={"items": []}, message="ok")
     assert resp["status"] == "ok"
     assert resp["request_id"] == req["request_id"]
+
+
+def test_create_request_includes_auth_token_when_provided():
+    req = protocol.create_request("ping", auth_token="secret-token")
+
+    assert req["auth_token"] == "secret-token"
 
 
 def test_serialize_deserialize_basic():
@@ -65,7 +73,16 @@ _EXPECTED_COMMANDS = frozenset({
     "get_statistics",
     "get_engine_status",
     "get_log_entries",
+    "get_dashboard",
     "reload_config",
+    "worker_register",
+    "worker_heartbeat",
+    "worker_poll",
+    "worker_step_complete",
+    "worker_step_error",
+    "worker_start",
+    "worker_stop",
+    "worker_restart",
 })
 
 
@@ -96,3 +113,13 @@ def test_ipc_command_constants_complete():
         f"以下 IPC 命令常量在 ipc/protocol.py 中存在但预期集合中缺失: {sorted(extra)}。"
         f"如果这些是新命令，请同时更新 Rust 侧和此测试的 _EXPECTED_COMMANDS。"
     )
+
+
+def test_package_re_exports_all_ipc_command_constants():
+    missing = [
+        name
+        for name in dir(protocol)
+        if name.startswith("CMD_") and not hasattr(ipc, name)
+    ]
+
+    assert not missing

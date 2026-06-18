@@ -396,7 +396,7 @@ fn build_edit_spans(
     cursor_bar_style: Style,
 ) -> Vec<Span<'static>> {
     let chars: Vec<char> = buffer.chars().collect();
-    debug_assert!(
+    assert!(
         cursor <= chars.len(),
         "edit cursor must not exceed buffer character length"
     );

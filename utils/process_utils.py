@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 进程管理工具模块 (Process Management Utilities)
@@ -5,12 +7,24 @@
 ===============================================================================
 """
 import os
+import logging
+import shutil
 import sys
 import socket
 import subprocess
 
+from engine.config import LOCAL_PATHS
+
 
 MIN_VALID_PID = 1
+WORKER_PID_KINDS = (
+    "local_worker",
+    "tunnel_workstation",
+    "tunnel_localworker",
+    "server_ipc_tunnel",
+)
+TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
+logger = logging.getLogger(__name__)
 
 
 def is_process_alive(pid: int) -> bool:
@@ -104,7 +118,7 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
 
     try:
         result = subprocess.run(
-            ["taskkill", "/pid", str(pid), "/f"],
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -113,6 +127,83 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
         return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def worker_pid_file(kind: str) -> str:
+    """Return the stable PID file path for worker and SSH tunnel helpers."""
+    if kind not in WORKER_PID_KINDS:
+        raise ValueError(f"未知 Worker PID 类型: {kind}")
+    data_dir = str(LOCAL_PATHS.get("data_dir") or "data")
+    return os.path.join(data_dir, f"{kind}.pid")
+
+
+def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[str, int | str]]:
+    """Terminate worker/tunnel processes recorded in stable PID files.
+
+    This is intentionally PID-file based so `worker stop`, `quit full`, and
+    `main.py --stop` can clean processes that were started by an earlier client
+    or daemon process whose in-memory `Popen`/`Child` handles are gone.
+    """
+    results: dict[str, dict[str, int | str]] = {}
+    for kind in WORKER_PID_KINDS:
+        pid_file = worker_pid_file(kind)
+        pid = read_pid_file(pid_file)
+        if pid is None:
+            continue
+        status = "stale"
+        if is_process_alive(pid):
+            status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+        if status != "failed":
+            remove_pid_file(pid_file)
+        results[kind] = {"pid": pid, "status": status}
+    return results
+
+
+def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, dict[str, str] | str]:
+    """Uninstall Windows Task Scheduler watchdogs for reverse SSH tunnels."""
+    if sys.platform != "win32":
+        return {"status": "skipped", "reason": "non_windows"}
+
+    project_root = project_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_path = os.path.join(project_root, "scripts", "start_workstation_reverse_tunnel.ps1")
+    if not os.path.exists(script_path):
+        return {"status": "skipped", "reason": "script_missing"}
+
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
+    results: dict[str, dict[str, str] | str] = {}
+    for tunnel_kind in TUNNEL_WATCHDOG_KINDS:
+        try:
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script_path,
+                    "-TunnelKind",
+                    tunnel_kind,
+                    "-UninstallWatchdog",
+                ],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if completed.returncode == 0:
+                results[tunnel_kind] = {"status": "uninstalled"}
+            else:
+                results[tunnel_kind] = {
+                    "status": "failed",
+                    "returncode": str(completed.returncode),
+                    "stderr": completed.stderr.strip(),
+                    "stdout": completed.stdout.strip(),
+                }
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("[Worker] %s tunnel watchdog cleanup failed: %s", tunnel_kind, exc)
+            results[tunnel_kind] = {"status": "failed", "error": str(exc)}
+    return results
 
 
 def check_ipc_ready(host: str = "127.0.0.1", port: int = 9527) -> bool:

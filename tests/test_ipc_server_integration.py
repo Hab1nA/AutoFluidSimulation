@@ -79,7 +79,7 @@ class TestServerLifecycle:
 
     def test_start_and_stop(self):
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.start()
         assert server._running is True
 
@@ -89,14 +89,14 @@ class TestServerLifecycle:
     def test_double_start_no_error(self):
         """重复 start 不抛异常。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.start()
         server.start()  # 不应报错
         server.stop()
 
     def test_stop_without_start_no_error(self):
         """未启动时 stop 不抛异常。"""
-        server = IPCServer(host="127.0.0.1", port=_find_free_port())
+        server = IPCServer(host="127.0.0.1", port=_find_free_port(), auth_token="")
         server.stop()
 
     def test_port_bind_failure_raises(self):
@@ -108,7 +108,7 @@ class TestServerLifecycle:
         blocker.bind(("127.0.0.1", port))
         blocker.listen(1)
 
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         try:
             with pytest.raises(OSError):
                 server.start()
@@ -124,7 +124,7 @@ class TestCommandRoundtrip:
     """验证完整的命令→响应往返。"""
 
     def _make_server(self, port: int) -> IPCServer:
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.register_handler("ping", lambda params: (True, "pong", "ok"))
         server.register_handler("echo", lambda params: (True, params.get("msg", ""), "echo"))
         server.start()
@@ -201,7 +201,7 @@ class TestErrorHandling:
 
     def test_unknown_command(self):
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.start()
         try:
             resp = _send_command(port, "nonexistent_cmd")
@@ -213,7 +213,7 @@ class TestErrorHandling:
     def test_handler_raises_exception(self):
         """处理器抛异常时返回 error 响应，不崩溃。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
 
         def bad_handler(params):
             raise RuntimeError("boom")
@@ -230,7 +230,7 @@ class TestErrorHandling:
     def test_invalid_json_message(self):
         """无效 JSON 消息返回 error。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.start()
         try:
             raw_resp = _send_raw(port, b"not json\n")
@@ -242,7 +242,7 @@ class TestErrorHandling:
     def test_handler_returns_false(self):
         """处理器返回 False 时响应 status 为 error。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.register_handler("fail", lambda params: (False, None, "操作失败"))
         server.start()
         try:
@@ -263,7 +263,7 @@ class TestConnectionLimit:
     def test_rejects_when_at_limit(self):
         """超过 max_connections 时拒绝新连接。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.register_handler("ping", lambda params: (True, "pong", "ok"))
         server.start()
         try:
@@ -294,7 +294,7 @@ class TestConcurrentClients:
     def test_concurrent_commands(self):
         """多个客户端同时发送命令不崩溃。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         # 在启动前注册所有 handler，避免竞态
         server.register_handler("ping", lambda params: (True, "pong", "ok"))
         server.register_handler("echo", lambda params: (True, params.get("msg", ""), "ok"))
@@ -334,7 +334,7 @@ class TestLargeMessage:
     def test_multi_packet_payload(self):
         """超过 recv 缓冲区 (4096) 的 payload 应正常处理。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.register_handler("big", lambda params: (True, len(params.get("data", "")), "ok"))
         server.start()
         try:
@@ -349,7 +349,7 @@ class TestLargeMessage:
     def test_unterminated_message_over_limit_disconnects(self):
         """未包含换行符的异常大消息应被服务端主动断开。"""
         port = _find_free_port()
-        server = IPCServer(host="127.0.0.1", port=port)
+        server = IPCServer(host="127.0.0.1", port=port, auth_token="")
         server.start()
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:

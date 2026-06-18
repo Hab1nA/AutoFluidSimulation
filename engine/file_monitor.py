@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 文件监控模块 (File Monitor)
-基于 watchdog 库实现的 STEP 文件目录监控。
+基于轮询实现的 STEP 文件目录监控。
 当 SW 宏批量导出 .step 文件时，监控每个文件的生成完成事件，
 并将完成的构型推入后续处理队列（Producer-Consumer 模式）。
 
@@ -122,11 +124,8 @@ class StepFileMonitor:
     持续扫描 STEP 目录，检测新生成的 model_gen4.SLDPRT_XX.step 文件，
     当文件写入完成（大小稳定）后，通过回调函数通知调度器。
 
-    设计为轮询模式（兼容性好，不依赖 watchdog 的 Native 文件系统事件），
-    同时也支持 watchdog 事件驱动的混合模式。
+    设计为轮询模式（兼容性好，不依赖第三方文件系统事件库）。
     """
-
-    _SW_STEP_PATTERN = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
 
     @staticmethod
     def _compile_config_regex(pattern: str) -> re.Pattern | None:
@@ -148,7 +147,7 @@ class StepFileMonitor:
         """获取或延迟编译文件名匹配正则（线程安全：幂等操作）。"""
         if cls._FILENAME_REGEX is None:
             sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
+            cls._FILENAME_REGEX = cls._compile_config_regex(sw_pattern)
         return cls._FILENAME_REGEX
 
     def __init__(self, step_dir: str | None = None,
@@ -169,11 +168,6 @@ class StepFileMonitor:
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
-
-        # 在实例初始化时编译正则（避免类变量的延迟初始化竞态）
-        if StepFileMonitor._FILENAME_REGEX is None:
-            sw_pattern = STEP_FILE_PATTERNS.get("sw", "model_gen4.SLDPRT_{config}.step")
-            StepFileMonitor._FILENAME_REGEX = StepFileMonitor._compile_config_regex(sw_pattern)  # type: ignore[arg-type]
 
     @property
     def is_running(self) -> bool:
@@ -217,6 +211,9 @@ class StepFileMonitor:
         """启动文件监控线程。"""
         if self._running:
             logger.warning("文件监控已在运行")
+            return
+
+        if not self._ensure_step_dir():
             return
 
         # 扫描目录中已存在的文件（断点续传场景）
@@ -322,8 +319,7 @@ class StepFileMonitor:
 
     def _scan_directory(self):
         """扫描 STEP 目录，检测文件变化。"""
-        if not os.path.isdir(self.step_dir):
-            logger.debug(f"STEP 目录不存在: {self.step_dir}")
+        if not self._ensure_step_dir():
             return
 
         try:
@@ -367,7 +363,7 @@ class StepFileMonitor:
 
     def _scan_existing_files(self):
         """扫描目录中已存在的文件，将其加入 known_files 以便后续稳定性检测。"""
-        if not os.path.isdir(self.step_dir):
+        if not self._ensure_step_dir():
             return
 
         try:
@@ -382,6 +378,21 @@ class StepFileMonitor:
                         logger.info(f"发现已存在的 STEP 文件: {filename} (构型{config_name})")
         except OSError as e:
             logger.warning(f"扫描已存在文件时出错: {e}")
+
+    def _ensure_step_dir(self) -> bool:
+        """确保 STEP 目录存在；监控器启动早于 SW 导出时不会持续报告目录缺失。"""
+        if not self.step_dir:
+            logger.error("STEP 输出目录未配置")
+            return False
+        if os.path.isdir(self.step_dir):
+            return True
+        try:
+            os.makedirs(self.step_dir, exist_ok=True)
+            logger.info(f"已创建 STEP 目录: {self.step_dir}")
+            return True
+        except OSError as e:
+            logger.warning(f"无法创建/访问 STEP 目录: {self.step_dir}: {e}")
+            return False
 
     # ------------------------------------------------------------------
     # 已处理文件查询

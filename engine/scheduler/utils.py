@@ -290,10 +290,8 @@ def check_step_output_exists(
         filename = get_step_filename("sc", config_name)
         if not filename:
             return False
-        remote_scdoc = (
-            f"{remote_config['scdoc_dir'].replace(chr(92), '/')}"
-            f"/{filename}"
-        )
+        scdoc_dir = str(remote_config["scdoc_dir"]).replace("\\", "/")
+        remote_scdoc = f"{scdoc_dir}/{filename}"
         try:
             if hasattr(ssh, "get_remote_file_size"):
                 if remote_check_timeout is None:
@@ -312,36 +310,31 @@ def check_step_output_exists(
             return False
 
     if step_name == "meshing":
-        flag_file = (
-            f"{remote_config['flag_dir'].replace(chr(92), '/')}"
-            f"/meshing_done_{config_name}.txt"
-        )
+        flag_dir = str(remote_config["flag_dir"]).replace("\\", "/")
+        error_flag = f"{flag_dir}/meshing_done_{config_name}.txt.error"
         mesh_name = get_step_filename("meshing", config_name)
         mesh_file = None
         if mesh_name:
-            mesh_file = (
-                f"{remote_config['msh_dir'].replace(chr(92), '/')}"
-                f"/{mesh_name}"
-            )
+            msh_dir = str(remote_config["msh_dir"]).replace("\\", "/")
+            mesh_file = f"{msh_dir}/{mesh_name}"
         try:
-            return _check_remote_file(flag_file) or (
+            return _check_remote_file(error_flag) or (
                 mesh_file is not None and _check_remote_file(mesh_file)
             )
         except Exception:
             return False
 
     if step_name == "solver":
-        flag_file = (
-            f"{remote_config['flag_dir'].replace(chr(92), '/')}"
-            f"/solver_done_{config_name}.txt"
-        )
-        result_dir = remote_config['result_dir'].replace(chr(92), '/')
+        flag_dir = str(remote_config["flag_dir"]).replace("\\", "/")
+        flag_file = f"{flag_dir}/solver_done_{config_name}.txt"
+        error_flag = f"{flag_file}.error"
+        result_dir = str(remote_config["result_dir"]).replace("\\", "/")
         cas_name = get_step_filename("solver", config_name)
         dat_name = get_step_filename("solverdata", config_name)
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            if _check_remote_file(flag_file):
+            if _check_remote_file(flag_file) or _check_remote_file(error_flag):
                 return True
             cas_exists = cas_file is not None and _check_remote_file(cas_file)
             dat_exists = dat_file is not None and _check_remote_file(dat_file)

@@ -27,7 +27,7 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from utils.logger import (
     LogEntry, LogBroadcastHandler, _classify_source,
-    install_broadcast_handler, get_broadcast_handler,
+    install_broadcast_handler, get_broadcast_handler, setup_logger,
 )
 
 
@@ -91,6 +91,33 @@ def test_log_entry_roundtrip():
     assert restored.message == original.message
     assert restored.raw_message == original.raw_message
     print("  ✅ LogEntry 序列化往返一致")
+
+
+def test_log_entry_structured_fields_roundtrip():
+    """测试结构化日志字段序列化往返。"""
+    original = LogEntry(
+        id=7,
+        timestamp="2026-05-08 12:00:00",
+        level="INFO",
+        source="scheduler",
+        logger_name="engine.scheduler.main",
+        message="[2026-05-08 12:00:00] [INFO] [engine.scheduler.main] 构型7 Meshing完成",
+        raw_message="[engine.scheduler.main] 构型7 Meshing完成",
+        category="step",
+        config_name="7",
+        step_name="Meshing",
+        worker_id="local-pc-01",
+        is_polling=False,
+    )
+
+    restored = LogEntry.from_dict(original.to_dict())
+
+    assert restored.category == "step"
+    assert restored.config_name == "7"
+    assert restored.step_name == "Meshing"
+    assert restored.worker_id == "local-pc-01"
+    assert restored.is_polling is False
+    print("  ✅ 结构化日志字段序列化往返一致")
 
 
 # ============================================================================
@@ -172,6 +199,45 @@ def test_handler_emit_and_get():
 
     test_logger.removeHandler(handler)
     print("  ✅ Handler 写入和读取正确")
+
+
+def test_broadcast_handler_strips_manual_message_prefix():
+    """测试手写模块前缀会从消息正文中剥离。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("ipc.server")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.warning("[IPC] IPC 连接数已达上限")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entry = result["entries"][0]
+    assert "[IPC] IPC 连接数已达上限" not in entry["message"]
+    assert entry["message"].endswith("IPC 连接数已达上限")
+    assert entry["raw_message"] == "[ipc.server] IPC 连接数已达上限"
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 手写模块前缀已从消息正文剥离")
+
+
+def test_broadcast_handler_keeps_unprefixed_message_unchanged():
+    """测试无手写模块前缀的消息正文保持不变。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.state_manager")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info("状态数据库已初始化: pipeline_state.db")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entry = result["entries"][0]
+    assert entry["message"].endswith("状态数据库已初始化: pipeline_state.db")
+    assert entry["raw_message"] == (
+        "[engine.state_manager] 状态数据库已初始化: pipeline_state.db"
+    )
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 无手写模块前缀的消息正文保持不变")
 
 
 def test_handler_incremental_query():
@@ -277,6 +343,30 @@ def test_handler_limit_parameter():
     print("  ✅ limit 参数正确")
 
 
+def test_handler_initial_query_returns_latest_window():
+    """测试首次查询返回最新窗口，而不是 daemon 启动时的最旧日志。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("test.handler.initial_window")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for i in range(1, 6):
+        test_logger.info(f"消息{i}")
+
+    result = handler.get_entries(since_id=0, limit=2)
+    entries = result["entries"]
+
+    assert [entry["raw_message"] for entry in entries] == [
+        "[test.handler.initial_window] 消息4",
+        "[test.handler.initial_window] 消息5",
+    ]
+    assert result["latest_id"] == 5
+    assert result["total"] == 5
+
+    test_logger.removeHandler(handler)
+    print("  ✅ 首次查询返回最新日志窗口")
+
+
 def test_handler_stats():
     """测试统计信息。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -360,8 +450,7 @@ def test_install_broadcast_handler():
     assert get_broadcast_handler() is handler
     assert handler in root_logger.handlers
 
-    test_logger = logging.getLogger("test.install.broadcast")
-    test_logger.setLevel(logging.DEBUG)
+    test_logger = setup_logger("test.install.broadcast")
     test_logger.info("全局handler测试")
     result = handler.get_entries(since_id=0, limit=10)
     assert len(result["entries"]) >= 1
@@ -369,6 +458,36 @@ def test_install_broadcast_handler():
     root_logger.removeHandler(handler)
     logger_mod._broadcast_handler = original_handler
     print("  ✅ 全局安装 broadcast handler 正确")
+
+
+def test_installed_broadcast_handler_ignores_unregistered_logger():
+    """测试 root 上的 broadcast handler 只接收通过 setup_logger 注册的 logger。"""
+    import utils.logger as logger_mod
+
+    original_handler = logger_mod._broadcast_handler
+    logger_mod._broadcast_handler = None
+
+    root_logger = logging.getLogger()
+    handler = install_broadcast_handler(capacity=50)
+    try:
+        unregistered_logger = logging.getLogger("thirdparty.noise")
+        unregistered_logger.setLevel(logging.DEBUG)
+        unregistered_logger.warning("第三方库噪音")
+
+        registered_logger = setup_logger("test.registered.broadcast")
+        registered_logger.warning("已注册项目日志")
+
+        result = handler.get_entries(since_id=0, limit=10)
+        messages = [entry["message"] for entry in result["entries"]]
+
+        assert not any("第三方库噪音" in message for message in messages)
+        assert any("已注册项目日志" in message for message in messages)
+    finally:
+        if handler in root_logger.handlers:
+            root_logger.removeHandler(handler)
+        logger_mod._broadcast_handler = original_handler
+
+    print("  ✅ root broadcast handler 忽略未注册 logger")
 
 
 def test_install_broadcast_handler_idempotent():
@@ -386,6 +505,29 @@ def test_install_broadcast_handler_idempotent():
     root_logger.removeHandler(h1)
     logger_mod._broadcast_handler = original_handler
     print("  ✅ 重复安装幂等性正确")
+
+
+def test_install_broadcast_handler_recovers_existing_root_handler():
+    """全局引用丢失但 root logger 已有 handler 时不应重复安装。"""
+    import utils.logger as logger_mod
+
+    original_handler = logger_mod._broadcast_handler
+    logger_mod._broadcast_handler = None
+    root_logger = logging.getLogger()
+    stale_handler = LogBroadcastHandler(capacity=50)
+    root_logger.addHandler(stale_handler)
+
+    try:
+        handler = install_broadcast_handler(capacity=50)
+
+        assert handler is stale_handler
+        assert logger_mod._broadcast_handler is stale_handler
+        handler_count = sum(1 for h in root_logger.handlers if isinstance(h, LogBroadcastHandler))
+        assert handler_count == 1
+    finally:
+        root_logger.removeHandler(stale_handler)
+        logger_mod._broadcast_handler = original_handler
+    print("  ✅ 全局 handler 引用丢失时可从 root logger 恢复")
 
 
 # ============================================================================
@@ -506,7 +648,7 @@ def test_log_export_with_filter():
 # ============================================================================
 
 def test_handler_since_id_exceeds_buffer():
-    """测试 since_id 超过缓冲区最大 ID。"""
+    """测试 since_id 超过缓冲区最大 ID 时提示重置并返回当前缓冲区。"""
     handler = LogBroadcastHandler(capacity=100)
     test_logger = logging.getLogger("test.boundary.since_id")
     test_logger.addHandler(handler)
@@ -517,10 +659,33 @@ def test_handler_since_id_exceeds_buffer():
     latest = result["latest_id"]
 
     result2 = handler.get_entries(since_id=latest + 100, limit=10)
-    assert result2["entries"] == []
+    assert result2["reset"] is True
+    assert len(result2["entries"]) == 1
+    assert result2["entries"][0]["id"] == latest
 
     test_logger.removeHandler(handler)
-    print("  ✅ since_id 超出范围返回空结果")
+    print("  ✅ since_id 超出范围提示重置并返回当前缓冲区")
+
+
+def test_handler_reports_gap_when_since_id_evicted():
+    """测试 since_id 已被环形缓冲淘汰时返回 gap 标记。"""
+    handler = LogBroadcastHandler(capacity=3)
+    test_logger = logging.getLogger("test.boundary.gap")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    for i in range(5):
+        test_logger.info(f"消息{i}")
+
+    result = handler.get_entries(since_id=1, limit=10)
+    ids = [entry["id"] for entry in result["entries"]]
+    assert result["has_gap"] is True
+    assert result["reset"] is False
+    assert len(ids) == 3
+    assert min(ids) > 1
+
+    test_logger.removeHandler(handler)
+    print("  ✅ since_id 被淘汰时返回 gap 标记")
 
 
 def test_handler_zero_limit():
@@ -616,6 +781,30 @@ def test_polling_filter_get_log_entries():
     print("  ✅ get_log_entries 轮询命令被正确过滤")
 
 
+def test_polling_logs_are_buffered_and_query_time_filterable():
+    """测试轮询日志进入底层缓冲区，但默认查询隐藏且可显式取回。"""
+    handler = LogBroadcastHandler(capacity=100)
+    ipc_logger = logging.getLogger("ipc.server")
+    ipc_logger.addHandler(handler)
+    ipc_logger.setLevel(logging.DEBUG)
+
+    ipc_logger.debug("收到命令: get_log_entries, params={'since_id': 0}")
+
+    default_result = handler.get_entries(since_id=0, limit=10)
+    assert default_result["entries"] == []
+    assert default_result["total"] == 0
+    assert default_result["latest_id"] > 0
+
+    full_result = handler.get_entries(since_id=0, limit=10, include_polling=True)
+    assert full_result["total"] == 1
+    assert len(full_result["entries"]) == 1
+    assert full_result["entries"][0]["is_polling"] is True
+    assert full_result["entries"][0]["category"] == "polling"
+
+    ipc_logger.removeHandler(handler)
+    print("  ✅ 轮询日志可存储、默认隐藏且可显式取回")
+
+
 def test_polling_filter_get_engine_status():
     """测试 get_engine_status 轮询命令被过滤。"""
     handler = LogBroadcastHandler(capacity=100)
@@ -631,8 +820,39 @@ def test_polling_filter_get_engine_status():
     print("  ✅ get_engine_status 轮询命令被正确过滤")
 
 
+def test_polling_filter_get_dashboard():
+    """测试 get_dashboard 批量轮询命令被过滤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    ipc_logger = logging.getLogger("ipc.server")
+    ipc_logger.addHandler(handler)
+    ipc_logger.setLevel(logging.DEBUG)
+
+    ipc_logger.debug("收到命令: get_dashboard, params={'since_log_id': 0}")
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, f"get_dashboard 应被过滤，但缓冲区有 {result['total']} 条"
+    assert result["latest_id"] > 0
+
+    ipc_logger.removeHandler(handler)
+    print("  ✅ get_dashboard 轮询命令被正确过滤")
+
+
+def test_polling_filter_worker_poll():
+    """测试 worker_poll 本地 Worker 轮询命令被过滤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    ipc_logger = logging.getLogger("ipc.server")
+    ipc_logger.addHandler(handler)
+    ipc_logger.setLevel(logging.DEBUG)
+
+    ipc_logger.debug("收到命令: worker_poll, params={'worker_id': 'Spica'}")
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, f"worker_poll 应被过滤，但缓冲区有 {result['total']} 条"
+
+    ipc_logger.removeHandler(handler)
+    print("  ✅ worker_poll 轮询命令被正确过滤")
+
+
 def test_polling_filter_mixed_with_normal():
-    """测试轮询命令与正常日志混合时，仅轮询命令被过滤。"""
+    """测试轮询命令和 IPC 生命周期日志被过滤，手动命令/错误保留。"""
     handler = LogBroadcastHandler(capacity=100)
     ipc_logger = logging.getLogger("ipc.server")
     ipc_logger.addHandler(handler)
@@ -646,17 +866,17 @@ def test_polling_filter_mixed_with_normal():
 
     result = handler.get_entries(since_id=0, limit=10)
     entries = result["entries"]
-    assert result["total"] == 3, f"期望3条日志（2条轮询被过滤），实际{result['total']}"
+    assert result["total"] == 2, f"期望2条日志（轮询和连接生命周期被过滤），实际{result['total']}"
 
     messages = [e["message"] for e in entries]
-    assert any("客户端连接" in m for m in messages), "正常日志'客户端连接'应保留"
+    assert not any("客户端连接" in m for m in messages), "IPC 客户端连接日志不应刷屏"
     assert any("收到命令: start" in m for m in messages), "手动命令'start'应保留"
     assert any("处理客户端消息异常" in m for m in messages), "错误日志应保留"
     assert not any("get_all_status" in m for m in messages), "轮询命令 get_all_status 不应出现"
     assert not any("get_log_entries" in m for m in messages), "轮询命令 get_log_entries 不应出现"
 
     ipc_logger.removeHandler(handler)
-    print("  ✅ 混合日志中轮询命令被正确过滤，正常日志保留")
+    print("  ✅ 混合日志中轮询和 IPC 生命周期日志被正确过滤，正常日志保留")
 
 
 def test_polling_filter_non_ipc_logger_not_filtered():
@@ -709,6 +929,8 @@ def test_polling_commands_constant():
     assert "get_all_status" in POLLING_COMMANDS
     assert "get_log_entries" in POLLING_COMMANDS
     assert "get_engine_status" in POLLING_COMMANDS
+    assert "get_dashboard" in POLLING_COMMANDS
+    assert "worker_poll" in POLLING_COMMANDS
     assert "get_statistics" not in POLLING_COMMANDS, "get_statistics 是手动命令，不应在过滤列表"
     assert "start" not in POLLING_COMMANDS
     assert "pause" not in POLLING_COMMANDS
@@ -732,10 +954,15 @@ def test_is_polling_log_static_method():
         name="PipelineDaemon", level=logging.INFO, pathname="", lineno=0,
         msg="调用 get_all_status 接口", args=None, exc_info=None,
     )
+    record_worker_poll = logging.LogRecord(
+        name="ipc.server", level=logging.DEBUG, pathname="", lineno=0,
+        msg="收到命令: worker_poll, params={'worker_id': 'Spica'}", args=None, exc_info=None,
+    )
 
     assert LogBroadcastHandler._is_polling_log(record_ipc_polling) is True
     assert LogBroadcastHandler._is_polling_log(record_ipc_normal) is False
     assert LogBroadcastHandler._is_polling_log(record_daemon_polling_name) is False
+    assert LogBroadcastHandler._is_polling_log(record_worker_poll) is True
 
     print("  ✅ _is_polling_log 静态方法判断正确")
 
@@ -758,6 +985,30 @@ def test_broadcast_false_record_is_suppressed():
 
     test_logger.removeHandler(handler)
     print("  ✅ broadcast=False 日志不会进入详细日志")
+
+
+def test_ipc_lifecycle_logs_are_suppressed():
+    """测试 IPC 连接/断开生命周期日志不会进入详细日志广播。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("ipc.server")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info("[IPC] IPC 客户端连接: ('127.0.0.1', 53318)")
+    test_logger.info("[IPC] IPC 客户端断开: ('127.0.0.1', 53318)")
+    test_logger.debug("[IPC] 客户端主动断开: [WinError 10054]")
+    test_logger.warning("[IPC] IPC 连接数已达上限 (10)，拒绝新连接")
+
+    result = handler.get_entries(since_id=0, limit=10)
+    messages = [e["message"] for e in result["entries"]]
+
+    assert result["total"] == 1
+    assert any("连接数已达上限" in m for m in messages), "异常连接告警应保留"
+    assert not any("客户端连接" in m for m in messages)
+    assert not any("客户端断开" in m for m in messages)
+
+    test_logger.removeHandler(handler)
+    print("  ✅ IPC 连接生命周期日志不会进入详细日志")
 
 
 # ============================================================================
@@ -804,7 +1055,7 @@ def test_periodic_log_queue_health_waiting_suppressed():
 
 
 def test_periodic_log_queue_warning_passes_through():
-    """测试 [队列异常] WARNING 日志（无 broadcast=False）应被放行。"""
+    """测试队列 WARNING 日志（无 broadcast=False）应被放行并剥离手写前缀。"""
     handler = LogBroadcastHandler(capacity=100)
     test_logger = logging.getLogger("engine.scheduler.worker_pool")
     test_logger.addHandler(handler)
@@ -814,7 +1065,10 @@ def test_periodic_log_queue_warning_passes_through():
 
     result = handler.get_entries(since_id=0, limit=10)
     assert result["total"] == 1, f"[队列异常] WARNING 应被放行，实际 {result['total']} 条"
-    assert "[队列异常]" in result["entries"][0]["message"]
+    assert result["entries"][0]["message"].endswith("构型8 SW 已完成但未入队")
+    assert result["entries"][0]["raw_message"] == (
+        "[engine.scheduler.worker_pool] 构型8 SW 已完成但未入队"
+    )
 
     test_logger.removeHandler(handler)
     print("  ✅ [队列异常] WARNING 日志被正确放行")
@@ -871,6 +1125,28 @@ def test_config_scoped_logs_are_suppressed():
 
     test_logger.removeHandler(handler)
     print("  ✅ 逐构型中文日志不会进入详细日志")
+
+
+def test_explicit_step_category_is_not_overridden_by_config_scoped_filter():
+    """显式标记的步骤日志不应被逐构型启发式隐藏。"""
+    handler = LogBroadcastHandler(capacity=100)
+    test_logger = logging.getLogger("engine.sc_process_pool")
+    test_logger.addHandler(handler)
+    test_logger.setLevel(logging.DEBUG)
+
+    test_logger.info(
+        "[SC-Pool] 构型7 SC 转换完成",
+        extra={"log_category": "step", "config_name": "7", "step_name": "sc"},
+    )
+
+    result = handler.get_entries(since_id=0, limit=10)
+    entries = result["entries"]
+    assert result["total"] == 1
+    assert entries[0]["category"] == "step"
+    assert entries[0]["config_name"] == "7"
+    assert entries[0]["step_name"] == "sc"
+
+    test_logger.removeHandler(handler)
 
 
 def test_config_scoped_log_suppression_matches_config_equals():
@@ -1259,6 +1535,7 @@ def main():
         ("LogEntry.to_dict()", test_log_entry_to_dict),
         ("LogEntry.from_dict()", test_log_entry_from_dict),
         ("LogEntry 序列化往返", test_log_entry_roundtrip),
+        ("LogEntry 结构化字段往返", test_log_entry_structured_fields_roundtrip),
         ("日志来源分类-SSH", test_classify_source_ssh),
         ("日志来源分类-调度器", test_classify_source_scheduler),
         ("日志来源分类-IPC", test_classify_source_ipc),
@@ -1272,28 +1549,35 @@ def main():
         ("Handler 来源过滤", test_handler_source_filter),
         ("Handler 容量限制", test_handler_capacity_limit),
         ("Handler limit参数", test_handler_limit_parameter),
+        ("Handler 首次查询最新窗口", test_handler_initial_query_returns_latest_window),
         ("Handler 统计信息", test_handler_stats),
         ("Handler 多线程安全", test_handler_thread_safety),
         ("Handler 空缓冲区", test_handler_empty_buffer),
         ("全局安装handler", test_install_broadcast_handler),
+        ("全局安装handler: 忽略未注册logger", test_installed_broadcast_handler_ignores_unregistered_logger),
         ("全局安装幂等性", test_install_broadcast_handler_idempotent),
         ("IPC日志传输", test_ipc_log_transmission),
         ("IPC日志过滤参数", test_ipc_log_transmission_with_filter),
         ("日志导出", test_log_export),
         ("带过滤日志导出", test_log_export_with_filter),
         ("边界: since_id超出", test_handler_since_id_exceeds_buffer),
+        ("边界: since_id已淘汰", test_handler_reports_gap_when_since_id_evicted),
         ("边界: limit=0", test_handler_zero_limit),
         ("边界: 组合过滤", test_handler_combined_filter),
         ("性能: 大量日志", test_handler_large_volume),
         ("轮询过滤: get_all_status", test_polling_filter_get_all_status),
         ("轮询过滤: get_log_entries", test_polling_filter_get_log_entries),
+        ("轮询过滤: 查询时可控", test_polling_logs_are_buffered_and_query_time_filterable),
         ("轮询过滤: get_engine_status", test_polling_filter_get_engine_status),
+        ("轮询过滤: get_dashboard", test_polling_filter_get_dashboard),
+        ("轮询过滤: worker_poll", test_polling_filter_worker_poll),
         ("轮询过滤: 混合日志", test_polling_filter_mixed_with_normal),
         ("轮询过滤: 非IPC不误过滤", test_polling_filter_non_ipc_logger_not_filtered),
         ("轮询过滤: 高频场景", test_polling_filter_high_frequency),
         ("轮询过滤: 常量完整性", test_polling_commands_constant),
         ("轮询过滤: _is_polling_log", test_is_polling_log_static_method),
         ("广播过滤: broadcast=False", test_broadcast_false_record_is_suppressed),
+        ("广播过滤: IPC生命周期", test_ipc_lifecycle_logs_are_suppressed),
         ("逐构型过滤: 构型N", test_config_scoped_logs_are_suppressed),
         ("逐构型过滤: config=N", test_config_scoped_log_suppression_matches_config_equals),
         ("逐构型过滤: 操作上下文", test_config_scoped_log_suppression_matches_operation_context),

@@ -63,8 +63,6 @@ pub struct StepFilePatterns {
     pub sw: String,
     #[serde(rename = "sc")]
     pub sc: String,
-    #[serde(rename = "transfer")]
-    pub transfer: Option<String>,
     #[serde(rename = "meshing")]
     pub meshing: String,
     #[serde(rename = "solver")]
@@ -78,7 +76,6 @@ impl Default for StepFilePatterns {
         Self {
             sw: "model_gen4.SLDPRT_{config}.step".to_string(),
             sc: "model_gen4_{config}.scdoc".to_string(),
-            transfer: None,
             meshing: "model_gen4_{config}.msh.h5".to_string(),
             solver: "model_gen4_{config}.cas.h5".to_string(),
             solver_dat: "model_gen4_{config}.dat.h5".to_string(),
@@ -114,6 +111,9 @@ pub struct SpaceClaimConfig {
     pub sc_process_appear_timeout: u64,
     pub sc_gui_ready_timeout: u64,
     pub sc_gui_stable_delay: u64,
+    pub sc_max_slots: u64,
+    pub sc_persistent_enabled: bool,
+    pub sc_oneshot_fallback_enabled: bool,
 }
 
 impl Default for SpaceClaimConfig {
@@ -123,7 +123,10 @@ impl Default for SpaceClaimConfig {
             sc_poll_interval: 2.0,
             sc_process_appear_timeout: 120,
             sc_gui_ready_timeout: 30,
-            sc_gui_stable_delay: 15,
+            sc_gui_stable_delay: 5,
+            sc_max_slots: 1,
+            sc_persistent_enabled: true,
+            sc_oneshot_fallback_enabled: true,
         }
     }
 }
@@ -250,9 +253,9 @@ impl SettingCategory {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
             SettingCategory::RemoteDirs => 10,
-            SettingCategory::StepPatterns => 6,
+            SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 5,
-            SettingCategory::SpaceClaim => 5,
+            SettingCategory::SpaceClaim => 8,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
             SettingCategory::GlobalSettings => 7,
@@ -268,20 +271,14 @@ impl SettingCategory {
                 3 => "step_dir",
                 4 => "sc_exe",
                 5 => "scdoc_dir",
-                _ => {
-                    debug_assert!(false, "LocalPaths: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("LocalPaths: invalid field index {idx}"),
             },
             SettingCategory::RemoteConnection => match idx {
                 0 => "host",
                 1 => "port",
                 2 => "username",
                 3 => "password",
-                _ => {
-                    debug_assert!(false, "RemoteConnection: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("RemoteConnection: invalid field index {idx}"),
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "working_dir",
@@ -294,22 +291,15 @@ impl SettingCategory {
                 7 => "conda_env",
                 8 => "conda_exe",
                 9 => "mpi_bin_dir",
-                _ => {
-                    debug_assert!(false, "RemoteDirs: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
                 0 => "sw",
                 1 => "sc",
-                2 => "transfer",
-                3 => "meshing",
-                4 => "solver",
-                5 => "solverdata",
-                _ => {
-                    debug_assert!(false, "StepPatterns: invalid field index {idx}");
-                    ""
-                }
+                2 => "meshing",
+                3 => "solver",
+                4 => "solverdata",
+                _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
                 0 => "sw_macro_timeout",
@@ -317,10 +307,7 @@ impl SettingCategory {
                 2 => "sw_visible",
                 3 => "sw_startup",
                 4 => "sw_dispatch_startup_delay",
-                _ => {
-                    debug_assert!(false, "SolidWorks: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("SolidWorks: invalid field index {idx}"),
             },
             SettingCategory::SpaceClaim => match idx {
                 0 => "sc_timeout",
@@ -328,27 +315,21 @@ impl SettingCategory {
                 2 => "sc_process_appear_timeout",
                 3 => "sc_gui_ready_timeout",
                 4 => "sc_gui_stable_delay",
-                _ => {
-                    debug_assert!(false, "SpaceClaim: invalid field index {idx}");
-                    ""
-                }
+                5 => "sc_max_slots",
+                6 => "sc_persistent_enabled",
+                7 => "sc_oneshot_fallback_enabled",
+                _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
                 0 => "meshing_timeout",
                 1 => "meshing_processor_count",
-                _ => {
-                    debug_assert!(false, "Meshing: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("Meshing: invalid field index {idx}"),
             },
             SettingCategory::Solver => match idx {
                 0 => "solver_timeout",
                 1 => "solver_processor_count",
                 2 => "solver_iteration_count",
-                _ => {
-                    debug_assert!(false, "Solver: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("Solver: invalid field index {idx}"),
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "watchdog_interval",
@@ -358,10 +339,7 @@ impl SettingCategory {
                 4 => "max_retries",
                 5 => "ssh_upload_max_retries",
                 6 => "dir_recursion_limit",
-                _ => {
-                    debug_assert!(false, "GlobalSettings: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
     }
@@ -375,20 +353,14 @@ impl SettingCategory {
                 3 => "STEP输出目录",
                 4 => "SC可执行文件",
                 5 => "SCDOC输出目录",
-                _ => {
-                    debug_assert!(false, "LocalPaths: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("LocalPaths: invalid field index {idx}"),
             },
             SettingCategory::RemoteConnection => match idx {
                 0 => "主机地址",
                 1 => "SSH端口",
                 2 => "用户名",
                 3 => "密码",
-                _ => {
-                    debug_assert!(false, "RemoteConnection: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("RemoteConnection: invalid field index {idx}"),
             },
             SettingCategory::RemoteDirs => match idx {
                 0 => "仿真工作目录",
@@ -401,22 +373,15 @@ impl SettingCategory {
                 7 => "Conda环境名",
                 8 => "Conda可执行文件",
                 9 => "MPI安装目录",
-                _ => {
-                    debug_assert!(false, "RemoteDirs: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
                 0 => "SW步骤模板",
                 1 => "SC步骤模板",
-                2 => "Transfer模板",
-                3 => "Meshing模板",
-                4 => "Solver模板",
-                5 => "Solver数据模板",
-                _ => {
-                    debug_assert!(false, "StepPatterns: invalid field index {idx}");
-                    ""
-                }
+                2 => "Meshing模板",
+                3 => "Solver模板",
+                4 => "Solver数据模板",
+                _ => panic!("StepPatterns: invalid field index {idx}"),
             },
             SettingCategory::SolidWorks => match idx {
                 0 => "宏超时(秒)",
@@ -424,10 +389,7 @@ impl SettingCategory {
                 2 => "显示窗口",
                 3 => "启动超时(秒)",
                 4 => "调度启动延迟(秒)",
-                _ => {
-                    debug_assert!(false, "SolidWorks: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("SolidWorks: invalid field index {idx}"),
             },
             SettingCategory::SpaceClaim => match idx {
                 0 => "脚本超时(秒)",
@@ -435,27 +397,21 @@ impl SettingCategory {
                 2 => "进程出现等待(秒)",
                 3 => "窗口就绪超时(秒)",
                 4 => "窗口稳定等待(秒)",
-                _ => {
-                    debug_assert!(false, "SpaceClaim: invalid field index {idx}");
-                    ""
-                }
+                5 => "常驻槽位数",
+                6 => "启用常驻Bridge",
+                7 => "常驻失败回退一次性Bridge",
+                _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
                 0 => "网格超时(秒)",
                 1 => "网格核心数",
-                _ => {
-                    debug_assert!(false, "Meshing: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("Meshing: invalid field index {idx}"),
             },
             SettingCategory::Solver => match idx {
                 0 => "求解超时(秒)",
                 1 => "求解核心数",
                 2 => "求解迭代次数",
-                _ => {
-                    debug_assert!(false, "Solver: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("Solver: invalid field index {idx}"),
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "看门狗间隔(秒)",
@@ -465,20 +421,19 @@ impl SettingCategory {
                 4 => "最大重试",
                 5 => "SSH上传最大重试",
                 6 => "目录递归深度限制",
-                _ => {
-                    debug_assert!(false, "GlobalSettings: invalid field index {idx}");
-                    ""
-                }
+                _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
     }
 
     pub fn is_bool_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=2)
+        (matches!(self, SettingCategory::SolidWorks) && matches!(idx, 1..=2))
+            || (matches!(self, SettingCategory::SpaceClaim) && matches!(idx, 6..=7))
     }
 
     pub fn is_password_field(self, idx: usize) -> bool {
-        matches!(self, SettingCategory::RemoteConnection) && idx == 3
+        // 使用基于字段名的防御性检查，避免因字段顺序调整而失效
+        matches!(self, SettingCategory::RemoteConnection) && self.field_name(idx) == "password"
     }
 
     /// 返回字段的完整配置路径名（如 "local_paths.sw_exe"）
@@ -625,15 +580,9 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => field_val!(self.config.step_file_patterns, sw, string),
                 1 => field_val!(self.config.step_file_patterns, sc, string),
-                2 => self
-                    .config
-                    .step_file_patterns
-                    .transfer
-                    .clone()
-                    .unwrap_or_default(),
-                3 => field_val!(self.config.step_file_patterns, meshing, string),
-                4 => field_val!(self.config.step_file_patterns, solver, string),
-                5 => field_val!(self.config.step_file_patterns, solver_dat, string),
+                2 => field_val!(self.config.step_file_patterns, meshing, string),
+                3 => field_val!(self.config.step_file_patterns, solver, string),
+                4 => field_val!(self.config.step_file_patterns, solver_dat, string),
                 _ => String::new(),
             },
             SettingCategory::SolidWorks => match idx {
@@ -650,6 +599,9 @@ impl SettingsState {
                 2 => field_val!(self.config.spaceclaim, sc_process_appear_timeout),
                 3 => field_val!(self.config.spaceclaim, sc_gui_ready_timeout),
                 4 => field_val!(self.config.spaceclaim, sc_gui_stable_delay),
+                5 => field_val!(self.config.spaceclaim, sc_max_slots),
+                6 => field_val!(self.config.spaceclaim, sc_persistent_enabled),
+                7 => field_val!(self.config.spaceclaim, sc_oneshot_fallback_enabled),
                 _ => String::new(),
             },
             SettingCategory::Meshing => match idx {
@@ -714,16 +666,9 @@ impl SettingsState {
             SettingCategory::StepPatterns => match idx {
                 0 => self.config.step_file_patterns.sw = value.to_string(),
                 1 => self.config.step_file_patterns.sc = value.to_string(),
-                2 => {
-                    self.config.step_file_patterns.transfer = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    };
-                }
-                3 => self.config.step_file_patterns.meshing = value.to_string(),
-                4 => self.config.step_file_patterns.solver = value.to_string(),
-                5 => self.config.step_file_patterns.solver_dat = value.to_string(),
+                2 => self.config.step_file_patterns.meshing = value.to_string(),
+                3 => self.config.step_file_patterns.solver = value.to_string(),
+                4 => self.config.step_file_patterns.solver_dat = value.to_string(),
                 _ => {}
             },
             SettingCategory::SolidWorks => match idx {
@@ -773,6 +718,18 @@ impl SettingsState {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.spaceclaim.sc_gui_stable_delay = v;
                     }
+                }
+                5 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_max_slots = v;
+                    }
+                }
+                6 => {
+                    self.config.spaceclaim.sc_persistent_enabled = value == "true" || value == "是"
+                }
+                7 => {
+                    self.config.spaceclaim.sc_oneshot_fallback_enabled =
+                        value == "true" || value == "是"
                 }
                 _ => {}
             },
@@ -1039,30 +996,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn step_patterns_expose_transfer_field() {
-        assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
-        assert_eq!(SettingCategory::StepPatterns.field_name(2), "transfer");
+    fn step_patterns_do_not_expose_transfer_field() {
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
+        assert_eq!(SettingCategory::StepPatterns.field_name(2), "meshing");
         assert_eq!(
             SettingCategory::StepPatterns.field_full_name(2),
-            "step_file_patterns.transfer"
+            "step_file_patterns.meshing"
         );
         assert_eq!(
             SettingCategory::StepPatterns.display_label(2),
-            "Transfer模板"
+            "Meshing模板"
         );
 
         let mut state = SettingsState::new();
         state.config = SettingsConfig::default();
-        assert_eq!(state.get_field_value(SettingCategory::StepPatterns, 2), "");
-
-        state.set_field_value(SettingCategory::StepPatterns, 2, "transfer_{config}.zip");
         assert_eq!(
-            state.config.step_file_patterns.transfer.as_deref(),
-            Some("transfer_{config}.zip")
+            state.get_field_value(SettingCategory::StepPatterns, 2),
+            "model_gen4_{config}.msh.h5"
         );
 
-        state.set_field_value(SettingCategory::StepPatterns, 2, "");
-        assert_eq!(state.config.step_file_patterns.transfer, None);
+        state.set_field_value(SettingCategory::StepPatterns, 2, "mesh_{config}.msh.h5");
+        assert_eq!(
+            state.config.step_file_patterns.meshing,
+            "mesh_{config}.msh.h5"
+        );
     }
 
     #[test]
@@ -1083,5 +1040,152 @@ mod tests {
                 "sw_dispatch_startup_delay",
             ]
         );
+    }
+
+    #[test]
+    fn spaceclaim_settings_expose_persistent_bridge_fields() {
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+
+        let field_names = (0..SettingCategory::SpaceClaim.field_count())
+            .map(|idx| SettingCategory::SpaceClaim.field_name(idx))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            field_names,
+            vec![
+                "sc_timeout",
+                "sc_poll_interval",
+                "sc_process_appear_timeout",
+                "sc_gui_ready_timeout",
+                "sc_gui_stable_delay",
+                "sc_max_slots",
+                "sc_persistent_enabled",
+                "sc_oneshot_fallback_enabled",
+            ]
+        );
+
+        assert!(SettingCategory::SpaceClaim.is_bool_field(6));
+        assert!(SettingCategory::SpaceClaim.is_bool_field(7));
+
+        let mut state = SettingsState::new();
+        state.config = SettingsConfig::default();
+        state.set_field_value(SettingCategory::SpaceClaim, 5, "2");
+        state.set_field_value(SettingCategory::SpaceClaim, 6, "false");
+        state.set_field_value(SettingCategory::SpaceClaim, 7, "false");
+
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 5), "2");
+        assert_eq!(
+            state.get_field_value(SettingCategory::SpaceClaim, 6),
+            "false"
+        );
+        assert_eq!(
+            state.get_field_value(SettingCategory::SpaceClaim, 7),
+            "false"
+        );
+    }
+
+    #[test]
+    fn is_password_field_identifies_remote_connection_password() {
+        // RemoteConnection.password is at idx 3
+        assert!(SettingCategory::RemoteConnection.is_password_field(3));
+        // Other fields in RemoteConnection are not password fields
+        assert!(!SettingCategory::RemoteConnection.is_password_field(0)); // host
+        assert!(!SettingCategory::RemoteConnection.is_password_field(1)); // port
+        assert!(!SettingCategory::RemoteConnection.is_password_field(2)); // username
+                                                                          // Other categories are never password fields
+        assert!(!SettingCategory::LocalPaths.is_password_field(0));
+        assert!(!SettingCategory::GlobalSettings.is_password_field(0));
+    }
+
+    #[test]
+    fn is_bool_field_identifies_solidworks_boolean_fields() {
+        // SolidWorks bool fields: idx 1 (sw_close_doc_on_finish), idx 2 (sw_visible)
+        assert!(SettingCategory::SolidWorks.is_bool_field(1));
+        assert!(SettingCategory::SolidWorks.is_bool_field(2));
+        // Non-bool fields in SolidWorks
+        assert!(!SettingCategory::SolidWorks.is_bool_field(0)); // sw_macro_timeout
+        assert!(!SettingCategory::SolidWorks.is_bool_field(3)); // sw_startup
+                                                                // Other categories are never bool fields
+        assert!(!SettingCategory::LocalPaths.is_bool_field(0));
+        assert!(!SettingCategory::GlobalSettings.is_bool_field(0));
+    }
+
+    #[test]
+    fn field_count_matches_all_categories() {
+        // Verify field_count is consistent across all categories
+        assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
+        assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
+        assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+        assert_eq!(SettingCategory::Meshing.field_count(), 2);
+        assert_eq!(SettingCategory::Solver.field_count(), 3);
+        assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
+    }
+
+    #[test]
+    fn field_name_covers_all_indices_for_each_category() {
+        // Verify that field_name returns non-empty strings for all valid indices
+        for cat in SettingCategory::ALL {
+            for idx in 0..cat.field_count() {
+                let name = cat.field_name(idx);
+                assert!(
+                    !name.is_empty(),
+                    "field_name({:?}, {}) returned empty string",
+                    cat,
+                    idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn display_label_covers_all_indices_for_each_category() {
+        // Verify that display_label returns non-empty strings for all valid indices
+        for cat in SettingCategory::ALL {
+            for idx in 0..cat.field_count() {
+                let label = cat.display_label(idx);
+                assert!(
+                    !label.is_empty(),
+                    "display_label({:?}, {}) returned empty string",
+                    cat,
+                    idx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_full_name_format_is_correct() {
+        // Verify field_full_name format: "section.field_name"
+        assert_eq!(
+            SettingCategory::LocalPaths.field_full_name(0),
+            "local_paths.sw_exe"
+        );
+        assert_eq!(
+            SettingCategory::RemoteConnection.field_full_name(0),
+            "remote_config.host"
+        );
+        assert_eq!(
+            SettingCategory::SolidWorks.field_full_name(0),
+            "solidworks.sw_macro_timeout"
+        );
+        assert_eq!(
+            SettingCategory::GlobalSettings.field_full_name(0),
+            "global_settings.watchdog_interval"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid field index")]
+    fn field_name_panics_on_out_of_bounds_index() {
+        SettingCategory::LocalPaths.field_name(999);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid field index")]
+    fn display_label_panics_on_out_of_bounds_index() {
+        SettingCategory::LocalPaths.display_label(999);
     }
 }

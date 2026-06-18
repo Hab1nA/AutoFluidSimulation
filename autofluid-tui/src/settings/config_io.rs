@@ -101,11 +101,25 @@ pub fn write_env_password(password: &str) -> Result<(), String> {
     let new_line = format!("{}{}", key, password);
 
     if let Some(line_start) = contents.find(key) {
-        let line_end = contents[line_start..]
+        // 处理 \r\n 和 \n 两种换行符
+        let after_key = &contents[line_start..];
+        let line_end = after_key
             .find('\n')
-            .map(|i| line_start + i)
+            .map(|i| line_start + i + 1) // 包含 \n
             .unwrap_or(contents.len());
-        contents.replace_range(line_start..line_end, &new_line);
+        // 去掉尾部的 \r\n 或 \n
+        let trim_end = if line_end > line_start
+            && contents.as_bytes().get(line_end - 1) == Some(&b'\n')
+        {
+            if line_end > line_start + 1 && contents.as_bytes().get(line_end - 2) == Some(&b'\r') {
+                line_end - 2
+            } else {
+                line_end - 1
+            }
+        } else {
+            line_end
+        };
+        contents.replace_range(line_start..trim_end, &new_line);
     } else {
         if !contents.is_empty() && !contents.ends_with('\n') {
             contents.push('\n');

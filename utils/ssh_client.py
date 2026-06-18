@@ -125,6 +125,13 @@ class RemoteWorkstation:
         except (OSError, EOFError):
             return False
 
+    def connection_is_active(self) -> bool:
+        """Return cached transport activity without sending a network heartbeat."""
+        if self._ssh is None:
+            return False
+        transport = self._ssh.get_transport()
+        return bool(transport is not None and transport.is_active())
+
     def ensure_connected(self) -> bool:
         """确保连接有效，若断开则自动重连。"""
         if not self.is_connected():
@@ -587,8 +594,7 @@ class RemoteWorkstation:
                 working_dir=working_dir, interactive=interactive,
             )
             self._write_remote_text_file(script_file, script)
-            if not interactive:
-                self._task_pid_files[task_name] = pid_file
+            self._task_pid_files[task_name] = pid_file
 
             script_cmd_path = script_file.replace("/", "\\")
             create_cmd = (
@@ -621,6 +627,8 @@ class RemoteWorkstation:
                 return (True, task_name)
             else:
                 logger.error(f"[SSH] 远程后台任务启动失败 (exit={exit_code}): {stderr[:200]}")
+                self.exec_command(f'schtasks /Delete /TN "{task_name}" /F', timeout=15)
+                self._task_pid_files.pop(task_name, None)
                 return (False, task_name)
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] 启动远程后台任务异常: {e}")
@@ -678,6 +686,52 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
             return False
 
+    def cleanup_remote_task_entry(
+        self,
+        task_name: str,
+        pid_file: str | None = None,
+    ) -> bool:
+        """清理已结束远程任务的计划任务条目和残留 PID 文件。
+
+        完成态任务的 wrapper 会在退出前删除 PID 文件，因此这里不能按 PID
+        终止进程树；超时或主动停止仍应使用 kill_remote_task()。
+        """
+        if not task_name:
+            return True
+        if not self.ensure_connected():
+            return False
+
+        try:
+            del_cmd = f'schtasks /Delete /TN "{task_name}" /F'
+            _, err, del_code = self.exec_command(del_cmd, timeout=15)
+            if pid_file:
+                self.delete_remote_file(pid_file)
+            if del_code == 0:
+                logger.info(f"[SSH] 已清理远程计划任务条目: {task_name}")
+            else:
+                logger.debug(
+                    f"[SSH] 远程计划任务条目已不存在或自清理完成: {task_name} "
+                    f"(exit={del_code}): {err[:200]}"
+                )
+            return True
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 清理远程任务条目异常 {task_name}: {e}")
+            return False
+
+    def read_remote_pid_file(self, pid_file: str) -> int | None:
+        """读取远程 wrapper 记录的子进程 PID（公共接口）。
+
+        供 RemoteExecutor 等外部模块在需要验证远程进程存活时调用，
+        避免通过 getattr 访问私有方法。
+
+        Args:
+            pid_file: 远程 PID 文件的路径（支持 / 和 \\ 分隔符）
+
+        Returns:
+            解析到的 PID 整数；无法读取或格式无效时返回 None
+        """
+        return self._read_remote_pid_file(pid_file)
+
     def _read_remote_pid_file(self, pid_file: str) -> int | None:
         """读取远程 wrapper 记录的子进程 PID。"""
         cmd_pid_file = pid_file.replace("/", "\\")
@@ -715,7 +769,19 @@ class RemoteWorkstation:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
-            command_runner = f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
+            pid_capture_line = (
+                "set \"AF_WRAPPER_PID=\"\r\n"
+                "for /f \"tokens=2 delims==\" %%P in ('wmic process where "
+                "\"Name='cmd.exe' and CommandLine like '%%%~nx0%%' "
+                "and not CommandLine like '%%wmic process%%'\" "
+                "get ProcessId /value 2^>nul ^| find \"=\"') do "
+                "if not defined AF_WRAPPER_PID set \"AF_WRAPPER_PID=%%P\"\r\n"
+                "if defined AF_WRAPPER_PID > \"%AF_PID_FILE%\" echo %AF_WRAPPER_PID%\r\n"
+            )
+            command_runner = (
+                f"{pid_capture_line}"
+                f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
+            )
         else:
             ps_command_arg = command.replace("'", "''")
             ps_script = (
@@ -772,8 +838,8 @@ class RemoteWorkstation:
         flag_file: str,
         timeout: int = 3600,
         poll_interval: int = 10,
-        paused_event=None,
-        stopped_event=None,
+        paused_event: threading.Event | None = None,
+        stopped_event: threading.Event | None = None,
     ) -> bool:
         """
         轮询等待远程标志文件出现（表示任务完成）。
@@ -830,12 +896,12 @@ class RemoteWorkstation:
     # ------------------------------------------------------------------
 
     def check_system(self, conda_exe: str = "", conda_env: str = "",
-                     remote_dirs: dict | None = None,
+                     remote_dirs: dict[str, str] | None = None,
                      mpi_bin_dir: str = "",
                      scripts_dir: str = "",
-                     script_files: list | None = None,
+                     script_files: list[str] | None = None,
                      ref_files_dir: str = "",
-                     ref_files: list | None = None) -> dict:
+                     ref_files: list[str] | None = None) -> dict[str, object]:
         """
         执行远程工作站系统自检。
 

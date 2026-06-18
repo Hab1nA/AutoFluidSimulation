@@ -4,7 +4,7 @@
 
 覆盖：
 - _env_override: 环境变量覆盖逻辑
-- _expand_dict_env_vars: 字典批量环境变量展开
+- _expand_config_value: 配置值环境变量递归展开
 - _apply_env_overrides: 环境变量覆盖 LOCAL_PATHS/REMOTE_CONFIG
 - LOCAL_PATHS / REMOTE_CONFIG / IPC_CONFIG: 默认值完整性
 - get_step_filename: 全步骤文件名生成
@@ -21,7 +21,10 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 
 
 # ====================================================================
@@ -140,9 +143,9 @@ class TestStepFilePatterns:
         filename = pattern.format(config=12)
         assert filename == "model_gen4_12.scdoc"
 
-    def test_transfer_pattern_is_none(self):
+    def test_transfer_pattern_is_not_configured(self):
         from engine.config import STEP_FILE_PATTERNS
-        assert STEP_FILE_PATTERNS["transfer"] is None
+        assert "transfer" not in STEP_FILE_PATTERNS
 
     def test_meshing_pattern(self):
         from engine.config import STEP_FILE_PATTERNS
@@ -208,6 +211,7 @@ class TestEnsureDirectories:
     def test_creates_missing_directories(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         # 临时替换路径到 tmp_path 下
         original = {k: LOCAL_PATHS[k] for k in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]}
         try:
@@ -225,6 +229,7 @@ class TestEnsureDirectories:
     def test_existing_directories_no_error(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         original = {k: LOCAL_PATHS[k] for k in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]}
         try:
             for key in ["step_dir", "scdoc_dir", "log_dir", "data_dir"]:
@@ -248,6 +253,7 @@ class TestValidateConfig:
     def test_returns_empty_when_all_valid(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         # 创建假文件使路径"存在"
         sw_model = tmp_path / "model.SLDPRT"
         sw_model.touch()
@@ -292,6 +298,7 @@ class TestValidateConfig:
     def test_warns_missing_sw_model(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sw_model", str(tmp_path / "nonexistent.SLDPRT"))
         for key, name in [("excel", "t.xlsx"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -306,6 +313,7 @@ class TestValidateConfig:
     def test_warns_missing_excel(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "excel", str(tmp_path / "nonexistent.xlsx"))
         for key, name in [("sw_model", "m.SLDPRT"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -320,6 +328,7 @@ class TestValidateConfig:
     def test_warns_missing_sc_exe(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(tmp_path / "nonexistent.exe"))
         for key, name in [("sw_model", "m.SLDPRT"), ("excel", "t.xlsx"), ("sw_exe", "sw.exe")]:
             f = tmp_path / name
@@ -334,6 +343,7 @@ class TestValidateConfig:
     def test_warns_missing_sw_exe(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
         monkeypatch.setitem(LOCAL_PATHS, "sw_exe", str(tmp_path / "nonexistent.exe"))
         for key, name in [("sw_model", "m.SLDPRT"), ("excel", "t.xlsx"), ("sc_exe", "sc.exe")]:
             f = tmp_path / name
@@ -344,6 +354,76 @@ class TestValidateConfig:
         from engine.config import validate_config
         warnings = validate_config()
         assert any("SolidWorks 可执行文件不存在" in w for w in warnings)
+
+    def test_server_mode_skips_local_windows_path_validation(self, tmp_path, monkeypatch):
+        from engine.config import LOCAL_PATHS, REMOTE_CONFIG, validate_config
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        for key in ["sw_model", "excel", "sc_exe", "sw_exe"]:
+            monkeypatch.setitem(LOCAL_PATHS, key, str(tmp_path / f"missing-{key}"))
+
+        warnings = validate_config()
+
+        assert not any("SW 模型文件不存在" in w for w in warnings)
+        assert not any("Excel 参数表不存在" in w for w in warnings)
+        assert not any("SpaceClaim 可执行文件不存在" in w for w in warnings)
+        assert not any("SolidWorks 可执行文件不存在" in w for w in warnings)
+
+    def test_server_mode_warns_when_reachable_config_missing(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            warnings = validate_config()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert any("WS-A" in warning for warning in warnings)
+        assert any("AUTOFLUID_SSH_REACHABLE_HOST" in warning for warning in warnings)
+        assert any("172.17.135.240:22" in warning for warning in warnings)
+
+    def test_server_mode_warns_when_reachable_port_missing(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            warnings = validate_config()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert any("AUTOFLUID_SSH_REACHABLE_PORT" in warning for warning in warnings)
 
 
 # ====================================================================
@@ -480,14 +560,14 @@ class TestExpandEnvVars:
         assert _expand_env_vars("just text") == "just text"
 
 
-class TestExpandDictEnvVars:
-    """验证 _expand_dict_env_vars 批量展开。"""
+class TestExpandConfigValue:
+    """验证 _expand_config_value 递归展开。"""
 
     def test_expands_all_values(self, monkeypatch):
         monkeypatch.setenv("AF_DICT_HOST", "192.168.1.1")
         monkeypatch.setenv("AF_DICT_PORT", "8080")
-        from engine.config import _expand_dict_env_vars
-        result = _expand_dict_env_vars({
+        from engine.config import _expand_config_value
+        result = _expand_config_value({
             "host": "${AF_DICT_HOST}",
             "port": "${AF_DICT_PORT}",
             "name": "fixed",
@@ -497,8 +577,8 @@ class TestExpandDictEnvVars:
         assert result["name"] == "fixed"
 
     def test_non_string_values_preserved(self):
-        from engine.config import _expand_dict_env_vars
-        result = _expand_dict_env_vars({"count": 42, "flag": True})
+        from engine.config import _expand_config_value
+        result = _expand_config_value({"count": 42, "flag": True})
         assert result["count"] == 42
         assert result["flag"] is True
 
@@ -518,9 +598,10 @@ class TestApplyEnvOverrides:
             LOCAL_PATHS["sw_model"] = original
 
     def test_remote_config_override(self, monkeypatch):
-        from engine.config import REMOTE_CONFIG
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
         original_host = REMOTE_CONFIG.get("host", "")
         original_port = REMOTE_CONFIG.get("port", 22)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SSH_HOST", "10.0.0.1")
         monkeypatch.setenv("AUTOFLUID_SSH_PORT", "2222")
         try:
@@ -531,6 +612,64 @@ class TestApplyEnvOverrides:
         finally:
             REMOTE_CONFIG["host"] = original_host
             REMOTE_CONFIG["port"] = original_port
+            WORKSTATIONS[:] = original_workstations
+
+    def test_remote_reachable_env_override_updates_default_workstation(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_SSH_REACHABLE_PORT", "2222")
+        monkeypatch.setenv("AUTOFLUID_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        try:
+            import engine.config as cfg
+
+            cfg._apply_env_overrides()
+            workstation = cfg.get_workstation_config()
+
+            assert WORKSTATIONS[0]["reachable_host"] == "127.0.0.1"
+            assert WORKSTATIONS[0]["reachable_port"] == 2222
+            assert WORKSTATIONS[0]["connectivity_mode"] == "reverse_tunnel"
+            assert workstation["host"] == "127.0.0.1"
+            assert workstation["port"] == 2222
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_import_applies_reachable_env_to_default_workstation(self, tmp_path):
+        code = (
+            "from engine.config import WORKSTATIONS, get_workstation_config, validate_config\n"
+            "ws = WORKSTATIONS[0]\n"
+            "effective = get_workstation_config()\n"
+            "assert ws['reachable_host'] == '127.0.0.1', ws\n"
+            "assert ws['reachable_port'] == 2222, ws\n"
+            "assert ws['connectivity_mode'] == 'reverse_tunnel', ws\n"
+            "assert effective['host'] == '127.0.0.1', effective\n"
+            "assert effective['port'] == 2222, effective\n"
+            "assert not any('AUTOFLUID_SSH_REACHABLE_HOST' in w for w in validate_config())\n"
+        )
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.getcwd(),
+            "AUTOFLUID_SERVER_MODE": "server",
+            "AUTOFLUID_SSH_REACHABLE_HOST": "127.0.0.1",
+            "AUTOFLUID_SSH_REACHABLE_PORT": "2222",
+            "AUTOFLUID_SSH_CONNECTIVITY_MODE": "reverse_tunnel",
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            cwd=str(tmp_path),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
 
 
 # ====================================================================
@@ -580,6 +719,125 @@ class TestReloadConfigFromToml:
             assert REMOTE_CONFIG["host"] == "10.99.99.99"
         finally:
             REMOTE_CONFIG["host"] = original_host
+
+    def test_merges_workstations_and_expands_env_vars(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        monkeypatch.setenv("AUTOFLUID_WS_A_PASSWORD", "secret-a")
+        original = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "10.0.0.10",
+                        "reachable_host": "100.64.1.20",
+                        "reachable_port": "2222",
+                        "connectivity_mode": "tailscale",
+                        "port": 2222,
+                        "username": "ps",
+                        "password": "${AUTOFLUID_WS_A_PASSWORD}",
+                        "working_dir": r"D:\work",
+                        "scripts_dir": r"D:\scripts",
+                        "ref_files_dir": r"D:\refs",
+                        "scdoc_dir": r"D:\scdoc",
+                        "msh_dir": r"D:\msh",
+                        "result_dir": r"D:\case",
+                        "flag_dir": r"D:\flags",
+                        "conda_env": "pyfluent",
+                        "conda_exe": r"C:\conda.exe",
+                        "mpi_bin_dir": r"C:\mpi",
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert WORKSTATIONS == [
+                {
+                    "id": "WS-A",
+                    "host": "10.0.0.10",
+                    "reachable_host": "100.64.1.20",
+                    "reachable_port": 2222,
+                    "connectivity_mode": "tailscale",
+                    "port": 2222,
+                    "username": "ps",
+                    "password": "secret-a",
+                    "working_dir": r"D:\work",
+                    "scripts_dir": r"D:\scripts",
+                    "ref_files_dir": r"D:\refs",
+                    "scdoc_dir": r"D:\scdoc",
+                    "msh_dir": r"D:\msh",
+                    "result_dir": r"D:\case",
+                    "flag_dir": r"D:\flags",
+                    "conda_env": "pyfluent",
+                    "conda_exe": r"C:\conda.exe",
+                    "mpi_bin_dir": r"C:\mpi",
+                }
+            ]
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_remote_config_backfills_default_workstation(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.delenv("AUTOFLUID_SSH_PASSWORD", raising=False)
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "remote_config": {
+                    "host": "10.99.99.99",
+                    "reachable_host": "203.0.113.10",
+                    "connectivity_mode": "public",
+                    "password": "pw",
+                }
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert WORKSTATIONS[0]["id"] == "default"
+            assert WORKSTATIONS[0]["host"] == "10.99.99.99"
+            assert WORKSTATIONS[0]["reachable_host"] == "203.0.113.10"
+            assert WORKSTATIONS[0]["connectivity_mode"] == "public"
+            assert WORKSTATIONS[0]["password"] == "pw"
+        finally:
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_merges_ipc_config_and_applies_env_overrides(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import IPC_CONFIG
+
+        original = dict(IPC_CONFIG)
+        monkeypatch.setenv("AUTOFLUID_IPC_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_IPC_PORT", "9650")
+        monkeypatch.setenv("AUTOFLUID_IPC_AUTH_TOKEN", "env-token")
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "ipc_config": {
+                    "host": "0.0.0.0",
+                    "port": 9528,
+                    "auth_token": "${AUTOFLUID_IPC_AUTH_TOKEN}",
+                }
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert IPC_CONFIG["host"] == "127.0.0.1"
+            assert IPC_CONFIG["port"] == 9650
+            assert IPC_CONFIG["auth_token"] == "env-token"
+        finally:
+            IPC_CONFIG.clear()
+            IPC_CONFIG.update(original)
 
     def test_merges_step_file_patterns(self, monkeypatch):
         import engine.config as cfg
@@ -707,6 +965,24 @@ class TestReloadConfigFromToml:
             LOCAL_PATHS["sw_exe"] = original
             monkeypatch.delenv("AUTOFLUID_SW_EXE", raising=False)
 
+    def test_solver_iteration_count_env_overrides_toml(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import ENGINE_CONFIG
+
+        monkeypatch.setenv("AUTOFLUID_SOLVER_ITERATION_COUNT", "25")
+        original = ENGINE_CONFIG.get("solver_iteration_count", 1000)
+
+        def _mock_load(*args, **kwargs):
+            return {"solver": {"solver_iteration_count": 1000}}
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert ENGINE_CONFIG["solver_iteration_count"] == 25
+        finally:
+            ENGINE_CONFIG["solver_iteration_count"] = original
+            monkeypatch.delenv("AUTOFLUID_SOLVER_ITERATION_COUNT", raising=False)
+
 
 class TestConfigDictCompleteness:
     """验证各配置字典的必填键完整性。"""
@@ -719,7 +995,7 @@ class TestConfigDictCompleteness:
     }
 
     _IPC_REQUIRED_KEYS = {
-        "host", "port", "db_path", "timeout", "max_connections",
+        "host", "port", "db_path", "timeout", "max_connections", "auth_token",
     }
 
     _ENGINE_REQUIRED_KEYS = {
@@ -734,6 +1010,14 @@ class TestConfigDictCompleteness:
         missing = self._REMOTE_REQUIRED_KEYS - set(REMOTE_CONFIG.keys())
         assert not missing, f"REMOTE_CONFIG 缺失: {sorted(missing)}"
 
+    def test_workstations_keys(self):
+        from engine.config import WORKSTATIONS
+
+        assert WORKSTATIONS
+        for workstation in WORKSTATIONS:
+            missing = (self._REMOTE_REQUIRED_KEYS | {"id"}) - set(workstation.keys())
+            assert not missing, f"WORKSTATIONS 缺失: {sorted(missing)}"
+
     def test_ipc_config_keys(self):
         from engine.config import IPC_CONFIG
         missing = self._IPC_REQUIRED_KEYS - set(IPC_CONFIG.keys())
@@ -743,3 +1027,215 @@ class TestConfigDictCompleteness:
         from engine.config import ENGINE_CONFIG
         missing = self._ENGINE_REQUIRED_KEYS - set(ENGINE_CONFIG.keys())
         assert not missing, f"ENGINE_CONFIG 缺失: {sorted(missing)}"
+
+
+class TestWorkstationLookup:
+    """验证工作站配置查询。"""
+
+    def test_get_workstation_config_returns_copy(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.10",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\work",
+                "scripts_dir": r"D:\scripts",
+                "ref_files_dir": r"D:\refs",
+                "scdoc_dir": r"D:\scdoc",
+                "msh_dir": r"D:\msh",
+                "result_dir": r"D:\case",
+                "flag_dir": r"D:\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            }
+        ]
+        try:
+            workstation = cfg.get_workstation_config("WS-A")
+            workstation["host"] = "changed"
+            assert WORKSTATIONS[0]["host"] == "10.0.0.10"
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_get_workstation_config_uses_reachable_host_in_server_mode(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "reachable_host": "100.64.1.20",
+                "connectivity_mode": "tailscale",
+                "port": 22,
+                "username": "ps",
+                "password": "",
+                "working_dir": r"D:\work",
+                "scripts_dir": r"D:\scripts",
+                "ref_files_dir": r"D:\refs",
+                "scdoc_dir": r"D:\scdoc",
+                "msh_dir": r"D:\msh",
+                "result_dir": r"D:\case",
+                "flag_dir": r"D:\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            }
+        ]
+        try:
+            workstation = cfg.get_workstation_config("WS-A")
+
+            assert workstation["host"] == "100.64.1.20"
+            assert workstation["reachable_host"] == "100.64.1.20"
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_get_workstation_config_uses_reachable_port_in_server_mode(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+                "port": 22,
+                "username": "ps",
+                "password": "",
+                "working_dir": r"D:\work",
+                "remote_script_dir": r"D:\scripts",
+                "scdoc_dir": r"D:\scdoc",
+                "msh_dir": r"D:\msh",
+                "result_dir": r"D:\case",
+                "fluent_log_dir": r"D:\logs",
+                "fluent_journal": r"D:\solver.jou",
+                "fluent_post_journal": r"D:\post.jou",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            }
+        ]
+        try:
+            workstation = cfg.get_workstation_config("WS-A")
+
+            assert workstation["host"] == "127.0.0.1"
+            assert workstation["port"] == 2222
+            assert workstation["reachable_port"] == 2222
+        finally:
+            WORKSTATIONS[:] = original
+
+    def test_get_workstation_config_rejects_unknown_id(self):
+        import pytest
+        import engine.config as cfg
+
+        with pytest.raises(KeyError):
+            cfg.get_workstation_config("missing")
+
+
+class TestServerModeLocalPaths:
+    """验证 server 模式下 daemon 本地产物路径不会落到 Windows 默认路径。"""
+
+    def test_reload_config_keeps_toml_scdoc_dir_in_server_mode(self, monkeypatch, tmp_path):
+        import engine.config as cfg
+
+        original_local = dict(cfg.LOCAL_PATHS)
+        original_remote = dict(cfg.REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in cfg.WORKSTATIONS]
+        data_dir = tmp_path / "server-data"
+        toml_scdoc_dir = tmp_path / "toml-scdoc"
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.delenv("AUTOFLUID_SCDOC_DIR", raising=False)
+        monkeypatch.delenv("AUTOFLUID_DATA_DIR", raising=False)
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda: {
+                "local_paths": {
+                    "data_dir": str(data_dir),
+                    "scdoc_dir": str(toml_scdoc_dir),
+                }
+            },
+        )
+
+        try:
+            assert cfg.reload_config_from_toml() is True
+
+            assert cfg.LOCAL_PATHS["data_dir"] == str(data_dir)
+            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(toml_scdoc_dir)
+        finally:
+            cfg.LOCAL_PATHS.clear()
+            cfg.LOCAL_PATHS.update(original_local)
+            cfg.REMOTE_CONFIG.clear()
+            cfg.REMOTE_CONFIG.update(original_remote)
+            cfg.WORKSTATIONS[:] = original_workstations
+
+    def test_reload_config_keeps_explicit_scdoc_env_override(self, monkeypatch, tmp_path):
+        import engine.config as cfg
+
+        original_local = dict(cfg.LOCAL_PATHS)
+        original_remote = dict(cfg.REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in cfg.WORKSTATIONS]
+        explicit_scdoc_dir = tmp_path / "explicit-scdoc"
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setenv("AUTOFLUID_SCDOC_DIR", str(explicit_scdoc_dir))
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda: {
+                "local_paths": {
+                    "data_dir": str(tmp_path / "server-data"),
+                    "scdoc_dir": r"C:\Users\XKZ\Documents\000ansys_data\scdoc",
+                }
+            },
+        )
+
+        try:
+            assert cfg.reload_config_from_toml() is True
+
+            assert cfg.LOCAL_PATHS["scdoc_dir"] == str(explicit_scdoc_dir)
+        finally:
+            cfg.LOCAL_PATHS.clear()
+            cfg.LOCAL_PATHS.update(original_local)
+            cfg.REMOTE_CONFIG.clear()
+            cfg.REMOTE_CONFIG.update(original_remote)
+            cfg.WORKSTATIONS[:] = original_workstations
+
+    def test_ensure_directories_skips_local_worker_step_dir_in_server_mode(
+        self, monkeypatch, tmp_path
+    ):
+        import engine.config as cfg
+
+        created_paths: list[str] = []
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "step_dir", r"C:\local-worker\step")
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "scdoc_dir", str(tmp_path / "scdoc"))
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "log_dir", str(tmp_path / "logs"))
+        monkeypatch.setitem(cfg.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+        monkeypatch.setattr(
+            cfg.os,
+            "makedirs",
+            lambda path, exist_ok=True: created_paths.append(path),
+        )
+
+        cfg.ensure_directories()
+
+        assert r"C:\local-worker\step" not in created_paths
+        assert created_paths == [
+            str(tmp_path / "scdoc"),
+            str(tmp_path / "logs"),
+            str(tmp_path / "data"),
+        ]

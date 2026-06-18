@@ -66,6 +66,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
         output_dir=str(output_dir),
         working_dir=str(working_dir),
         processor_count=1,
+        scdoc_name=f"model_gen4_{config_id}.scdoc",
     )
 
 
@@ -104,6 +105,20 @@ def test_missing_scdoc_is_rejected_before_fluent_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "parse_args", lambda: args)
 
     with pytest.raises(FileNotFoundError, match="SCDOC 输入文件不存在"):
+        module.main()
+
+
+def test_uses_configured_scdoc_name_for_input_validation(tmp_path, monkeypatch):
+    def fail_if_launched(**kwargs: Any):
+        raise AssertionError("Fluent must not launch when the configured SCDOC is missing")
+
+    module = _load_batch_meshing_module(monkeypatch, fail_if_launched)
+    args = _make_args(tmp_path, config_id=9)
+    Path(args.scdoc_dir, f"model_gen4_{args.config_id}.scdoc").unlink()
+    args.scdoc_name = "custom_9.scdoc"
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+
+    with pytest.raises(FileNotFoundError, match="custom_9\\.scdoc"):
         module.main()
 
 

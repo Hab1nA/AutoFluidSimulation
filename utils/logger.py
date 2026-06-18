@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """日志工具模块 (Logger Utility)
 提供统一的日志记录功能，同时输出到文件和控制台。
 支持会话管理：每次进程启动时通过 init_session() 创建独立的日志存放目录，
@@ -19,6 +21,7 @@ import logging
 import os
 import re
 import threading
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -56,6 +59,37 @@ _deferred_loggers: list[
     tuple[logging.Logger, _BufferHandler, logging.Formatter]
 ] = []
 _deferred_lock = threading.Lock()
+_broadcast_logger_names: set[str] = set()
+_broadcast_logger_lock = threading.Lock()
+
+_MANUAL_MESSAGE_PREFIX_RE = re.compile(
+    r"^\[(?=[^\]\r\n]*[A-Za-z\u4e00-\u9fff])[^\]\r\n]{1,40}\]\s*"
+)
+
+
+def _strip_manual_message_prefix(message: str) -> str:
+    """Remove handwritten module/category prefixes from a log message.
+
+    The formatter already includes ``%(name)s`` as the authoritative source, so
+    message text should not repeat tags such as ``[IPC]`` or ``[Scheduler]``.
+    Numeric progress markers like ``[1/3]`` are intentionally preserved.
+    """
+    cleaned = message
+    while True:
+        next_cleaned = _MANUAL_MESSAGE_PREFIX_RE.sub("", cleaned, count=1)
+        if next_cleaned == cleaned:
+            return cleaned
+        cleaned = next_cleaned
+
+
+class PrefixStrippingFormatter(logging.Formatter):
+    """Formatter that removes duplicate handwritten prefixes from message text."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        normalized = copy(record)
+        normalized.msg = _strip_manual_message_prefix(record.getMessage())
+        normalized.args = ()
+        return super().format(normalized)
 
 
 def init_session(process_type: str, timestamp: str | None = None) -> str:
@@ -158,6 +192,18 @@ def _infer_log_category(name: str) -> str:
     return "daemon"
 
 
+def _register_broadcast_logger(name: str) -> None:
+    """Register a project logger as eligible for daemon log broadcasting."""
+    with _broadcast_logger_lock:
+        _broadcast_logger_names.add(name)
+
+
+def _is_registered_broadcast_logger(name: str) -> bool:
+    """Return whether a logger was explicitly registered by setup_logger()."""
+    with _broadcast_logger_lock:
+        return name in _broadcast_logger_names
+
+
 def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
     """创建并配置一个 logger 实例。
 
@@ -171,11 +217,12 @@ def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
 
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
+    _register_broadcast_logger(name)
 
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
+    formatter = PrefixStrippingFormatter(
         "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -265,7 +312,15 @@ POLLING_COMMANDS = frozenset({
     "get_all_status",
     "get_log_entries",
     "get_engine_status",
+    "get_dashboard",
+    "worker_poll",
 })
+
+_IPC_LIFECYCLE_LOG_MARKERS = (
+    "IPC 客户端连接",
+    "IPC 客户端断开",
+    "客户端主动断开",
+)
 
 _CONFIG_SCOPED_LOG_PATTERNS = (
     re.compile(r"构型\s*\d+"),
@@ -296,12 +351,25 @@ def _classify_source(logger_name: str, message: str) -> str:
     return "system"
 
 
+def _optional_str(value: object) -> str | None:
+    """Return a non-empty string for optional log context fields."""
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
+
+
 @dataclass
 class LogEntry:
     """结构化日志条目，用于 IPC 传输和 TUI 展示。
 
     message: 完整格式化消息（含时间戳、级别、logger名），用于文件导出
     raw_message: 原始消息文本（仅 logger名 + 消息内容），用于 TUI 详细日志面板显示
+    category: 条目分类（"general" / "polling" / "lifecycle" / "config_scoped" 等）
+    config_name: 关联构型名称
+    step_name: 关联步骤名称
+    worker_id: 关联 Worker ID
+    is_polling: 是否为轮询类日志
     """
 
     id: int
@@ -311,9 +379,14 @@ class LogEntry:
     logger_name: str
     message: str
     raw_message: str
+    category: str = "general"
+    config_name: str | None = None
+    step_name: str | None = None
+    worker_id: str | None = None
+    is_polling: bool = False
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "id": self.id,
             "timestamp": self.timestamp,
             "level": self.level,
@@ -322,6 +395,16 @@ class LogEntry:
             "message": self.message,
             "raw_message": self.raw_message,
         }
+        d["category"] = self.category
+        if self.config_name is not None:
+            d["config_name"] = self.config_name
+        if self.step_name is not None:
+            d["step_name"] = self.step_name
+        if self.worker_id is not None:
+            d["worker_id"] = self.worker_id
+        if self.is_polling:
+            d["is_polling"] = self.is_polling
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "LogEntry":
@@ -333,6 +416,11 @@ class LogEntry:
             logger_name=data.get("logger_name", ""),
             message=data.get("message", ""),
             raw_message=data.get("raw_message", data.get("message", "")),
+            category=data.get("category", "general"),
+            config_name=data.get("config_name"),
+            step_name=data.get("step_name"),
+            worker_id=data.get("worker_id"),
+            is_polling=data.get("is_polling", False),
         )
 
 
@@ -343,13 +431,14 @@ class LogBroadcastHandler(logging.Handler):
     缓冲区满时自动淘汰最旧条目（deque maxlen 机制）。
     """
 
-    def __init__(self, capacity: int = 1000):
+    def __init__(self, capacity: int = 1000, registered_only: bool = False):
         super().__init__()
         self.setLevel(logging.DEBUG)
         self._buffer: collections.deque[LogEntry] = collections.deque(maxlen=capacity)
         self._id_counter = itertools.count(1)
         self._lock = threading.Lock()
-        self._formatter = logging.Formatter(
+        self.registered_only = registered_only
+        self._formatter = PrefixStrippingFormatter(
             "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
@@ -358,11 +447,17 @@ class LogBroadcastHandler(logging.Handler):
         try:
             if getattr(record, "broadcast", True) is False:
                 return
-            if self._is_polling_log(record):
-                return
-            if self._is_config_scoped_log(record):
+            if self.registered_only and not _is_registered_broadcast_logger(record.name):
                 return
             entry = self._entry_from_record(record)
+            has_explicit_category = bool(getattr(record, "log_category", None))
+            if getattr(record, "is_polling", False) or self._is_polling_log(record):
+                entry.is_polling = True
+                entry.category = "polling"
+            elif not has_explicit_category and self._is_ipc_lifecycle_log(record):
+                entry.category = "lifecycle"
+            elif not has_explicit_category and self._is_config_scoped_log(record):
+                entry.category = "config_scoped"
             with self._lock:
                 self._buffer.append(entry)
         except Exception:
@@ -370,8 +465,9 @@ class LogBroadcastHandler(logging.Handler):
 
     def _entry_from_record(self, record: logging.LogRecord) -> LogEntry:
         """Build a structured entry from a log record."""
+        clean_message = _strip_manual_message_prefix(record.getMessage())
         msg = self._formatter.format(record)
-        raw_msg = f"[{record.name}] {record.getMessage()}"
+        raw_msg = f"[{record.name}] {clean_message}"
         return LogEntry(
             id=next(self._id_counter),
             timestamp=datetime.fromtimestamp(
@@ -382,6 +478,11 @@ class LogBroadcastHandler(logging.Handler):
             logger_name=record.name,
             message=msg,
             raw_message=raw_msg,
+            category=str(getattr(record, "log_category", "general") or "general"),
+            config_name=_optional_str(getattr(record, "config_name", None)),
+            step_name=_optional_str(getattr(record, "step_name", None)),
+            worker_id=_optional_str(getattr(record, "worker_id", None)),
+            is_polling=bool(getattr(record, "is_polling", False)),
         )
 
     @staticmethod
@@ -395,6 +496,14 @@ class LogBroadcastHandler(logging.Handler):
             return False
         message = record.getMessage()
         return any(pattern.search(message) for pattern in _CONFIG_SCOPED_LOG_PATTERNS)
+
+    @staticmethod
+    def _is_ipc_lifecycle_log(record: logging.LogRecord) -> bool:
+        """过滤 IPC 连接生命周期噪音，保留真正的 IPC 错误和命令日志。"""
+        if "ipc" not in record.name.lower():
+            return False
+        message = record.getMessage()
+        return any(marker in message for marker in _IPC_LIFECYCLE_LOG_MARKERS)
 
     @staticmethod
     def _is_polling_log(record: logging.LogRecord) -> bool:
@@ -428,6 +537,9 @@ class LogBroadcastHandler(logging.Handler):
         limit: int = 100,
         level_filter: str | None = None,
         source_filter: str | None = None,
+        include_polling: bool = False,
+        include_lifecycle: bool = False,
+        include_config_scoped: bool = False,
     ) -> dict:
         """增量查询日志条目。
 
@@ -436,33 +548,63 @@ class LogBroadcastHandler(logging.Handler):
             limit: 最大返回条数
             level_filter: 按日志级别过滤（显示该级别及以上更严重级别）
             source_filter: 按来源过滤（如 "remote_ps", "local_ps"）
+            include_polling: 是否包含轮询类日志条目
+            include_lifecycle: 是否包含 IPC 生命周期日志条目
+            include_config_scoped: 是否包含逐构型日志条目
 
         Returns:
-            {"entries": [LogEntry.to_dict(), ...], "latest_id": int, "total": int}
+            {"entries": [...], "latest_id": int, "total": int,
+             "has_gap": bool, "reset": bool}
         """
         with self._lock:
             snapshot = list(self._buffer)
 
+        latest_id = snapshot[-1].id if snapshot else 0
+
+        # since_id 超过缓冲区最大 ID → 客户端游标已过期，提示重置
+        reset = bool(since_id > latest_id > 0)
+        if reset:
+            since_id = 0
+
+        # since_id 仍在有效范围之前但已被环形缓冲淘汰 → 提示有间隙
+        has_gap = False
+        if not reset and since_id > 0 and snapshot:
+            if since_id < snapshot[0].id:
+                has_gap = True
+
         threshold = self._LEVEL_ORDER.get(level_filter, 0) if level_filter else -1
-        filtered = []
+        visible = []
         for entry in snapshot:
             if entry.id <= since_id:
+                continue
+            # 按类别隐藏（默认隐藏轮询 / 生命周期 / 逐构型）
+            if not include_polling and entry.is_polling:
+                continue
+            if not include_lifecycle and entry.category == "lifecycle":
+                continue
+            if not include_config_scoped and entry.category == "config_scoped":
                 continue
             if level_filter and self._LEVEL_ORDER.get(entry.level, 1) < threshold:
                 continue
             if source_filter and entry.source != source_filter:
                 continue
-            filtered.append(entry)
+            visible.append(entry)
 
-        filtered.sort(key=lambda e: e.id)
-
-        latest_id = snapshot[-1].id if snapshot else 0
-        total = len(snapshot)
+        visible.sort(key=lambda e: e.id)
+        total = len(visible)
+        if limit <= 0:
+            limited = []
+        elif since_id == 0:
+            limited = visible[-limit:]
+        else:
+            limited = visible[:limit]
 
         return {
-            "entries": [e.to_dict() for e in filtered[:limit]],
+            "entries": [e.to_dict() for e in limited],
             "latest_id": latest_id,
             "total": total,
+            "has_gap": has_gap,
+            "reset": reset,
         }
 
     def get_stats(self) -> dict:
@@ -514,13 +656,32 @@ def install_broadcast_handler(capacity: int = 1000) -> LogBroadcastHandler:
     global _broadcast_handler
 
     with _broadcast_handler_lock:
+        root_logger = logging.getLogger()
+        existing_handlers = [
+            handler
+            for handler in root_logger.handlers
+            if isinstance(handler, LogBroadcastHandler)
+        ]
+
         if _broadcast_handler is not None:
+            keeper = _broadcast_handler
+            keeper.registered_only = True
+            for handler in existing_handlers:
+                if handler is not keeper:
+                    root_logger.removeHandler(handler)
+            if keeper not in root_logger.handlers:
+                root_logger.addHandler(keeper)
+            return keeper
+
+        if existing_handlers:
+            _broadcast_handler = existing_handlers[0]
+            _broadcast_handler.registered_only = True
+            for handler in existing_handlers[1:]:
+                root_logger.removeHandler(handler)
             return _broadcast_handler
 
         clamped = min(capacity, _MAX_BROADCAST_CAPACITY)
-        _broadcast_handler = LogBroadcastHandler(capacity=clamped)
-
-        root_logger = logging.getLogger()
+        _broadcast_handler = LogBroadcastHandler(capacity=clamped, registered_only=True)
         root_logger.addHandler(_broadcast_handler)
 
         return _broadcast_handler

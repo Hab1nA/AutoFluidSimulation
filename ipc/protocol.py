@@ -55,14 +55,31 @@ CMD_GET_ALL_STATUS = "get_all_status"   # 获取所有构型状态
 CMD_GET_STATISTICS = "get_statistics"   # 获取统计信息
 CMD_GET_ENGINE_STATUS = "get_engine_status"  # 获取引擎状态
 CMD_GET_LOG_ENTRIES = "get_log_entries"  # 增量拉取日志条目
+CMD_GET_DASHBOARD = "get_dashboard"      # 批量获取状态、引擎信息和日志增量
 CMD_RELOAD_CONFIG = "reload_config"      # 重新加载 TOML 配置文件
+
+# ---- LocalWorker 命令 ----
+CMD_WORKER_REGISTER = "worker_register"    # LocalWorker 注册
+CMD_WORKER_HEARTBEAT = "worker_heartbeat"  # LocalWorker 心跳
+CMD_WORKER_POLL = "worker_poll"            # LocalWorker 拉取待执行任务
+CMD_WORKER_STEP_COMPLETE = "worker_step_complete"  # LocalWorker 上报任务完成
+CMD_WORKER_STEP_ERROR = "worker_step_error"        # LocalWorker 上报任务失败
+
+# ---- Worker 生命周期管理命令 ----
+CMD_WORKER_START = "worker_start"          # 启动所有 worker（本地 + 工作站）
+CMD_WORKER_STOP = "worker_stop"            # 停止所有 worker 并关闭 SSH 隧道
+CMD_WORKER_RESTART = "worker_restart"      # 重启所有 worker
 
 
 # ============================================================================
 # 消息构造与解析
 # ============================================================================
 
-def create_request(command: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def create_request(
+    command: str,
+    params: dict[str, Any] | None = None,
+    auth_token: str | None = None,
+) -> dict[str, Any]:
     """
     创建一个标准请求消息。
 
@@ -73,11 +90,14 @@ def create_request(command: str, params: dict[str, Any] | None = None) -> dict[s
     Returns:
         请求消息字典
     """
-    return {
+    request = {
         "command": command,
         "params": params or {},
         "request_id": str(uuid.uuid4())[:8],
     }
+    if auth_token:
+        request["auth_token"] = auth_token
+    return request
 
 
 def create_response(status: str, request_id: str, data: Any = None,
@@ -123,9 +143,9 @@ def deserialize(data: bytes) -> dict[str, Any] | None:
             return None
         obj = json.loads(text)
         if not isinstance(obj, dict):
-            logger.warning(f"消息反序列化后不是对象: {type(obj).__name__}")
+            logger.warning(f"[IPC] 消息反序列化后不是对象: {type(obj).__name__}")
             return None
         return obj
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.warning(f"消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
+        logger.warning(f"[IPC] 消息反序列化失败: {e} (原始数据前100字节: {data[:100]!r})")
         return None

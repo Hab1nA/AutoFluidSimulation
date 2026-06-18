@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.6.1** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.8.2** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -13,13 +13,14 @@ AutoFluid 是一个**全自动 CFD 仿真流水线控制系统**，用于批量�
 - **全自动五阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解全流程
 - **C/S 分离架构**: Python 后台守护进程 (Daemon) + Rust TUI 终端界面，独立部署、独立重启
 - **直接 COM API**: 通过 `win32com` 直接调用 SolidWorks COM 接口导出 STEP，无需宏文件
-- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（7 分类 48 字段在线编辑）
+- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（9 分类 47 字段在线编辑）
 - **SQLite WAL 持久化**: 状态实时落盘，支持断点续传，Daemon 重启不丢失进度
 - **DAG 异步调度**: Producer-Consumer 队列 + 全局 Barrier，边导出边处理的并行流水线
-- **SCProcessPool**: 3 槽位进程池管理 SpaceClaim 并发调用，含等待队列与断点续传
+- **SCProcessPool**: 1 槽位常驻进程池管理 SpaceClaim 并发调用（可通过 sc_max_slots 扩展），含等待队列与断点续传
 - **C# Bridge**: SpaceClaim 通过 C# `SpaceClaimBridge.exe` 进程检测模式调用，三相 GUI 就绪检测
 - **远程编排**: SSH + PowerShell `Start-Process` 在远程工作站启动独立后台进程
 - **优雅关闭**: `quit full` 安全退出，自动断开 SSH、停止监控、清理残留进程
+- **Worker 生命周期管理**: TUI 内 `worker start/stop/restart` 统一管理本地 Worker 进程和工作站 SSH 隧道
 
 ---
 
@@ -30,6 +31,7 @@ graph TB
     subgraph "TUI 客户端进程"
         TUI[Rust TUI<br/>ratatui + tokio]
         IPC_C[IPC Client<br/>TCP Socket]
+        WM[WorkerManager<br/>本地进程 + SSH 隧道]
     end
 
     subgraph "后台 Daemon 进程 (Python)"
@@ -37,11 +39,14 @@ graph TB
         SM[StateManager<br/>SQLite WAL]
         SCH[PipelineScheduler<br/>DAG + Barrier]
         TR[TaskRunner]
-        SCPOOL[SCProcessPool<br/>3 槽位并发池]
+        SCPOOL[SCProcessPool<br/>1 槽位常驻池]
         FM[StepFileMonitor<br/>文件大小稳定检测]
+        LWR[LocalWorkerRegistry<br/>Worker 注册与心跳]
+        LWA[LocalWorkerAdapter<br/>Daemon 侧 Worker 代理]
     end
 
     subgraph "本地 Windows"
+        LW[LocalWorker<br/>Python 进程]
         SW[SolidWorks<br/>win32com COM API]
         SC[SpaceClaim<br/>C# Bridge → 进程检测]
         FS[文件系统<br/>STEP/SCDOC]
@@ -57,6 +62,7 @@ graph TB
     IPC_C --> IPC_S
     IPC_S --> SM
     IPC_S --> SCH
+    IPC_S --> LWR
     SCH --> FM
     SCH --> TR
     SCH --> SCPOOL
@@ -66,6 +72,10 @@ graph TB
     SSH -->|Start-Process| MESH
     SSH -->|Start-Process| SOLVER
     FM -->|轮询| FS
+    LW -->|worker_register/poll/heartbeat| IPC_S
+    LWA -->|enqueue_task| LWR
+    TUI -->|worker_mgr| WM
+    WM -->|启动/停止| LW
 ```
 
 | 组件                        | 职责                                        | 技术                             |
@@ -74,8 +84,12 @@ graph TB
 | **PipelineScheduler** | DAG 调度、Barrier 控制、SW 重试编排         | Producer-Consumer 队列           |
 | **StateManager**      | 持久化状态，并发读写，增量同步              | SQLite WAL                       |
 | **TaskRunner**        | 各阶段执行（SW/SC/Transfer/Meshing/Solver） | win32com / paramiko / subprocess |
-| **SCProcessPool**     | SpaceClaim 3 槽位并发池 + 等待队列          | C# Bridge 进程检测模式           |
+| **SCProcessPool**     | SpaceClaim 1 槽位常驻池 + 等待队列          | C# Bridge 进程检测模式           |
 | **StepFileMonitor**   | STEP 文件稳定性检测                         | 轮询 + 历史采样                  |
+| **LocalWorkerRegistry** | Worker 注册、心跳、任务队列调度           | 内存注册表 + 线程锁              |
+| **LocalWorkerAdapter** | Daemon 侧 Worker 代理，投递 SW/SC 任务    | enqueue/wait 模式                |
+| **LocalWorker**       | 本地 Worker 客户端，执行 SW/SC 任务         | Python 进程 + IPC 轮询           |
+| **WorkerManager**     | TUI 侧 Worker 进程和 SSH 隧道管理          | Rust 子进程管理                  |
 | **IPC Server**        | Daemon ↔ TUI 通信                          | TCP + JSON                       |
 | **PipelineTUI**       | 终端交互界面                                | Rust ratatui                     |
 
@@ -98,7 +112,7 @@ SW 导出 → SC 转换 → Transfer 传输 → Meshing 网格 → Solver 求解
 ### 调度策略
 
 1. **SW 阶段**: 串行遍历所有构型，导出同时文件监控器并行推送下游
-2. **SC → Transfer → Meshing**: 3 个 Worker 线程并发处理
+2. **SC → Transfer → Meshing**: SC + Transfer 各 1 个 Worker 线程组成流水线
 3. **全局 Barrier**: 所有 Meshing 完成后统一解锁 Solver
 4. **Solver 阶段**: 所有构型并行启动求解
 
@@ -127,11 +141,17 @@ AutoFluidSimulation/
 │   ├── config.py            # 配置中心（路径、SSH、引擎参数）
 │   ├── config_fingerprint.py # 配置指纹（数据库分片）
 │   ├── daemon.py            # PipelineDaemon 守护进程
+│   ├── config_assigner.py    # ConfigAssigner 构型→工作站分配
+│   ├── local_worker.py       # LocalWorker 本地 Worker 客户端
+│   ├── local_worker_registry.py # LocalWorkerRegistry 注册与心跳
+│   ├── local_worker_adapter.py  # LocalWorkerAdapter Daemon 侧代理
 │   ├── scheduler/           # PipelineScheduler DAG 调度器（子包）
 │   │   ├── main.py          # 调度主逻辑
 │   │   ├── barrier.py       # 全局屏障协调器
+│   │   ├── control.py       # 暂停/恢复/停止控制
 │   │   ├── sw_phase.py      # SW 阶段处理器
 │   │   ├── worker_pool.py   # Worker 线程池管理
+│   │   ├── work_queue.py    # 工作队列
 │   │   ├── meshing_monitor.py # 网格阶段监控
 │   │   ├── retry.py         # 重试管理器
 │   │   └── utils.py         # 调度工具函数
@@ -148,14 +168,16 @@ AutoFluidSimulation/
 │   ├── spaceclaim_transit.py # SC 转换脚本（V23 API）
 │   ├── sw_executor.py        # SolidWorks COM 执行器
 │   ├── remote_executor.py    # 远程 SSH 执行器
-│   └── cleaner.py            # 中间文件清理器
+│   ├── cleaner.py            # 中间文件清理器
+│   └── remote_scripts/       # 远程部署脚本
 │
 ├── bridge/                  # C# SpaceClaim 桥接
 │   └── SpaceClaimBridge/
 │       ├── Program.cs       # 主程序（.NET 4.8，进程检测模式）
 │       ├── Program.NoRef.cs # 免 ANSYS 引用版本
 │       ├── compile.bat      # MSBuild 编译
-│       └── compile_noref.bat
+│       ├── compile_noref.bat
+│       └── find_msbuild.bat # MSBuild 自动探测
 │
 ├── utils/                   # 工具模块
 │   ├── excel_reader.py      # Excel 读取
@@ -167,19 +189,50 @@ AutoFluidSimulation/
 ├── autofluid-tui/           # Rust TUI 前端
 │   ├── Cargo.toml
 │   └── src/
-│       ├── main.rs          # 异步主循环
+│       ├── main.rs          # 二进制入口
+│       ├── lib.rs           # 库入口（模块声明 + run_tui）
 │       ├── daemon_mgr.rs    # Daemon 进程管理
+│       ├── worker_mgr.rs    # Worker 进程管理（本地 Worker + SSH 隧道）
+│       ├── event_handler.rs # 事件处理模块入口
+│       ├── event_handler/   # 事件处理（command / key_handler / mouse / actions）
+│       ├── ipc.rs           # IPC 通信模块入口
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
-│       ├── state/           # 应用状态
-│       ├── event_handler/   # 事件处理（command.rs / key_handler.rs）
-│       ├── settings/        # 设置页面（9 分类 49 字段）
-│       └── ui/              # UI 渲染
+│       ├── state.rs         # 应用状态模块入口
+│       ├── state/           # 应用状态（app_state / filter / log_buffer）
+│       ├── settings/        # 设置页面（9 分类 47 字段）
+│       ├── text_buffer.rs   # 文本缓冲区
+│       ├── theme.rs         # 主题配色
+│       ├── ui.rs            # UI 渲染模块入口
+│       ├── ui/              # UI 渲染（header / table / logs / dialogs / command_bar / scrollbar / layout）
+│       └── utils.rs         # 工具函数
+│
+├── scripts/                 # 环境检查与部署脚本
+│   ├── autofluid_env.ps1    # 环境变量加载库
+│   ├── check_local_env.ps1  # 本地控制机环境检查
+│   ├── check_remote_env.ps1 # 远程工作站环境检查（通过 SSH）
+│   ├── setup_remote_workstation.ps1 # 远程工作站一键部署
+│   ├── verify_remote_setup.ps1     # 远程环境快速验证
+│   ├── start_autofluid_preflight.ps1 # 预检 + 启动 Daemon
+│   ├── start_client_window.ps1     # TUI 客户端启动窗口
+│   ├── start_daemon_window.ps1     # Daemon 启动窗口
+│   ├── start_local_worker_window.ps1 # 本地 Worker 启动窗口
+│   ├── start_server_ipc_tunnel.ps1 # 服务器 IPC 隧道
+│   ├── start_workstation_reverse_tunnel.ps1 # 工作站反向 SSH 隧道
+│   └── deploy_linux_server.sh # Linux 服务器部署脚本
+│
+├── tools/                   # 服务器 CLI 工具
+│   └── autofluid_cli.py     # 服务器端命令行管理工具
 │
 ├── docs/                    # 项目文档
 │   ├── code-style-guide.md  # 代码规范
-│   └── roadmap.md           # 远期路线图
+│   ├── architecture-refactoring-plan.md # 远期架构改进计划
+│   ├── current-daemon-architecture.md # 当前 Daemon 架构说明
+│   ├── solver-remaining-time-design.md # 求解器剩余时间估算
+│   ├── test-failure-investigation-2026-06-17.md # 测试失败分析
+│   ├── workstation-tunnel-recovery-plan.md # 工作站隧道自恢复方案
+│   └── Fluent仿真数据采集与五项研究指标计算报告.md # 仿真数据采集报告
 │
-└── tests/                   # 测试
+└── tests/                   # 测试（39 个测试文件）
 ```
 
 ---
@@ -206,7 +259,6 @@ python-dotenv≥1.0.0    # .env 加载
 toml≥0.10.0            # TOML 配置
 pywin32≥305            # SolidWorks COM
 paramiko≥3.0.0         # SSH/SFTP
-watchdog≥3.0.0         # 文件监控
 ```
 
 安装：`pip install -r requirements.txt`
@@ -235,7 +287,7 @@ watchdog≥3.0.0         # 文件监控
 
 | 要求                         | 说明                                       |
 | ---------------------------- | ------------------------------------------ |
-| **Python 3.10 ~ 3.12** | 推荐 3.11（`toml` 标准库可替代第三方包） |
+| **Python 3.10+** | 推荐 3.13（项目 .venv 当前为 3.13.9） |
 | **pip 23.0+**          | 用于安装依赖                               |
 
 **依赖包清单**（`pip install -r requirements.txt` 一键安装）：
@@ -247,7 +299,6 @@ watchdog≥3.0.0         # 文件监控
 | `python-dotenv` | ≥1.0.0  | 加载 `.env` 敏感信息（SSH 密码等）     |
 | `pywin32`       | ≥305    | SolidWorks COM 自动化接口                |
 | `paramiko`      | ≥3.0.0  | SSH/SFTP 远程连接与文件传输              |
-| `watchdog`      | ≥3.0.0  | 文件系统事件监控（STEP 文件稳定性检测）  |
 | `sqlite3`       | —       | Python 标准库自带，SQLite WAL 状态持久化 |
 
 ```powershell
@@ -464,6 +515,33 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 9  | 目录结构就位        | 确认 `step_dir` / `scdoc_dir` / `.env` / `Excel` / `.SLDPRT` 均已存在        |
 | 10 | TOML 配置正确       | TUI 启动后执行 `check` 命令或进入 `settings` 页面验证                              |
 
+### 环境自动化脚本
+
+`scripts/` 目录提供一套 PowerShell 脚本，用于快速检查和配置本地及远程环境：
+
+| 脚本                               | 用途                                                        | 运行位置     |
+| ---------------------------------- | ----------------------------------------------------------- | ------------ |
+| `check_local_env.ps1`            | 逐项检查本地控制机环境（Python/Rust/MSBuild/SW/SC/SSH等）  | 本地控制机   |
+| `check_remote_env.ps1`           | 通过 SSH 检查远程工作站环境（Conda/PyFluent/Fluent/MPI等） | 本地控制机   |
+| `setup_remote_workstation.ps1`   | 一键部署远程工作站（SSH+Conda+PyFluent+目录结构）           | 远程工作站   |
+| `verify_remote_setup.ps1`        | 在远程工作站本机快速验证环境就绪状态                        | 远程工作站   |
+| `start_client_window.ps1`        | 设置窗口标题并启动 TUI 客户端                               | 本地控制机   |
+| `start_daemon_window.ps1`        | 设置窗口标题并启动后台 Daemon                               | 本地控制机   |
+
+```powershell
+# 本地环境检查
+.\scripts\check_local_env.ps1
+
+# 远程环境检查（会提示输入 SSH 主机/用户）
+.\scripts\check_remote_env.ps1
+
+# 在远程工作站上（管理员身份）一键部署
+.\scripts\setup_remote_workstation.ps1
+
+# 在远程工作站上快速验证
+.\scripts\verify_remote_setup.ps1
+```
+
 ### 编译（首次使用）
 
 ```powershell
@@ -519,7 +597,7 @@ python main.py --all           # 同时启动
 │  ...                      │  [DEBUG] COM 调用...     │
 ├───────────────────────────┴──────────────────────────┤
 │  > start                                          ▎ │  ← 命令输入行
-│▶ Start│⏸ Pause │⚙ Settings│🔧 Check│...│⏹ Full│  ← 快捷按钮栏
+|▶ Start│⏸ Pause│⚙ Settings│🔧 Check│...│👷 Worker│⏹ Full│  ← 快捷按钮栏
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -543,6 +621,7 @@ python main.py --all           # 同时启动
 | ----------------------------- | ---------------------------------------------------------------------------- |
 | **点击按钮**            | 触发对应命令（Start / Pause / Settings / Check / Status / Quit / Quit Full） |
 | **点击 😈 Daemon 按钮** | 展开下拉菜单（start / stop / restart），再次点击选项执行                     |
+| **点击 👷 Worker 按钮** | 展开下拉菜单（start / stop / restart），再次点击选项执行                     |
 | **点击表格行**          | 高亮当前行                                                                   |
 | **点击日志行**          | 高亮当前行                                                                   |
 | **滚轮滚动**            | 在表格、信息日志、详细日志区域各自独立滚动                                   |
@@ -556,11 +635,12 @@ python main.py --all           # 同时启动
 | ---------------------- | ------------- | ------------------------------------------------------------------- |
 | **▶ Start**     | `start`     | 启动/继续流水线                                                     |
 | **⏸ Pause**     | `pause`     | 暂停流水线                                                          |
-| **⚙ Settings**  | `settings`  | 可视化配置（7 分类 48 字段在线编辑）                                |
+| **⚙ Settings**  | `settings`  | 可视化配置（9 分类 48 字段在线编辑）                                |
 | **🔧 Check**     | `check`     | 系统自检（弹出结果对话框）                                          |
 | **📊 Status**    | `status`    | 统计摘要（引擎状态/各步骤完成数）                                   |
 | **😈 Daemon**    | 下拉菜单      | 展开子菜单：`daemon start` / `daemon stop` / `daemon restart` |
-| **🚪 Quit**      | `quit`      | 退出 TUI（后台引擎继续运行）                                        |
+| **� Worker**    | 下拉菜单      | 展开子菜单：`worker start` / `worker stop` / `worker restart` |
+| **�🚪 Quit**      | `quit`      | 退出 TUI（后台引擎继续运行）                                        |
 | **⏹ Quit Full** | `quit full` | 完全退出（停止引擎 + 关闭 TUI，弹出确认对话框）                     |
 
 ### 完整命令列表
@@ -584,6 +664,14 @@ python main.py --all           # 同时启动
 | `daemon start`   | 启动后台引擎并自动建立 IPC 连接（最多等待 10 秒） |
 | `daemon stop`    | 停止后台引擎（弹出确认对话框，TUI 继续运行）      |
 | `daemon restart` | 重启后台引擎（先 stop 再 start，自动重连）        |
+
+#### Worker 生命周期
+
+| 命令                | 说明                                                         |
+| ------------------- | ------------------------------------------------------------ |
+| `worker start`    | 启动所有 Worker（建立 SSH 隧道 + 启动本地 Worker 进程）      |
+| `worker stop`     | 停止所有 Worker（关闭进程和 SSH 隧道，弹出确认对话框）       |
+| `worker restart`  | 重启所有 Worker（先 stop 再 start，弹出确认对话框）          |
 
 #### 退出
 
@@ -637,17 +725,19 @@ python main.py --all           # 同时启动
 
 ### 设置页面（Settings）
 
-输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 49 个字段**：
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 47 个字段**：
 
 | 分类                     | 字段数 | 内容                                                                                    |
 | ------------------------ | ------ | --------------------------------------------------------------------------------------- |
-| **本地文件路径**   | 10     | SW/SpaceClaim 可执行文件、模型/Excel/脚本/桥接程序/输出目录/日志/数据路径               |
+| **本地文件路径**   | 6      | SW/SpaceClaim 可执行文件、模型、Excel 参数表、STEP/SCDOC 输出目录                      |
 | **远程工作站连接** | 4      | 主机地址、SSH 端口、用户名、密码（密码字段掩码显示，写入 `.env` 文件）                |
-| **远程执行目录**   | 9      | 工程根目录、SCDOC/网格/结果/标志文件目录、Conda 环境名/路径、网格/求解脚本              |
-| **步骤文件模板**   | 5      | SW / SC / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位）    |
-| **SolidWorks**     | 7      | 宏超时、完成后关闭文档/退出、显示窗口、启动超时、调度启动延迟、退出等待                 |
+| **远程执行目录**   | 10     | 工作目录、脚本/引用文件目录、SCDOC/网格/结果/标志目录、Conda 环境名/路径、MPI 目录      |
+| **步骤文件模板**   | 5      | SW / SC / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位） |
+| **SolidWorks**     | 5      | 宏超时、完成后关闭文档、显示窗口、启动超时、调度启动延迟                                |
 | **SpaceClaim**     | 5      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待                            |
-| **全局设置**       | 9      | 看门狗间隔、传输/网格/求解超时、最大重试、状态刷新间隔、SSH 连接/上传重试、目录递归深度 |
+| **网格划分**       | 2      | 网格超时、网格核心数                                                                    |
+| **仿真求解**       | 3      | 求解超时、求解核心数、求解迭代次数                                                      |
+| **全局设置**       | 7      | 看门狗间隔、状态刷新间隔、传输超时、SSH 连接/上传重试、最大重试、目录递归深度           |
 
 **设置页面操作**：
 
@@ -704,19 +794,28 @@ TUI ↔ Daemon 通过 TCP `127.0.0.1:9527` 通信，JSON 文本协议（`\n` 分
 {"status": "ok", "data": {}, "message": "流水线已启动", "request_id": "a1b2c3d4"}
 ```
 
-| 命令                  | 说明             |
-| --------------------- | ---------------- |
-| `start`             | 启动/继续流水线  |
-| `pause`             | 暂停流水线       |
-| `stop`              | 完全停止引擎     |
-| `check`             | 系统自检         |
-| `get_all_status`    | 获取所有构型状态 |
-| `get_statistics`    | 获取统计信息     |
-| `get_engine_status` | 获取引擎状态     |
-| `get_log_entries`   | 增量拉取日志     |
-| `reset_step`        | 重置步骤状态     |
-| `clean_step`        | 清理步骤文件     |
-| `reload_config`     | 重载 TOML 配置   |
+| 命令                  | 说明                     |
+| --------------------- | ------------------------ |
+| `start`             | 启动/继续流水线          |
+| `pause`             | 暂停流水线               |
+| `stop`              | 完全停止引擎             |
+| `check`             | 系统自检                 |
+| `get_all_status`    | 获取所有构型状态         |
+| `get_statistics`    | 获取统计信息             |
+| `get_engine_status` | 获取引擎状态             |
+| `get_log_entries`   | 增量拉取日志             |
+| `get_dashboard`     | 批量获取状态+引擎+日志   |
+| `reset_step`        | 重置步骤状态             |
+| `clean_step`        | 清理步骤文件             |
+| `reload_config`     | 重载 TOML 配置           |
+| `worker_start`      | 启动所有 Worker          |
+| `worker_stop`       | 停止所有 Worker          |
+| `worker_restart`    | 重启所有 Worker          |
+| `worker_register`   | LocalWorker 注册         |
+| `worker_heartbeat`  | LocalWorker 心跳         |
+| `worker_poll`       | LocalWorker 拉取任务     |
+| `worker_step_complete` | LocalWorker 任务完成   |
+| `worker_step_error` | LocalWorker 任务失败     |
 
 ---
 
@@ -776,10 +875,12 @@ compile_noref.bat    # 免引用版本
 ## 开发
 
 - 编码规范见 `docs/code-style-guide.md`
-- 远期规划见 `docs/architecture-refactoring-plan.md`
+- 远期架构规划见 `docs/architecture-refactoring-plan.md`
+- Daemon 拆分实现见 `docs/current-daemon-architecture.md`
+- 求解器剩余时间设计见 `docs/solver-remaining-time-design.md`
 - Python: ruff linting + mypy 类型检查
 - Rust: `cargo check` + `cargo clippy`
 
 ---
 
-> **版本**: v2.6.1 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-05 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.8.2 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）

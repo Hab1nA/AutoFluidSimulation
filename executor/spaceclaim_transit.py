@@ -126,10 +126,14 @@ def _get_script_dir():
 _SCRIPT_DIR = _get_script_dir()
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)  # executor/ 的父目录即项目根
 # 验证：项目根下应存在 logs/ 目录或 executor/ 目录
-_candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
-if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
-    # 回退：在脚本所在目录下创建
-    _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
+_env_log_dir = os.environ.get("AUTOFLUID_SC_LOG_DIR", "")
+if _env_log_dir:
+    _candidate_log_dir = _env_log_dir
+else:
+    _candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
+    if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
+        # 回退：在脚本所在目录下创建
+        _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
 
 try:
     if not os.path.isdir(_candidate_log_dir):
@@ -137,7 +141,12 @@ try:
 except (OSError, IOError):
     _candidate_log_dir = os.environ.get("TEMP", _SCRIPT_DIR)
 
-_log_path = os.path.join(_candidate_log_dir, "spaceclaim_transit_{}.log".format(os.getpid()))
+_slot_id = os.environ.get("AUTOFLUID_SC_SLOT_ID", "")
+if _slot_id:
+    _log_file_name = "spaceclaim_transit_slot{}_{}.log".format(_slot_id, os.getpid())
+else:
+    _log_file_name = "spaceclaim_transit_{}.log".format(os.getpid())
+_log_path = os.path.join(_candidate_log_dir, _log_file_name)
 logger = _SpaceClaimLogger("spaceclaim_transit", _log_path)
 
 # --------------------------------------------------------------------------
@@ -204,7 +213,7 @@ def _get_script_args():
         raw_args = g['args']
 
         # 方式1a: Dictionary 形式（Application.RunScript API 模式）
-        #   argDictionary = {"config_name": ..., "step_dir": ..., "scdoc_dir": ...}
+        #   argDictionary = {"config_name": ..., "step_dir": ..., "scdoc_dir": ..., "scdoc_name": ...}
         if isinstance(raw_args, dict) or hasattr(raw_args, 'get'):
             # ★ 不可使用 "or" 短路求值：config_name 可能是整数 0（falsy），
             #    会被 "or" 错误跳过。应显式检查 None。
@@ -215,9 +224,10 @@ def _get_script_args():
                 config = raw_args.get('config')
             step_dir = raw_args.get('step_dir') or raw_args.get('stepDir')
             scdoc_dir = raw_args.get('scdoc_dir') or raw_args.get('scdocDir')
-            if config is not None and step_dir and scdoc_dir:
+            scdoc_name = raw_args.get('scdoc_name') or raw_args.get('scdocName')
+            if config is not None and step_dir and scdoc_dir and scdoc_name:
                 logger.info("参数来源: Application.RunScript Dictionary")
-                return [str(config), str(step_dir), str(scdoc_dir)]
+                return [str(config), str(step_dir), str(scdoc_dir), str(scdoc_name)]
             logger.warning("Dictionary args 缺少必要字段: keys={}".format(
                 list(raw_args.keys()) if hasattr(raw_args, 'keys') else 'N/A'))
 
@@ -242,8 +252,9 @@ def _get_script_args():
     env_config = os.environ.get("AUTOFLUID_SC_CONFIG", "")
     env_step = os.environ.get("AUTOFLUID_SC_STEP_DIR", "")
     env_scdoc = os.environ.get("AUTOFLUID_SC_SCDOC_DIR", "")
-    if env_config and env_step and env_scdoc:
-        return [env_config, env_step, env_scdoc]
+    env_scdoc_name = os.environ.get("AUTOFLUID_SC_SCDOC_NAME", "")
+    if env_config and env_step and env_scdoc and env_scdoc_name:
+        return [env_config, env_step, env_scdoc, env_scdoc_name]
 
     return []
 
@@ -402,7 +413,7 @@ def _close_all_documents():
 # 主处理逻辑
 # ============================================================================
 
-def process_step_file(config_name, step_dir, scdoc_dir):
+def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     """
     处理单个 STEP 文件：打开 → 创建命名选择集 → 保存 SCDOC。
 
@@ -410,8 +421,12 @@ def process_step_file(config_name, step_dir, scdoc_dir):
         config_name: 构型编号（整数或字符串）
         step_dir: STEP 文件目录
         scdoc_dir: SCDOC 输出目录
+        scdoc_name: SCDOC 输出文件名
     """
     file_index = int(config_name)
+    if os.path.basename(scdoc_name) != scdoc_name:
+        logger.error("SCDOC 文件名不能包含路径: {}".format(scdoc_name))
+        return False
 
     # 构造输入文件名 (格式: model_gen4.SLDPRT_XX.step)
     step_filename = "model_gen4.SLDPRT_{}.step".format(file_index)
@@ -586,8 +601,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     # ------------------------------------------------------------------
     # 6. 保存文档为 SCDOC
     # ------------------------------------------------------------------
-    out_filename = "model_gen4_{}.scdoc".format(file_index)
-    out_path = os.path.join(scdoc_dir, out_filename)
+    out_path = os.path.join(scdoc_dir, scdoc_name)
 
     # 确保输出目录存在（Python 2.7 无 exist_ok 参数）
     try:
@@ -638,7 +652,7 @@ def process_step_file(config_name, step_dir, scdoc_dir):
     except Exception as e:
         logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
 
-    logger.info("构型 {} 处理完成: {}".format(file_index, out_filename))
+    logger.info("构型 {} 处理完成: {}".format(file_index, scdoc_name))
     return True
 
 
@@ -721,11 +735,18 @@ def _persistent_loop():
                     os.remove(cmd_file)
                 except (IOError, OSError):
                     pass
+                try:
+                    logger.info("常驻模式: 正在退出 SpaceClaim...")
+                    Command.Execute("Exit")
+                except Exception as e:
+                    logger.warning("常驻模式: 退出 SpaceClaim 时异常: {}: {}".format(
+                        type(e).__name__, e))
                 break
 
             config_name = str(cmd_data.get("config", ""))
             step_dir = cmd_data.get("stepdir", "")
             scdoc_dir = cmd_data.get("scdocdir", "")
+            scdoc_name = cmd_data.get("scdocname", "")
             run_id = cmd_data.get("run_id", "")
 
             # ★ per-run 结果文件：每次命令唯一 run_id，消除跨构型竞态
@@ -737,7 +758,7 @@ def _persistent_loop():
                 result_file = os.path.join(
                     cmd_dir, "sc_result_{}".format(slot_id))
 
-            if not config_name or not step_dir or not scdoc_dir:
+            if not config_name or not step_dir or not scdoc_dir or not scdoc_name:
                 logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))
                 _write_result(result_file, config_name, False,
                               "命令缺少必要字段", run_id=run_id)
@@ -762,6 +783,7 @@ def _persistent_loop():
                 _persistent_config_count, config_name, run_id))
             logger.info("STEP 目录: {}".format(step_dir))
             logger.info("SCDOC 目录: {}".format(scdoc_dir))
+            logger.info("SCDOC 文件: {}".format(scdoc_name))
 
             # ★ 构型前强制清理所有文档 + GC
             try:
@@ -776,7 +798,7 @@ def _persistent_loop():
                 logger.warning("构型前清理异常（非关键）: {}: {}".format(
                     type(e).__name__, e))
 
-            success = process_step_file(config_name, step_dir, scdoc_dir)
+            success = process_step_file(config_name, step_dir, scdoc_dir, scdoc_name)
 
             # ★ _write_result 独立包裹：编码异常不逃逸到外层 BaseException handler
             #   _write_result 内部已有 4 层降级保护，此处仅兜底极端编码异常
@@ -928,9 +950,6 @@ def _write_result(result_file, config_name, success, message="",
             logger.info("降级写入结果文件成功: {}".format(result_file))
         except Exception as e2:
             logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
-            logger.info("降级写入结果文件成功: {}".format(result_file))
-        except Exception as e2:
-            logger.error("降级写入也失败: {}: {}".format(type(e2).__name__, e2))
 
 
 def Main():
@@ -939,11 +958,11 @@ def Main():
         # 获取脚本参数
         script_args = _get_script_args()
 
-        if not script_args or len(script_args) < 3:
+        if not script_args or len(script_args) < 4:
             logger.error("=" * 60)
             logger.error("参数不足！")
-            logger.info("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>")
-            logger.info("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR")
+            logger.info("用法: SpaceClaim.exe /RunScript=<脚本> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录> <SCDOC文件名>")
+            logger.info("或设置环境变量: AUTOFLUID_SC_CONFIG / AUTOFLUID_SC_STEP_DIR / AUTOFLUID_SC_SCDOC_DIR / AUTOFLUID_SC_SCDOC_NAME")
             logger.error("实际收到的参数 ({} 个): {}".format(len(script_args), script_args))
             logger.error("=" * 60)
             return
@@ -951,15 +970,17 @@ def Main():
         config_name = script_args[0]
         step_dir = script_args[1]
         scdoc_dir = script_args[2]
+        scdoc_name = script_args[3]
 
         logger.info("=" * 60)
         logger.info("SpaceClaim Transit Script V23")
         logger.info("构型编号: {}".format(config_name))
         logger.info("STEP 目录: {}".format(step_dir))
         logger.info("SCDOC 目录: {}".format(scdoc_dir))
+        logger.info("SCDOC 文件: {}".format(scdoc_name))
         logger.info("=" * 60)
 
-        success = process_step_file(config_name, step_dir, scdoc_dir)
+        success = process_step_file(config_name, step_dir, scdoc_dir, scdoc_name)
 
         if success:
             logger.info("构型 {} 转换成功".format(config_name))

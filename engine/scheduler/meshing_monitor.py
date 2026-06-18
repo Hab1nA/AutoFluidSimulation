@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 网格划分监控模块 (Meshing Monitor)
 
@@ -14,8 +16,10 @@
 import queue
 import threading
 import time
+from typing import Callable
 
 from engine.config import (
+    DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
     STATUS_ERROR, STATUS_RETRYING, ENGINE_CONFIG,
 )
@@ -43,17 +47,77 @@ class MeshingMonitor:
         remote_executor: RemoteExecutor,
         paused_event: threading.Event,
         stopped_event: threading.Event,
+        get_reset_generation: Callable[[int, str], int] | None = None,
+        on_meshing_completed: Callable[[int], None] | None = None,
     ):
         self.state = state_manager
         self._remote_executor = remote_executor
         self._paused = paused_event
         self._stopped = stopped_event
+        self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
+        self._on_meshing_completed = on_meshing_completed
 
         self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: threading.Thread | None = None
         self._in_flight_config: int | None = None  # 当前正在执行 Meshing 的构型
 
         logger.info("[MeshingMonitor] 初始化完成")
+
+    def _step_generation(self, config_name: int, step_name: str) -> int:
+        """Return the reset generation for a config step."""
+        return int(self._get_reset_generation(config_name, step_name))
+
+    def _is_stale_step_result(
+        self,
+        config_name: int,
+        step_name: str,
+        generation: int,
+    ) -> bool:
+        """Whether reset touched this step while Meshing was running."""
+        return generation != self._step_generation(config_name, step_name)
+
+    def _discard_stale_step_result(self, config_name: int, step_name: str) -> None:
+        """Restore reset state after an old Meshing result wrote back."""
+        logger.warning(
+            "[MeshingMonitor] 构型%s [%s] 结果已过期，丢弃旧执行结果并恢复 reset 状态",
+            config_name,
+            step_name,
+        )
+        self.state.reset_config_steps(config_name, step_name)
+
+    def _record_unknown_remote_status(self, config_name: int, step_name: str) -> bool:
+        """
+        Count unknown remote probes and surface an error once retry budget is exhausted.
+
+        Returns True when the queue item should be retried later.
+        """
+        retry_count = self.state.increment_retry(config_name, step_name)
+        max_retries = int(ENGINE_CONFIG["max_retries"])
+        if retry_count >= max_retries:
+            self.state.set_step_status(
+                config_name,
+                step_name,
+                STATUS_ERROR,
+                f"远程 {step_name} 状态连续 {retry_count} 次未知，停止等待",
+            )
+            logger.error(
+                "[MeshingMonitor] 构型%s 远程状态 unknown 达到重试上限，标记为 Error",
+                config_name,
+            )
+            return False
+        logger.warning(
+            "[MeshingMonitor] 构型%s 远程状态未知，保留 Running 状态并重新排队 "
+            "(%s/%s)",
+            config_name,
+            retry_count,
+            max_retries,
+        )
+        return True
+
+    def _workstation_for_config(self, config_name: int) -> str:
+        """Return assigned workstation for a config, preserving legacy default."""
+        workstation_id = self.state.get_config_workstation(config_name)
+        return workstation_id or DEFAULT_WORKSTATION_ID
 
     # ------------------------------------------------------------------
     # 队列操作
@@ -184,26 +248,76 @@ class MeshingMonitor:
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
             return False
 
+        generation = self._step_generation(config_name, "meshing")
+        workstation_id = self._workstation_for_config(config_name)
+
         # ---- 断点续传：检查远程输出是否已存在（复用共享工具函数） ----
-        if self._check_remote_outputs_exist(config_name):
+        if self._check_remote_outputs_exist(config_name, workstation_id):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
+            if self._is_stale_step_result(config_name, "meshing", generation):
+                self._discard_stale_step_result(config_name, "meshing")
+                return False
             logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 远程输出已存在，标记完成")
             return False
 
         # ---- 检查是否为重启后仍在运行的 Meshing ----
         meshing_status = self.state.get_step_status(config_name, "meshing")
         if meshing_status == STATUS_RUNNING:
-            # Daemon 重启后发现 Meshing=Running，无法确定远程是否仍在运行
-            # 先检查标志文件，若不存在则重置为 Waiting 后重新启动
-            if self._remote_executor.check_meshing_done(config_name):
+            remote_status = self._remote_executor.query_remote_task_status(
+                config_name,
+                "meshing",
+                workstation_id=workstation_id,
+            )
+            if remote_status == "completed":
                 self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
+                self._remote_executor.forget_remote_task(
+                    config_name,
+                    "meshing",
+                    workstation_id=workstation_id,
+                )
                 logger.info(f"[MeshingMonitor] 构型{config_name} Meshing: 重启后检测到完成标志")
                 return False
-            # ★ 重置为 Waiting：清除孤儿 Running 状态，避免原子防护误判
+            if remote_status == "failed":
+                self.state.set_step_status(
+                    config_name,
+                    "meshing",
+                    STATUS_ERROR,
+                    "远程网格划分任务失败",
+                )
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
+                self._remote_executor.forget_remote_task(
+                    config_name,
+                    "meshing",
+                    workstation_id=workstation_id,
+                )
+                return False
+            if remote_status == "running":
+                logger.info(
+                    f"[MeshingMonitor] 构型{config_name} Meshing 远程任务仍在运行，恢复轮询"
+                )
+                should_requeue = self._wait_for_meshing_completion(config_name)
+                if self._is_stale_step_result(config_name, "meshing", generation):
+                    self._discard_stale_step_result(config_name, "meshing")
+                    return False
+                return should_requeue
+            if remote_status == "unknown":
+                return self._record_unknown_remote_status(config_name, "meshing")
+
+            # lost：确认无远程任务且无产物后，清除孤儿 Running 并重新启动。
             self.state.set_step_status(config_name, "meshing", STATUS_WAITING)
+            self._remote_executor.forget_remote_task(
+                config_name,
+                "meshing",
+                workstation_id=workstation_id,
+            )
             logger.warning(
-                f"[MeshingMonitor] 构型{config_name} Meshing 重启后状态为 Running，"
-                f"无法确定远程状态，重置为 Waiting 后重新启动"
+                f"[MeshingMonitor] 构型{config_name} Meshing 重启后远程任务已丢失，"
+                "重置为 Waiting 后重新启动"
             )
 
         # ---- 启动远程 Meshing（带重试） ----
@@ -215,7 +329,10 @@ class MeshingMonitor:
                 return False
 
             # ★ 原子防护：确保同一时刻只有一个构型处于 Meshing Running
-            if not self.state.set_meshing_running_if_idle(config_name):
+            if not self.state.set_meshing_running_if_idle(
+                config_name,
+                workstation_id=workstation_id,
+            ):
                 logger.warning(
                     f"[MeshingMonitor] 构型{config_name} 被跳过："
                     f"另一个构型正在执行网格划分，重新入队"
@@ -227,7 +344,10 @@ class MeshingMonitor:
                 f"(尝试 {attempt}/{max_retries})"
             )
 
-            if self._remote_executor.start_meshing(config_name):
+            if self._remote_executor.start_meshing(
+                config_name,
+                workstation_id=workstation_id,
+            ):
                 break  # 启动成功，进入等待
 
             # 启动失败
@@ -251,15 +371,30 @@ class MeshingMonitor:
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
                 return False
 
-        # ---- 轮询等待完成 ----
+        should_requeue = self._wait_for_meshing_completion(config_name, workstation_id)
+        if self._is_stale_step_result(config_name, "meshing", generation):
+            self._discard_stale_step_result(config_name, "meshing")
+            return False
+        return should_requeue
+
+    def _wait_for_meshing_completion(
+        self,
+        config_name: int,
+        workstation_id: str | None = None,
+    ) -> bool:
+        """轮询等待 Meshing 完成，并按控制状态更新数据库。"""
+        workstation_id = workstation_id or self._workstation_for_config(config_name)
         logger.info(f"[MeshingMonitor] 等待构型{config_name} 网格划分完成...")
         if self._remote_executor.wait_meshing_completion(
             config_name,
             paused_event=self._paused,
             stopped_event=self._stopped,
+            workstation_id=workstation_id,
         ):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成 ✓")
+            if self._on_meshing_completed is not None:
+                self._on_meshing_completed(config_name)
         else:
             if self._paused.is_set():
                 self.state.set_step_status(
@@ -308,12 +443,18 @@ class MeshingMonitor:
         else:
             logger.info("[MeshingMonitor] 断点续传: 无需补充的构型")
 
-    def _check_remote_outputs_exist(self, config_name: int) -> bool:
+    def _check_remote_outputs_exist(
+        self,
+        config_name: int,
+        workstation_id: str | None = None,
+    ) -> bool:
         """检查远程标志文件或网格文件是否已存在（复用共享工具函数）。"""
+        workstation_id = workstation_id or self._workstation_for_config(config_name)
         try:
             return self._remote_executor.check_meshing_outputs_exist(
                 config_name,
                 timeout=float(ENGINE_CONFIG["transfer_timeout"]),
+                workstation_id=workstation_id,
             )
         except Exception:
             return False

@@ -86,7 +86,7 @@ def test_export_per_config_cleans_up_when_model_open_fails(
     assert executor._com_initialized is False
 
 
-def test_export_per_config_cleans_up_when_design_table_import_fails(
+def test_export_per_config_cleans_up_when_first_config_switch_fails(
     fake_com_modules,
     sw_paths,
     monkeypatch,
@@ -96,13 +96,12 @@ def test_export_per_config_cleans_up_when_design_table_import_fails(
     doc = SimpleNamespace()
     cleanup_calls = []
 
+    def fail_show_config(_name):
+        raise RuntimeError("configuration switch failed")
+
+    doc.ShowConfiguration2 = fail_show_config
     monkeypatch.setattr(executor, "_connect_sw", lambda: app)
     monkeypatch.setattr(executor, "_open_sw_model", lambda *_args: doc)
-    monkeypatch.setattr(
-        executor,
-        "_import_design_table_with_retry",
-        lambda *_args: False,
-    )
     monkeypatch.setattr(
         executor,
         "_disconnect_sw",
@@ -128,6 +127,7 @@ def test_export_per_config_saveas_exception_disconnects_cached_com(
     extension = SimpleNamespace()
     doc = SimpleNamespace(Extension=extension)
     cleanup_calls = []
+    terminate_calls = []
 
     doc.ShowConfiguration2 = lambda _name: True
     doc.Rebuild = lambda _arg: True
@@ -148,9 +148,177 @@ def test_export_per_config_saveas_exception_disconnects_cached_com(
             (sw_app, sw_doc, sw_model)
         ),
     )
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
 
     assert executor.export_sw_per_config(1) is False
     assert cleanup_calls == [(app, doc, LOCAL_PATHS["sw_model"])]
+    assert terminate_calls == []
     assert executor._cached_sw_app is None
     assert executor._cached_doc is None
     assert executor._com_initialized is False
+
+
+def test_export_per_config_saveas_rpc_failure_terminates_sw(
+    fake_com_modules,
+    sw_paths,
+    monkeypatch,
+):
+    executor = SWExecutor(SimpleNamespace())
+    app = SimpleNamespace()
+    extension = SimpleNamespace()
+    doc = SimpleNamespace(Extension=extension)
+    cleanup_calls = []
+    terminate_calls = []
+
+    doc.ShowConfiguration2 = lambda _name: True
+    doc.Rebuild = lambda _arg: True
+    extension.Rebuild = lambda _arg: True
+
+    def raise_saveas(*_args):
+        raise RuntimeError("-2147023170 远程过程调用失败。")
+
+    extension.SaveAs = raise_saveas
+    executor._cached_sw_app = app
+    executor._cached_doc = doc
+    executor._com_initialized = True
+
+    monkeypatch.setattr(
+        executor,
+        "_disconnect_sw",
+        lambda sw_app, sw_doc, sw_model: cleanup_calls.append(
+            (sw_app, sw_doc, sw_model)
+        ),
+    )
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
+
+    assert executor.export_sw_per_config(1) is False
+    assert cleanup_calls == [(app, doc, LOCAL_PATHS["sw_model"])]
+    assert terminate_calls == ["terminate"]
+    assert executor._cached_sw_app is None
+    assert executor._cached_doc is None
+    assert executor._com_initialized is False
+
+
+def test_opendoc6_rpc_failure_terminates_sw_and_retries_once(
+    fake_com_modules,
+    sw_paths,
+    monkeypatch,
+):
+    executor = SWExecutor(SimpleNamespace())
+    first_app = SimpleNamespace()
+    recovered_app = SimpleNamespace()
+    connect_calls = []
+    visible_calls = []
+    terminate_calls = []
+    open_calls = []
+
+    class _Extension:
+        def Rebuild(self, _arg):
+            return True
+
+        def SaveAs(self, filepath, *_args):
+            Path(filepath).write_text("step", encoding="utf-8")
+            return True
+
+    class _Doc:
+        Extension = _Extension()
+
+        def ShowConfiguration2(self, _name):
+            return True
+
+        def Rebuild(self, _arg):
+            return True
+
+    def open_model(*_args):
+        open_calls.append("open")
+        if len(open_calls) == 1:
+            executor._last_open_error = RuntimeError("-2147023170 远程过程调用失败。")
+            return None
+        return _Doc()
+
+    def connect_sw():
+        connect_calls.append("connect")
+        return first_app if len(connect_calls) == 1 else recovered_app
+
+    def document_visible(visible, doc_type):
+        visible_calls.append((visible, doc_type))
+
+    recovered_app.Visible = True
+    recovered_app.DocumentVisible = document_visible
+
+    monkeypatch.setattr(executor, "_connect_sw", connect_sw)
+    monkeypatch.setattr(executor, "_open_sw_model", open_model)
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
+    monkeypatch.setattr(executor, "_disconnect_sw", lambda *_args: None)
+
+    assert executor.export_sw_per_config(1) is True
+    assert open_calls == ["open", "open"]
+    assert recovered_app.Visible is False
+    assert visible_calls == [(False, 1)]
+    assert terminate_calls == ["terminate"]
+
+
+def test_opendoc6_rpc_recovery_fails_gracefully_when_reopen_fails(
+    fake_com_modules,
+    sw_paths,
+    monkeypatch,
+):
+    executor = SWExecutor(SimpleNamespace())
+    app = SimpleNamespace()
+    terminate_calls = []
+
+    def open_model(*_args):
+        executor._last_open_error = RuntimeError("0x800706BE RPC_S_CALL_FAILED")
+        return None
+
+    monkeypatch.setattr(executor, "_connect_sw", lambda: app)
+    monkeypatch.setattr(executor, "_open_sw_model", open_model)
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
+    monkeypatch.setattr(executor, "_disconnect_sw", lambda *_args: None)
+
+    assert executor.export_sw_per_config(1) is False
+    assert terminate_calls == ["terminate"]
+    assert "无法打开模型" in executor.last_error
+
+
+def test_opendoc6_non_rpc_failure_does_not_terminate_sw(
+    fake_com_modules,
+    sw_paths,
+    monkeypatch,
+):
+    executor = SWExecutor(SimpleNamespace())
+    app = SimpleNamespace()
+    terminate_calls = []
+
+    def open_model(*_args):
+        executor._last_open_error = RuntimeError("file is corrupt")
+        return None
+
+    monkeypatch.setattr(executor, "_connect_sw", lambda: app)
+    monkeypatch.setattr(executor, "_open_sw_model", open_model)
+    monkeypatch.setattr(
+        executor,
+        "_terminate_sw_processes",
+        lambda: terminate_calls.append("terminate"),
+    )
+    monkeypatch.setattr(executor, "_disconnect_sw", lambda *_args: None)
+
+    assert executor.export_sw_per_config(1) is False
+    assert terminate_calls == []
+    assert "无法打开模型" in executor.last_error

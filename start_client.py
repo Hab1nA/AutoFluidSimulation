@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 启动 TUI 客户端 (Client)
@@ -6,7 +8,8 @@
 用法：
     python start_client.py
 
-前提条件：必须先启动 start_daemon.py（后台引擎）。
+前提条件：必须先确保 `AUTOFLUID_IPC_HOST` / `AUTOFLUID_SERVER_HOST`
+指向正在运行的 daemon。
 如果仅退出 TUI 而不停止后台（quit 命令），
 可以随时重新运行此脚本连接回后台引擎。
 ===============================================================================
@@ -29,6 +32,7 @@ if __name__ == "__main__":
         print("正在启动 Rust TUI 客户端...")
         print(f"  日志目录: {session_log_dir}")
         print(f"  二进制: {rust_bin}")
+        print("  后端模式: 连接远端 daemon，不会在本地启动后台引擎")
         print("提示: 使用 quit 命令仅退出界面，后台引擎继续运行")
         print("      使用 quit full 命令彻底停止后台引擎")
         print()

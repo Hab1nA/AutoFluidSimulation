@@ -1,3 +1,8 @@
+---
+description: "Use when: 全面审查 Python 代码质量、规范性和健壮性，迭代修复直至通过所有检查。触发词：审查 Python、review python、Python 代码审查、Python code review。"
+agent: "agent"
+---
+
 # Python 代码全面审查与修复
 
 > **本 Prompt 仅审查 Python 代码。** Rust 代码请使用 `review-rust.prompt.md`，C# 代码请使用 `review-csharp.prompt.md`。
@@ -5,7 +10,7 @@
 ## 审查前准备
 
 1. 阅读 `.github/instructions/python.instructions.md`，掌握 Python 代码规范
-2. 阅读 `.github/instructions/implementation-planning.instructions.md` 中的架构概览，理解项目结构
+2. 阅读 `AGENTS.md` 了解项目架构、关键交互逻辑和高风险兼容区
 3. 阅读 `README.md` 和 `docs/code-style-guide.md`，了解项目全貌
 4. 使用仓库内 `.venv\Scripts\python.exe` 执行所有 Python 检查，不使用裸 `python`
 

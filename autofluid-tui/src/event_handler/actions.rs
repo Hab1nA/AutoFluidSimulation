@@ -1,30 +1,73 @@
-use crate::daemon_mgr::DaemonManager;
 use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::{AppState, LogBuffer};
+use crate::worker_mgr::prepare_remote_workers;
+use crate::EventContext;
 
-#[allow(clippy::too_many_arguments)]
-pub fn handle_confirm_result(
-    result: command::CommandResult,
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-    daemon: &mut DaemonManager,
-    project_dir: &str,
-    full_quit: &mut bool,
-) {
+pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventContext) {
     match result {
         command::CommandResult::FullQuit => {
-            *full_quit = true;
-            if ipc.is_connected() {
-                let _ = rt.block_on(ipc.full_quit());
+            *ctx.full_quit = true;
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.full_quit()) {
+                    Ok(resp) if resp.is_ok() => {
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        ctx.log_buffer
+                            .push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                    }
+                }
             }
-            rt.block_on(ipc.disconnect());
-            state.should_quit = true;
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+            ctx.rt.block_on(ctx.ipc.disconnect());
+            ctx.state.should_quit = true;
         }
         command::CommandResult::StopDaemon => {
-            daemon.stop_with_ipc(ipc, rt, state, log_buffer, project_dir);
+            ctx.daemon
+                .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
+        }
+        command::CommandResult::StopWorkers => {
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
+                    Ok(resp) if resp.is_ok() => {
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+        }
+        command::CommandResult::RestartWorkers => {
+            if ctx.ipc.is_connected() {
+                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
+                    Ok(resp) if resp.is_ok() => {
+                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
+                    }
+                    Ok(resp) => {
+                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
+                    }
+                    Err(e) => {
+                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                    }
+                }
+            }
+            ctx.worker
+                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+            ctx.worker
+                .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
+                    prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
+                });
         }
         _ => {}
     }

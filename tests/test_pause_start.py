@@ -39,7 +39,7 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
     ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
@@ -62,15 +62,37 @@ class _MockRemoteExecutor:
     def _get_ssh(self):
         return None
 
-    def start_meshing(self, config_name: int) -> bool:
+    def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         return True
 
     def check_meshing_done(self, config_name: int) -> bool:
         return False
 
-    def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
+    def wait_meshing_completion(
+        self,
+        config_name,
+        paused_event=None,
+        stopped_event=None,
+        workstation_id: str = "default",
+    ) -> bool:
         time.sleep(0.1)
         return True
+
+    def query_remote_task_status(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> str:
+        return "lost"
+
+    def forget_remote_task(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> None:
+        return None
 
 
 class _MockSWExecutor:
@@ -108,23 +130,6 @@ class MockTaskRunner:
         self._sc_pool = _MockSCPool()
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_executor = _MockSWExecutor(state_manager)
-
-    def execute_sw_step(self) -> bool:
-        """旧的批量方法（保留兼容性）。"""
-        self._sw_call_count += 1
-        print(f"  [MockTaskRunner] execute_sw_step() 第{self._sw_call_count}次调用"
-              f" (delay={self._sw_delay}s, fail={self._sw_should_fail})")
-
-        if self._sw_should_fail:
-            all_configs = self.state.get_all_configs()
-            for cn in all_configs:
-                self.state.set_step_status(cn, "sw", STATUS_ERROR, "模拟 SW 失败")
-            return False
-
-        all_configs = self.state.get_all_configs()
-        for cn in all_configs:
-            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
-        return True
 
     def execute_sw_per_config(self, config_name: int) -> bool:
         """单构型 SW 导出（供 RetryManager 调用）。"""
@@ -238,6 +243,7 @@ class MockStepFileMonitor:
         self.on_file_ready = on_file_ready
         self._processed_files = set()
         self._known_files = set()
+        self._owns_paused_event = shared_paused_event is None
         self._paused = shared_paused_event if shared_paused_event is not None else threading.Event()
         self._wake_event = threading.Event()
         self._need_reset = False
@@ -264,7 +270,8 @@ class MockStepFileMonitor:
 
     def resume_only(self):
         """仅恢复监控，不重置已处理文件集合。"""
-        self._paused.clear()
+        if self._owns_paused_event:
+            self._paused.clear()
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（仅清除暂停标志）")
 
@@ -283,7 +290,8 @@ class MockStepFileMonitor:
 
     def resume_and_reset(self):
         self._need_reset = True
-        self._paused.clear()
+        if self._owns_paused_event:
+            self._paused.clear()
         self._wake_event.set()
         print("  [MockFileMonitor] 已恢复（将执行重置和立即扫描）")
 
@@ -687,11 +695,12 @@ def test_pause_when_stopped():
         ctx.cleanup()
 
 
-def test_file_monitor_paused_on_pause():
+def test_file_monitor_paused_on_pause(monkeypatch):
     print("\n" + "=" * 60)
     print("测试 8: 暂停后文件监控停止扫描")
     print("=" * 60)
 
+    monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
     ctx = TestContext(num_configs=3)
     try:
         ctx.runner._sw_delay = 0.0
@@ -757,6 +766,41 @@ def test_pause_blocks_step_file_callback():
         )
 
         print("[PASS] 测试 9 通过")
+
+    finally:
+        ctx.scheduler.stop()
+        ctx.cleanup()
+
+
+def test_step_file_ready_after_stop_does_not_enqueue_sc():
+    print("\n" + "=" * 60)
+    print("测试 9.1: stop 后 STEP 回调不重新入队")
+    print("=" * 60)
+
+    ctx = TestContext(num_configs=3)
+    try:
+        ctx.runner._sw_delay = 0.0
+        ctx.runner._sw_should_fail = False
+        ctx.run_pipeline_async()
+
+        ok = ctx.wait_for_condition(
+            lambda: ctx.state.get_engine_status() == "running"
+        )
+        assert ok, "引擎未能进入 running 状态"
+
+        ctx.scheduler.stop()
+        ctx.assert_engine_status("stopped", "stop 后")
+        assert ctx.scheduler._stopped.is_set(), "调度器应处于 stopped 状态"
+        assert not ctx.scheduler._paused.is_set(), "stop 后 paused 标志应清除"
+
+        initial_qsize = ctx.scheduler._sc_queue.qsize()
+        ctx.scheduler._on_step_file_ready(1, "/fake/path/config_1.step")
+
+        assert ctx.scheduler._sc_queue.qsize() == initial_qsize, (
+            "stopped 状态下 STEP 回调不应推入 SC 队列"
+        )
+
+        print("[PASS] 测试 9.1 通过")
 
     finally:
         ctx.scheduler.stop()

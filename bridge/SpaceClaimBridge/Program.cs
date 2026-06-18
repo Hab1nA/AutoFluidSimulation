@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
+
+#nullable enable
 
 namespace AutoFluidSimulation.Bridge
 {
@@ -31,6 +34,7 @@ namespace AutoFluidSimulation.Bridge
     ///     --config   &lt;构型编号&gt;
     ///     --stepdir  &lt;STEP文件目录&gt;
     ///     --scdocdir &lt;SCDOC输出目录&gt;
+    ///     --scdocname &lt;SCDOC输出文件名&gt;
     ///     [--timeout &lt;秒数, 默认300&gt;]
     ///
     /// 返回值：
@@ -51,8 +55,8 @@ namespace AutoFluidSimulation.Bridge
         };
 
         private const string ProcessName = "SpaceClaim";
+        // 与 Python 端 SCProcessPool 的 STEP 文件名模式保持一致
         private const string StepFileNamePattern = "model_gen4.SLDPRT_{0}.step";
-        private const string ScdocFileNamePattern = "model_gen4_{0}.scdoc";
         private const int DefaultProcessAppearTimeoutSeconds = 120;
         private const int DefaultGuiReadyTimeoutSeconds = 30;
         private const int DefaultGuiStableDelaySeconds = 15;
@@ -69,10 +73,18 @@ namespace AutoFluidSimulation.Bridge
         private const int GuiFallbackFixedDelayMs = 20000;
         private const int MaxConsecutiveProcessCheckFailures = 5;
 
+        /// <summary>
+        /// 程序入口点。解析命令行参数并执行 SpaceClaim 脚本，返回对应退出码。
+        /// </summary>
+        /// <param name="args">命令行参数数组</param>
+        /// <returns>退出码：0=成功, 1=脚本失败, 2=启动失败, 3=输出验证失败, 4=参数错误, 5=超时</returns>
         private static int Main(string[] args)
         {
             try
             {
+                Console.OutputEncoding = Encoding.UTF8;
+                Console.InputEncoding = Encoding.UTF8;
+
                 var options = ParseArguments(args);
                 if (options == null)
                 {
@@ -88,7 +100,12 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
-        private static BridgeOptions ParseArguments(string[] args)
+        /// <summary>
+        /// 解析命令行参数并返回结构化选项。
+        /// </summary>
+        /// <param name="args">原始命令行参数数组</param>
+        /// <returns>解析后的选项对象，解析失败返回 null</returns>
+        private static BridgeOptions? ParseArguments(string[] args)
         {
             var options = new BridgeOptions();
 
@@ -112,8 +129,12 @@ namespace AutoFluidSimulation.Bridge
                         options.ScdocDir = ReadRequiredArgumentValue(args, ref i, "--scdocdir");
                         if (options.ScdocDir == null) return null;
                         break;
+                    case "--scdocname":
+                        options.ScdocFileName = ReadRequiredArgumentValue(args, ref i, "--scdocname");
+                        if (options.ScdocFileName == null) return null;
+                        break;
                     case "--timeout":
-                        string timeoutValue = ReadRequiredArgumentValue(args, ref i, "--timeout");
+                        string? timeoutValue = ReadRequiredArgumentValue(args, ref i, "--timeout");
                         if (timeoutValue == null) return null;
                         if (!int.TryParse(timeoutValue, out int t) || t <= 0)
                         {
@@ -135,7 +156,7 @@ namespace AutoFluidSimulation.Bridge
                         if (options.CmdDir == null) return null;
                         break;
                     case "--slotid":
-                        string slotValue = ReadRequiredArgumentValue(args, ref i, "--slotid");
+                        string? slotValue = ReadRequiredArgumentValue(args, ref i, "--slotid");
                         if (slotValue == null) return null;
                         if (!int.TryParse(slotValue, out int sid) || sid < 0)
                         {
@@ -155,7 +176,8 @@ namespace AutoFluidSimulation.Bridge
             if (string.IsNullOrEmpty(options.ScriptPath) ||
                 string.IsNullOrEmpty(options.ConfigName) ||
                 string.IsNullOrEmpty(options.StepDir) ||
-                string.IsNullOrEmpty(options.ScdocDir))
+                string.IsNullOrEmpty(options.ScdocDir) ||
+                string.IsNullOrEmpty(options.ScdocFileName))
             {
                 // 常驻模式只需要 Script 和 CmdDir
                 if (options.Persistent)
@@ -176,10 +198,25 @@ namespace AutoFluidSimulation.Bridge
                 }
             }
 
+            if (!string.IsNullOrEmpty(options.ScdocFileName) &&
+                Path.GetFileName(options.ScdocFileName) != options.ScdocFileName)
+            {
+                Console.Error.WriteLine("[BRIDGE_ERROR] 参数 --scdocname 不能包含路径");
+                PrintUsage();
+                return null;
+            }
+
             return options;
         }
 
-        private static string ReadRequiredArgumentValue(string[] args, ref int index, string optionName)
+        /// <summary>
+        /// 读取命令行参数中指定选项的值，索引自动前进。
+        /// </summary>
+        /// <param name="args">命令行参数数组</param>
+        /// <param name="index">当前选项索引（引用传递，自动递增）</param>
+        /// <param name="optionName">选项名称（用于错误消息）</param>
+        /// <returns>参数值，缺少值时返回 null</returns>
+        private static string? ReadRequiredArgumentValue(string[] args, ref int index, string optionName)
         {
             if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
             {
@@ -192,6 +229,9 @@ namespace AutoFluidSimulation.Bridge
             return args[index];
         }
 
+        /// <summary>
+        /// 输出命令行用法说明到 stderr。
+        /// </summary>
         private static void PrintUsage()
         {
             Console.Error.WriteLine(@"
@@ -200,6 +240,7 @@ namespace AutoFluidSimulation.Bridge
   --config   <构型编号>           (必需)
   --stepdir  <STEP文件目录>       (必需)
   --scdocdir <SCDOC输出目录>      (必需)
+  --scdocname <SCDOC输出文件名>    (必需)
   [--timeout <秒数>]              (可选, 默认300)
   [--sc-exe  <SpaceClaim.exe路径>] (可选, 覆盖自动检测)
 
@@ -207,10 +248,16 @@ namespace AutoFluidSimulation.Bridge
   --persistent                    (启用常驻模式)
   --script   <transit脚本路径>    (必需)
   --cmddir   <IPC命令目录>       (必需)
-  --slotid   <槽位ID>            (可选, 默认0)
+  [--sc-exe  <SpaceClaim.exe路径>] (可选, 覆盖自动检测)
+  [--slotid   <槽位ID>]           (可选, 默认0)
 ");
         }
 
+        /// <summary>
+        /// 根据模式（一次性/常驻）执行 SpaceClaim 脚本。
+        /// </summary>
+        /// <param name="opts">解析后的 Bridge 选项</param>
+        /// <returns>退出码</returns>
         private static int Execute(BridgeOptions opts)
         {
             if (opts.Persistent)
@@ -219,11 +266,12 @@ namespace AutoFluidSimulation.Bridge
             }
 
             Console.WriteLine($"[BRIDGE] SpaceClaim Bridge 启动");
-            Console.WriteLine($"[BRIDGE]   脚本: {opts.ScriptPath}");
-            Console.WriteLine($"[BRIDGE]   构型: {opts.ConfigName}");
-            Console.WriteLine($"[BRIDGE]   STEP目录: {opts.StepDir}");
-            Console.WriteLine($"[BRIDGE]   SCDOC目录: {opts.ScdocDir}");
-            Console.WriteLine($"[BRIDGE]   超时: {opts.TimeoutSeconds}s");
+            Console.WriteLine($"[BRIDGE] 脚本: {opts.ScriptPath}");
+            Console.WriteLine($"[BRIDGE] 构型: {opts.ConfigName}");
+            Console.WriteLine($"[BRIDGE] STEP目录: {opts.StepDir}");
+            Console.WriteLine($"[BRIDGE] SCDOC目录: {opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] SCDOC文件: {opts.ScdocFileName}");
+            Console.WriteLine($"[BRIDGE] 超时: {opts.TimeoutSeconds}s");
 
             var stepFile = GetStepFilePath(opts);
             if (!File.Exists(stepFile))
@@ -231,11 +279,11 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine($"[BRIDGE_ERROR] STEP 文件不存在: {stepFile}");
                 return (int)ExitCode.OutputValidationFailed;
             }
-            Console.WriteLine($"[BRIDGE]   STEP文件: {stepFile} ({new FileInfo(stepFile).Length} bytes)");
+            Console.WriteLine($"[BRIDGE] STEP文件: {stepFile} ({new FileInfo(stepFile).Length} bytes)");
 
             Directory.CreateDirectory(opts.ScdocDir);
 
-            string scExe = FindSpaceClaimExe(opts.ScExePath);
+            string? scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -248,14 +296,15 @@ namespace AutoFluidSimulation.Bridge
             int processAppearTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT",
                 DefaultProcessAppearTimeoutSeconds);
-            Process workingProcess = null;
+            Process? workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (环境变量传参模式)...");
-            Console.WriteLine($"[BRIDGE]   Exe: {scExe}");
-            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} /Splash=False /Welcome=False /ExitAfterScript=True");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] Exe: {scExe}");
+            Console.WriteLine($"[BRIDGE] Args: {runScriptArg} /Splash=False /Welcome=False /ExitAfterScript=True");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_CONFIG={opts.ConfigName}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_STEP_DIR={opts.StepDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SCDOC_DIR={opts.ScdocDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SCDOC_NAME={opts.ScdocFileName}");
 
             try
             {
@@ -265,9 +314,11 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
                     UseShellExecute = false,
                 };
-                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName;
-                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir;
+                PrepareSpaceClaimEnvironment(psi);
+                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
+                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName!;
                 Process started = Process.Start(psi);
                 workingProcess = ResolveStartedSpaceClaimProcess(
                     started, launchBaseline, processAppearTimeout);
@@ -318,7 +369,7 @@ namespace AutoFluidSimulation.Bridge
                     }
                     catch (Exception ex)
                     {
-                        Console.Error.WriteLine($"[BRIDGE] Warning: 进程状态检查失败: {ex.Message}");
+                        Console.WriteLine($"[BRIDGE_WARN] 进程状态检查失败: {ex.Message}");
                         processAlive = false;
                     }
 
@@ -342,31 +393,275 @@ namespace AutoFluidSimulation.Bridge
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
                 return (int)ExitCode.Timeout;
             }
+            catch (InvalidOperationException ex)
+            {
+                int? earlySuccess = TryReturnSuccessIfScdocExists(
+                    opts,
+                    "SpaceClaim exited before GUI ready but SCDOC exists");
+                if (earlySuccess.HasValue)
+                {
+                    return earlySuccess.Value;
+                }
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
+                return (int)ExitCode.LaunchFailed;
+            }
             finally
             {
                 workingProcess?.Dispose();
             }
         }
 
+        private static void PrepareSpaceClaimEnvironment(ProcessStartInfo psi)
+        {
+            BackfillProcessEnvironment(psi);
+            NormalizePathEnvironmentVariables(psi);
+            EnsureAnsysEnvironmentVariables(psi);
+        }
+
+        private static void BackfillProcessEnvironment(ProcessStartInfo psi)
+        {
+            CopyEnvironmentVariables(
+                psi,
+                Environment.GetEnvironmentVariables(EnvironmentVariableTarget.Machine));
+            CopyEnvironmentVariables(
+                psi,
+                Environment.GetEnvironmentVariables(EnvironmentVariableTarget.User));
+            Console.WriteLine("[BRIDGE] 已补齐系统/用户环境变量");
+        }
+
+        private static void CopyEnvironmentVariables(
+            ProcessStartInfo psi,
+            System.Collections.IDictionary variables)
+        {
+            foreach (System.Collections.DictionaryEntry entry in variables)
+            {
+                string? name = entry.Key as string;
+                string? value = entry.Value as string;
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(value))
+                {
+                    continue;
+                }
+
+                if (string.Equals(name, "Path", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (psi.EnvironmentVariables.ContainsKey(name) &&
+                    !string.IsNullOrWhiteSpace(psi.EnvironmentVariables[name]))
+                {
+                    continue;
+                }
+
+                psi.EnvironmentVariables[name] = value;
+            }
+        }
+
+        private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
+        {
+            NormalizeCurrentProcessPathEnvironment();
+
+            string? inheritedPath = null;
+            var pathKeys = new List<string>();
+            foreach (string key in psi.EnvironmentVariables.Keys)
+            {
+                if (string.Equals(key, "Path", StringComparison.OrdinalIgnoreCase))
+                {
+                    pathKeys.Add(key);
+                    if (inheritedPath == null || string.Equals(key, "Path", StringComparison.Ordinal))
+                    {
+                        inheritedPath = psi.EnvironmentVariables[key];
+                    }
+                }
+            }
+
+            foreach (string key in pathKeys)
+            {
+                psi.EnvironmentVariables.Remove(key);
+            }
+
+            string pathValue = BuildSpaceClaimPath(inheritedPath);
+            psi.EnvironmentVariables["Path"] = pathValue;
+            Console.WriteLine("[BRIDGE] 已补齐 SpaceClaim 子进程 Path");
+        }
+
+        private static void EnsureAnsysEnvironmentVariables(ProcessStartInfo psi)
+        {
+            string awpRoot = ResolveAwpRoot();
+            SetEnvironmentIfMissing(psi, "AWP_ROOT231", awpRoot);
+            SetEnvironmentIfMissing(psi, "AWP_LOCALE231", "zh");
+            SetEnvironmentIfMissing(psi, "ANSYS231_DIR", Path.Combine(awpRoot, "ANSYS"));
+            SetEnvironmentIfMissing(
+                psi,
+                "ANSYSLIC_DIR",
+                @"C:\Program Files\ANSYS Inc\Shared Files\Licensing");
+            SetEnvironmentIfMissing(psi, "ANSYSLMD_LICENSE_FILE", "1055@localhost");
+            SetEnvironmentIfMissing(
+                psi,
+                "CADOE_LIBDIR231",
+                Path.Combine(awpRoot, @"CommonFiles\Language\zh"));
+            Console.WriteLine("[BRIDGE] 已补齐 ANSYS SpaceClaim 环境变量");
+        }
+
+        private static string ResolveAwpRoot()
+        {
+            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
+            if (!string.IsNullOrWhiteSpace(awpRoot) && Directory.Exists(awpRoot))
+            {
+                return awpRoot;
+            }
+
+            return @"C:\Program Files\ANSYS Inc\v231";
+        }
+
+        private static void SetEnvironmentIfMissing(
+            ProcessStartInfo psi,
+            string name,
+            string value)
+        {
+            if (psi.EnvironmentVariables.ContainsKey(name) &&
+                !string.IsNullOrWhiteSpace(psi.EnvironmentVariables[name]))
+            {
+                return;
+            }
+
+            string? processValue = Environment.GetEnvironmentVariable(name);
+            psi.EnvironmentVariables[name] =
+                !string.IsNullOrWhiteSpace(processValue) ? processValue : value;
+        }
+
+        private static void NormalizeCurrentProcessPathEnvironment()
+        {
+            string? pathValue = Environment.GetEnvironmentVariable("Path");
+            if (pathValue == null)
+            {
+                pathValue = Environment.GetEnvironmentVariable("PATH");
+            }
+
+            Environment.SetEnvironmentVariable("PATH", null);
+            Environment.SetEnvironmentVariable("Path", null);
+            if (pathValue != null)
+            {
+                Environment.SetEnvironmentVariable("Path", pathValue);
+            }
+        }
+
+        private static string BuildSpaceClaimPath(string? inheritedPath)
+        {
+            var entries = new List<string>();
+            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
+            if (string.IsNullOrWhiteSpace(awpRoot))
+            {
+                awpRoot = @"C:\Program Files\ANSYS Inc\v231";
+            }
+
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"SCDM\Stride"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, "SCDM"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"Addins\ACT\bin\Win64"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"fluent\ntbin\win64"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"commonfiles\CAD\Spatial"));
+            AddPathIfDirectory(entries, Path.Combine(awpRoot, @"commonfiles\CAD\bin\winx64"));
+            AddPathIfDirectory(entries, Environment.GetEnvironmentVariable("ANSYSLIC_DIR"));
+
+            AppendPathList(entries, inheritedPath);
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path"));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("PATH"));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine));
+            AppendPathList(entries, Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User));
+
+            return string.Join(";", DeduplicatePathEntries(entries));
+        }
+
+        private static void AddPathIfDirectory(List<string> entries, string? path)
+        {
+            if (path == null)
+            {
+                return;
+            }
+
+            string pathText = path.Trim();
+            if (pathText.Length == 0)
+            {
+                return;
+            }
+
+            string expanded = Environment.ExpandEnvironmentVariables(pathText);
+            if (Directory.Exists(expanded))
+            {
+                entries.Add(expanded);
+            }
+        }
+
+        private static void AppendPathList(List<string> entries, string? pathValue)
+        {
+            if (pathValue == null)
+            {
+                return;
+            }
+
+            string pathText = pathValue.Trim();
+            if (pathText.Length == 0)
+            {
+                return;
+            }
+
+            foreach (string entry in pathText.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string trimmed = entry.Trim();
+                if (trimmed.Length > 0)
+                {
+                    entries.Add(trimmed);
+                }
+            }
+        }
+
+        private static IEnumerable<string> DeduplicatePathEntries(IEnumerable<string> entries)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string entry in entries)
+            {
+                string normalized = entry.Trim().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (normalized.Length == 0 || !seen.Add(normalized))
+                {
+                    continue;
+                }
+
+                yield return entry.Trim();
+            }
+        }
+
+        private static int? TryReturnSuccessIfScdocExists(BridgeOptions opts, string reason)
+        {
+            string scdocFile = GetScdocFilePath(opts);
+            if (!File.Exists(scdocFile))
+            {
+                return null;
+            }
+
+            var fi = new FileInfo(scdocFile);
+            Console.WriteLine($"[BRIDGE] ✓ {reason}: {scdocFile} ({fi.Length} bytes)");
+            return (int)ExitCode.Success;
+        }
+
         // ==============================================================
         // 常驻模式：启动 SpaceClaim 后通过文件协议循环处理命令
         // ==============================================================
+
+        /// <summary>
+        /// 常驻模式执行入口：启动 SpaceClaim 后通过文件协议循环处理命令。
+        /// </summary>
+        /// <param name="opts">解析后的 Bridge 选项</param>
+        /// <returns>退出码</returns>
         private static int ExecutePersistent(BridgeOptions opts)
         {
             Console.WriteLine($"[BRIDGE] SpaceClaim Bridge 常驻模式启动");
-            Console.WriteLine($"[BRIDGE]   脚本: {opts.ScriptPath}");
-            Console.WriteLine($"[BRIDGE]   槽位: {opts.SlotId}");
-            Console.WriteLine($"[BRIDGE]   IPC目录: {opts.CmdDir}");
-
-            if (string.IsNullOrEmpty(opts.CmdDir))
-            {
-                Console.Error.WriteLine("[BRIDGE_ERROR] 常驻模式需要 --cmddir 参数");
-                return (int)ExitCode.InvalidArgs;
-            }
+            Console.WriteLine($"[BRIDGE] 脚本: {opts.ScriptPath}");
+            Console.WriteLine($"[BRIDGE] 槽位: {opts.SlotId}");
+            Console.WriteLine($"[BRIDGE] IPC目录: {opts.CmdDir}");
 
             Directory.CreateDirectory(opts.CmdDir);
 
-            string scExe = FindSpaceClaimExe(opts.ScExePath);
+            string? scExe = FindSpaceClaimExe(opts.ScExePath);
             if (scExe == null)
             {
                 Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到");
@@ -378,14 +673,14 @@ namespace AutoFluidSimulation.Bridge
             int processAppearTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PROCESS_APPEAR_TIMEOUT",
                 DefaultProcessAppearTimeoutSeconds);
-            Process workingProcess = null;
+            Process? workingProcess = null;
 
             Console.WriteLine("[BRIDGE] 正在启动 SpaceClaim (常驻模式)...");
-            Console.WriteLine($"[BRIDGE]   Exe: {scExe}");
-            Console.WriteLine($"[BRIDGE]   Args: {runScriptArg} /Splash=False /Welcome=False");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_PERSISTENT=1");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_CMD_DIR={opts.CmdDir}");
-            Console.WriteLine($"[BRIDGE]   Env: AUTOFLUID_SC_SLOT_ID={opts.SlotId}");
+            Console.WriteLine($"[BRIDGE] Exe: {scExe}");
+            Console.WriteLine($"[BRIDGE] Args: {runScriptArg} /Splash=False /Welcome=False");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_PERSISTENT=1");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_CMD_DIR={opts.CmdDir}");
+            Console.WriteLine($"[BRIDGE] Env: AUTOFLUID_SC_SLOT_ID={opts.SlotId}");
 
             try
             {
@@ -396,11 +691,12 @@ namespace AutoFluidSimulation.Bridge
                     Arguments = runScriptArg + " /Splash=False /Welcome=False",
                     UseShellExecute = false,
                 };
+                PrepareSpaceClaimEnvironment(psi);
                 // Python passes the same slot settings to Bridge; Bridge forwards them
                 // to the child SpaceClaim process that runs spaceclaim_transit.py.
                 psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";
                 psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
-                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir;
+                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir!;
                 psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = opts.SlotId.ToString();
                 Process started = Process.Start(psi);
                 workingProcess = ResolveStartedSpaceClaimProcess(
@@ -423,10 +719,20 @@ namespace AutoFluidSimulation.Bridge
             int guiReadyTimeout = GetEnvInt(
                 "AUTOFLUID_SC_GUI_READY_TIMEOUT",
                 DefaultGuiReadyTimeoutSeconds);
-            WaitForGuiReady(workingProcess, guiReadyTimeout);
+            try
+            {
+                WaitForGuiReady(workingProcess, guiReadyTimeout);
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
+                WritePersistentMonitorFile(opts, GetProcessIdOrDefault(workingProcess), "gui_ready_failed");
+                workingProcess?.Dispose();
+                return (int)ExitCode.LaunchFailed;
+            }
 
             // 等待脚本就绪标志
-            string readyFile = Path.Combine(opts.CmdDir, $"sc_ready_{opts.SlotId}.json");
+            string readyFile = Path.Combine(opts.CmdDir!, $"sc_ready_{opts.SlotId}.json");
             Console.WriteLine($"[BRIDGE] 等待脚本就绪标志: {readyFile}");
             int persistentReadyTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PERSISTENT_READY_TIMEOUT",
@@ -456,7 +762,7 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: 进程状态检查异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] 进程状态检查异常: {ex.Message}");
                 }
                 Thread.Sleep(PersistentReadyPollIntervalMs);
             }
@@ -470,7 +776,7 @@ namespace AutoFluidSimulation.Bridge
 
             Console.WriteLine("[BRIDGE] 常驻模式就绪，开始命令循环...");
 
-            string cmdFile = Path.Combine(opts.CmdDir, $"sc_cmd_{opts.SlotId}.json");
+            string cmdFile = Path.Combine(opts.CmdDir!, $"sc_cmd_{opts.SlotId}.json");
 
             // 命令循环：监听进程退出和 quit 文件命令
             int exitCode = (int)ExitCode.Success;
@@ -536,13 +842,13 @@ namespace AutoFluidSimulation.Bridge
                     catch (Exception ex)
                     {
                         consecutiveProcessCheckFailures++;
-                        Console.Error.WriteLine(
-                            "[BRIDGE] Warning: 进程状态检查异常 "
+                        Console.WriteLine(
+                            "[BRIDGE_WARN] 进程状态检查异常 "
                             + $"({consecutiveProcessCheckFailures}/{MaxConsecutiveProcessCheckFailures}): {ex.Message}");
                         if (consecutiveProcessCheckFailures >= MaxConsecutiveProcessCheckFailures)
                         {
                             Console.Error.WriteLine(
-                                "[BRIDGE] 进程状态检查连续失败，判定 SpaceClaim 已退出");
+                                "[BRIDGE_ERROR] 进程状态检查连续失败，判定 SpaceClaim 已退出");
                             WritePersistentMonitorFile(
                                 opts,
                                 GetProcessIdOrDefault(workingProcess),
@@ -589,8 +895,15 @@ namespace AutoFluidSimulation.Bridge
             return exitCode;
         }
 
-        private static Process ResolveStartedSpaceClaimProcess(
-            Process startedProcess,
+        /// <summary>
+        /// 解析 Process.Start 返回的句柄，不可用时回退到进程扫描。
+        /// </summary>
+        /// <param name="startedProcess">Process.Start 返回的进程对象</param>
+        /// <param name="launchBaseline">启动时间基线</param>
+        /// <param name="processAppearTimeout">进程出现超时秒数</param>
+        /// <returns>可用的 SpaceClaim 进程对象，未找到返回 null</returns>
+        private static Process? ResolveStartedSpaceClaimProcess(
+            Process? startedProcess,
             DateTime launchBaseline,
             int processAppearTimeout)
         {
@@ -609,8 +922,8 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine(
-                        $"[BRIDGE] Warning: 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
+                    Console.WriteLine(
+                        $"[BRIDGE_WARN] 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
                 }
             }
 
@@ -618,33 +931,49 @@ namespace AutoFluidSimulation.Bridge
             return WaitForProcessAppear(launchBaseline, processAppearTimeout);
         }
 
+        /// <summary>
+        /// 根据配置构建 STEP 文件的完整路径。
+        /// </summary>
+        /// <param name="opts">Bridge 选项</param>
+        /// <returns>STEP 文件路径</returns>
         private static string GetStepFilePath(BridgeOptions opts)
         {
             return Path.Combine(
-                opts.StepDir,
-                string.Format(StepFileNamePattern, opts.ConfigName));
+                opts.StepDir!,
+                string.Format(StepFileNamePattern, opts.ConfigName!));
         }
 
+        /// <summary>
+        /// 根据配置构建 SCDOC 输出文件的完整路径。
+        /// </summary>
+        /// <param name="opts">Bridge 选项</param>
+        /// <returns>SCDOC 文件路径</returns>
         private static string GetScdocFilePath(BridgeOptions opts)
         {
             return Path.Combine(
-                opts.ScdocDir,
-                string.Format(ScdocFileNamePattern, opts.ConfigName));
+                opts.ScdocDir!,
+                opts.ScdocFileName!);
         }
 
+        /// <summary>
+        /// 写入常驻模式监控文件（JSON 格式），供 Python 端轮询读取。
+        /// </summary>
+        /// <param name="opts">Bridge 选项</param>
+        /// <param name="spaceClaimPid">SpaceClaim 进程 PID</param>
+        /// <param name="status">当前状态字符串</param>
         private static void WritePersistentMonitorFile(
             BridgeOptions opts,
             int spaceClaimPid,
             string status)
         {
-            if (opts == null || string.IsNullOrEmpty(opts.CmdDir))
+            if (string.IsNullOrEmpty(opts.CmdDir))
             {
                 return;
             }
 
             try
             {
-                string monitorFile = Path.Combine(opts.CmdDir, $"sc_bridge_{opts.SlotId}.json");
+                string monitorFile = Path.Combine(opts.CmdDir!, $"sc_bridge_{opts.SlotId}.json");
                 int bridgePid = Process.GetCurrentProcess().Id;
                 string json =
                     "{" +
@@ -659,11 +988,16 @@ namespace AutoFluidSimulation.Bridge
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[BRIDGE] Warning: 写入监控信息失败: {ex.Message}");
+                Console.WriteLine($"[BRIDGE_WARN] 写入监控信息失败: {ex.Message}");
             }
         }
 
-        private static string ReadCommandFile(string cmdFile)
+        /// <summary>
+        /// 以共享模式读取命令文件内容，文件不存在或被锁定时返回 null。
+        /// </summary>
+        /// <param name="cmdFile">命令文件路径</param>
+        /// <returns>文件内容，读取失败返回 null</returns>
+        private static string? ReadCommandFile(string cmdFile)
         {
             try
             {
@@ -692,13 +1026,23 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 检查命令文件中是否包含 quit 指令。
+        /// </summary>
+        /// <param name="cmdFile">命令文件路径</param>
+        /// <returns>包含 quit 指令返回 true</returns>
         private static bool IsQuitCommandPending(string cmdFile)
         {
-            string content = ReadCommandFile(cmdFile);
+            string? content = ReadCommandFile(cmdFile);
             return content != null && content.Contains("\"quit\"");
         }
 
-        private static int GetProcessIdOrDefault(Process process)
+        /// <summary>
+        /// 安全获取进程 PID，进程对象不可用时返回 0。
+        /// </summary>
+        /// <param name="process">进程对象（可为 null）</param>
+        /// <returns>进程 PID 或 0</returns>
+        private static int GetProcessIdOrDefault(Process? process)
         {
             if (process == null)
             {
@@ -715,22 +1059,50 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
-        private static string EscapeJsonString(string value)
+        /// <summary>
+        /// 转义字符串中的 JSON 特殊字符和控制字符。
+        /// </summary>
+        /// <param name="value">待转义的原始字符串</param>
+        /// <returns>转义后的 JSON 安全字符串</returns>
+        private static string EscapeJsonString(string? value)
         {
             if (value == null)
             {
                 return string.Empty;
             }
 
-            return value
-                .Replace("\\", "\\\\")
-                .Replace("\"", "\\\"")
-                .Replace("\n", "\\n")
-                .Replace("\r", "\\r")
-                .Replace("\t", "\\t");
+            var sb = new System.Text.StringBuilder(value.Length + 16);
+            foreach (char c in value)
+            {
+                switch (c)
+                {
+                    case '\\': sb.Append("\\\\"); break;
+                    case '"': sb.Append("\\\""); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (c < 0x20)
+                        {
+                            sb.Append("\\u");
+                            sb.Append(((int)c).ToString("x4"));
+                        }
+                        else
+                        {
+                            sb.Append(c);
+                        }
+                        break;
+                }
+            }
+            return sb.ToString();
         }
 
-        private static string FindSpaceClaimExe(string userPath = null)
+        /// <summary>
+        /// 按优先级查找 SpaceClaim.exe：命令行指定 → 环境变量 → 已知安装路径。
+        /// </summary>
+        /// <param name="userPath">命令行指定的可选路径</param>
+        /// <returns>找到的可执行文件路径，未找到返回 null</returns>
+        private static string? FindSpaceClaimExe(string? userPath = null)
         {
             // 1. 优先使用命令行指定的路径
             if (!string.IsNullOrEmpty(userPath) && File.Exists(userPath))
@@ -739,7 +1111,7 @@ namespace AutoFluidSimulation.Bridge
                 return userPath;
             }
             // 2. 检查环境变量 AUTOFLUID_SC_EXE
-            string envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
+            string? envPath = Environment.GetEnvironmentVariable("AUTOFLUID_SC_EXE");
             if (!string.IsNullOrEmpty(envPath) && File.Exists(envPath))
             {
                 Console.WriteLine($"[BRIDGE] 找到 SpaceClaim.exe (环境变量): {envPath}");
@@ -754,16 +1126,37 @@ namespace AutoFluidSimulation.Bridge
                     return p;
                 }
             }
+
+            Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim.exe 未找到, 已检查:");
+            if (!string.IsNullOrEmpty(userPath))
+            {
+                Console.Error.WriteLine($"  命令行路径: {userPath}");
+            }
+            if (!string.IsNullOrEmpty(envPath))
+            {
+                Console.Error.WriteLine($"  环境变量路径: {envPath}");
+            }
+            foreach (string p in SpaceClaimExePaths)
+            {
+                Console.Error.WriteLine($"  已知路径: {p}");
+            }
             return null;
         }
 
-        private static Process WaitForProcessAppear(DateTime after, int timeoutSec)
+        /// <summary>
+        /// 等待 SpaceClaim 进程出现，过滤启动前已有的旧进程。
+        /// </summary>
+        /// <param name="after">启动时间基线（UTC）</param>
+        /// <param name="timeoutSec">等待超时秒数</param>
+        /// <returns>匹配的进程对象，超时返回 null</returns>
+        private static Process? WaitForProcessAppear(DateTime after, int timeoutSec)
         {
             // 记录启动前已有的进程 PID，用于过滤旧进程
             var existingPids = new HashSet<int>();
             foreach (var p in Process.GetProcessesByName(ProcessName))
             {
-                try { existingPids.Add(p.Id); } catch { }
+                try { existingPids.Add(p.Id); }
+                catch (InvalidOperationException) { /* 进程已退出，跳过 */ }
                 p.Dispose();
             }
 
@@ -771,7 +1164,7 @@ namespace AutoFluidSimulation.Bridge
             while (DateTime.UtcNow < deadline)
             {
                 Process[] procs = Process.GetProcessesByName(ProcessName);
-                Process selectedProcess = null;
+                Process? selectedProcess = null;
                 try
                 {
                     foreach (Process p in procs)
@@ -787,7 +1180,8 @@ namespace AutoFluidSimulation.Bridge
                         }
                         catch (Exception ex)
                         {
-                            Console.Error.WriteLine($"[BRIDGE] Warning: 访问进程信息失败: {ex.Message}");
+                            // 无权访问进程 StartTime（如跨会话进程），跳过
+                            Console.WriteLine($"[BRIDGE_WARN] 访问进程信息失败 (PID={p.Id}): {ex.Message}");
                         }
                     }
 
@@ -804,7 +1198,7 @@ namespace AutoFluidSimulation.Bridge
                         }
                         catch (Exception ex)
                         {
-                            Console.Error.WriteLine($"[BRIDGE] Warning: 返回进程失败: {ex.Message}");
+                            Console.WriteLine($"[BRIDGE_WARN] 返回进程失败: {ex.Message}");
                         }
                     }
                 }
@@ -825,6 +1219,11 @@ namespace AutoFluidSimulation.Bridge
             return null;
         }
 
+        /// <summary>
+        /// 释放除已选中进程外的所有进程对象。
+        /// </summary>
+        /// <param name="processes">待清理的进程集合</param>
+        /// <param name="selected">保留不释放的进程</param>
         private static void DisposeUnmatchedProcesses(IEnumerable<Process> processes, Process selected)
         {
             foreach (Process process in processes)
@@ -835,13 +1234,18 @@ namespace AutoFluidSimulation.Bridge
                     {
                         process.Dispose();
                     }
-                    catch
+                    catch (Exception)
                     {
+                        // Dispose 期间的任何异常均忽略，确保批量清理不中断
                     }
                 }
             }
         }
 
+        /// <summary>
+        /// 释放所有进程对象，忽略已释放的对象。
+        /// </summary>
+        /// <param name="processes">待清理的进程集合</param>
         private static void DisposeProcesses(IEnumerable<Process> processes)
         {
             foreach (Process process in processes)
@@ -850,12 +1254,19 @@ namespace AutoFluidSimulation.Bridge
                 {
                     process.Dispose();
                 }
-                catch
+                catch (Exception)
                 {
+                    // Dispose 期间的任何异常均忽略，确保批量清理不中断
                 }
             }
         }
 
+        /// <summary>
+        /// 从环境变量读取正整数值，无效或未设置时返回默认值。
+        /// </summary>
+        /// <param name="name">环境变量名</param>
+        /// <param name="defaultValue">默认值</param>
+        /// <returns>解析后的正整数或默认值</returns>
         private static int GetEnvInt(string name, int defaultValue)
         {
             string value = Environment.GetEnvironmentVariable(name);
@@ -866,6 +1277,11 @@ namespace AutoFluidSimulation.Bridge
             return defaultValue;
         }
 
+        /// <summary>
+        /// 等待 SpaceClaim GUI 就绪：主窗口出现 → 线程空闲 → 加载稳定延时。
+        /// </summary>
+        /// <param name="p">SpaceClaim 进程对象</param>
+        /// <param name="timeoutSec">主窗口出现超时秒数</param>
         private static void WaitForGuiReady(Process p, int timeoutSec)
         {
             DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
@@ -882,7 +1298,7 @@ namespace AutoFluidSimulation.Bridge
                         string title = p.MainWindowTitle;
                         if (!string.IsNullOrEmpty(title))
                         {
-                            Console.WriteLine($"[BRIDGE]   主窗口已检测到: \"{title}\"");
+                            Console.WriteLine($"[BRIDGE] 主窗口已检测到: \"{title}\"");
                             mainWindowFound = true;
                         }
                     }
@@ -894,29 +1310,29 @@ namespace AutoFluidSimulation.Bridge
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: 主窗口检测异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] 主窗口检测异常: {ex.Message}");
                 }
                 if (!mainWindowFound) Thread.Sleep(ProcessAppearPollIntervalMs);
             }
 
             if (!mainWindowFound)
             {
-                Console.WriteLine("[BRIDGE]   Phase 1 超时, 使用 WaitForInputIdle 兜底...");
+                Console.WriteLine("[BRIDGE] Phase 1 超时, 使用 WaitForInputIdle 兜底...");
                 try
                 {
                     if (p.WaitForInputIdle(WaitForInputIdleTimeoutMs))
                     {
-                        Console.WriteLine("[BRIDGE]   WaitForInputIdle 兜底 OK");
+                        Console.WriteLine("[BRIDGE] WaitForInputIdle 兜底 OK");
                         Thread.Sleep(GuiFallbackStableDelayMs);
                         return;
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"[BRIDGE] Warning: WaitForInputIdle 异常: {ex.Message}");
+                    Console.WriteLine($"[BRIDGE_WARN] WaitForInputIdle 异常: {ex.Message}");
                 }
                 Console.WriteLine(
-                    $"[BRIDGE]   兜底失败, 使用固定延时 ({GuiFallbackFixedDelayMs / 1000}s)");
+                    $"[BRIDGE] 兜底失败, 使用固定延时 ({GuiFallbackFixedDelayMs / 1000}s)");
                 Thread.Sleep(GuiFallbackFixedDelayMs);
                 return;
             }
@@ -927,16 +1343,16 @@ namespace AutoFluidSimulation.Bridge
                 p.Refresh();
                 if (p.WaitForInputIdle(WaitForInputIdleTimeoutMs))
                 {
-                    Console.WriteLine("[BRIDGE]   主窗口线程已空闲");
+                    Console.WriteLine("[BRIDGE] 主窗口线程已空闲");
                 }
                 else
                 {
-                    Console.WriteLine("[BRIDGE]   WaitForInputIdle 超时, 继续...");
+                    Console.WriteLine("[BRIDGE] WaitForInputIdle 超时, 继续...");
                 }
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[BRIDGE] Warning: Phase 2 WaitForInputIdle 异常: {ex.Message}");
+                Console.WriteLine($"[BRIDGE_WARN] Phase 2 WaitForInputIdle 异常: {ex.Message}");
             }
 
             // Phase 3 等待时间可通过环境变量配置（默认 15 秒）
@@ -949,16 +1365,39 @@ namespace AutoFluidSimulation.Bridge
         }
     }
 
+    /// <summary>
+    /// SpaceClaim Bridge 命令行参数选项。
+    /// </summary>
     internal class BridgeOptions
     {
-        public string ScriptPath { get; set; }
-        public string ConfigName { get; set; }
-        public string StepDir { get; set; }
-        public string ScdocDir { get; set; }
+        /// <summary>SpaceClaim transit 脚本路径（必需）。</summary>
+        public string? ScriptPath { get; set; }
+
+        /// <summary>构型编号，用于构建 STEP 文件名（一次性模式必需）。</summary>
+        public string? ConfigName { get; set; }
+
+        /// <summary>STEP 文件所在目录（一次性模式必需）。</summary>
+        public string? StepDir { get; set; }
+
+        /// <summary>SCDOC 输出目录（一次性模式必需）。</summary>
+        public string? ScdocDir { get; set; }
+
+        /// <summary>SCDOC 输出文件名（一次性模式必需）。</summary>
+        public string? ScdocFileName { get; set; }
+
+        /// <summary>SpaceClaim 进程超时秒数，默认 300。</summary>
         public int TimeoutSeconds { get; set; } = 300;
-        public string ScExePath { get; set; }
+
+        /// <summary>自定义 SpaceClaim.exe 路径，覆盖自动检测。</summary>
+        public string? ScExePath { get; set; }
+
+        /// <summary>是否启用常驻模式（循环处理命令）。</summary>
         public bool Persistent { get; set; }
-        public string CmdDir { get; set; }
+
+        /// <summary>常驻模式 IPC 命令目录路径（常驻模式必需）。</summary>
+        public string? CmdDir { get; set; }
+
+        /// <summary>常驻模式槽位 ID，默认 0。</summary>
         public int SlotId { get; set; }
     }
 }

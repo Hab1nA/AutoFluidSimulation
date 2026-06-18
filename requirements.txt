@@ -23,8 +23,5 @@ pywin32>=305             # SolidWorks COM 接口
 # ---- SSH 远程连接 ----
 paramiko>=3.0.0          # SSH/SFTP 客户端（远程工作站通信）
 
-# ---- 文件监控 (可选，当前使用轮询模式) ----
-watchdog>=3.0.0          # 文件系统事件监控
-
 # ---- 数据库 (Python 内置，无需安装) ----
 # sqlite3 - Python 标准库自带

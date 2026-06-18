@@ -68,9 +68,8 @@ pub fn compute_detail_lines_no_wrap(
     let mut max_width: usize = 0;
     for entry in log_buffer.filtered_entries(level_filter, source_filter) {
         let color = entry.level_color();
-        let level = entry.level.clone();
-        let prefix = format!("[{}] ", level);
-        let msg = entry.raw_message.clone();
+        let prefix = entry.detail_prefix();
+        let msg = entry.display_message();
         let full = format!("{}{}", prefix, msg);
         let w = unicode_width::UnicodeWidthStr::width(full.as_str());
         if w > max_width {
@@ -206,7 +205,7 @@ pub fn get_raw_message_at_visual_line(
         .filtered_entries(level_filter, source_filter)
         .collect();
     if visual_line < entries.len() {
-        Some(entries[visual_line].raw_message.clone())
+        Some(entries[visual_line].display_message())
     } else {
         None
     }
@@ -337,5 +336,39 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
             },
             hscrollbar_area,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::log_buffer::LogEntry;
+
+    #[test]
+    fn detail_lines_omit_timestamp_prefix() {
+        let mut log_buffer = LogBuffer::new();
+        log_buffer.push_detail(LogEntry {
+            id: 1,
+            timestamp: "2026-06-10 12:34:56".to_string(),
+            level: "WARNING".to_string(),
+            source: "scheduler".to_string(),
+            logger_name: "engine.scheduler.main".to_string(),
+            message: "step directory missing".to_string(),
+            raw_message: "[engine.scheduler.main] step directory missing".to_string(),
+            category: "general".to_string(),
+            config_name: None,
+            step_name: None,
+            worker_id: None,
+            is_polling: false,
+        });
+
+        let (lines, _) = compute_detail_lines_no_wrap(&log_buffer, &None, &None);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "[WARNING] ");
+        assert!(!lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.contains("2026-06-10 12:34:56")));
     }
 }

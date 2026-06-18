@@ -140,14 +140,9 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
 }
 
 fn validate_step_patterns(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
-    let patterns: [(&str, &str, bool); 6] = [
+    let patterns: [(&str, &str, bool); 5] = [
         ("step_file_patterns.sw", &config.step_file_patterns.sw, true),
         ("step_file_patterns.sc", &config.step_file_patterns.sc, true),
-        (
-            "step_file_patterns.transfer",
-            config.step_file_patterns.transfer.as_deref().unwrap_or(""),
-            false,
-        ),
         (
             "step_file_patterns.meshing",
             &config.step_file_patterns.meshing,
@@ -237,6 +232,13 @@ fn validate_spaceclaim(config: &SettingsConfig, errors: &mut Vec<ValidationError
             severity: Severity::Warning,
         });
     }
+    if config.spaceclaim.sc_max_slots == 0 {
+        errors.push(ValidationError {
+            field_name: "spaceclaim.sc_max_slots".to_string(),
+            message: "槽位数必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
 }
 
 fn validate_meshing(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
@@ -289,7 +291,7 @@ fn validate_solver(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
             message: "迭代次数至少为 1".to_string(),
             severity: Severity::Error,
         });
-    } else if config.solver.solver_iteration_count > 100000 {
+    } else if config.solver.solver_iteration_count > 100_000 {
         errors.push(ValidationError {
             field_name: "solver.solver_iteration_count".to_string(),
             message: "迭代次数异常偏高（> 100000）".to_string(),

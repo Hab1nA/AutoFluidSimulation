@@ -10,9 +10,13 @@ pub enum CommandResult {
     None,
     Quit,
     FullQuit,
+    StartCheck,
     StartDaemon,
     StopDaemon,
     RestartDaemon,
+    StartWorkers,
+    StopWorkers,
+    RestartWorkers,
 }
 
 pub async fn dispatch_command(
@@ -35,12 +39,13 @@ pub async fn dispatch_command(
         }
         "start" => cmd_start(ipc, log_buffer).await,
         "pause" => cmd_pause(ipc, log_buffer).await,
-        "check" => cmd_check(ipc, state, log_buffer).await,
+        "check" => cmd_check(ipc, state, log_buffer),
         "status" => cmd_status(ipc, log_buffer).await,
         "reset" => cmd_reset(&parts, state, log_buffer),
         "clean" => cmd_clean(&parts, state, log_buffer),
         "quit" => cmd_quit(&parts, state, log_buffer),
         "daemon" => cmd_daemon(&parts, state, log_buffer),
+        "worker" => cmd_worker(&parts, ipc, state, log_buffer).await,
         "settings" => {
             if state.engine_info.pipeline_started {
                 log_buffer.push_info(
@@ -102,37 +107,16 @@ async fn cmd_pause(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandRe
     CommandResult::None
 }
 
-async fn cmd_check(
+fn cmd_check(
     ipc: &mut IpcClient,
-    state: &mut AppState,
+    _state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) -> CommandResult {
     if !ipc.is_connected() {
         log_buffer.push_info("❌ 未连接到后台引擎".to_string());
         return CommandResult::None;
     }
-    log_buffer.push_info("🔍 正在系统自检（含远程 SSH 检测，请耐心等待）...".to_string());
-    match ipc.check_system().await {
-        Ok(resp) if resp.is_ok() => {
-            log_buffer.push_info("✅ 系统自检完成".to_string());
-            state.check_data = Some(resp.data);
-            state.dialog_scroll = 0;
-            state.ui_mode = UiMode::CheckResult;
-        }
-        Ok(resp) => {
-            log_buffer.push_info(format!("❌ 系统自检失败: {}", resp.message));
-        }
-        Err(e) => {
-            // 自动重连已在 send_request_with_timeout 内部完成，
-            // 此处仅根据当前连接状态告知用户结果。
-            if ipc.is_connected() {
-                log_buffer.push_info(format!("❌ 通信失败: {}（连接已自动恢复）", e));
-            } else {
-                log_buffer.push_info(format!("❌ 通信失败: {}（自动重连失败，请手动重连）", e));
-            }
-        }
-    }
-    CommandResult::None
+    CommandResult::StartCheck
 }
 
 async fn cmd_status(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandResult {
@@ -325,6 +309,56 @@ fn cmd_daemon(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     }
 }
 
+async fn cmd_worker(
+    parts: &[&str],
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> CommandResult {
+    if parts.len() < 2 {
+        log_buffer.push_info("用法: worker start | worker stop | worker restart".to_string());
+        return CommandResult::None;
+    }
+    match parts[1].to_lowercase().as_str() {
+        "start" => cmd_worker_start(ipc, log_buffer).await,
+        "stop" => {
+            state.confirm_message = Some(
+                "确定要【停止所有 Worker】吗？\n本地 Worker 进程和工作站 SSH 隧道将被关闭！"
+                    .to_string(),
+            );
+            state.confirm_callback = Some(ConfirmAction::StopWorkers);
+            state.dialog_scroll = 0;
+            state.ui_mode = UiMode::ConfirmDialog;
+            CommandResult::None
+        }
+        "restart" => {
+            state.confirm_message = Some(
+                "确定要【重启所有 Worker】吗？\n将先停止再启动本地 Worker 和工作站连接。"
+                    .to_string(),
+            );
+            state.confirm_callback = Some(ConfirmAction::RestartWorkers);
+            state.dialog_scroll = 0;
+            state.ui_mode = UiMode::ConfirmDialog;
+            CommandResult::None
+        }
+        _ => {
+            log_buffer.push_info("用法: worker start | worker stop | worker restart".to_string());
+            CommandResult::None
+        }
+    }
+}
+
+async fn cmd_worker_start(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandResult {
+    if !ipc.is_connected() {
+        log_buffer.push_info("❌ 未连接到后台引擎".to_string());
+        return CommandResult::None;
+    }
+    log_buffer.push_info(
+        "🔧 正在启动 Worker（建立 SSH 隧道、验证连通性、启动本地 Worker）...".to_string(),
+    );
+    CommandResult::StartWorkers
+}
+
 fn cmd_filter(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
     if parts.len() < 2 {
         log_buffer.push_info("用法: filter <error|warning|info|debug|remote|local|com|scheduler|system|clear|status>".to_string());
@@ -380,7 +414,13 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         format!("export_{}.log", time_str)
     };
 
-    let log_dir = std::env::current_dir().unwrap_or_default().join("logs");
+    let log_dir = match std::env::current_dir() {
+        Ok(dir) => dir.join("logs"),
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 获取当前目录失败: {}", e));
+            return CommandResult::None;
+        }
+    };
     let _ = fs::create_dir_all(&log_dir);
     let filepath = log_dir.join(&filename);
 
@@ -395,7 +435,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
         match fs::write(&filepath, lines.join("\n")) {
             Ok(_) => {
                 log::info!(
-                    "[TUI] 日志导出完成: scope={}, path={}, lines={}",
+                    "日志导出完成: scope={}, path={}, lines={}",
                     scope,
                     filepath.display(),
                     lines.len()
@@ -408,11 +448,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
                 ));
             }
             Err(e) => {
-                log::error!(
-                    "[TUI] 日志导出失败: path={}, error={}",
-                    filepath.display(),
-                    e
-                );
+                log::error!("日志导出失败: path={}, error={}", filepath.display(), e);
                 log_buffer.push_info(format!("❌ 日志导出失败: {}", e));
             }
         }
@@ -431,7 +467,7 @@ pub async fn execute_confirm_action(
             step_name,
         } => {
             log::info!(
-                "[TUI] 确认重置步骤: config={}, step={}",
+                "确认重置步骤: config={}, step={}",
                 config_name,
                 step_name.as_deref().unwrap_or("all")
             );
@@ -461,7 +497,7 @@ pub async fn execute_confirm_action(
             config_name,
         } => {
             log::info!(
-                "[TUI] 确认清理步骤文件: step={}, config={}",
+                "确认清理步骤文件: step={}, config={}",
                 step_name,
                 config_name
                     .as_ref()
@@ -481,15 +517,20 @@ pub async fn execute_confirm_action(
             CommandResult::None
         }
         ConfirmAction::FullQuit => {
-            log::info!("[TUI] 确认完全退出后台引擎和界面");
-            if ipc.is_connected() {
-                let _ = ipc.full_quit().await;
-            }
+            log::info!("确认完全退出后台引擎和界面");
             CommandResult::FullQuit
         }
         ConfirmAction::StopDaemon => {
-            log::info!("[TUI] 确认停止后台引擎");
+            log::info!("确认停止后台引擎");
             CommandResult::StopDaemon
+        }
+        ConfirmAction::StopWorkers => {
+            log::info!("确认停止所有 Worker");
+            CommandResult::StopWorkers
+        }
+        ConfirmAction::RestartWorkers => {
+            log::info!("确认重启所有 Worker");
+            CommandResult::RestartWorkers
         }
     }
 }
@@ -505,9 +546,12 @@ const HELP_LINES: &[&str] = &[
     "  reset <XX|all> <step|all>  - 重置构型步骤状态",
     "  clean <XX|all> <step|all>  - 清理构型步骤文件",
     "  clean all cache            - 清理远程临时缓存文件",
-    "  daemon start               - 启动后台引擎并自动连接",
-    "  daemon stop                - 停止后台引擎（TUI 继续运行）",
-    "  daemon restart             - 重启后台引擎（等同于 stop + start）",
+    "  daemon start               - 按当前模式启动本地/服务器后台引擎并自动连接",
+    "  daemon stop                - 按当前模式停止本地/服务器后台引擎（TUI 继续运行）",
+    "  daemon restart             - 按当前模式重启后台引擎（等同于 stop + start）",
+    "  worker start               - 启动所有 Worker（建立 SSH 隧道、启动本地 Worker）",
+    "  worker stop                - 停止所有 Worker（关闭进程和 SSH 隧道）",
+    "  worker restart             - 重启所有 Worker（等同于 stop + start）",
     "  quit                       - 退出界面（引擎继续运行）",
     "  quit full                  - 完全退出（停止引擎 + 关闭 TUI）",
     "",

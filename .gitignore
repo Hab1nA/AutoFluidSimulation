@@ -73,10 +73,12 @@ start_codewhale.bat
 Thumbs.db
 Desktop.ini
 ehthumbs.db
+*.lnk
 
 # ============================================================================
 # C# / MSBuild 编译产物
 # ============================================================================
+bridge/SpaceClaimBridge.exe
 bridge/SpaceClaimBridge/bin/
 bridge/SpaceClaimBridge/obj/
 bridge/SpaceClaimBridge/*.csproj.lscache
@@ -102,18 +104,9 @@ logs/
 *.log
 
 # ============================================================================
-# data 目录运行时文件
+# data 目录（运行时生成文件，无需入库）
 # ============================================================================
-data/*.pid
-data/**/*.pid
-data/*.db
-data/**/*.db
-data/*.db-shm
-data/**/*.db-shm
-data/*.db-wal
-data/**/*.db-wal
-data/*.json
-data/**/*.json
+data/
 
 # ============================================================================
 # 测试输出文件

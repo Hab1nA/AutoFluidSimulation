@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ===============================================================================
 总控程序入口 (Main Entry)
@@ -7,13 +9,14 @@
     python main.py --all          # 同时启动 daemon + client（进程分离模式）
     python main.py --daemon       # 仅启动后台守护进程
     python main.py --client       # 仅启动 TUI 客户端
+    python main.py --worker       # 仅启动本地 LocalWorker
     python main.py --stop         # 终止所有运行中的仿真进程
     python main.py --status       # 查看运行状态
 
 快捷方式：
-    start.bat                     # Windows 批处理快捷启动
-    start.bat stop                # 停止所有程序
-    start.bat status              # 查看状态
+    scripts/start_autofluid_preflight.ps1  # Windows 预检并启动
+    python main.py --quit                  # 停止所有程序
+    python main.py --status                # 查看状态
 ===============================================================================
 """
 import sys
@@ -28,7 +31,15 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.tui_launcher import find_rust_tui_binary, print_rust_tui_not_found_help
-from utils.process_utils import is_process_alive, read_pid_file, remove_pid_file, run_taskkill, check_ipc_ready
+from utils.logger import PrefixStrippingFormatter
+from utils.process_utils import (
+    check_ipc_ready,
+    cleanup_worker_processes_from_pid_files,
+    is_process_alive,
+    read_pid_file,
+    remove_pid_file,
+    run_taskkill,
+)
 from engine.config import IPC_CONFIG, PROCESS_MANAGEMENT
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +50,7 @@ IPC_READY_TIMEOUT = PROCESS_MANAGEMENT["ipc_ready_timeout"]
 
 
 
-def _ensure_dirs():
+def _ensure_dirs() -> None:
     """创建必要的目录结构。"""
     os.makedirs(PID_DIR, exist_ok=True)
 
@@ -58,8 +69,8 @@ def _setup_subprocess_logger(log_file: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
     if logger.handlers:
         return logger
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
+    formatter = PrefixStrippingFormatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     fh = logging.FileHandler(log_file, encoding="utf-8")
@@ -115,7 +126,7 @@ def _start_daemon_subprocess(daemon_log_file: str) -> subprocess.Popen | None:
         return None
 
 
-def _stop_daemon_subprocess():
+def _stop_daemon_subprocess() -> None:
     """终止后台守护进程。"""
     pid = read_pid_file(DAEMON_PID_FILE)
     if pid is None:
@@ -125,25 +136,43 @@ def _stop_daemon_subprocess():
     if not is_process_alive(pid):
         print("后台引擎: 未运行")
     else:
+        stopped = False
         try:
             if sys.platform == "win32":
                 if run_taskkill(pid):
                     print(f"后台引擎进程已终止 (PID: {pid})")
+                    stopped = True
                 else:
                     print(f"[警告] 无法终止后台引擎进程 (PID: {pid})")
             else:
                 os.kill(pid, signal.SIGTERM)
-                try:
-                    os.waitpid(pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
-                print(f"后台引擎进程已终止 (PID: {pid})")
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if not is_process_alive(pid):
+                        stopped = True
+                        break
+                    time.sleep(0.2)
+                if not stopped:
+                    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                    os.kill(pid, sigkill)
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        if not is_process_alive(pid):
+                            stopped = True
+                            break
+                        time.sleep(0.2)
+                if stopped:
+                    print(f"后台引擎进程已终止 (PID: {pid})")
+                else:
+                    print(f"[警告] 无法终止后台引擎进程 (PID: {pid})")
         except (OSError, ProcessLookupError) as e:
             print(f"[警告] 终止后台引擎进程失败: {e}")
+        if not stopped:
+            return
     remove_pid_file(DAEMON_PID_FILE)
 
 
-def _stop_all_processes():
+def _stop_all_processes() -> None:
     print("=" * 60)
     print("正在停止所有仿真进程...")
     print("=" * 60)
@@ -154,6 +183,7 @@ def _stop_all_processes():
             ("start_daemon.py", "后台引擎"),
             ("start_client.py", "TUI 客户端"),
             ("main.py --all", "总控程序(--all)"),
+            ("main.py --worker", "LocalWorker"),
         ]:
             try:
                 ps_filter = (
@@ -182,6 +212,7 @@ def _stop_all_processes():
             except (subprocess.SubprocessError, OSError):
                 pass
 
+    cleanup_worker_processes_from_pid_files()
     _stop_daemon_subprocess()
     print("所有进程已停止。")
 
@@ -205,7 +236,7 @@ def _find_latest_session_dir(process_type: str) -> str | None:
     return None
 
 
-def _show_status():
+def _show_status() -> None:
     print("=" * 60)
     print("仿真程序运行状态")
     print("=" * 60)
@@ -250,7 +281,7 @@ def _show_status():
     print()
 
 
-def _run_all_mode():
+def _run_all_mode() -> None:
     from utils.logger import init_session, build_session_log_dir
 
     _ensure_dirs()
@@ -398,7 +429,7 @@ def _run_all_mode():
         print("如需后台引擎继续运行，请使用 start_daemon.py 单独启动。")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="液氧甲烷火箭发动机仿真总控程序"
     )
@@ -413,6 +444,14 @@ def main():
     parser.add_argument(
         "--all", action="store_true",
         help="同时启动守护进程和客户端（进程分离模式，Daemon 输出重定向到日志文件）"
+    )
+    parser.add_argument(
+        "--worker", action="store_true",
+        help="仅启动本地 LocalWorker（用于连接远程 ocar daemon）"
+    )
+    parser.add_argument(
+        "--worker-once", action="store_true",
+        help="LocalWorker 仅注册并发送一次心跳，用于连通性测试"
     )
     parser.add_argument(
         "--stop", action="store_true",
@@ -458,6 +497,18 @@ def main():
             sys.exit(1)
     elif args.all:
         _run_all_mode()
+    elif args.worker or args.worker_once:
+        from engine.config import ensure_directories, reload_config_from_toml
+        from engine.local_worker import LocalWorker
+
+        reload_config_from_toml()
+        ensure_directories()
+        worker = LocalWorker.from_env()
+        if args.worker_once:
+            worker.register_once()
+            worker.heartbeat_once()
+        else:
+            worker.run_forever()
     elif args.stop:
         _stop_all_processes()
     elif args.status:
@@ -467,7 +518,8 @@ def main():
         print()
         print("推荐使用方式:")
         print("python main.py --all       # 一键启动 (Daemon + Client)")
-        print("python start.bat            # Windows 快捷启动 (双窗口)")
+        print("python main.py --worker     # 启动本地 LocalWorker 连接远程 daemon")
+        print("scripts/start_autofluid_preflight.ps1  # Windows 预检并启动")
         print("终端1: python start_daemon.py")
         print("终端2: python start_client.py")
 

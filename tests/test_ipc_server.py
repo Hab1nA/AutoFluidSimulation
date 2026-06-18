@@ -1,5 +1,14 @@
 from ipc.server import IPCServer
-from ipc.protocol import serialize, create_request
+from ipc.protocol import (
+    CMD_GET_DASHBOARD,
+    CMD_WORKER_HEARTBEAT,
+    CMD_WORKER_POLL,
+    CMD_WORKER_REGISTER,
+    CMD_WORKER_STEP_COMPLETE,
+    CMD_WORKER_STEP_ERROR,
+    create_request,
+    serialize,
+)
 
 
 class DummyHandler:
@@ -16,7 +25,7 @@ class DummyHandler:
 
 
 def test_process_message_unknown_command():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     # do not start socket; test _process_message directly
     req = create_request("no_such_cmd", {})
     raw = serialize(req)
@@ -26,7 +35,7 @@ def test_process_message_unknown_command():
 
 
 def test_process_message_handler_returns_false():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     srv.register_handler("test_cmd", DummyHandler(raise_exc=False, ok=False))
     req = create_request("test_cmd", {"x": 1})
     raw = serialize(req)
@@ -37,7 +46,7 @@ def test_process_message_handler_returns_false():
 
 
 def test_process_message_handler_raises_exception():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     srv.register_handler("test_cmd", DummyHandler(raise_exc=True))
     req = create_request("test_cmd", {})
     raw = serialize(req)
@@ -48,11 +57,95 @@ def test_process_message_handler_raises_exception():
 
 
 def test_process_message_bad_payload():
-    srv = IPCServer(host="127.0.0.1", port=0)
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
     # send non-json / invalid payload
     resp = srv._process_message(b"not a json\n")
     assert resp["status"] == "error"
     assert resp["request_id"] == "unknown"
+
+
+def test_process_message_rejects_missing_auth_token_when_required():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {})
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "error"
+    assert resp["request_id"] == req["request_id"]
+    assert "认证失败" in resp["message"]
+
+
+def test_process_message_rejects_wrong_auth_token_when_required():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {}, auth_token="wrong-token")
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "error"
+    assert resp["request_id"] == req["request_id"]
+    assert "认证失败" in resp["message"]
+
+
+def test_process_message_accepts_matching_auth_token():
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="secret-token")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request("test_cmd", {}, auth_token="secret-token")
+
+    resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "ok"
+    assert resp["data"] == {"ok": True}
+
+
+def test_register_default_handlers_includes_local_worker_commands():
+    class _Daemon:
+        def handle_worker_register(self, params):
+            return True, params, ""
+
+        def handle_worker_heartbeat(self, params):
+            return True, params, ""
+
+        def handle_worker_poll(self, params):
+            return True, params, ""
+
+        def handle_worker_step_complete(self, params):
+            return True, params, ""
+
+        def handle_worker_step_error(self, params):
+            return True, params, ""
+
+        def __getattr__(self, _name):
+            return lambda params=None: (True, params, "")
+
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+
+    srv.register_default_handlers(_Daemon())
+
+    for command in {
+        CMD_WORKER_REGISTER,
+        CMD_WORKER_HEARTBEAT,
+        CMD_WORKER_POLL,
+        CMD_WORKER_STEP_COMPLETE,
+        CMD_WORKER_STEP_ERROR,
+    }:
+        assert command in srv._handlers
+
+
+def test_register_default_handlers_includes_dashboard_query():
+    class _Daemon:
+        def handle_get_dashboard(self, params):
+            return True, params, ""
+
+        def __getattr__(self, _name):
+            return lambda params=None: (True, params, "")
+
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+
+    srv.register_default_handlers(_Daemon())
+
+    assert CMD_GET_DASHBOARD in srv._handlers
 
 
 

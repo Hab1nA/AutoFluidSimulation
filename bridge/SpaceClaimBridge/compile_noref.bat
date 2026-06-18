@@ -16,7 +16,7 @@ echo.
 
 call "%~dp0find_msbuild.bat"
 if errorlevel 1 (
-    echo [ERROR] ??? MSBuild
+    echo [ERROR] MSBuild not found
     echo.
     echo Please install Visual Studio 2019+ or VS Build Tools 2022
     popd
@@ -52,7 +52,7 @@ if exist "..\SpaceClaimBridge.exe" (
 
 echo.
 echo Usage:
-echo   SpaceClaimBridge.exe --script "C:\path\to\transit.py" --config 1 --stepdir "C:\step" --scdocdir "C:\scdoc"
+echo   SpaceClaimBridge.exe --script "C:\path\to\transit.py" --config 1 --stepdir "C:\step" --scdocdir "C:\scdoc" --scdocname "model_gen4_1.scdoc"
 
 popd
 endlocal

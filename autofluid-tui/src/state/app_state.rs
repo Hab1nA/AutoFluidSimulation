@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+
 use crate::settings::SettingsState;
 use crate::text_buffer::TextBuffer;
 use crate::theme::AppTheme;
@@ -108,6 +111,19 @@ pub struct EngineInfo {
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
     pub pipeline_started: bool,
+    pub daemon_started_at: Option<f64>,
+    pub daemon_started_at_display: Option<String>,
+    pub daemon_uptime_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HealthInfo {
+    pub local_worker_online: Option<bool>,
+    pub local_ipc_tunnel_ok: Option<bool>,
+    pub local_ipc_tunnel_direct: bool,
+    pub server_to_local_ssh: Option<String>,
+    pub server_to_workstation_ssh: Option<String>,
+    pub workstation_ssh_details: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -145,6 +161,7 @@ pub struct AppState {
     pub status_data: HashMap<String, HashMap<String, String>>,
     pub configs: Vec<u64>,
     pub engine_info: EngineInfo,
+    pub health_info: HealthInfo,
     pub last_log_id: u64,
     pub log_filter_level: Option<String>,
     pub log_filter_source: Option<String>,
@@ -176,6 +193,10 @@ pub struct AppState {
     pub hovered_daemon_menu_item: Option<u8>,
     pub clicked_daemon_menu_item: Option<u8>,
     pub daemon_menu_click_time: Option<std::time::Instant>,
+    pub worker_menu_open: bool,
+    pub hovered_worker_menu_item: Option<u8>,
+    pub clicked_worker_menu_item: Option<u8>,
+    pub worker_menu_click_time: Option<std::time::Instant>,
     pub clicked_dialog_button: Option<u8>,
     pub click_time: Option<std::time::Instant>,
     pub dialog_click_time: Option<std::time::Instant>,
@@ -212,6 +233,8 @@ pub enum ConfirmAction {
     },
     FullQuit,
     StopDaemon,
+    StopWorkers,
+    RestartWorkers,
 }
 
 impl AppState {
@@ -305,7 +328,50 @@ impl AppState {
                 .get("pipeline_started")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            self.engine_info.daemon_started_at =
+                obj.get("daemon_started_at").and_then(|v| v.as_f64());
+            self.engine_info.daemon_started_at_display = obj
+                .get("daemon_started_at_display")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            self.engine_info.daemon_uptime_seconds =
+                obj.get("daemon_uptime_seconds").and_then(|v| v.as_u64());
         }
+        self.needs_redraw = true;
+    }
+
+    pub fn update_health_info(&mut self, data: &serde_json::Value) {
+        if let Some(obj) = data.as_object() {
+            self.health_info.local_worker_online =
+                obj.get("local_worker_online").and_then(|v| v.as_bool());
+            self.health_info.server_to_local_ssh = obj
+                .get("server_to_local_ssh")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            self.health_info.server_to_workstation_ssh = obj
+                .get("server_to_workstation_ssh")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            self.health_info.workstation_ssh_details.clear();
+            if let Some(details) = obj
+                .get("workstation_ssh_details")
+                .and_then(|v| v.as_object())
+            {
+                for (key, value) in details {
+                    if let Some(status) = value.as_str() {
+                        self.health_info
+                            .workstation_ssh_details
+                            .insert(key.clone(), status.to_string());
+                    }
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn update_local_ipc_tunnel(&mut self, host: &str, connected: bool) {
+        self.health_info.local_ipc_tunnel_direct = !is_local_endpoint(host);
+        self.health_info.local_ipc_tunnel_ok = Some(connected);
         self.needs_redraw = true;
     }
 
@@ -317,22 +383,86 @@ impl AppState {
             .unwrap_or(STATUS_WAITING)
     }
 
+    #[cfg(test)]
     pub fn info_bar_text(&self) -> String {
+        self.info_bar_parts()
+            .into_iter()
+            .map(|part| part.text)
+            .collect()
+    }
+
+    pub fn info_bar_line(&self) -> Line<'static> {
+        Line::from(
+            self.info_bar_parts()
+                .into_iter()
+                .map(|part| {
+                    let color = match part.color {
+                        Some(InfoBarColor::Success) => self.theme.success,
+                        Some(InfoBarColor::Error) => self.theme.error,
+                        None => self.theme.gray_5,
+                    };
+                    let style = Style::default().fg(color);
+                    Span::styled(part.text, style)
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn daemon_runtime_text(&self) -> String {
+        let Some(started_at) = self.engine_info.daemon_started_at_display.as_deref() else {
+            return String::new();
+        };
+        let uptime = self
+            .engine_info
+            .daemon_uptime_seconds
+            .map(format_uptime)
+            .unwrap_or_else(|| "--".to_string());
+        format!("启动 {}  运行 {}", started_at, uptime)
+    }
+
+    fn info_bar_parts(&self) -> Vec<InfoBarPart> {
+        let ipc = ok_label(Some(self.connected));
+        let local_worker = ok_label(self.health_info.local_worker_online);
+        let local_server = if self.health_info.local_ipc_tunnel_direct {
+            "直连"
+        } else {
+            ok_label(self.health_info.local_ipc_tunnel_ok)
+        };
+        let server_local = status_label(self.health_info.server_to_local_ssh.as_deref());
+        let server_workstation =
+            status_label(self.health_info.server_to_workstation_ssh.as_deref());
+
+        let mut parts = vec![InfoBarPart::plain("  IPC:")];
+        push_status_part(&mut parts, ipc);
+        parts.push(InfoBarPart::plain(" │ LW:"));
+        push_status_part(&mut parts, local_worker);
+        parts.push(InfoBarPart::plain(" │ L→S:"));
+        push_status_part(&mut parts, local_server);
+        parts.push(InfoBarPart::plain(" │ S→L:"));
+        push_status_part(&mut parts, server_local);
+        parts.push(InfoBarPart::plain(" │ S→W:"));
+        push_status_part(&mut parts, server_workstation);
+        parts.push(InfoBarPart::plain(" │ 引擎:"));
+
         if !self.connected {
-            return "  引擎: 未连接  │  请先启动 Daemon".to_string();
+            parts.push(InfoBarPart::plain("未连接"));
+            return parts;
         }
+
         let engine_status = engine_status_display(&self.engine_info.engine_status);
+        parts.push(InfoBarPart::status(engine_status));
+        parts.push(InfoBarPart::plain(format!(
+            " │ 构型:{}",
+            self.configs.len()
+        )));
+        parts.push(InfoBarPart::plain(" │ 屏障:"));
         let barrier = if self.engine_info.barrier_passed {
             "已通过"
         } else {
             "未通过"
         };
-        format!(
-            "  引擎: {}  │  构型数: {}  │  屏障: {}",
-            engine_status,
-            self.configs.len(),
-            barrier,
-        )
+        parts.push(InfoBarPart::status(barrier));
+        parts
     }
 
     pub fn clamp_table_scroll(&mut self, visible_height: u16) {
@@ -415,6 +545,76 @@ impl AppState {
     }
 }
 
+struct InfoBarPart {
+    text: String,
+    color: Option<InfoBarColor>,
+}
+
+#[derive(Clone, Copy)]
+enum InfoBarColor {
+    Success,
+    Error,
+}
+
+impl InfoBarPart {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            color: None,
+        }
+    }
+
+    fn status(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let color = match text.as_str() {
+            "OK" | "运行中" | "已通过" => Some(InfoBarColor::Success),
+            "断" | "已停止" | "未通过" => Some(InfoBarColor::Error),
+            _ => None,
+        };
+        Self { text, color }
+    }
+}
+
+fn push_status_part(parts: &mut Vec<InfoBarPart>, label: &'static str) {
+    parts.push(InfoBarPart::status(label));
+}
+
+fn ok_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "OK",
+        Some(false) => "断",
+        None => "未知",
+    }
+}
+
+fn status_label(value: Option<&str>) -> &'static str {
+    match value {
+        Some("ok") => "OK",
+        Some("disconnected") => "断",
+        Some(status) if status.starts_with("error:") => "断",
+        Some("unknown") | None => "未知",
+        Some(_) => "未知",
+    }
+}
+
+fn is_local_endpoint(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+pub fn format_uptime(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{secs:02}s")
+    } else {
+        format!("{minutes}m{secs:02}s")
+    }
+}
+
 fn expire_click<T>(
     click_time: &mut Option<std::time::Instant>,
     clicked: &mut Option<T>,
@@ -428,4 +628,101 @@ fn expire_click<T>(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn info_bar_text_includes_compact_health_statuses() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state.engine_info.barrier_passed = true;
+        state.configs = vec![1, 2, 3];
+        state.health_info.local_worker_online = Some(true);
+        state.health_info.local_ipc_tunnel_ok = Some(true);
+        state.health_info.local_ipc_tunnel_direct = false;
+        state.health_info.server_to_local_ssh = Some("ok".to_string());
+        state.health_info.server_to_workstation_ssh = Some("disconnected".to_string());
+
+        let text = state.info_bar_text();
+
+        assert!(text.contains("IPC:OK"));
+        assert!(text.contains("LW:OK"));
+        assert!(text.contains("L→S:OK"));
+        assert!(text.contains("S→L:OK"));
+        assert!(text.contains("S→W:断"));
+        assert!(text.contains("引擎:运行中"));
+        assert!(text.contains("构型:3"));
+        assert!(text.contains("屏障:已通过"));
+    }
+
+    #[test]
+    fn info_bar_line_colors_status_values_only() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state.engine_info.barrier_passed = false;
+        state.health_info.local_worker_online = Some(true);
+        state.health_info.local_ipc_tunnel_ok = Some(false);
+        state.health_info.server_to_local_ssh = Some("unknown".to_string());
+        state.health_info.server_to_workstation_ssh = Some("disconnected".to_string());
+
+        let line = state.info_bar_line();
+
+        assert_span_color(&line, "OK", Some(state.theme.success));
+        assert_span_color(&line, "断", Some(state.theme.error));
+        assert_span_color(&line, "运行中", Some(state.theme.success));
+        assert_span_color(&line, "未通过", Some(state.theme.error));
+        assert_span_color(&line, "未知", Some(state.theme.gray_5));
+        assert_span_color(&line, " │ 引擎:", Some(state.theme.gray_5));
+    }
+
+    #[test]
+    fn info_bar_text_distinguishes_direct_ipc_endpoint() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.update_local_ipc_tunnel("ocar", true);
+
+        assert!(state.info_bar_text().contains("L→S:直连"));
+    }
+
+    #[test]
+    fn info_bar_text_treats_local_ipc_endpoint_as_tunnel_status() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.update_local_ipc_tunnel("127.0.0.1", true);
+
+        assert!(state.info_bar_text().contains("L→S:OK"));
+    }
+
+    #[test]
+    fn format_uptime_compacts_seconds_minutes_and_hours() {
+        assert_eq!(format_uptime(8), "8s");
+        assert_eq!(format_uptime(65), "1m05s");
+        assert_eq!(format_uptime(3_725), "1h02m05s");
+    }
+
+    #[test]
+    fn daemon_runtime_text_keeps_started_date_and_time() {
+        let mut state = AppState::default();
+        state.engine_info.daemon_started_at_display = Some("2026-06-13 14:03:21".to_string());
+        state.engine_info.daemon_uptime_seconds = Some(65);
+
+        assert_eq!(
+            state.daemon_runtime_text(),
+            "启动 2026-06-13 14:03:21  运行 1m05s"
+        );
+    }
+
+    fn assert_span_color(line: &Line<'_>, text: &str, expected: Option<ratatui::style::Color>) {
+        let span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == text)
+            .unwrap_or_else(|| panic!("missing span {text:?}"));
+        assert_eq!(span.style.fg, expected);
+    }
 }
