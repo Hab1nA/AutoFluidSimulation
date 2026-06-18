@@ -14,6 +14,8 @@ pub const STATUS_PAUSED: &str = "Paused";
 pub const STATUS_RETRYING: &str = "Retrying";
 pub const STATUS_COMPLETED: &str = "Completed";
 pub const STATUS_ERROR: &str = "Error";
+pub const SETTINGS_LOCKED_MESSAGE: &str =
+    "⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置";
 
 pub const STEP_NAMES: [&str; 5] = ["sw", "sc", "transfer", "meshing", "solver"];
 
@@ -472,6 +474,19 @@ impl AppState {
         format!("启动 {}  运行 {}", started_at, uptime)
     }
 
+    pub fn settings_locked(&self) -> bool {
+        self.engine_info.pipeline_started
+    }
+
+    pub fn mark_daemon_stopped(&mut self) {
+        self.connected = false;
+        self.engine_info = EngineInfo {
+            engine_status: "stopped".to_string(),
+            ..Default::default()
+        };
+        self.needs_redraw = true;
+    }
+
     fn info_bar_parts(&self) -> Vec<InfoBarPart> {
         let ipc = ok_label(Some(self.connected));
         let local_worker = ok_label(self.health_info.local_worker_online);
@@ -852,6 +867,39 @@ mod tests {
             state.daemon_runtime_text(),
             "启动 2026-06-13 14:03:21  运行 1m05s"
         );
+    }
+
+    #[test]
+    fn mark_daemon_stopped_clears_settings_lock_runtime_fields() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state.engine_info.sw_macro_started = true;
+        state.engine_info.barrier_passed = true;
+        state.engine_info.pipeline_started = true;
+        state.engine_info.daemon_started_at = Some(1718000000.0);
+        state.engine_info.daemon_started_at_display = Some("2026-06-13 14:03:21".to_string());
+        state.engine_info.daemon_uptime_seconds = Some(65);
+        state.engine_info.solver_progress = Some(SolverProgress {
+            config_name: 1,
+            current_iter: Some(1),
+            total_iter: 10,
+            remaining_sec: 9.0,
+            updated_at: Some(1718000000.0),
+        });
+
+        state.mark_daemon_stopped();
+
+        assert!(!state.connected);
+        assert!(!state.settings_locked());
+        assert_eq!(state.engine_info.engine_status, "stopped");
+        assert!(!state.engine_info.sw_macro_started);
+        assert!(!state.engine_info.barrier_passed);
+        assert!(state.engine_info.daemon_started_at.is_none());
+        assert!(state.engine_info.daemon_started_at_display.is_none());
+        assert!(state.engine_info.daemon_uptime_seconds.is_none());
+        assert!(state.engine_info.solver_progress.is_none());
+        assert!(state.needs_redraw);
     }
 
     fn assert_span_color(line: &Line<'_>, text: &str, expected: Option<ratatui::style::Color>) {

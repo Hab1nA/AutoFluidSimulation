@@ -1,5 +1,6 @@
 use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
+use crate::state::app_state::SETTINGS_LOCKED_MESSAGE;
 use crate::state::{AppState, LogBuffer};
 use crate::worker_mgr::prepare_remote_workers;
 use crate::EventContext;
@@ -79,6 +80,15 @@ pub fn save_settings(
     rt: &tokio::runtime::Runtime,
     log_buffer: &mut LogBuffer,
 ) {
+    if state.settings_locked() {
+        log_buffer.push_info(SETTINGS_LOCKED_MESSAGE.to_string());
+        if let Some(ref mut ss) = state.settings_state {
+            ss.save_error = Some(SETTINGS_LOCKED_MESSAGE.to_string());
+        }
+        state.needs_redraw = true;
+        return;
+    }
+
     if let Some(ref mut ss) = state.settings_state {
         if ss.is_editing_field() {
             ss.commit_edit_current_field();
@@ -116,5 +126,40 @@ pub fn save_settings(
                 state.needs_redraw = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::SettingsState;
+
+    #[test]
+    fn save_settings_refuses_when_pipeline_started_after_dialog_opened() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        state.settings_state = Some(SettingsState::new());
+        state.engine_info.pipeline_started = true;
+        let mut log_buffer = LogBuffer::new();
+
+        save_settings(&mut state, &mut ipc, &rt, &mut log_buffer);
+
+        assert!(state.settings_state.is_some());
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .and_then(|settings| settings.save_error.as_deref()),
+            Some(SETTINGS_LOCKED_MESSAGE)
+        );
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line == SETTINGS_LOCKED_MESSAGE));
+        assert!(state.needs_redraw);
     }
 }

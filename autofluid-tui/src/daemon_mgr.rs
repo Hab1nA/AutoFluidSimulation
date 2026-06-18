@@ -443,14 +443,14 @@ impl DaemonManager {
                     return false;
                 }
             }
-            state.connected = false;
+            state.mark_daemon_stopped();
             log_buffer.push_info("✅ 服务器后台引擎已停止或正在停止".to_string());
             return true;
         }
 
         match self.stop(project_dir) {
             Ok(()) => {
-                state.connected = false;
+                state.mark_daemon_stopped();
                 log_buffer.push_info("✅ 后台引擎已停止".to_string());
                 true
             }

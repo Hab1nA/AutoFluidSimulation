@@ -45,6 +45,14 @@ function Resolve-PowerShellExe {
     throw "PowerShell executable was not found."
 }
 
+function Resolve-WScriptExe {
+    $command = Get-Command wscript.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        throw "wscript.exe was not found in PATH."
+    }
+    return $command.Source
+}
+
 function Get-TunnelSshTarget {
     if ($TunnelKind -eq "LocalWorker" -and
         -not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST)) {
@@ -119,6 +127,80 @@ function Get-TunnelWatchdogTaskName {
     return "AutoFluidTunnelWatchdog-$TunnelKind-$RemotePort"
 }
 
+function ConvertTo-VbsStringLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '""') + '"'
+}
+
+function ConvertTo-WindowsCommandArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Get-TunnelWatchdogLauncherPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $launcherDir = Join-Path (Join-Path $ProjectDir "data") "watchdog"
+    $launcherName = "autofluid-tunnel-watchdog-$TunnelKind-$RemotePort.vbs"
+    return Join-Path $launcherDir $launcherName
+}
+
+function New-TunnelWatchdogLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellExe
+    )
+
+    $scriptPath = $PSCommandPath
+    $launcherPath = Get-TunnelWatchdogLauncherPath -RemotePort $RemotePort
+    $launcherDir = Split-Path -Parent $launcherPath
+    if (-not [string]::IsNullOrWhiteSpace($launcherDir)) {
+        New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+    }
+
+    $commandParts = @(
+        $PowerShellExe,
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $scriptPath,
+        "-TunnelKind", $TunnelKind,
+        "-NoWatchdog",
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds)
+    )
+    $command = ($commandParts | ForEach-Object { ConvertTo-WindowsCommandArgument -Value $_ }) -join " "
+    $launcherContent = @(
+        'Set shell = CreateObject("WScript.Shell")',
+        "command = $(ConvertTo-VbsStringLiteral -Value $command)",
+        'shell.Run command, 0, False'
+    ) -join "`r`n"
+    Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
+    return $launcherPath
+}
+
+function Remove-TunnelWatchdogLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $launcherPath = Get-TunnelWatchdogLauncherPath -RemotePort $RemotePort
+    Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue
+    return $launcherPath
+}
+
 function Install-TunnelWatchdogTask {
     param(
         [Parameter(Mandatory = $true)]
@@ -128,18 +210,11 @@ function Install-TunnelWatchdogTask {
     )
 
     $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
-    $scriptPath = $PSCommandPath
-    $arguments = @(
-        "-WindowStyle", "Hidden",
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$scriptPath`"",
-        "-TunnelKind", $TunnelKind,
-        "-NoWatchdog",
-        "-RestartDelaySeconds", $RestartDelaySeconds
-    ) -join " "
+    $wscriptExe = Resolve-WScriptExe
+    $launcherPath = New-TunnelWatchdogLauncher -RemotePort $RemotePort -PowerShellExe $PowerShellExe
+    $arguments = ConvertTo-WindowsCommandArgument -Value $launcherPath
 
-    $action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $wscriptExe -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 1) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
@@ -534,9 +609,11 @@ $tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Work
 
 if ($UninstallWatchdog) {
     $taskName = Uninstall-TunnelWatchdogTask -RemotePort $remotePort
+    $launcherPath = Remove-TunnelWatchdogLauncher -RemotePort $remotePort
     $monitorStopped = Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort
     $sshStopped = Stop-ReverseTunnelSshProcesses -RemotePort $remotePort
     Write-Host "Uninstalled AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $taskName"
+    Write-Host "Removed AutoFluid $tunnelLabel reverse SSH tunnel watchdog launcher: $launcherPath"
     Write-Host "Stopped AutoFluid $tunnelLabel reverse SSH tunnel monitor: $monitorStopped; ssh processes: $sshStopped"
     exit 0
 }
@@ -550,6 +627,16 @@ if ($InstallWatchdog) {
         Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
     }
     exit 0
+}
+
+if (-not $NoWatchdog -and -not $Check -and -not $Monitor) {
+    try {
+        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
+        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
+    }
+    catch {
+        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
+    }
 }
 
 $sshExe = Resolve-SshExe

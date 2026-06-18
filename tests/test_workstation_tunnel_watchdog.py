@@ -21,15 +21,16 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "Register-ScheduledTask" in source
     assert "Unregister-ScheduledTask" in source
     assert "-NoWatchdog" in source
-    assert '"-WindowStyle", "Hidden"' in source
+    assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
 
 
-def test_tunnel_watchdog_is_not_installed_by_default_startup() -> None:
+def test_tunnel_watchdog_is_installed_by_default_startup() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
-    assert "if (-not $Check -and -not $NoWatchdog) {" not in source
+    assert "if (-not $NoWatchdog -and -not $Check -and -not $Monitor)" in source
+    assert "Install-TunnelWatchdogTask -RemotePort $remotePort" in source
     assert "Install-TunnelWatchdogTask" in source
-    assert "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready" not in source
+    assert "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready" in source
 
 
 def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:
@@ -37,6 +38,26 @@ def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:
 
     assert "[TimeSpan]::MaxValue" not in source
     assert "New-TimeSpan -Days 3650" in source
+
+
+def test_tunnel_watchdog_task_uses_hidden_wscript_launcher() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Resolve-WScriptExe" in source
+    assert "function New-TunnelWatchdogLauncher" in source
+    assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
+    assert "WScript.Shell" in source
+    assert "Run command, 0, False" in source
+    assert 'Set-Content -LiteralPath $launcherPath' in source
+
+
+def test_tunnel_watchdog_uninstall_removes_hidden_launcher() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Remove-TunnelWatchdogLauncher" in source
+    assert "Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue" in source
+    assert "Remove-TunnelWatchdogLauncher -RemotePort $remotePort" in source
+    assert "Removed AutoFluid $tunnelLabel reverse SSH tunnel watchdog launcher" in source
 
 
 def test_tunnel_watchdog_has_default_pid_file_for_scheduled_task_runs() -> None:
