@@ -163,7 +163,11 @@ def _parse_fluent_iteration_table_progress(
 
 def _write_progress_file(progress_file: str, progress: dict[str, object]) -> None:
     """Atomically write solver progress JSON."""
-    payload = dict(progress)
+    payload = {
+        key: value
+        for key, value in progress.items()
+        if key in {"config_name", "current_iter", "total_iter", "remaining_sec"}
+    }
     payload["updated_at"] = time.time()
     parent = os.path.dirname(progress_file)
     if parent:
@@ -389,7 +393,7 @@ def cleanup_log_files(config_id: int, log_dir: str) -> None:
     """
     patterns_to_delete = [
         "fluent-*.trn",
-        "*.out",
+        "report-def-*-rfile*.out",
     ]
     try:
         filenames = os.listdir(log_dir)

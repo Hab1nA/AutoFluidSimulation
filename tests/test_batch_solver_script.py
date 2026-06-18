@@ -262,6 +262,7 @@ def test_write_progress_file_uses_atomic_replace(tmp_path, monkeypatch):
     stored = json.loads(progress_file.read_text(encoding="utf-8"))
     assert stored["config_name"] == 5
     assert stored["remaining_sec"] == 15.0
+    assert "raw_line" not in stored
     assert isinstance(stored["updated_at"], float)
     assert not progress_file.with_suffix(".json.tmp").exists()
 
@@ -328,6 +329,7 @@ def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_pa
     Path(args.working_dir, "report-def-v-rfile_2_1.out").write_text(
         "report", encoding="utf-8"
     )
+    Path(args.working_dir, "user-result.out").write_text("keep", encoding="utf-8")
     Path(args.working_dir, "keep.dat").write_text("keep", encoding="utf-8")
 
     module.main()
@@ -336,6 +338,7 @@ def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_pa
     assert Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").read_bytes() == b"temperature"
     assert not Path(args.working_dir, "fluent-20260618-115935-21428.trn").exists()
     assert not Path(args.working_dir, "report-def-v-rfile_2_1.out").exists()
+    assert Path(args.working_dir, "user-result.out").exists()
     assert Path(args.working_dir, "keep.dat").exists()
 
 
