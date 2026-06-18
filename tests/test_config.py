@@ -709,16 +709,24 @@ class TestReloadConfigFromToml:
         from engine.config import REMOTE_CONFIG
 
         original_host = REMOTE_CONFIG.get("host", "")
+        original_animation_dir = REMOTE_CONFIG.get("animation_dir", "")
 
         def _mock_load(*args, **kwargs):
-            return {"remote_config": {"host": "10.99.99.99"}}
+            return {
+                "remote_config": {
+                    "host": "10.99.99.99",
+                    "animation_dir": r"D:\custom-animation",
+                }
+            }
 
         monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
         try:
             assert cfg.reload_config_from_toml() is True
             assert REMOTE_CONFIG["host"] == "10.99.99.99"
+            assert REMOTE_CONFIG["animation_dir"] == r"D:\custom-animation"
         finally:
             REMOTE_CONFIG["host"] = original_host
+            REMOTE_CONFIG["animation_dir"] = original_animation_dir
 
     def test_merges_workstations_and_expands_env_vars(self, monkeypatch):
         import engine.config as cfg
@@ -745,6 +753,7 @@ class TestReloadConfigFromToml:
                         "scdoc_dir": r"D:\scdoc",
                         "msh_dir": r"D:\msh",
                         "result_dir": r"D:\case",
+                        "animation_dir": r"D:\animation",
                         "flag_dir": r"D:\flags",
                         "conda_env": "pyfluent",
                         "conda_exe": r"C:\conda.exe",
@@ -772,6 +781,7 @@ class TestReloadConfigFromToml:
                     "scdoc_dir": r"D:\scdoc",
                     "msh_dir": r"D:\msh",
                     "result_dir": r"D:\case",
+                    "animation_dir": r"D:\animation",
                     "flag_dir": r"D:\flags",
                     "conda_env": "pyfluent",
                     "conda_exe": r"C:\conda.exe",
@@ -990,7 +1000,7 @@ class TestConfigDictCompleteness:
     _REMOTE_REQUIRED_KEYS = {
         "host", "port", "username", "password",
         "working_dir", "scripts_dir", "ref_files_dir",
-        "scdoc_dir", "msh_dir", "result_dir", "flag_dir",
+        "scdoc_dir", "msh_dir", "result_dir", "animation_dir", "flag_dir",
         "conda_env", "conda_exe", "mpi_bin_dir",
     }
 
@@ -1009,6 +1019,7 @@ class TestConfigDictCompleteness:
         from engine.config import REMOTE_CONFIG
         missing = self._REMOTE_REQUIRED_KEYS - set(REMOTE_CONFIG.keys())
         assert not missing, f"REMOTE_CONFIG 缺失: {sorted(missing)}"
+        assert REMOTE_CONFIG["animation_dir"] == r"D:\xkz_1020\animation"
 
     def test_workstations_keys(self):
         from engine.config import WORKSTATIONS
@@ -1050,6 +1061,7 @@ class TestWorkstationLookup:
                 "scdoc_dir": r"D:\scdoc",
                 "msh_dir": r"D:\msh",
                 "result_dir": r"D:\case",
+                "animation_dir": r"D:\animation",
                 "flag_dir": r"D:\flags",
                 "conda_env": "pyfluent",
                 "conda_exe": r"C:\conda.exe",
@@ -1084,6 +1096,7 @@ class TestWorkstationLookup:
                 "scdoc_dir": r"D:\scdoc",
                 "msh_dir": r"D:\msh",
                 "result_dir": r"D:\case",
+                "animation_dir": r"D:\animation",
                 "flag_dir": r"D:\flags",
                 "conda_env": "pyfluent",
                 "conda_exe": r"C:\conda.exe",
@@ -1119,6 +1132,7 @@ class TestWorkstationLookup:
                 "scdoc_dir": r"D:\scdoc",
                 "msh_dir": r"D:\msh",
                 "result_dir": r"D:\case",
+                "animation_dir": r"D:\animation",
                 "fluent_log_dir": r"D:\logs",
                 "fluent_journal": r"D:\solver.jou",
                 "fluent_post_journal": r"D:\post.jou",

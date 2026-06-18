@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from engine.scheduler.control import PipelineControl
 
 from engine.config import LOCAL_PATHS, ENGINE_CONFIG, OPERATION_TIMEOUTS, get_step_filename
+from utils.log_paths import service_log_dir
 from utils.logger import get_session_log_dir, setup_logger
 from utils.process_utils import is_process_alive, run_taskkill
 
@@ -794,8 +795,12 @@ class SCProcessPool:
 
     def _build_bridge_log_dir(self) -> str:
         """构建 Bridge 与 transit 共用的会话日志目录。"""
-        base_log_dir = get_session_log_dir() or LOCAL_PATHS.get("log_dir", "logs")
-        bridge_log_dir = os.path.join(base_log_dir, "bridge")
+        session_log_dir = get_session_log_dir()
+        bridge_log_dir = (
+            os.path.join(session_log_dir, "bridge")
+            if session_log_dir
+            else service_log_dir("spaceclaim")
+        )
         os.makedirs(bridge_log_dir, exist_ok=True)
         return bridge_log_dir
 

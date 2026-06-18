@@ -119,6 +119,10 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         ),
         ("remote_config.msh_dir", &config.remote_config.msh_dir),
         ("remote_config.result_dir", &config.remote_config.result_dir),
+        (
+            "remote_config.animation_dir",
+            &config.remote_config.animation_dir,
+        ),
     ];
     for (name, path) in &remote_dirs {
         if path.is_empty() {

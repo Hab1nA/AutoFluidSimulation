@@ -49,8 +49,19 @@ def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
 
     assert 'os.environ.get("AUTOFLUID_SC_LOG_DIR"' in source
     assert 'os.environ.get("AUTOFLUID_SC_SLOT_ID"' in source
+    assert '"local", "services", "spaceclaim"' in source
     assert "spaceclaim_transit_slot{}_{}.log" in source
     assert "spaceclaim_transit_{}.log" in source
+
+
+def test_daemon_service_logs_use_structured_service_paths() -> None:
+    source = (Path(__file__).resolve().parents[1] / "engine" / "daemon.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "service_log_file" in source
+    assert 'service_log_file("alert-watcher", "alert_watcher.log")' in source
+    assert 'service_log_file("local-worker", "local_worker_autostart.log")' in source
 
 
 def test_spaceclaim_transit_uses_passed_scdoc_name() -> None:

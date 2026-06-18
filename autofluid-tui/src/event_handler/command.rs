@@ -1,7 +1,9 @@
 use std::fs;
 
 use crate::ipc::client::IpcClient;
-use crate::state::app_state::{AppState, ConfirmAction, UiMode, STEP_NAMES};
+use crate::state::app_state::{
+    AppState, ConfirmAction, UiMode, SETTINGS_LOCKED_MESSAGE, STEP_NAMES,
+};
 use crate::state::filter;
 use crate::state::log_buffer::LogBuffer;
 use crate::utils::format_local_time;
@@ -47,10 +49,8 @@ pub async fn dispatch_command(
         "daemon" => cmd_daemon(&parts, state, log_buffer),
         "worker" => cmd_worker(&parts, ipc, state, log_buffer).await,
         "settings" => {
-            if state.engine_info.pipeline_started {
-                log_buffer.push_info(
-                    "⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置".to_string(),
-                );
+            if state.settings_locked() {
+                log_buffer.push_info(SETTINGS_LOCKED_MESSAGE.to_string());
             } else {
                 state.open_settings();
             }
@@ -415,7 +415,7 @@ fn cmd_export(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) 
     };
 
     let log_dir = match std::env::current_dir() {
-        Ok(dir) => dir.join("logs"),
+        Ok(dir) => dir.join("logs").join("local").join("exports"),
         Err(e) => {
             log_buffer.push_info(format!("❌ 获取当前目录失败: {}", e));
             return CommandResult::None;
@@ -608,5 +608,71 @@ mod tests {
             .info_messages
             .iter()
             .any(|line| line.contains("daemon restart")));
+    }
+
+    #[tokio::test]
+    async fn settings_command_blocks_while_pipeline_started() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        state.engine_info.pipeline_started = true;
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command("settings", &mut ipc, &mut state, &mut log_buffer).await;
+
+        assert!(matches!(result, CommandResult::None));
+        assert_ne!(state.ui_mode, UiMode::Settings);
+        assert!(state.settings_state.is_none());
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line == SETTINGS_LOCKED_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn settings_command_opens_after_daemon_state_is_cleared() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        state.engine_info.pipeline_started = true;
+        state.mark_daemon_stopped();
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command("settings", &mut ipc, &mut state, &mut log_buffer).await;
+
+        assert!(matches!(result, CommandResult::None));
+        assert_eq!(state.ui_mode, UiMode::Settings);
+        assert!(state.settings_state.is_some());
+    }
+
+    #[tokio::test]
+    async fn export_command_writes_to_structured_export_dir() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-export-test-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create temp project dir");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set temp cwd");
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        log_buffer.push_info("export me".to_string());
+
+        let result = dispatch_command(
+            "export all structured-export",
+            &mut ipc,
+            &mut state,
+            &mut log_buffer,
+        )
+        .await;
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        assert!(matches!(result, CommandResult::None));
+        assert!(project_dir
+            .join("logs")
+            .join("local")
+            .join("exports")
+            .join("structured-export.log")
+            .is_file());
+        std::fs::remove_dir_all(project_dir).ok();
     }
 }

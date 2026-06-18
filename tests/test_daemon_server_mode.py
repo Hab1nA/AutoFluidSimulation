@@ -135,8 +135,13 @@ def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path)
     daemon._stop_event.set()
     daemon.start()
 
-    assert len(popen_calls) == 1
-    command, kwargs = popen_calls[0]
+    alert_calls = [
+        (command, kwargs)
+        for command, kwargs in popen_calls
+        if "tools.autofluid_cli" in command and "alerts" in command and "watch" in command
+    ]
+    assert len(alert_calls) == 1
+    command, kwargs = alert_calls[0]
     assert command == [
         daemon_module.PipelineDaemon._daemon_python_executable(),
         "-m",

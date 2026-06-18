@@ -702,7 +702,7 @@ python main.py --all           # 同时启动
 
 | 命令                | 说明                                               |
 | ------------------- | -------------------------------------------------- |
-| `export`          | 导出当前日志到 `logs/export_YYYYMMDD_HHMMSS.log` |
+| `export`          | 导出当前日志到 `logs/local/exports/export_YYYYMMDD_HHMMSS.log` |
 | `export <文件名>` | 导出日志为指定文件名（自动追加 `.log` 后缀）     |
 
 > **注意**：日志导出受当前 `filter` 影响——只导出符合过滤条件的条目。

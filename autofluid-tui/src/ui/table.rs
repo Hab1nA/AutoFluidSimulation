@@ -4,9 +4,7 @@ use ratatui::text::Text;
 use ratatui::widgets::{Block, Borders, Cell, Row, Table};
 use ratatui::Frame;
 
-use crate::state::app_state::{
-    status_color, status_icon, step_display_name, AppState, FocusZone, STEP_NAMES,
-};
+use crate::state::app_state::{step_display_name, AppState, FocusZone, STEP_NAMES};
 use crate::ui::scrollbar;
 
 pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
@@ -55,10 +53,8 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
                 Text::from(cn_str.clone()).alignment(Alignment::Center),
             ))
             .chain(STEP_NAMES.iter().map(|step| {
-                let status = state.get_step_status(&cn_str, step);
-                let icon = status_icon(status);
-                let color = status_color(status);
-                let text = format!("{} {}", icon, status);
+                let text = state.step_cell_text(&cn_str, step);
+                let color = state.step_cell_color(&cn_str, step);
                 Cell::new(Text::from(text).alignment(Alignment::Center))
                     .style(Style::default().fg(color))
             }))

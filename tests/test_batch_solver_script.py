@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import importlib.util
 import os
 import sys
@@ -72,6 +73,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
         working_dir_v=str(working_dir_v),
         processor_count=64,
         iterate_count=10,
+        progress_file=None,
     )
 
 
@@ -189,6 +191,82 @@ def test_mpi_rejects_processor_count_larger_than_machine(tmp_path, monkeypatch):
         module.setup_mpi_environment(str(mpi_bin_dir), 128)
 
 
+def test_parse_remaining_time_line_extracts_seconds_and_iteration(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+
+    progress = module._parse_remaining_time_line(
+        "iter 350 residuals ... estimated time remaining: 1:23:45",
+        total_iter=1000,
+        config_id=5,
+    )
+
+    assert progress == {
+        "config_name": 5,
+        "current_iter": 350,
+        "total_iter": 1000,
+        "remaining_sec": 5025.0,
+        "raw_line": "iter 350 residuals ... estimated time remaining: 1:23:45",
+    }
+
+
+def test_parse_remaining_time_line_accepts_mm_ss(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+
+    progress = module._parse_remaining_time_line(
+        "solver update: remaining time: 02:05",
+        total_iter=10,
+        config_id=7,
+    )
+
+    assert progress is not None
+    assert progress["current_iter"] is None
+    assert progress["remaining_sec"] == 125.0
+
+
+def test_parse_remaining_time_line_accepts_fluent_iteration_table(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    line = (
+        "    10  1.0924e+00  2.2756e-04  1.8022e-05  1.8029e-05  "
+        "6.3507e-03  3.7984e-02  2.3162e-02  3.4976e-03  "
+        "3.7721e-02  0:02:12   15"
+    )
+
+    progress = module._parse_remaining_time_line(
+        line,
+        total_iter=25,
+        config_id=1,
+    )
+
+    assert progress == {
+        "config_name": 1,
+        "current_iter": 10,
+        "total_iter": 25,
+        "remaining_sec": 132.0,
+        "raw_line": line,
+    }
+
+
+def test_write_progress_file_uses_atomic_replace(tmp_path, monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    progress_file = tmp_path / "solver_progress_5.json"
+    payload = {
+        "config_name": 5,
+        "current_iter": 3,
+        "total_iter": 10,
+        "remaining_sec": 15.0,
+        "raw_line": "time remaining: 00:15",
+    }
+
+    module._write_progress_file(str(progress_file), payload)
+
+    stored = json.loads(progress_file.read_text(encoding="utf-8"))
+    assert stored["config_name"] == 5
+    assert stored["remaining_sec"] == 15.0
+    assert "raw_line" not in stored
+    assert isinstance(stored["updated_at"], float)
+    assert not progress_file.with_suffix(".json.tmp").exists()
+
+
 def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeypatch):
     launch_kwargs: dict[str, Any] = {}
     session = _SuccessfulSolverSession()
@@ -231,6 +309,37 @@ def test_exit_failure_tries_force_exit(tmp_path, monkeypatch):
 
     assert session.exit_calls == 1
     assert session.force_exit_calls == 1
+
+
+def test_main_moves_animation_to_explicit_anim_dir_and_cleans_solver_logs(tmp_path, monkeypatch):
+    session = _SuccessfulSolverSession()
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
+    args = _make_args(tmp_path)
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    Path(args.working_dir_v).mkdir(parents=True)
+    Path(args.working_dir_t).mkdir(parents=True)
+    Path(args.working_dir_v, "animation-v.mp4").write_bytes(b"velocity")
+    Path(args.working_dir_t, "animation-t.mp4").write_bytes(b"temperature")
+    Path(args.working_dir, "fluent-20260618-115935-21428.trn").write_text(
+        "transcript", encoding="utf-8"
+    )
+    Path(args.working_dir, "report-def-v-rfile_2_1.out").write_text(
+        "report", encoding="utf-8"
+    )
+    Path(args.working_dir, "user-result.out").write_text("keep", encoding="utf-8")
+    Path(args.working_dir, "keep.dat").write_text("keep", encoding="utf-8")
+
+    module.main()
+
+    assert Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").read_bytes() == b"velocity"
+    assert Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").read_bytes() == b"temperature"
+    assert not Path(args.working_dir, "fluent-20260618-115935-21428.trn").exists()
+    assert not Path(args.working_dir, "report-def-v-rfile_2_1.out").exists()
+    assert Path(args.working_dir, "user-result.out").exists()
+    assert Path(args.working_dir, "keep.dat").exists()
 
 
 def test_mesh_read_falls_back_to_read_case_when_needed(tmp_path, monkeypatch):

@@ -45,6 +45,14 @@ function Resolve-PowerShellExe {
     throw "PowerShell executable was not found."
 }
 
+function Resolve-WScriptExe {
+    $command = Get-Command wscript.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        throw "wscript.exe was not found in PATH."
+    }
+    return $command.Source
+}
+
 function Get-TunnelSshTarget {
     if ($TunnelKind -eq "LocalWorker" -and
         -not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST)) {
@@ -119,6 +127,80 @@ function Get-TunnelWatchdogTaskName {
     return "AutoFluidTunnelWatchdog-$TunnelKind-$RemotePort"
 }
 
+function ConvertTo-VbsStringLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '""') + '"'
+}
+
+function ConvertTo-WindowsCommandArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
+function Get-TunnelWatchdogLauncherPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $launcherDir = Join-Path (Join-Path $ProjectDir "data") "watchdog"
+    $launcherName = "autofluid-tunnel-watchdog-$TunnelKind-$RemotePort.vbs"
+    return Join-Path $launcherDir $launcherName
+}
+
+function New-TunnelWatchdogLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellExe
+    )
+
+    $scriptPath = $PSCommandPath
+    $launcherPath = Get-TunnelWatchdogLauncherPath -RemotePort $RemotePort
+    $launcherDir = Split-Path -Parent $launcherPath
+    if (-not [string]::IsNullOrWhiteSpace($launcherDir)) {
+        New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+    }
+
+    $commandParts = @(
+        $PowerShellExe,
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $scriptPath,
+        "-TunnelKind", $TunnelKind,
+        "-NoWatchdog",
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds)
+    )
+    $command = ($commandParts | ForEach-Object { ConvertTo-WindowsCommandArgument -Value $_ }) -join " "
+    $launcherContent = @(
+        'Set shell = CreateObject("WScript.Shell")',
+        "command = $(ConvertTo-VbsStringLiteral -Value $command)",
+        'shell.Run command, 0, False'
+    ) -join "`r`n"
+    Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding ASCII
+    return $launcherPath
+}
+
+function Remove-TunnelWatchdogLauncher {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $launcherPath = Get-TunnelWatchdogLauncherPath -RemotePort $RemotePort
+    Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue
+    return $launcherPath
+}
+
 function Install-TunnelWatchdogTask {
     param(
         [Parameter(Mandatory = $true)]
@@ -128,25 +210,14 @@ function Install-TunnelWatchdogTask {
     )
 
     $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
-    $scriptPath = $PSCommandPath
-    $arguments = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$scriptPath`"",
-        "-TunnelKind", $TunnelKind,
-        "-NoWatchdog",
-        "-RestartDelaySeconds", $RestartDelaySeconds
-    ) -join " "
+    $wscriptExe = Resolve-WScriptExe
+    $launcherPath = New-TunnelWatchdogLauncher -RemotePort $RemotePort -PowerShellExe $PowerShellExe
+    $arguments = ConvertTo-WindowsCommandArgument -Value $launcherPath
 
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if ($null -ne $existing) {
-        return $taskName
-    }
-
-    $action = New-ScheduledTaskAction -Execute $PowerShellExe -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $wscriptExe -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 1) `
-        -RepetitionDuration ([TimeSpan]::MaxValue)
+        -RepetitionDuration (New-TimeSpan -Days 3650)
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
@@ -261,11 +332,26 @@ function Get-TunnelLogPaths {
     )
 
     $tunnelName = if ($TunnelKind -eq "LocalWorker") { "local-worker" } else { "workstation" }
-    return @{
-        Stdout = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.out.log"
-        Stderr = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.err.log"
-        Supervisor = Join-Path ([System.IO.Path]::GetTempPath()) "autofluid-${tunnelName}-tunnel-${RemotePort}.supervisor.log"
+    $logDir = Join-Path $ProjectDir "logs/local/tunnels/$tunnelName"
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     }
+    catch {
+        $logDir = [System.IO.Path]::GetTempPath()
+    }
+    return @{
+        Stdout = Join-Path $logDir "${RemotePort}.out.log"
+        Stderr = Join-Path $logDir "${RemotePort}.err.log"
+        Supervisor = Join-Path $logDir "${RemotePort}.supervisor.log"
+    }
+}
+
+function Get-TunnelPidFile {
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_TUNNEL_PID_FILE)) {
+        return $env:AUTOFLUID_TUNNEL_PID_FILE
+    }
+    $pidName = if ($TunnelKind -eq "LocalWorker") { "tunnel_localworker.pid" } else { "tunnel_workstation.pid" }
+    return Join-Path (Join-Path $ProjectDir "data") $pidName
 }
 
 function Write-TunnelSupervisorLog {
@@ -385,6 +471,41 @@ function Get-ExistingTunnelMonitorProcess {
         Select-Object -First 1
 }
 
+function Stop-ExistingTunnelMonitorProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $existing = Get-ExistingTunnelMonitorProcess -RemotePort $RemotePort
+    if ($null -eq $existing) {
+        return $false
+    }
+    Stop-Process -Id $existing.ProcessId -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    return $true
+}
+
+function Stop-ReverseTunnelSshProcesses {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    $remoteForwardPattern = "(^|\s)-R\s+\S+:${RemotePort}:"
+    $stoppedCount = 0
+    Get-CimInstance Win32_Process |
+        Where-Object {
+            $_.Name -eq "ssh.exe" `
+                -and $_.CommandLine -match $remoteForwardPattern
+        } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $stoppedCount += 1
+        }
+    return $stoppedCount
+}
+
 function Start-ReverseTunnelSupervisor {
     param(
         [Parameter(Mandatory = $true)]
@@ -420,7 +541,7 @@ function Write-TunnelSupervisorPid {
         [object]$Process
     )
 
-    $pidFile = $env:AUTOFLUID_TUNNEL_PID_FILE
+    $pidFile = Get-TunnelPidFile
     if ([string]::IsNullOrWhiteSpace($pidFile)) {
         return
     }
@@ -495,7 +616,12 @@ $tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Work
 
 if ($UninstallWatchdog) {
     $taskName = Uninstall-TunnelWatchdogTask -RemotePort $remotePort
+    $launcherPath = Remove-TunnelWatchdogLauncher -RemotePort $remotePort
+    $monitorStopped = Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort
+    $sshStopped = Stop-ReverseTunnelSshProcesses -RemotePort $remotePort
     Write-Host "Uninstalled AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $taskName"
+    Write-Host "Removed AutoFluid $tunnelLabel reverse SSH tunnel watchdog launcher: $launcherPath"
+    Write-Host "Stopped AutoFluid $tunnelLabel reverse SSH tunnel monitor: $monitorStopped; ssh processes: $sshStopped"
     exit 0
 }
 
@@ -508,6 +634,16 @@ if ($InstallWatchdog) {
         Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
     }
     exit 0
+}
+
+if (-not $NoWatchdog -and -not $Check -and -not $Monitor) {
+    try {
+        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
+        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
+    }
+    catch {
+        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
+    }
 }
 
 $sshExe = Resolve-SshExe
@@ -528,16 +664,6 @@ if ($Monitor) {
     exit 0
 }
 
-if (-not $Check -and -not $NoWatchdog) {
-    try {
-        $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
-        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
-    }
-    catch {
-        Write-Warning "Failed to install AutoFluid $tunnelLabel reverse SSH tunnel watchdog task: $_"
-    }
-}
-
 if (-not (Test-TcpEndpoint -HostName $targetHost -Port $targetPort)) {
     throw "$tunnelLabel SSH target is not reachable from this machine: ${targetHost}:${targetPort}"
 }
@@ -547,16 +673,24 @@ if (Test-RemoteTunnelEndpoint `
     -TunnelTarget $tunnelTarget `
     -RemoteHost $remoteHost `
     -RemotePort $remotePort) {
-    Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel is already reachable; reuse the existing tunnel."
     $existing = Get-ExistingTunnelMonitorProcess -RemotePort $remotePort
     if ($null -ne $existing) {
+        Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel is already reachable; reuse the existing tunnel."
         Write-TunnelSupervisorPid -Process $existing
+        exit 0
     }
+    Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel endpoint is reachable but no supervisor monitor was found; starting a new monitor."
+    $process = Start-ReverseTunnelSupervisor -RemotePort $remotePort
+    Write-TunnelSupervisorPid -Process $process
     exit 0
 }
 
 if ($Check) {
     throw "AutoFluid $tunnelLabel reverse SSH tunnel is not reachable on ${remoteHost}:${remotePort}."
+}
+
+if (Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort) {
+    Write-Host "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable."
 }
 
 $process = Start-ReverseTunnelSupervisor -RemotePort $remotePort

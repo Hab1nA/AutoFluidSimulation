@@ -914,6 +914,7 @@ class _MockTaskRunner:
         self._solver_dispatched = []
         self._solver_wait_result = True
         self._solver_wait_count = 0
+        self._solver_flag_cleanup_count = 0
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_in_flight = False
         self._ssh = _MockSSH()
@@ -963,6 +964,10 @@ class _MockTaskRunner:
     def wait_solver_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         self._solver_wait_count += 1
         return self._solver_wait_result
+
+    def cleanup_solver_runtime_flag_artifacts(self) -> dict[str, int]:
+        self._solver_flag_cleanup_count += 1
+        return {"deleted": 2, "failed": 0}
 
     def get_remote_executor(self):
         return self._remote_executor
@@ -1600,8 +1605,19 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.scheduler._stopped.is_set()
         assert self.state.get_engine_status() == "stopped"
+        assert self.runner._solver_flag_cleanup_count == 1
         for step in ["sw", "sc", "transfer", "meshing", "solver"]:
             assert self.state.get_step_status(1, step) == STATUS_COMPLETED
+
+    def test_finalize_pipeline_error_keeps_solver_flag_artifacts(self):
+        """失败终态应保留 flags 中后台 wrapper 产物供排障。"""
+        self.state.set_engine_status("running")
+
+        self.scheduler.finalize_pipeline("failed")
+
+        assert self.scheduler._stopped.is_set()
+        assert self.state.get_engine_status() == "stopped"
+        assert self.runner._solver_flag_cleanup_count == 0
 
     def test_start_pipeline_unhandled_exception_marks_engine_stopped(self, caplog):
         """调度器线程启动阶段异常时不能让 engine_status 残留 running。"""

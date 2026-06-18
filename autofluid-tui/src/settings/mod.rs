@@ -30,6 +30,8 @@ pub struct RemoteConfig {
     pub scdoc_dir: String,
     pub msh_dir: String,
     pub result_dir: String,
+    #[serde(default)]
+    pub animation_dir: String,
     pub flag_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
@@ -49,6 +51,7 @@ impl Default for RemoteConfig {
             scdoc_dir: String::new(),
             msh_dir: String::new(),
             result_dir: String::new(),
+            animation_dir: String::new(),
             flag_dir: String::new(),
             conda_env: String::new(),
             conda_exe: String::new(),
@@ -252,7 +255,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
-            SettingCategory::RemoteDirs => 10,
+            SettingCategory::RemoteDirs => 11,
             SettingCategory::StepPatterns => 5,
             SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 8,
@@ -287,10 +290,11 @@ impl SettingCategory {
                 3 => "scdoc_dir",
                 4 => "msh_dir",
                 5 => "result_dir",
-                6 => "flag_dir",
-                7 => "conda_env",
-                8 => "conda_exe",
-                9 => "mpi_bin_dir",
+                6 => "animation_dir",
+                7 => "flag_dir",
+                8 => "conda_env",
+                9 => "conda_exe",
+                10 => "mpi_bin_dir",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -369,10 +373,11 @@ impl SettingCategory {
                 3 => "SCDOC接收目录",
                 4 => "网格输出目录",
                 5 => "仿真输出目录",
-                6 => "仿真标志目录",
-                7 => "Conda环境名",
-                8 => "Conda可执行文件",
-                9 => "MPI安装目录",
+                6 => "动画输出目录",
+                7 => "仿真标志目录",
+                8 => "Conda环境名",
+                9 => "Conda可执行文件",
+                10 => "MPI安装目录",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -571,10 +576,11 @@ impl SettingsState {
                 3 => field_val!(self.config.remote_config, scdoc_dir, string),
                 4 => field_val!(self.config.remote_config, msh_dir, string),
                 5 => field_val!(self.config.remote_config, result_dir, string),
-                6 => field_val!(self.config.remote_config, flag_dir, string),
-                7 => field_val!(self.config.remote_config, conda_env, string),
-                8 => field_val!(self.config.remote_config, conda_exe, string),
-                9 => field_val!(self.config.remote_config, mpi_bin_dir, string),
+                6 => field_val!(self.config.remote_config, animation_dir, string),
+                7 => field_val!(self.config.remote_config, flag_dir, string),
+                8 => field_val!(self.config.remote_config, conda_env, string),
+                9 => field_val!(self.config.remote_config, conda_exe, string),
+                10 => field_val!(self.config.remote_config, mpi_bin_dir, string),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -657,10 +663,11 @@ impl SettingsState {
                 3 => self.config.remote_config.scdoc_dir = value.to_string(),
                 4 => self.config.remote_config.msh_dir = value.to_string(),
                 5 => self.config.remote_config.result_dir = value.to_string(),
-                6 => self.config.remote_config.flag_dir = value.to_string(),
-                7 => self.config.remote_config.conda_env = value.to_string(),
-                8 => self.config.remote_config.conda_exe = value.to_string(),
-                9 => self.config.remote_config.mpi_bin_dir = value.to_string(),
+                6 => self.config.remote_config.animation_dir = value.to_string(),
+                7 => self.config.remote_config.flag_dir = value.to_string(),
+                8 => self.config.remote_config.conda_env = value.to_string(),
+                9 => self.config.remote_config.conda_exe = value.to_string(),
+                10 => self.config.remote_config.mpi_bin_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {
@@ -1115,13 +1122,33 @@ mod tests {
         // Verify field_count is consistent across all categories
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 5);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
         assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
+    }
+
+    #[test]
+    fn remote_dirs_expose_animation_dir() {
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
+        assert_eq!(SettingCategory::RemoteDirs.field_name(6), "animation_dir");
+        assert_eq!(
+            SettingCategory::RemoteDirs.field_full_name(6),
+            "remote_config.animation_dir"
+        );
+        assert_eq!(SettingCategory::RemoteDirs.display_label(6), "动画输出目录");
+
+        let mut state = SettingsState::new();
+        state.config = SettingsConfig::default();
+        state.set_field_value(SettingCategory::RemoteDirs, 6, r"D:\animation");
+        assert_eq!(
+            state.get_field_value(SettingCategory::RemoteDirs, 6),
+            r"D:\animation"
+        );
+        assert_eq!(state.config.remote_config.animation_dir, r"D:\animation");
     }
 
     #[test]

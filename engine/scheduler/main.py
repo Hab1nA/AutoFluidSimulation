@@ -309,6 +309,16 @@ class PipelineScheduler:
         """流水线自然终结收尾，不复用用户 stop() 的暂停落库逻辑."""
         if outcome == "completed":
             logger.info("[Scheduler] 全部构型处理完成，开始自然收尾")
+            cleanup_flags = getattr(self.runner, "cleanup_solver_runtime_flag_artifacts", None)
+            if callable(cleanup_flags):
+                try:
+                    result = cleanup_flags()
+                    logger.info(
+                        "[Scheduler] Solver flags 运行产物清理完成: "
+                        f"deleted={result.get('deleted', 0)}, failed={result.get('failed', 0)}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[Scheduler] Solver flags 运行产物清理异常: {e}")
         else:
             logger.error("[Scheduler] Solver 阶段终结但存在错误，开始失败收尾")
 

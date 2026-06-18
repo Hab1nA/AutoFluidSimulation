@@ -14,6 +14,8 @@ pub const STATUS_PAUSED: &str = "Paused";
 pub const STATUS_RETRYING: &str = "Retrying";
 pub const STATUS_COMPLETED: &str = "Completed";
 pub const STATUS_ERROR: &str = "Error";
+pub const SETTINGS_LOCKED_MESSAGE: &str =
+    "⚠ 流水线已启动过，配置已锁定。请重启 Daemon 后再修改设置";
 
 pub const STEP_NAMES: [&str; 5] = ["sw", "sc", "transfer", "meshing", "solver"];
 
@@ -114,6 +116,16 @@ pub struct EngineInfo {
     pub daemon_started_at: Option<f64>,
     pub daemon_started_at_display: Option<String>,
     pub daemon_uptime_seconds: Option<u64>,
+    pub solver_progress: Option<SolverProgress>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SolverProgress {
+    pub config_name: u64,
+    pub current_iter: Option<u64>,
+    pub total_iter: u64,
+    pub remaining_sec: f64,
+    pub updated_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -336,6 +348,8 @@ impl AppState {
                 .map(str::to_string);
             self.engine_info.daemon_uptime_seconds =
                 obj.get("daemon_uptime_seconds").and_then(|v| v.as_u64());
+            self.engine_info.solver_progress =
+                obj.get("solver_progress").and_then(parse_solver_progress);
         }
         self.needs_redraw = true;
     }
@@ -383,6 +397,46 @@ impl AppState {
             .unwrap_or(STATUS_WAITING)
     }
 
+    pub fn step_cell_text(&self, config: &str, step: &str) -> String {
+        let status = self.get_step_status(config, step);
+        if self.should_show_solver_progress(config, step, status) {
+            if let Some(progress) = self.engine_info.solver_progress.as_ref() {
+                return format!(
+                    "{} {}",
+                    status_icon(status),
+                    format_remaining_time(progress.remaining_sec)
+                );
+            }
+        }
+        format!("{} {}", status_icon(status), status)
+    }
+
+    pub fn step_cell_color(&self, config: &str, step: &str) -> ratatui::style::Color {
+        let status = self.get_step_status(config, step);
+        if self.should_show_solver_progress(config, step, status) {
+            return self.theme.success;
+        }
+        status_color(status)
+    }
+
+    fn should_show_solver_progress(&self, config: &str, step: &str, status: &str) -> bool {
+        if step != "solver" || status != STATUS_RUNNING {
+            return false;
+        }
+        let Some(progress) = self.engine_info.solver_progress.as_ref() else {
+            return false;
+        };
+        let iteration_is_valid = progress
+            .current_iter
+            .is_none_or(|current| current <= progress.total_iter);
+        let timestamp_is_valid = progress.updated_at.is_none_or(f64::is_finite);
+        progress.remaining_sec.is_finite()
+            && progress.remaining_sec >= 0.0
+            && iteration_is_valid
+            && timestamp_is_valid
+            && config.parse::<u64>().ok() == Some(progress.config_name)
+    }
+
     #[cfg(test)]
     pub fn info_bar_text(&self) -> String {
         self.info_bar_parts()
@@ -418,6 +472,19 @@ impl AppState {
             .map(format_uptime)
             .unwrap_or_else(|| "--".to_string());
         format!("启动 {}  运行 {}", started_at, uptime)
+    }
+
+    pub fn settings_locked(&self) -> bool {
+        self.engine_info.pipeline_started
+    }
+
+    pub fn mark_daemon_stopped(&mut self) {
+        self.connected = false;
+        self.engine_info = EngineInfo {
+            engine_status: "stopped".to_string(),
+            ..Default::default()
+        };
+        self.needs_redraw = true;
     }
 
     fn info_bar_parts(&self) -> Vec<InfoBarPart> {
@@ -615,6 +682,29 @@ pub fn format_uptime(seconds: u64) -> String {
     }
 }
 
+pub fn format_remaining_time(seconds: f64) -> String {
+    let safe_seconds = if seconds.is_finite() && seconds >= 0.0 {
+        seconds.floor() as u64
+    } else {
+        0
+    };
+    let hours = safe_seconds / 3600;
+    let minutes = (safe_seconds % 3600) / 60;
+    let secs = safe_seconds % 60;
+    format!("{hours:02}:{minutes:02}:{secs:02}")
+}
+
+fn parse_solver_progress(value: &serde_json::Value) -> Option<SolverProgress> {
+    let obj = value.as_object()?;
+    Some(SolverProgress {
+        config_name: obj.get("config_name")?.as_u64()?,
+        current_iter: obj.get("current_iter").and_then(|v| v.as_u64()),
+        total_iter: obj.get("total_iter").and_then(|v| v.as_u64()).unwrap_or(0),
+        remaining_sec: obj.get("remaining_sec")?.as_f64()?,
+        updated_at: obj.get("updated_at").and_then(|v| v.as_f64()),
+    })
+}
+
 fn expire_click<T>(
     click_time: &mut Option<std::time::Instant>,
     clicked: &mut Option<T>,
@@ -706,6 +796,68 @@ mod tests {
     }
 
     #[test]
+    fn format_remaining_time_uses_hh_mm_ss() {
+        assert_eq!(format_remaining_time(0.0), "00:00:00");
+        assert_eq!(format_remaining_time(125.0), "00:02:05");
+        assert_eq!(format_remaining_time(5_025.0), "01:23:45");
+        assert_eq!(format_remaining_time(-1.0), "00:00:00");
+        assert_eq!(format_remaining_time(f64::NAN), "00:00:00");
+    }
+
+    #[test]
+    fn update_engine_info_parses_solver_progress() {
+        let mut state = AppState::default();
+        let data = serde_json::json!({
+            "engine_status": "running",
+            "solver_progress": {
+                "config_name": 5,
+                "current_iter": 350,
+                "total_iter": 1000,
+                "remaining_sec": 5025.0,
+                "updated_at": 1717584000.123
+            }
+        });
+
+        state.update_engine_info(&data);
+
+        let progress = state
+            .engine_info
+            .solver_progress
+            .as_ref()
+            .expect("solver progress");
+        assert_eq!(progress.config_name, 5);
+        assert_eq!(progress.current_iter, Some(350));
+        assert_eq!(progress.total_iter, 1000);
+        assert_eq!(progress.remaining_sec, 5025.0);
+        assert_eq!(progress.updated_at, Some(1717584000.123));
+    }
+
+    #[test]
+    fn solver_running_cell_shows_remaining_time_for_matching_config() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "5": {"solver": "Running", "meshing": "Running"},
+            "6": {"solver": "Running"}
+        }));
+        state.update_engine_info(&serde_json::json!({
+            "solver_progress": {
+                "config_name": 5,
+                "total_iter": 1000,
+                "remaining_sec": 5025.0
+            }
+        }));
+
+        assert_eq!(state.step_cell_text("5", "solver"), "⏳ 01:23:45");
+        assert_eq!(state.step_cell_color("5", "solver"), state.theme.success);
+        assert_eq!(state.step_cell_text("5", "meshing"), "⏳ Running");
+        assert_eq!(
+            state.step_cell_color("5", "meshing"),
+            status_color(STATUS_RUNNING)
+        );
+        assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
+    }
+
+    #[test]
     fn daemon_runtime_text_keeps_started_date_and_time() {
         let mut state = AppState::default();
         state.engine_info.daemon_started_at_display = Some("2026-06-13 14:03:21".to_string());
@@ -715,6 +867,39 @@ mod tests {
             state.daemon_runtime_text(),
             "启动 2026-06-13 14:03:21  运行 1m05s"
         );
+    }
+
+    #[test]
+    fn mark_daemon_stopped_clears_settings_lock_runtime_fields() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state.engine_info.sw_macro_started = true;
+        state.engine_info.barrier_passed = true;
+        state.engine_info.pipeline_started = true;
+        state.engine_info.daemon_started_at = Some(1718000000.0);
+        state.engine_info.daemon_started_at_display = Some("2026-06-13 14:03:21".to_string());
+        state.engine_info.daemon_uptime_seconds = Some(65);
+        state.engine_info.solver_progress = Some(SolverProgress {
+            config_name: 1,
+            current_iter: Some(1),
+            total_iter: 10,
+            remaining_sec: 9.0,
+            updated_at: Some(1718000000.0),
+        });
+
+        state.mark_daemon_stopped();
+
+        assert!(!state.connected);
+        assert!(!state.settings_locked());
+        assert_eq!(state.engine_info.engine_status, "stopped");
+        assert!(!state.engine_info.sw_macro_started);
+        assert!(!state.engine_info.barrier_passed);
+        assert!(state.engine_info.daemon_started_at.is_none());
+        assert!(state.engine_info.daemon_started_at_display.is_none());
+        assert!(state.engine_info.daemon_uptime_seconds.is_none());
+        assert!(state.engine_info.solver_progress.is_none());
+        assert!(state.needs_redraw);
     }
 
     fn assert_span_color(line: &Line<'_>, text: &str, expected: Option<ratatui::style::Color>) {

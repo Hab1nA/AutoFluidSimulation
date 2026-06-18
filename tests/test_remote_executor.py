@@ -27,6 +27,8 @@ class _StateRecorder:
     def __init__(self) -> None:
         self.status_updates: list[tuple[int, str, str, str]] = []
         self.remote_tasks: dict[tuple[int, str], dict[str, object]] = {}
+        self.solver_progress_updates: list[dict[str, object]] = []
+        self.solver_progress_clears = 0
 
     def set_step_status(
         self,
@@ -68,6 +70,12 @@ class _StateRecorder:
             self._remote_task_key(config_name, step_name, workstation_id),
             None,
         )
+
+    def set_solver_progress(self, progress: dict[str, object]) -> None:
+        self.solver_progress_updates.append(progress)
+
+    def clear_solver_progress(self) -> None:
+        self.solver_progress_clears += 1
 
     @staticmethod
     def _remote_task_key(
@@ -655,7 +663,8 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
         def kill_remote_task(self, task_name: str) -> bool:
             return True
 
-    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor._remote_tasks[4] = "AutoFluid_solver"
     monkeypatch.setattr(
         "executor.remote_executor.time.sleep",
@@ -666,8 +675,9 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
 
     assert executor.wait_solver_completion(4) is False
     assert checked == [error_flag]
-    assert deleted == [error_flag]
+    assert deleted == [error_flag, "D:/flags/solver_progress_4.json"]
     assert 4 not in executor._remote_tasks
+    assert state.solver_progress_clears == 1
 
 
 def test_start_meshing_persists_remote_task_metadata(monkeypatch):
@@ -1022,6 +1032,7 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
             "scripts_dir": r"E:\ws-a scripts",
             "msh_dir": r"E:\ws-a msh",
             "result_dir": r"E:\ws-a result",
+            "animation_dir": r"E:\ws-a animation",
             "working_dir": r"E:\ws-a work",
             "flag_dir": r"E:\ws-a flags",
         },
@@ -1057,7 +1068,84 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
     assert "E:\\ws-a scripts/batch_solver_gen4.py" in str(calls[0]["command"])
     assert '"E:\\ws-a msh"' in str(calls[0]["command"])
     assert '"E:\\ws-a result"' in str(calls[0]["command"])
+    assert '--anim-dir "E:\\ws-a animation"' in str(calls[0]["command"])
     assert '"E:\\ws-a work"' in str(calls[0]["command"])
+    assert '--progress-file "E:/ws-a flags/solver_progress_6.json"' in str(calls[0]["command"])
+
+
+def test_cleanup_solver_runtime_flag_artifacts_deletes_only_completed_wrapper_logs(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    deleted: list[str] = []
+
+    class _SSH:
+        def list_remote_directory(self, remote_dir: str):
+            assert remote_dir == r"D:\flags"
+            return [
+                "autofluid_bg_done.cmd",
+                "autofluid_bg_done.log",
+                "autofluid_bg_done.pid",
+                "solver_done_1.txt",
+                "solver_progress_1.json",
+                "other.log",
+            ]
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.cleanup_solver_runtime_flag_artifacts() == {"deleted": 2, "failed": 0}
+    assert deleted == [
+        "D:/flags/autofluid_bg_done.cmd",
+        "D:/flags/autofluid_bg_done.log",
+    ]
+
+
+def test_wait_solver_completion_reads_progress_and_updates_state(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 60)
+
+    progress_payload = {
+        "config_name": 4,
+        "current_iter": 350,
+        "total_iter": 1000,
+        "remaining_sec": 5025.0,
+        "updated_at": 1717584000.123,
+    }
+    checked: list[str] = []
+    read_paths: list[str] = []
+    times = iter([0.0, 0.0, 30.0, 30.0, 30.0])
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            checked.append(remote_path)
+            return remote_path in {
+                "D:/flags/solver_done_4.txt",
+                "D:/result/model_gen4_4.cas.h5",
+                "D:/result/model_gen4_4.dat.h5",
+            }
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            read_paths.append(remote_path)
+            return json.dumps(progress_payload)
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            return True
+
+        def cleanup_remote_task_entry(self, task_name: str, pid_file: str | None = None) -> bool:
+            return True
+
+    state = _StateRecorder()
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[4] = "AutoFluid_solver"
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+
+    assert executor.wait_solver_completion(4) is True
+    assert read_paths == ["D:/flags/solver_progress_4.json"]
+    assert state.solver_progress_updates == [progress_payload]
+    assert state.solver_progress_clears == 1
 
 
 def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypatch):

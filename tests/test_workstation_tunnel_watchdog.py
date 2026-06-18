@@ -21,6 +21,75 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "Register-ScheduledTask" in source
     assert "Unregister-ScheduledTask" in source
     assert "-NoWatchdog" in source
+    assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
+
+
+def test_tunnel_watchdog_is_installed_by_default_startup() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "if (-not $NoWatchdog -and -not $Check -and -not $Monitor)" in source
+    assert "Install-TunnelWatchdogTask -RemotePort $remotePort" in source
+    assert "Install-TunnelWatchdogTask" in source
+    assert "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready" in source
+
+
+def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "[TimeSpan]::MaxValue" not in source
+    assert "New-TimeSpan -Days 3650" in source
+
+
+def test_tunnel_watchdog_task_uses_hidden_wscript_launcher() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Resolve-WScriptExe" in source
+    assert "function New-TunnelWatchdogLauncher" in source
+    assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
+    assert "WScript.Shell" in source
+    assert "Run command, 0, False" in source
+    assert 'Set-Content -LiteralPath $launcherPath' in source
+
+
+def test_tunnel_watchdog_uninstall_removes_hidden_launcher() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Remove-TunnelWatchdogLauncher" in source
+    assert "Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue" in source
+    assert "Remove-TunnelWatchdogLauncher -RemotePort $remotePort" in source
+    assert "Removed AutoFluid $tunnelLabel reverse SSH tunnel watchdog launcher" in source
+
+
+def test_tunnel_watchdog_has_default_pid_file_for_scheduled_task_runs() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Get-TunnelPidFile" in source
+    assert "tunnel_localworker.pid" in source
+    assert "tunnel_workstation.pid" in source
+    assert "AUTOFLUID_TUNNEL_PID_FILE" in source
+
+
+def test_tunnel_watchdog_rebuilds_monitor_when_endpoint_is_reachable() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "reverse SSH tunnel endpoint is reachable but no supervisor monitor was found" in source
+    assert "Start-ReverseTunnelSupervisor -RemotePort $remotePort" in source
+
+
+def test_tunnel_watchdog_replaces_monitor_when_endpoint_is_down() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort" in source
+    assert "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable." in source
+
+
+def test_tunnel_watchdog_uninstall_stops_orphan_reverse_ssh_processes() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert "function Stop-ReverseTunnelSshProcesses" in source
+    assert "ssh.exe" in source
+    assert '$remoteForwardPattern = "(^|\\s)-R\\s+\\S+:${RemotePort}:"' in source
+    assert "Stopped AutoFluid $tunnelLabel reverse SSH tunnel monitor" in source
 
 
 def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_both_tunnel_kinds(

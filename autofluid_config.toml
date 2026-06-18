@@ -16,6 +16,7 @@ ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
 scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
+animation_dir = 'D:\xkz_1020\animation'
 flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'

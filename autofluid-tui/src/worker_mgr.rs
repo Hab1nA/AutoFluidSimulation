@@ -52,6 +52,8 @@ impl WorkerPidKind {
 pub struct WorkerManager {
     /// 本地 LocalWorker 子进程
     worker_process: Option<Child>,
+    /// 本地 LocalWorker 是常驻进程，TUI 退出时不应隐式杀掉；显式 stop/restart 时再清理。
+    worker_started_detached: bool,
     /// 工作站 SSH 反向隧道子进程
     workstation_tunnel_process: Option<Child>,
     /// 服务器到本机 LocalWorker 的 SSH 反向隧道子进程
@@ -64,6 +66,7 @@ impl WorkerManager {
     pub fn new() -> Self {
         Self {
             worker_process: None,
+            worker_started_detached: false,
             workstation_tunnel_process: None,
             local_worker_tunnel_process: None,
             project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -256,6 +259,7 @@ impl WorkerManager {
                 log::info!("本地 LocalWorker 已启动: pid={}", pid);
                 log_buffer.push_info(format!("✅ 本地 Worker 已启动 (PID: {})", pid));
                 self.worker_process = Some(child);
+                self.worker_started_detached = true;
                 true
             }
             Err(e) => {
@@ -272,14 +276,17 @@ impl WorkerManager {
         match result {
             StopResult::NoProcess => true,
             StopResult::AlreadyExited => {
+                self.worker_started_detached = false;
                 log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
                 true
             }
             StopResult::Terminated => {
+                self.worker_started_detached = false;
                 log_buffer.push_info("✅ 本地 Worker 已终止".to_string());
                 true
             }
             StopResult::Error(e) => {
+                self.worker_started_detached = false;
                 log_buffer.push_info(format!("⚠️ 终止本地 Worker 失败: {}", e));
                 false
             }
@@ -636,10 +643,12 @@ fn env_or_default(name: &str, default: &str) -> String {
 
 impl Drop for WorkerManager {
     fn drop(&mut self) {
-        // 确保子进程在 WorkerManager 被丢弃时被清理
-        if let Some(ref mut proc) = self.worker_process {
-            let _ = proc.kill();
-            let _ = proc.wait();
+        // 随 TUI 启动的 LocalWorker 需要跨客户端重连继续运行；显式 worker stop 会清理。
+        if !self.worker_started_detached {
+            if let Some(ref mut proc) = self.worker_process {
+                let _ = proc.kill();
+                let _ = proc.wait();
+            }
         }
         if let Some(ref mut proc) = self.workstation_tunnel_process {
             let _ = proc.kill();
@@ -951,6 +960,35 @@ mod tests {
 
         assert!(!function_body.contains("while "));
         assert!(!function_body.contains("std::thread::sleep"));
+    }
+
+    #[test]
+    fn drop_preserves_tui_started_local_worker() {
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live worker process");
+
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live worker process");
+
+        let pid = child.id();
+        let mut manager = WorkerManager::new();
+        manager.worker_process = Some(child);
+        manager.worker_started_detached = true;
+
+        drop(manager);
+
+        assert!(crate::utils::is_pid_alive(pid));
+        assert!(crate::utils::kill_process_tree(pid) || !crate::utils::is_pid_alive(pid));
     }
 
     #[test]

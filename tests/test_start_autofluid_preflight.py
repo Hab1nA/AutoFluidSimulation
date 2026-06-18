@@ -18,7 +18,8 @@ def test_preflight_default_server_daemon_command_waits_for_ipc_readiness() -> No
     assert "get_engine_status" in function_body
     assert "ready_count" in function_body
     assert "AutoFluid daemon IPC ready" in function_body
-    assert "tail -n 80 logs/autofluid-daemon.out" in function_body
+    assert "logs/server/services/daemon-bootstrap/autofluid-daemon.out" in function_body
+    assert "tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out" in function_body
 
 
 def test_server_ipc_tunnel_reuse_requires_protocol_probe() -> None:
@@ -34,6 +35,13 @@ def test_server_ipc_tunnel_persists_pid_for_cleanup() -> None:
 
     assert "server_ipc_tunnel.pid" in content
     assert "Set-Content -LiteralPath $pidFile" in content
+
+
+def test_server_ipc_tunnel_prefers_structured_log_dir_with_temp_fallback() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+
+    assert "logs/local/tunnels/server-ipc" in content
+    assert "[System.IO.Path]::GetTempPath()" in content
 
 
 def test_server_ipc_tunnel_reuse_refreshes_pid_for_cleanup() -> None:

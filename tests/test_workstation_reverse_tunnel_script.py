@@ -91,3 +91,12 @@ def test_tunnel_script_persists_supervisor_pid_for_cleanup() -> None:
     assert "Set-Content -LiteralPath $pidFile" in source
     assert '$Process.PSObject.Properties.Name -contains "ProcessId"' in source
     assert "$processId" in source
+
+
+def test_tunnel_script_prefers_structured_log_dir_with_temp_fallback() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "logs/local/tunnels/$tunnelName" in source
+    assert "[System.IO.Path]::GetTempPath()" in source

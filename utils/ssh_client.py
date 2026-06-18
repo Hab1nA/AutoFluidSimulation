@@ -289,6 +289,38 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
 
+    def read_remote_text_file(
+        self,
+        remote_path: str,
+        *,
+        timeout: float | None = None,
+    ) -> str | None:
+        """读取远程 UTF-8 小文本文件；不存在或连接异常时返回 None。"""
+        if not self.ensure_connected():
+            return None
+        if self._sftp is None:
+            return None
+        channel = self._sftp.get_channel()
+        previous_timeout = None
+        if timeout is not None:
+            try:
+                previous_timeout = channel.gettimeout()
+            except AttributeError:
+                previous_timeout = None
+            channel.settimeout(timeout)
+        try:
+            with self._sftp.open(remote_path.replace("\\", "/"), "rb") as remote_file:
+                raw: bytes = remote_file.read()
+            return raw.decode("utf-8", errors="replace")
+        except FileNotFoundError:
+            return None
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+            logger.debug(f"[SSH] 读取远程文本文件失败: {remote_path}: {e}")
+            return None
+        finally:
+            if timeout is not None:
+                channel.settimeout(previous_timeout)
+
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
         递归创建远程目录（类似 mkdir -p）。
@@ -447,6 +479,28 @@ class RemoteWorkstation:
                     logger.warning(f"[SSH] 删除远程文件失败: {child_path}: {e}")
                     failed_count += 1
         return (deleted_count, failed_count)
+
+    def list_remote_directory(self, remote_dir: str) -> list[str]:
+        """返回远程目录下的直接子项名称；目录不存在时返回空列表。"""
+        if not self.ensure_connected():
+            return []
+        if self._sftp is None:
+            logger.error(f"[SSH] SFTP 未就绪，无法列出远程目录: {remote_dir}")
+            return []
+
+        normalized = remote_dir.replace("\\", "/").rstrip("/")
+        try:
+            return [
+                entry.filename
+                for entry in self._sftp.listdir_attr(normalized)
+                if entry.filename not in {".", ".."}
+            ]
+        except FileNotFoundError:
+            logger.info(f"[SSH] 远程目录不存在（跳过列举）: {remote_dir}")
+            return []
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning(f"[SSH] 列出远程目录失败: {remote_dir}: {e}")
+            return []
 
     # ------------------------------------------------------------------
     # 远程命令执行

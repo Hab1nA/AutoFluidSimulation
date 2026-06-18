@@ -7,6 +7,7 @@ use super::protocol::{IpcRequest, IpcResponse};
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9527;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DASHBOARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// check 命令涉及远程 SSH 自检（含 conda/目录/文件/磁盘/进程检查），需要更长超时。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// reset 可能同步清理 SC/SW 资源或等待 LocalWorker，不能使用普通轮询级超时。
@@ -157,28 +158,42 @@ impl IpcClient {
         request: &IpcRequest,
         timeout: Duration,
     ) -> Result<IpcResponse, String> {
+        self.send_request_impl(request, timeout, true).await
+    }
+
+    async fn send_request_impl(
+        &mut self,
+        request: &IpcRequest,
+        timeout: Duration,
+        reconnect_on_failure: bool,
+    ) -> Result<IpcResponse, String> {
         let started_at = Instant::now();
         log_request_start(request, timeout);
         let mut stream = match self.stream.take() {
             Some(s) => s,
             None => {
-                log::warn!(
-                    "请求暂未发送: command={}, request_id={}, reason=未连接，尝试重连",
-                    request.command,
-                    request.request_id
-                );
-                self.auto_reconnect("请求前未连接").await;
-                match self.stream.take() {
-                    Some(s) => s,
-                    None => return Err("未连接".to_string()),
+                if reconnect_on_failure {
+                    log::warn!(
+                        "请求暂未发送: command={}, request_id={}, reason=未连接，尝试重连",
+                        request.command,
+                        request.request_id
+                    );
+                    self.auto_reconnect("请求前未连接").await;
+                    match self.stream.take() {
+                        Some(s) => s,
+                        None => return Err("未连接".to_string()),
+                    }
+                } else {
+                    return Err("未连接".to_string());
                 }
             }
         };
 
         let data = request.serialize();
         if let Err(e) = stream.write_all(&data).await {
-            // 发送失败：stream 可能已损坏，丢弃连接后自动重连
-            self.auto_reconnect("发送失败").await;
+            if reconnect_on_failure {
+                self.auto_reconnect("发送失败").await;
+            }
             log::warn!(
                 "请求发送失败: command={}, request_id={}, elapsed_ms={}, error={}",
                 request.command,
@@ -192,12 +207,10 @@ impl IpcClient {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
 
-        // 使用 read_until 替代逐字节读取，提高效率
         let read_result = tokio::time::timeout(timeout, async {
             match reader.read_until(b'\n', &mut buffer).await {
-                Ok(0) => Ok(false), // EOF
+                Ok(0) => Ok(false),
                 Ok(_) => {
-                    // 检查响应长度
                     if buffer.len() > MAX_RESPONSE_BYTES {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
@@ -213,32 +226,31 @@ impl IpcClient {
         .await;
 
         match read_result {
-            Ok(Ok(true)) => {
-                match IpcResponse::deserialize(&buffer) {
-                    Some(resp) => {
-                        // 正常读取成功：从 reader 取回 stream 归还
-                        let stream = reader.into_inner();
-                        self.stream = Some(stream);
-                        log_request_finish(request, &resp, started_at.elapsed());
-                        Ok(resp)
-                    }
-                    None => {
-                        // 响应格式异常时丢弃当前连接，避免下一次请求复用已脱序的流。
-                        drop(reader);
-                        self.auto_reconnect("响应解析失败").await;
-                        log::warn!(
-                            "响应解析失败: command={}, request_id={}, elapsed_ms={}",
-                            request.command,
-                            request.request_id,
-                            started_at.elapsed().as_millis()
-                        );
-                        Err("无效响应格式".to_string())
-                    }
+            Ok(Ok(true)) => match IpcResponse::deserialize(&buffer) {
+                Some(resp) => {
+                    let stream = reader.into_inner();
+                    self.stream = Some(stream);
+                    log_request_finish(request, &resp, started_at.elapsed());
+                    Ok(resp)
                 }
-            }
+                None => {
+                    drop(reader);
+                    if reconnect_on_failure {
+                        self.auto_reconnect("响应解析失败").await;
+                    }
+                    log::warn!(
+                        "响应解析失败: command={}, request_id={}, elapsed_ms={}",
+                        request.command,
+                        request.request_id,
+                        started_at.elapsed().as_millis()
+                    );
+                    Err("无效响应格式".to_string())
+                }
+            },
             Ok(Ok(false)) => {
-                // 对端关闭连接 → stream 已不可用，自动重连
-                self.auto_reconnect("对端关闭").await;
+                if reconnect_on_failure {
+                    self.auto_reconnect("对端关闭").await;
+                }
                 log::warn!(
                     "请求失败: command={}, request_id={}, elapsed_ms={}, reason=连接已断开",
                     request.command,
@@ -248,12 +260,9 @@ impl IpcClient {
                 Err("连接已断开".to_string())
             }
             Ok(Err(e)) => {
-                // 读取 I/O 错误：丢弃 stream，防止后续通信脱序。
-                // BufReader 内部缓冲区中的字节已被 read() 从内核消耗，
-                // 但未被应用层消费；into_inner() 后这些字节永久丢失，
-                // 而内核缓冲区中可能残留后续字节 → 下次读取脱序。
-                // 直接丢弃 reader（含其内部缓冲区和底层 stream）最安全。
-                self.auto_reconnect("读取失败").await;
+                if reconnect_on_failure {
+                    self.auto_reconnect("读取失败").await;
+                }
                 log::warn!(
                     "请求读取失败: command={}, request_id={}, elapsed_ms={}, error={}",
                     request.command,
@@ -264,10 +273,9 @@ impl IpcClient {
                 Err(format!("读取失败: {}", e))
             }
             Err(_) => {
-                // 读取超时：同样丢弃 stream，原因同上。
-                // 服务端可能仍在处理旧请求（旧连接线程完成后自行清理），
-                // 新连接获得干净的字节流，不会与旧请求混淆。
-                self.auto_reconnect("请求超时").await;
+                if reconnect_on_failure {
+                    self.auto_reconnect("请求超时").await;
+                }
                 log::warn!(
                     "请求超时: command={}, request_id={}, timeout_ms={}, elapsed_ms={}",
                     request.command,
@@ -355,10 +363,14 @@ impl IpcClient {
             "log_limit".to_string(),
             serde_json::Value::Number(log_limit.into()),
         );
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_GET_DASHBOARD,
-            serde_json::Value::Object(params),
-        ))
+        self.send_request_impl(
+            &IpcRequest::with_params(
+                super::protocol::CMD_GET_DASHBOARD,
+                serde_json::Value::Object(params),
+            ),
+            DASHBOARD_TIMEOUT,
+            false,
+        )
         .await
     }
 
@@ -538,7 +550,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -698,6 +710,109 @@ mod tests {
 
         assert!(result.is_ok());
         rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn get_dashboard_allows_short_server_latency_spike() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"running"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut dashboard = String::new();
+            reader.read_line(&mut dashboard).expect("read dashboard");
+            let request: Value = serde_json::from_str(dashboard.trim()).expect("dashboard json");
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("dashboard request id");
+            std::thread::sleep(Duration::from_millis(1100));
+            let response = format!(
+                r#"{{"status":"ok","data":{{"statuses":{{}},"engine":{{}},"logs":{{"entries":[],"latest_id":0}}}},"message":"","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write delayed dashboard response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.get_dashboard(0, 50));
+
+        assert!(result.is_ok());
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn get_dashboard_timeout_does_not_block_on_synchronous_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"running"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut dashboard = String::new();
+            reader.read_line(&mut dashboard).expect("read dashboard");
+            let request: Value = serde_json::from_str(dashboard.trim()).expect("dashboard json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_GET_DASHBOARD)
+            );
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let started = Instant::now();
+        let result = rt.block_on(client.get_dashboard(0, 50));
+
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "dashboard polling should not block the TUI on normal request and reconnect timeouts"
+        );
+        assert!(!client.is_connected());
         server.join().expect("server thread");
     }
 

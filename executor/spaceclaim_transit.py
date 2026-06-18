@@ -130,10 +130,14 @@ _env_log_dir = os.environ.get("AUTOFLUID_SC_LOG_DIR", "")
 if _env_log_dir:
     _candidate_log_dir = _env_log_dir
 else:
-    _candidate_log_dir = os.path.join(_PROJECT_ROOT, "logs", "executor")
+    _candidate_log_dir = os.path.join(
+        _PROJECT_ROOT, "logs", "local", "services", "spaceclaim"
+    )
     if not os.path.isdir(os.path.join(_PROJECT_ROOT, "logs")):
         # 回退：在脚本所在目录下创建
-        _candidate_log_dir = os.path.join(_SCRIPT_DIR, "logs", "executor")
+        _candidate_log_dir = os.path.join(
+            _SCRIPT_DIR, "logs", "local", "services", "spaceclaim"
+        )
 
 try:
     if not os.path.isdir(_candidate_log_dir):

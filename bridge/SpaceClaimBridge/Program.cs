@@ -411,6 +411,10 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 准备 SpaceClaim 子进程环境变量：补齐系统变量、规范化 Path、设置 ANSYS 变量。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
         private static void PrepareSpaceClaimEnvironment(ProcessStartInfo psi)
         {
             BackfillProcessEnvironment(psi);
@@ -418,6 +422,10 @@ namespace AutoFluidSimulation.Bridge
             EnsureAnsysEnvironmentVariables(psi);
         }
 
+        /// <summary>
+        /// 将系统级和用户级环境变量合并到子进程启动信息中，确保 SpaceClaim 能访问完整环境。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
         private static void BackfillProcessEnvironment(ProcessStartInfo psi)
         {
             CopyEnvironmentVariables(
@@ -429,6 +437,11 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine("[BRIDGE] 已补齐系统/用户环境变量");
         }
 
+        /// <summary>
+        /// 将字典中的环境变量复制到进程启动信息中，跳过已存在的和 Path 变量。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
+        /// <param name="variables">待复制的环境变量字典</param>
         private static void CopyEnvironmentVariables(
             ProcessStartInfo psi,
             System.Collections.IDictionary variables)
@@ -457,6 +470,10 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 规范化子进程的 Path 环境变量：合并多个 Path 键并注入 SpaceClaim 所需路径。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
         private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
         {
             NormalizeCurrentProcessPathEnvironment();
@@ -485,6 +502,10 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine("[BRIDGE] 已补齐 SpaceClaim 子进程 Path");
         }
 
+        /// <summary>
+        /// 确保 ANSYS SpaceClaim 运行所需的环境变量已设置（AWP_ROOT、许可路径等）。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
         private static void EnsureAnsysEnvironmentVariables(ProcessStartInfo psi)
         {
             string awpRoot = ResolveAwpRoot();
@@ -503,6 +524,10 @@ namespace AutoFluidSimulation.Bridge
             Console.WriteLine("[BRIDGE] 已补齐 ANSYS SpaceClaim 环境变量");
         }
 
+        /// <summary>
+        /// 解析 ANSYS 安装根目录：优先使用环境变量 AWP_ROOT231，否则回退到默认路径。
+        /// </summary>
+        /// <returns>ANSYS 安装根目录路径</returns>
         private static string ResolveAwpRoot()
         {
             string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
@@ -514,6 +539,12 @@ namespace AutoFluidSimulation.Bridge
             return @"C:\Program Files\ANSYS Inc\v231";
         }
 
+        /// <summary>
+        /// 在子进程启动信息中设置环境变量，仅当该变量未被预设时才生效。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
+        /// <param name="name">环境变量名</param>
+        /// <param name="value">默认值（当前进程同名变量优先）</param>
         private static void SetEnvironmentIfMissing(
             ProcessStartInfo psi,
             string name,
@@ -530,6 +561,9 @@ namespace AutoFluidSimulation.Bridge
                 !string.IsNullOrWhiteSpace(processValue) ? processValue : value;
         }
 
+        /// <summary>
+        /// 规范化当前进程的 Path 环境变量：消除 Path/PATH 双键冲突。
+        /// </summary>
         private static void NormalizeCurrentProcessPathEnvironment()
         {
             string? pathValue = Environment.GetEnvironmentVariable("Path");
@@ -546,6 +580,11 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 构建包含 SpaceClaim 所需路径的 PATH 值，合并继承路径并去重。
+        /// </summary>
+        /// <param name="inheritedPath">从父进程继承的 PATH 值</param>
+        /// <returns>规范化后的 PATH 字符串</returns>
         private static string BuildSpaceClaimPath(string? inheritedPath)
         {
             var entries = new List<string>();
@@ -572,6 +611,11 @@ namespace AutoFluidSimulation.Bridge
             return string.Join(";", DeduplicatePathEntries(entries));
         }
 
+        /// <summary>
+        /// 将目录路径添加到路径列表中（仅当目录实际存在时）。
+        /// </summary>
+        /// <param name="entries">路径列表</param>
+        /// <param name="path">待检查的目录路径</param>
         private static void AddPathIfDirectory(List<string> entries, string? path)
         {
             if (path == null)
@@ -592,6 +636,11 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 将分号分隔的 PATH 值拆分并追加到路径列表中。
+        /// </summary>
+        /// <param name="entries">路径列表</param>
+        /// <param name="pathValue">分号分隔的 PATH 字符串</param>
         private static void AppendPathList(List<string> entries, string? pathValue)
         {
             if (pathValue == null)
@@ -615,6 +664,11 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 对路径列表进行大小写不敏感的去重，保持首次出现的顺序。
+        /// </summary>
+        /// <param name="entries">原始路径列表</param>
+        /// <returns>去重后的路径序列</returns>
         private static IEnumerable<string> DeduplicatePathEntries(IEnumerable<string> entries)
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -630,6 +684,12 @@ namespace AutoFluidSimulation.Bridge
             }
         }
 
+        /// <summary>
+        /// 检查 SCDOC 文件是否已存在，存在时返回 Success 退出码。
+        /// </summary>
+        /// <param name="opts">Bridge 选项</param>
+        /// <param name="reason">用于日志输出的检查原因</param>
+        /// <returns>SCDOC 存在返回 Success 退出码，否则返回 null</returns>
         private static int? TryReturnSuccessIfScdocExists(BridgeOptions opts, string reason)
         {
             string scdocFile = GetScdocFilePath(opts);
@@ -983,7 +1043,24 @@ namespace AutoFluidSimulation.Bridge
                     $"\"status\":\"{EscapeJsonString(status)}\"," +
                     $"\"timestamp_utc\":\"{DateTime.UtcNow:O}\"" +
                     "}";
-                File.WriteAllText(monitorFile, json);
+                // 使用临时文件 + File.Replace 实现 NTFS 原子写入，
+                // 防止 Python 端轮询读取时读到不完整的 JSON。
+                string tempFile = monitorFile + ".tmp";
+                File.WriteAllText(tempFile, json);
+                try
+                {
+                    File.Replace(tempFile, monitorFile, null);
+                }
+                catch (FileNotFoundException)
+                {
+                    File.Move(tempFile, monitorFile);
+                }
+                finally
+                {
+                    // 清理可能残留的临时文件
+                    try { if (File.Exists(tempFile)) File.Delete(tempFile); }
+                    catch { /* 忽略清理失败 */ }
+                }
                 Console.WriteLine($"[BRIDGE] 监控信息已写入: {monitorFile}");
             }
             catch (Exception ex)
@@ -1071,7 +1148,7 @@ namespace AutoFluidSimulation.Bridge
                 return string.Empty;
             }
 
-            var sb = new System.Text.StringBuilder(value.Length + 16);
+            var sb = new StringBuilder(value.Length + 16);
             foreach (char c in value)
             {
                 switch (c)
@@ -1081,6 +1158,8 @@ namespace AutoFluidSimulation.Bridge
                     case '\n': sb.Append("\\n"); break;
                     case '\r': sb.Append("\\r"); break;
                     case '\t': sb.Append("\\t"); break;
+                    case '\u2028': sb.Append("\\u2028"); break;
+                    case '\u2029': sb.Append("\\u2029"); break;
                     default:
                         if (c < 0x20)
                         {

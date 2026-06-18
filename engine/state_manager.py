@@ -12,6 +12,7 @@ Daemon 写入状态，TUI 客户端读取状态。通过 IPC 命令触发状态�
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -742,6 +743,11 @@ class StateManager:
                         logger.debug(
                             f"仍有 {remaining['cnt'] if remaining else 0} 个构型的 SW=Completed，保持 sw_macro_started=true"
                         )
+                if from_step is None or STEP_INDEX.get(from_step, 0) <= STEP_INDEX["solver"]:
+                    conn.execute(
+                        "DELETE FROM engine_state WHERE key = ?",
+                        ("solver_progress",),
+                    )
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'sw'} 起的所有步骤")
 
@@ -758,6 +764,10 @@ class StateManager:
                 conn.execute(
                     "UPDATE engine_state SET value = ? WHERE key = ?",
                     ("0", "error_count"),
+                )
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress",),
                 )
         logger.warning("已重置所有构型的所有步骤！")
 
@@ -786,6 +796,41 @@ class StateManager:
                     (status,)
                 )
         logger.info(f"引擎状态变更: -> {status}")
+
+    def set_solver_progress(self, progress: dict[str, object]) -> None:
+        """存储当前 Solver 剩余时间进度。"""
+        payload = json.dumps(progress, ensure_ascii=False)
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    ("solver_progress", payload),
+                )
+
+    def get_solver_progress(self) -> dict[str, object] | None:
+        """读取当前 Solver 剩余时间进度；不存在或损坏时返回 None。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM engine_state WHERE key = ?",
+                ("solver_progress",),
+            ).fetchone()
+        if not row or not row["value"]:
+            return None
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning("[State] solver_progress JSON 损坏，已忽略")
+            return None
+        return value if isinstance(value, dict) else None
+
+    def clear_solver_progress(self) -> None:
+        """清理当前 Solver 剩余时间进度。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress",),
+                )
 
     def set_all_running_to_paused(self):
         """将所有 Running 和 Retrying 状态的步骤批量切换为 Paused。"""

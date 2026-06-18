@@ -358,6 +358,7 @@ class TestBuildSolverCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\Auto Fluid\scripts")
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\Auto Fluid\animation%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\Auto Fluid\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
@@ -369,6 +370,7 @@ class TestBuildSolverCommand:
 
         assert '"C:\\Program Files\\conda.exe"' in command
         assert '--working-dir "D:\\Auto Fluid\\work%%ROOT%%"' in command
+        assert '--anim-dir "D:\\Auto Fluid\\animation%%ROOT%%"' in command
         assert '--working-dir-t "D:\\Auto Fluid\\work%%ROOT%%/animation-t"' in command
 
     def test_invalid_solver_processor_count_falls_back_to_default(self, monkeypatch):
@@ -645,7 +647,10 @@ class TestExecuteSolver:
         executor._remote_tasks[6] = "AutoFluid_solver_done_task"
 
         assert executor.wait_solver_completion(6) is True
-        assert deleted == ["D:/flags/solver_done_6.txt"]
+        assert deleted == [
+            "D:/flags/solver_done_6.txt",
+            "D:/flags/solver_progress_6.json",
+        ]
         assert cleaned == [
             ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
         ]
