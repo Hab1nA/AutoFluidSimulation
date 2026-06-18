@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 
 from engine import daemon as daemon_module
 from engine.daemon import PipelineDaemon
@@ -57,6 +58,31 @@ class _LargeLogHandler:
             ],
             "latest_id": 7,
             "total": 7,
+            "has_gap": False,
+            "reset": False,
+        }
+
+
+class _ManyLargeLogHandler:
+    def __init__(self, count: int = 200):
+        self.count = count
+
+    def get_entries(self, **_kwargs):
+        return {
+            "entries": [
+                {
+                    "id": idx,
+                    "timestamp": "2026-06-16 22:00:00",
+                    "level": "DEBUG",
+                    "source": "ipc",
+                    "logger_name": "ipc.server",
+                    "message": "x" * 20_000,
+                    "raw_message": "x" * 20_000,
+                }
+                for idx in range(1, self.count + 1)
+            ],
+            "latest_id": self.count,
+            "total": self.count,
             "has_gap": False,
             "reset": False,
         }
@@ -263,6 +289,38 @@ def test_dashboard_trims_large_log_payload(monkeypatch):
     assert data["logs"]["truncated"] is True
     assert data["logs"]["entries"]
     assert data["logs"]["entries"][-1]["id"] == 7
+
+
+def test_dashboard_trims_many_large_log_entries_quickly(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "get_broadcast_handler",
+        lambda: _ManyLargeLogHandler(count=200),
+    )
+    monkeypatch.setattr(daemon_module, "WORKSTATIONS", [])
+    monkeypatch.setattr(daemon_module, "_MAX_DASHBOARD_LOG_BYTES", 900_000)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = 1_000.0
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = None
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_001.0)
+    monkeypatch.setattr(daemon_module.time, "strftime", lambda _fmt, _value: "now")
+    monkeypatch.setattr(daemon_module.time, "localtime", lambda value: value)
+
+    started = time.perf_counter()
+    ok, data, _ = daemon.handle_get_dashboard({"since_log_id": 0, "log_limit": 200})
+    elapsed = time.perf_counter() - started
+
+    assert ok is True
+    encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    assert len(encoded) <= daemon_module._MAX_DASHBOARD_LOG_BYTES
+    assert elapsed < 0.25
+    assert data["logs"]["truncated"] is True
+    assert data["logs"]["entries"]
+    assert data["logs"]["entries"][-1]["id"] == 200
 
 
 def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):

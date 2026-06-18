@@ -1428,10 +1428,23 @@ class PipelineDaemon:
             return
         if _json_size_bytes(data) <= _MAX_DASHBOARD_LOG_BYTES:
             return
-        kept = list(entries)
-        while kept and _json_size_bytes(data) > _MAX_DASHBOARD_LOG_BYTES:
-            kept.pop(0)
-            logs["entries"] = kept
+
+        original_entries = entries
+        logs["entries"] = []
+        base_size = _json_size_bytes(data)
+        entry_budget = max(0, _MAX_DASHBOARD_LOG_BYTES - base_size)
+        kept_reversed: list[Any] = []
+        used = 0
+        for entry in reversed(original_entries):
+            entry_size = _json_size_bytes(entry) + 1
+            if kept_reversed and used + entry_size > entry_budget:
+                break
+            if not kept_reversed and entry_size > entry_budget:
+                break
+            kept_reversed.append(entry)
+            used += entry_size
+        logs["entries"] = list(reversed(kept_reversed))
+
         if _json_size_bytes(data) > _MAX_DASHBOARD_LOG_BYTES:
             logs["entries"] = []
         logs["truncated"] = True

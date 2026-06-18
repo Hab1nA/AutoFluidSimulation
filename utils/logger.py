@@ -304,6 +304,7 @@ POLLING_COMMANDS = frozenset({
     "get_engine_status",
     "get_dashboard",
     "worker_poll",
+    "worker_heartbeat",
 })
 
 _IPC_LIFECYCLE_LOG_MARKERS = (

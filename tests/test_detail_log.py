@@ -851,6 +851,28 @@ def test_polling_filter_worker_poll():
     print("  ✅ worker_poll 轮询命令被正确过滤")
 
 
+def test_polling_filter_worker_heartbeat():
+    """测试 worker_heartbeat 本地 Worker 心跳命令被过滤。"""
+    handler = LogBroadcastHandler(capacity=100)
+    ipc_logger = logging.getLogger("ipc.server")
+    ipc_logger.addHandler(handler)
+    ipc_logger.setLevel(logging.DEBUG)
+
+    ipc_logger.debug("收到命令: worker_heartbeat, params={'worker_id': 'Spica'}")
+    result = handler.get_entries(since_id=0, limit=10)
+    assert result["total"] == 0, (
+        f"worker_heartbeat 应被过滤，但缓冲区有 {result['total']} 条"
+    )
+    assert result["latest_id"] > 0
+
+    full_result = handler.get_entries(since_id=0, limit=10, include_polling=True)
+    assert full_result["total"] == 1
+    assert full_result["entries"][0]["category"] == "polling"
+
+    ipc_logger.removeHandler(handler)
+    print("  ✅ worker_heartbeat 轮询命令被正确过滤")
+
+
 def test_polling_filter_mixed_with_normal():
     """测试轮询命令和 IPC 生命周期日志被过滤，手动命令/错误保留。"""
     handler = LogBroadcastHandler(capacity=100)

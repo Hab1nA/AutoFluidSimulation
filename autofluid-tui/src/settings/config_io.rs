@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use super::SettingsConfig;
 
 pub fn config_file_path() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_default()
-        .join("autofluid_config.toml")
+    crate::utils::resolve_project_dir().join("autofluid_config.toml")
 }
 
 pub fn load_config() -> Result<SettingsConfig, String> {
@@ -67,7 +65,7 @@ fn replace_file(tmp_path: &Path, path: &Path) -> Result<(), String> {
 }
 
 pub fn env_file_path() -> PathBuf {
-    std::env::current_dir().unwrap_or_default().join(".env")
+    crate::utils::resolve_project_dir().join(".env")
 }
 
 pub fn read_env_password() -> String {
@@ -132,4 +130,57 @@ pub fn write_env_password(password: &str) -> Result<(), String> {
     file.write_all(contents.as_bytes())
         .map_err(|e| format!("写入 .env 文件失败: {}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_project_dir() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "autofluid-tui-config-{}",
+            crate::generate_request_id()
+        ))
+    }
+
+    #[test]
+    fn load_config_finds_project_root_when_started_from_tui_subdirectory() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        let nested_dir = project_dir
+            .join("autofluid-tui")
+            .join("target")
+            .join("release");
+        std::fs::create_dir_all(&nested_dir).expect("create nested dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            r#"
+[local_paths]
+sw_exe = 'C:\AutoFluid\Test\SLDWORKS.exe'
+sw_model = ''
+excel = ''
+step_dir = ''
+sc_exe = ''
+scdoc_dir = ''
+"#,
+        )
+        .expect("write config");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&nested_dir).expect("set nested cwd");
+        let config = load_config();
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        let config = config.expect("load config from project root");
+
+        assert_eq!(config.local_paths.sw_exe, r"C:\AutoFluid\Test\SLDWORKS.exe");
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
 }
