@@ -668,6 +668,8 @@ class TestFileCleanerCleanStepFiles:
             assert ssh.deleted == [
                 "D:/remote/flags/postprocess_done_2.txt",
                 "D:/remote/flags/postprocess_done_2.txt.error",
+                "D:/remote/post/model_gen4_2.csv",
+                "D:/remote/post/model_gen4_2.json",
                 "D:/remote/metrics/model_gen4_2.csv",
                 "D:/remote/metrics/metrics_summary.csv",
                 "D:/remote/animation/t_gen4_2.mp4",
@@ -676,7 +678,59 @@ class TestFileCleanerCleanStepFiles:
                 "D:/remote/flags/autofluid_bg_postprocess_2.log",
                 "D:/remote/flags/autofluid_bg_postprocess_2.pid",
             ]
-            assert ssh.cleared == ["D:/remote/metrics/model_gen4_2"]
+            assert ssh.cleared == [
+                "D:/remote/post/model_gen4_2",
+                "D:/remote/metrics/model_gen4_2",
+            ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_includes_postprocess_artifacts(self, tmp_path, monkeypatch):
+        """clean all all 应覆盖后处理输出，不能只清到 solver。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\remote\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\remote\scdoc")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\remote\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\case")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\remote\animation")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\remote\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\remote\metrics")
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+                self.cleared: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared.append(remote_dir)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            ssh = _ConnectedSSH()
+            cleaner = FileCleaner(state, lambda: ssh)
+
+            cleaner.clean_step_files("all", config_name=2)
+
+            assert "D:/remote/flags/postprocess_done_2.txt" in ssh.deleted
+            assert "D:/remote/post/model_gen4_2.csv" in ssh.deleted
+            assert "D:/remote/animation/t_gen4_2.mp4" in ssh.deleted
+            assert "D:/remote/post/model_gen4_2" in ssh.cleared
+            assert "D:/remote/metrics/model_gen4_2" in ssh.cleared
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 

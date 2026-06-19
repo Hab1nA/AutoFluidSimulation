@@ -120,10 +120,6 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
         ),
         ("remote_config.msh_dir", &config.remote_config.msh_dir),
         ("remote_config.result_dir", &config.remote_config.result_dir),
-        (
-            "remote_config.animation_dir",
-            &config.remote_config.animation_dir,
-        ),
     ];
     for (name, path) in &remote_dirs {
         if path.is_empty() {
@@ -313,6 +309,10 @@ fn validate_solver(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
 fn validate_postprocess(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     let remote_dirs = [
         ("postprocess.output_dir", &config.postprocess.output_dir),
+        (
+            "postprocess.animation_dir",
+            &config.postprocess.animation_dir,
+        ),
         ("postprocess.metrics_dir", &config.postprocess.metrics_dir),
     ];
     for (name, path) in &remote_dirs {
@@ -546,9 +546,9 @@ mod tests {
             e.field_name == "postprocess.postprocess_timeout"
                 && matches!(e.severity, Severity::Error)
         }));
-        assert!(!errors
-            .iter()
-            .any(|e| e.field_name == "postprocess.animation_dir"));
+        assert!(errors.iter().any(|e| {
+            e.field_name == "postprocess.animation_dir" && matches!(e.severity, Severity::Warning)
+        }));
         assert!(!errors
             .iter()
             .any(|e| e.field_name == "postprocess.exit_to_throat_area_ratio"));

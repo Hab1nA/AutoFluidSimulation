@@ -1370,8 +1370,13 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "sw") == STATUS_RUNNING
 
-    def test_resume_scan_requeues_sc_when_downstream_never_ran(self):
+    def test_resume_scan_requeues_sc_when_downstream_never_ran(self, monkeypatch):
         """下游仍为 Waiting 时，resume 扫描应恢复 SC 入队。"""
+        step_dir = os.path.join(self.tmpdir, "steps")
+        os.makedirs(step_dir, exist_ok=True)
+        monkeypatch.setitem(LOCAL_PATHS, "step_dir", step_dir)
+        with open(os.path.join(step_dir, "model_gen4.SLDPRT_1.step"), "wb") as f:
+            f.write(b"step")
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_step_status(1, "sw", STATUS_COMPLETED)
         self.state.set_step_status(1, "sc", STATUS_WAITING)

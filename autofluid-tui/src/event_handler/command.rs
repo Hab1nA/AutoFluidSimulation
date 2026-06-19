@@ -200,13 +200,22 @@ fn cmd_reset(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -
 }
 
 fn cmd_clean(parts: &[&str], state: &mut AppState, log_buffer: &mut LogBuffer) -> CommandResult {
-    if parts.len() < 3 {
-        log_buffer
-            .push_info("用法: clean <构型名|all> <步骤名|all> 或 clean all cache".to_string());
+    if parts.len() < 2 {
+        log_buffer.push_info(
+            "用法: clean <构型名|all> <步骤名|all>、clean <步骤名> 或 clean all cache".to_string(),
+        );
         return CommandResult::None;
     }
-    let config_arg = parts[1];
-    let step_arg = parts[2];
+    let (config_arg, step_arg) = if parts.len() >= 3 {
+        (parts[1], parts[2])
+    } else if STEP_NAMES.contains(&parts[1]) {
+        ("all", parts[1])
+    } else {
+        log_buffer.push_info(
+            "用法: clean <构型名|all> <步骤名|all>、clean <步骤名> 或 clean all cache".to_string(),
+        );
+        return CommandResult::None;
+    };
 
     if config_arg.eq_ignore_ascii_case("all") && step_arg.eq_ignore_ascii_case("cache") {
         state.confirm_message = Some(
@@ -545,6 +554,7 @@ const HELP_LINES: &[&str] = &[
     "  status                     - 显示状态摘要",
     "  reset <XX|all> <step|all>  - 重置构型步骤状态",
     "  clean <XX|all> <step|all>  - 清理构型步骤文件",
+    "  clean <step>               - 清理所有构型的指定步骤文件",
     "  clean all cache            - 清理远程临时缓存文件",
     "  daemon start               - 按当前模式启动本地/服务器后台引擎并自动连接",
     "  daemon stop                - 按当前模式停止本地/服务器后台引擎（TUI 继续运行）",
@@ -641,6 +651,88 @@ mod tests {
         assert!(matches!(result, CommandResult::None));
         assert_eq!(state.ui_mode, UiMode::Settings);
         assert!(state.settings_state.is_some());
+    }
+
+    #[tokio::test]
+    async fn reset_all_postprocess_opens_confirmation() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command(
+            "reset all postprocess",
+            &mut ipc,
+            &mut state,
+            &mut log_buffer,
+        )
+        .await;
+
+        assert!(matches!(result, CommandResult::None));
+        assert_eq!(state.ui_mode, UiMode::ConfirmDialog);
+        assert!(matches!(
+            state.confirm_callback,
+            Some(ConfirmAction::ResetStep {
+                ref config_name,
+                ref step_name,
+            }) if config_name == "all" && step_name.as_deref() == Some("postprocess")
+        ));
+        assert!(!log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line.contains("无效步骤名")));
+    }
+
+    #[tokio::test]
+    async fn clean_all_postprocess_opens_confirmation() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        let result = dispatch_command(
+            "clean all postprocess",
+            &mut ipc,
+            &mut state,
+            &mut log_buffer,
+        )
+        .await;
+
+        assert!(matches!(result, CommandResult::None));
+        assert_eq!(state.ui_mode, UiMode::ConfirmDialog);
+        assert!(matches!(
+            state.confirm_callback,
+            Some(ConfirmAction::CleanStep {
+                ref step_name,
+                ref config_name,
+            }) if step_name == "postprocess" && config_name.is_none()
+        ));
+        assert!(!log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line.contains("无效步骤名")));
+    }
+
+    #[tokio::test]
+    async fn clean_postprocess_shorthand_targets_all_configs() {
+        let mut ipc = IpcClient::new(None, None);
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        let result =
+            dispatch_command("clean postprocess", &mut ipc, &mut state, &mut log_buffer).await;
+
+        assert!(matches!(result, CommandResult::None));
+        assert_eq!(state.ui_mode, UiMode::ConfirmDialog);
+        assert!(matches!(
+            state.confirm_callback,
+            Some(ConfirmAction::CleanStep {
+                ref step_name,
+                ref config_name,
+            }) if step_name == "postprocess" && config_name.is_none()
+        ));
+        assert!(!log_buffer
+            .info_messages
+            .iter()
+            .any(|line| line.contains("无效步骤名")));
     }
 
     #[tokio::test]

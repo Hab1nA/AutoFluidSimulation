@@ -61,6 +61,11 @@ def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int
 def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -> list[str]:
     """Return per-config postprocess result and runtime files to delete."""
     flag_dir = str(config.get("flag_dir", "")).replace("\\", "/").rstrip("/")
+    output_dir = str(
+        config.get("postprocess_output_dir")
+        or ENGINE_CONFIG.get("postprocess_output_dir")
+        or config.get("result_dir", "")
+    ).replace("\\", "/").rstrip("/")
     engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
     config_postprocess_animation_dir = config.get("postprocess_animation_dir")
     if (
@@ -85,6 +90,11 @@ def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -
         paths.extend([
             f"{flag_dir}/postprocess_done_{config_name}.txt",
             f"{flag_dir}/postprocess_done_{config_name}.txt.error",
+        ])
+    if output_dir:
+        paths.extend([
+            f"{output_dir}/model_gen4_{config_name}.csv",
+            f"{output_dir}/model_gen4_{config_name}.json",
         ])
     if metrics_dir:
         paths.extend([
@@ -119,6 +129,20 @@ def _postprocess_metrics_config_dir(
     if not metrics_dir:
         return None
     return f"{metrics_dir}/model_gen4_{config_name}"
+
+
+def _postprocess_output_config_dir(
+    config: Mapping[str, object],
+    config_name: int,
+) -> str | None:
+    output_dir = str(
+        config.get("postprocess_output_dir")
+        or ENGINE_CONFIG.get("postprocess_output_dir")
+        or config.get("result_dir", "")
+    ).replace("\\", "/").rstrip("/")
+    if not output_dir:
+        return None
+    return f"{output_dir}/model_gen4_{config_name}"
 
 
 class FileCleaner:
@@ -514,15 +538,18 @@ class FileCleaner:
                             else:
                                 failed_count += 1
                         if step_name == "postprocess":
-                            metrics_config_dir = _postprocess_metrics_config_dir(
-                                remote_config,
-                                int(cn),
-                            )
+                            config_dirs = [
+                                _postprocess_output_config_dir(remote_config, int(cn)),
+                                _postprocess_metrics_config_dir(remote_config, int(cn)),
+                            ]
                             clear_remote_directory = getattr(ssh, "clear_remote_directory", None)
-                            if metrics_config_dir and callable(clear_remote_directory):
-                                _, clear_failed_count = clear_remote_directory(metrics_config_dir)
-                                if clear_failed_count:
-                                    failed_count += clear_failed_count
+                            if callable(clear_remote_directory):
+                                for config_dir in config_dirs:
+                                    if not config_dir:
+                                        continue
+                                    _, clear_failed_count = clear_remote_directory(config_dir)
+                                    if clear_failed_count:
+                                        failed_count += clear_failed_count
                     logger.info(
                         f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
                         f"已处理 {processed_count} 个，失败 {failed_count} 个"

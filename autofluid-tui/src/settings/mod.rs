@@ -286,13 +286,13 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
-            SettingCategory::RemoteDirs => 11,
+            SettingCategory::RemoteDirs => 10,
             SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 8,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
-            SettingCategory::PostProcess => 3,
+            SettingCategory::PostProcess => 4,
             SettingCategory::GlobalSettings => 7,
         }
     }
@@ -322,11 +322,10 @@ impl SettingCategory {
                 3 => "scdoc_dir",
                 4 => "msh_dir",
                 5 => "result_dir",
-                6 => "animation_dir",
-                7 => "flag_dir",
-                8 => "conda_env",
-                9 => "conda_exe",
-                10 => "mpi_bin_dir",
+                6 => "flag_dir",
+                7 => "conda_env",
+                8 => "conda_exe",
+                9 => "mpi_bin_dir",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -371,7 +370,8 @@ impl SettingCategory {
             SettingCategory::PostProcess => match idx {
                 0 => "postprocess_timeout",
                 1 => "output_dir",
-                2 => "metrics_dir",
+                2 => "animation_dir",
+                3 => "metrics_dir",
                 _ => panic!("PostProcess: invalid field index {idx}"),
             },
             SettingCategory::GlobalSettings => match idx {
@@ -412,11 +412,10 @@ impl SettingCategory {
                 3 => "SCDOC接收目录",
                 4 => "网格输出目录",
                 5 => "仿真输出目录",
-                6 => "动画输出目录",
-                7 => "仿真标志目录",
-                8 => "Conda环境名",
-                9 => "Conda可执行文件",
-                10 => "MPI安装目录",
+                6 => "仿真标志目录",
+                7 => "Conda环境名",
+                8 => "Conda可执行文件",
+                9 => "MPI安装目录",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -461,7 +460,8 @@ impl SettingCategory {
             SettingCategory::PostProcess => match idx {
                 0 => "后处理超时(秒)",
                 1 => "后处理输出目录",
-                2 => "指标输出目录",
+                2 => "动画输出目录",
+                3 => "指标输出目录",
                 _ => panic!("PostProcess: invalid field index {idx}"),
             },
             SettingCategory::GlobalSettings => match idx {
@@ -508,7 +508,7 @@ impl SettingCategory {
     /// 当前仅 `LocalPaths` category 的所有字段为本地路径。
     pub fn is_path_field(self, idx: usize) -> bool {
         matches!(self, SettingCategory::LocalPaths)
-            || (matches!(self, SettingCategory::PostProcess) && matches!(idx, 1..=2))
+            || (matches!(self, SettingCategory::PostProcess) && matches!(idx, 1..=3))
     }
 }
 
@@ -624,11 +624,10 @@ impl SettingsState {
                 3 => field_val!(self.config.remote_config, scdoc_dir, string),
                 4 => field_val!(self.config.remote_config, msh_dir, string),
                 5 => field_val!(self.config.remote_config, result_dir, string),
-                6 => field_val!(self.config.remote_config, animation_dir, string),
-                7 => field_val!(self.config.remote_config, flag_dir, string),
-                8 => field_val!(self.config.remote_config, conda_env, string),
-                9 => field_val!(self.config.remote_config, conda_exe, string),
-                10 => field_val!(self.config.remote_config, mpi_bin_dir, string),
+                6 => field_val!(self.config.remote_config, flag_dir, string),
+                7 => field_val!(self.config.remote_config, conda_env, string),
+                8 => field_val!(self.config.remote_config, conda_exe, string),
+                9 => field_val!(self.config.remote_config, mpi_bin_dir, string),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -673,7 +672,8 @@ impl SettingsState {
             SettingCategory::PostProcess => match idx {
                 0 => field_val!(self.config.postprocess, postprocess_timeout),
                 1 => field_val!(self.config.postprocess, output_dir, string),
-                2 => field_val!(self.config.postprocess, metrics_dir, string),
+                2 => field_val!(self.config.postprocess, animation_dir, string),
+                3 => field_val!(self.config.postprocess, metrics_dir, string),
                 _ => String::new(),
             },
             SettingCategory::GlobalSettings => match idx {
@@ -718,11 +718,10 @@ impl SettingsState {
                 3 => self.config.remote_config.scdoc_dir = value.to_string(),
                 4 => self.config.remote_config.msh_dir = value.to_string(),
                 5 => self.config.remote_config.result_dir = value.to_string(),
-                6 => self.config.remote_config.animation_dir = value.to_string(),
-                7 => self.config.remote_config.flag_dir = value.to_string(),
-                8 => self.config.remote_config.conda_env = value.to_string(),
-                9 => self.config.remote_config.conda_exe = value.to_string(),
-                10 => self.config.remote_config.mpi_bin_dir = value.to_string(),
+                6 => self.config.remote_config.flag_dir = value.to_string(),
+                7 => self.config.remote_config.conda_env = value.to_string(),
+                8 => self.config.remote_config.conda_exe = value.to_string(),
+                9 => self.config.remote_config.mpi_bin_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {
@@ -834,7 +833,8 @@ impl SettingsState {
                     }
                 }
                 1 => self.config.postprocess.output_dir = value.to_string(),
-                2 => self.config.postprocess.metrics_dir = value.to_string(),
+                2 => self.config.postprocess.animation_dir = value.to_string(),
+                3 => self.config.postprocess.metrics_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::GlobalSettings => match idx {
@@ -1198,57 +1198,77 @@ mod tests {
         // Verify field_count is consistent across all categories
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
-        assert_eq!(SettingCategory::PostProcess.field_count(), 3);
+        assert_eq!(SettingCategory::PostProcess.field_count(), 4);
         assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
     }
 
     #[test]
-    fn remote_dirs_expose_animation_dir() {
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
-        assert_eq!(SettingCategory::RemoteDirs.field_name(6), "animation_dir");
+    fn remote_dirs_do_not_expose_animation_dir() {
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        let visible_fields = (0..SettingCategory::RemoteDirs.field_count())
+            .map(|idx| SettingCategory::RemoteDirs.field_name(idx))
+            .collect::<Vec<_>>();
+        assert!(!visible_fields.contains(&"animation_dir"));
+        assert_eq!(SettingCategory::RemoteDirs.field_name(6), "flag_dir");
         assert_eq!(
             SettingCategory::RemoteDirs.field_full_name(6),
-            "remote_config.animation_dir"
+            "remote_config.flag_dir"
         );
-        assert_eq!(SettingCategory::RemoteDirs.display_label(6), "动画输出目录");
+    }
+
+    #[test]
+    fn postprocess_settings_expose_animation_dir() {
+        assert_eq!(SettingCategory::PostProcess.field_count(), 4);
+        assert_eq!(SettingCategory::PostProcess.field_name(2), "animation_dir");
+        assert_eq!(
+            SettingCategory::PostProcess.field_full_name(2),
+            "postprocess.animation_dir"
+        );
+        assert_eq!(
+            SettingCategory::PostProcess.display_label(2),
+            "动画输出目录"
+        );
+        assert!(SettingCategory::PostProcess.is_path_field(2));
 
         let mut state = SettingsState::new();
         state.config = SettingsConfig::default();
-        state.set_field_value(SettingCategory::RemoteDirs, 6, r"D:\animation");
+        state.set_field_value(SettingCategory::PostProcess, 2, r"D:\animation");
         assert_eq!(
-            state.get_field_value(SettingCategory::RemoteDirs, 6),
+            state.get_field_value(SettingCategory::PostProcess, 2),
             r"D:\animation"
         );
-        assert_eq!(state.config.remote_config.animation_dir, r"D:\animation");
+        assert_eq!(state.config.postprocess.animation_dir, r"D:\animation");
     }
 
     #[test]
     fn postprocess_settings_expose_user_editable_paths_and_metrics() {
         assert_eq!(SettingCategory::ALL.len(), 10);
-        assert_eq!(SettingCategory::PostProcess.field_count(), 3);
+        assert_eq!(SettingCategory::PostProcess.field_count(), 4);
         assert_eq!(
             SettingCategory::PostProcess.field_name(0),
             "postprocess_timeout"
         );
         assert_eq!(SettingCategory::PostProcess.field_name(1), "output_dir");
-        assert_eq!(SettingCategory::PostProcess.field_name(2), "metrics_dir");
+        assert_eq!(SettingCategory::PostProcess.field_name(2), "animation_dir");
+        assert_eq!(SettingCategory::PostProcess.field_name(3), "metrics_dir");
         assert_eq!(
-            SettingCategory::PostProcess.field_full_name(2),
+            SettingCategory::PostProcess.field_full_name(3),
             "postprocess.metrics_dir"
         );
         assert!(SettingCategory::PostProcess.is_path_field(1));
         assert!(SettingCategory::PostProcess.is_path_field(2));
+        assert!(SettingCategory::PostProcess.is_path_field(3));
 
         let visible_fields = (0..SettingCategory::PostProcess.field_count())
             .map(|idx| SettingCategory::PostProcess.field_name(idx))
             .collect::<Vec<_>>();
-        assert!(!visible_fields.contains(&"animation_dir"));
+        assert!(visible_fields.contains(&"animation_dir"));
         assert!(!visible_fields.contains(&"exit_to_throat_area_ratio"));
         assert!(!visible_fields.contains(&"cstar_reference"));
 
@@ -1256,12 +1276,13 @@ mod tests {
         state.config = SettingsConfig::default();
         state.set_field_value(SettingCategory::PostProcess, 0, "4200");
         state.set_field_value(SettingCategory::PostProcess, 1, r"D:\post\output");
-        state.set_field_value(SettingCategory::PostProcess, 2, r"D:\post\metrics");
+        state.set_field_value(SettingCategory::PostProcess, 2, r"D:\post\animation");
+        state.set_field_value(SettingCategory::PostProcess, 3, r"D:\post\metrics");
 
         assert_eq!(state.config.postprocess.postprocess_timeout, 4200);
         assert_eq!(state.config.postprocess.output_dir, r"D:\post\output");
+        assert_eq!(state.config.postprocess.animation_dir, r"D:\post\animation");
         assert_eq!(state.config.postprocess.metrics_dir, r"D:\post\metrics");
-        assert_eq!(state.config.postprocess.animation_dir, String::new());
         assert_eq!(
             state.config.postprocess.exit_to_throat_area_ratio,
             7.427276607
