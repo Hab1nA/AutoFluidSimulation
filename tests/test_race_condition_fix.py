@@ -159,6 +159,13 @@ class MockTaskRunner:
                                 paused_event=None, stopped_event=None) -> bool:
         return True
 
+    def register_postprocess_from_solver(self, config_name: int) -> bool:
+        return True
+
+    def wait_postprocess_completion(self, config_name,
+                                    paused_event=None, stopped_event=None) -> bool:
+        return True
+
     def get_ssh(self):
         return None
 

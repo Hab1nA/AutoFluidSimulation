@@ -979,6 +979,16 @@ class _MockTaskRunner:
         self._postprocess_dispatched.append(config_name)
         return True
 
+    def register_postprocess_from_solver(self, config_name: int) -> bool:
+        workstation_id = "default"
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = str(get_config_workstation(config_name) or "default")
+        return self._remote_executor.register_postprocess_from_solver(
+            config_name,
+            workstation_id=workstation_id,
+        )
+
     def wait_postprocess_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         self._postprocess_wait_count += 1
         return self._postprocess_wait_result
@@ -1021,6 +1031,8 @@ class _MockRemoteExecutor:
         self._remote_task_status = "lost"
         self._remote_task_status_checks: list[tuple[int, str, str]] = []
         self._forgotten_remote_tasks: list[tuple[int, str, str]] = []
+        self._postprocess_handoffs: list[tuple[int, str]] = []
+        self._remote_task_events: list[tuple[str, int, str, str]] = []
         self._meshing_waits: list[tuple[int, str]] = []
 
     def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
@@ -1069,10 +1081,31 @@ class _MockRemoteExecutor:
         step_name: str,
         workstation_id: str = "default",
     ) -> None:
+        self._remote_task_events.append(("forget", config_name, step_name, workstation_id))
         self._forgotten_remote_tasks.append((config_name, step_name, workstation_id))
         delete_remote_task = getattr(self.state, "delete_remote_task", None)
         if callable(delete_remote_task):
             delete_remote_task(config_name, step_name, workstation_id=workstation_id)
+
+    def register_postprocess_from_solver(
+        self,
+        config_name: int,
+        workstation_id: str = "default",
+    ) -> bool:
+        self._remote_task_events.append(
+            ("handoff", config_name, "postprocess", workstation_id)
+        )
+        self._postprocess_handoffs.append((config_name, workstation_id))
+        self.state.save_remote_task(
+            workstation_id=workstation_id,
+            config_name=config_name,
+            step_name="postprocess",
+            task_name="AutoFluid_solver_task",
+            flag_file=f"D:/flags/postprocess_done_{config_name}.txt",
+            error_flag_file=f"D:/flags/postprocess_done_{config_name}.txt.error",
+            started_at=time.time(),
+        )
+        return True
 
 
 class _SpyFileMonitor:
@@ -1555,8 +1588,8 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
-    def test_resume_scan_completed_remote_solver_forgets_task(self):
-        """恢复扫描确认 Solver 已完成时清理远程任务元数据。"""
+    def test_resume_scan_completed_remote_solver_hands_off_before_forget(self):
+        """恢复扫描确认 Solver 已完成时先登记 PostProcess，再清理 Solver 元数据。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -1567,7 +1600,16 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
-        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
+        assert self.runner._remote_executor._postprocess_handoffs == [(1, "default")]
+        assert self.runner._remote_executor._remote_task_events[:2] == [
+            ("handoff", 1, "postprocess", "default"),
+            ("forget", 1, "solver", "default"),
+        ]
+        assert self.runner._remote_executor._forgotten_remote_tasks[0] == (
+            1,
+            "solver",
+            "default",
+        )
 
     def test_resume_scan_paused_remote_solver_with_outputs_forgets_task(self):
         """Paused Solver 输出已存在时也应清理远程任务元数据。"""
@@ -3255,7 +3297,8 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=5)
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
-        assert self.runner._postprocess_dispatched == [1]
+        assert self.runner._postprocess_dispatched == []
+        assert self.runner._remote_executor._postprocess_handoffs == [(1, "default")]
         assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
         assert self.solver_terminal_outcomes == ["completed"]
 
@@ -3320,6 +3363,34 @@ class TestBarrierCoordinator:
         assert self.runner._solver_wait_count == 1
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 
+    def test_running_solver_completed_hands_off_postprocess_before_forget(self):
+        """Daemon 重启后发现 Solver 已完成时应保留同一 Fluent 会话给 PostProcess。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "completed"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "solver", "WS-A")
+        ]
+        assert self.runner._remote_executor._postprocess_handoffs == [(1, "WS-A")]
+        assert self.runner._remote_executor._remote_task_events[:2] == [
+            ("handoff", 1, "postprocess", "WS-A"),
+            ("forget", 1, "solver", "WS-A"),
+        ]
+        assert self.runner._remote_executor._forgotten_remote_tasks[0] == (
+            1,
+            "solver",
+            "WS-A",
+        )
+        assert self.runner._postprocess_dispatched == []
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
     def test_running_solver_remote_recovery_uses_assigned_workstation(self):
         """Solver 恢复查询与清理应使用构型分配的工作站。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -3335,9 +3406,11 @@ class TestBarrierCoordinator:
         assert self.runner._remote_executor._remote_task_status_checks == [
             (1, "solver", "WS-A")
         ]
-        assert self.runner._remote_executor._forgotten_remote_tasks == [
-            (1, "solver", "WS-A")
-        ]
+        assert self.runner._remote_executor._forgotten_remote_tasks[0] == (
+            1,
+            "solver",
+            "WS-A",
+        )
 
     def test_running_solver_unknown_remote_state_does_not_restart(self):
         """远程 Solver 状态未知时保守保持 Running，不重复启动。"""
@@ -3383,7 +3456,11 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=5)
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
-        assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
+        assert self.runner._remote_executor._forgotten_remote_tasks[0] == (
+            1,
+            "solver",
+            "default",
+        )
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 

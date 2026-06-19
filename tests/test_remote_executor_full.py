@@ -333,6 +333,12 @@ class TestBuildSolverCommand:
         assert "batch_solver_gen4.py" in command
         assert "run --no-capture-output -n pyfluent python -u" in command
         assert "--processor-count 128" in command
+        assert "--solver-flag-file D:/flags/solver_done_2.txt" in command
+        assert "--post-journal-path" in command
+        assert "solver_post_gen4.jou" in command
+        assert "--extra-post-journal-path" in command
+        assert "postprocess_extra_gen4.jou" in command
+        assert "--postprocess-flag-file D:/flags/postprocess_done_2.txt" in command
 
 
 class TestBuildPostprocessCommand:
@@ -643,8 +649,8 @@ class TestExecuteSolver:
         assert "batch_solver_gen4.py" in str(captured["command"])
         assert '--working-dir "D:\\working"' in str(captured["command"])
 
-    def test_wait_solver_completion_cleans_remote_task(self, monkeypatch):
-        """Solver 完成后清理计划任务条目，避免 Fluent 任务堆积。"""
+    def test_wait_solver_completion_keeps_remote_task_for_postprocess(self, monkeypatch):
+        """Solver 完成后保留计划任务，供同一 Fluent 会话继续后处理。"""
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
         monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 30)
@@ -690,10 +696,8 @@ class TestExecuteSolver:
             "D:/flags/solver_done_6.txt",
             "D:/flags/solver_progress_6.json",
         ]
-        assert cleaned == [
-            ("AutoFluid_solver_done_task", "D:/flags/autofluid_bg_solver_done.pid")
-        ]
-        assert 6 not in executor._remote_tasks
+        assert cleaned == []
+        assert executor._remote_tasks[6] == "AutoFluid_solver_done_task"
 
 
 class TestExecutePostprocess:
@@ -704,16 +708,8 @@ class TestExecutePostprocess:
         assert executor.execute_postprocess("1") is False
         assert executor.execute_postprocess(1.5) is False
 
-    def test_execute_postprocess_uses_interactive_scheduled_task(self, monkeypatch):
-        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
-        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
-        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
-        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+    def test_execute_postprocess_reuses_solver_scheduled_task(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
-        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
-        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
-        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
-        captured: dict[str, str | None] = {}
 
         class _SSH:
             def exec_background(
@@ -724,20 +720,41 @@ class TestExecutePostprocess:
                 working_dir: str | None = None,
                 interactive: bool = False,
             ) -> tuple[bool, str]:
-                captured["command"] = command
-                captured["flag_file"] = flag_file
-                captured["working_dir"] = working_dir
-                captured["interactive"] = str(interactive)
-                return (True, "AutoFluid_postprocess")
+                raise AssertionError("postprocess must reuse the solver Fluent task")
 
-        executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
-        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
+        state = _StateRecorder()
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+        executor._remember_remote_task(2, "solver", "AutoFluid_solver")
 
         assert executor.execute_postprocess(2) is True
-        assert captured["working_dir"] == r"D:\working"
-        assert captured["interactive"] == "True"
-        assert "batch_postprocess_gen4.py" in str(captured["command"])
-        assert captured["flag_file"] == "D:/flags/postprocess_done_2.txt"
+        assert state.remote_tasks[(2, "postprocess")]["task_name"] == "AutoFluid_solver"
+        assert state.remote_tasks[(2, "postprocess")]["flag_file"] == (
+            "D:/flags/postprocess_done_2.txt"
+        )
+
+    def test_register_postprocess_reuses_persisted_solver_task_after_restart(self, monkeypatch):
+        """Daemon 重启后仅凭 DB 中的 Solver 任务记录也能登记 PostProcess。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+
+        state = _StateRecorder()
+        state.remote_tasks[(3, "solver")] = {
+            "config_name": 3,
+            "step_name": "solver",
+            "task_name": "AutoFluid_solver_recovered",
+            "flag_file": "D:/flags/solver_done_3.txt",
+            "error_flag_file": "D:/flags/solver_done_3.txt.error",
+            "pid_file": "D:/flags/autofluid_bg_solver_recovered.pid",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: None, threading.RLock())
+
+        assert executor.register_postprocess_from_solver(3) is True
+        assert state.remote_tasks[(3, "postprocess")]["task_name"] == (
+            "AutoFluid_solver_recovered"
+        )
+        assert state.remote_tasks[(3, "postprocess")]["flag_file"] == (
+            "D:/flags/postprocess_done_3.txt"
+        )
 
     def test_wait_postprocess_completion_cleans_remote_task(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")

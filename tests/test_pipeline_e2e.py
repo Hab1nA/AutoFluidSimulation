@@ -84,6 +84,9 @@ class _E2ETaskRunner:
     def execute_postprocess(self, config_name: int) -> bool:
         return self._execute_step("postprocess", config_name)
 
+    def register_postprocess_from_solver(self, config_name: int) -> bool:
+        return True
+
     def wait_meshing_completion(self, config_name, paused_event=None, stopped_event=None) -> bool:
         return self._step_results.get("meshing", True)
 

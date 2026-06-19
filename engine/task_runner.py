@@ -410,6 +410,13 @@ class TaskRunner:
             workstation_id=self._workstation_for_config(config_name),
         )
 
+    def register_postprocess_from_solver(self, config_name: int) -> bool:
+        """将同一远程 Solver 任务登记为 PostProcess 任务。"""
+        return self._remote_executor.register_postprocess_from_solver(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
+
     def wait_postprocess_completion(
         self,
         config_name: int,

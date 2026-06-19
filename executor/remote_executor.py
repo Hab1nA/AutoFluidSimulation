@@ -305,6 +305,14 @@ class RemoteExecutor:
         self._pop_remote_task(config_name, step_name, workstation_id)
         self._delete_remote_task_from_state(config_name, step_name, workstation_id)
 
+    def register_postprocess_from_solver(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        """Persist PostProcess tracking for the same remote Solver task."""
+        return self._register_postprocess_from_solver(config_name, workstation_id)
+
     def query_remote_task_status(
         self,
         config_name: int,
@@ -1095,6 +1103,7 @@ class RemoteExecutor:
         """
         config = remote_config or self._remote_config_for_workstation()
         flag_file = self._solver_flag_file(config_name, config)
+        postprocess_flag_file = self._postprocess_flag_file(config_name, config)
         progress_file = self._solver_progress_file(config_name, config)
         conda_env = config["conda_env"]
         conda_exe = config["conda_exe"]
@@ -1136,6 +1145,14 @@ class RemoteExecutor:
             str(iteration_count),
             "--progress-file",
             _cmd_arg(progress_file, force_quote=True),
+            "--solver-flag-file",
+            _cmd_arg(flag_file),
+            "--post-journal-path",
+            _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
+            "--extra-post-journal-path",
+            _cmd_arg(f"{scripts_dir}/postprocess_extra_gen4.jou", force_quote=True),
+            "--postprocess-flag-file",
+            _cmd_arg(postprocess_flag_file),
         ])
         return command, flag_file
 
@@ -1297,7 +1314,20 @@ class RemoteExecutor:
         config_name: int,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> bool:
-        """在远程工作站启动后处理后台任务。"""
+        """接管同一 Fluent 会话中的后处理阶段。
+
+        Solver 远程脚本在同一个 Fluent session 内继续执行 PostProcess。
+        本方法只把正在运行的 solver 后台任务登记为 postprocess 任务，
+        让后续 wait_postprocess_completion() 轮询 postprocess_done flag；
+        不再启动独立 Fluent/PostProcess 脚本。
+        """
+        return self._register_postprocess_from_solver(config_name, workstation_id)
+
+    def _register_postprocess_from_solver(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         try:
             self._validate_config_name(config_name)
         except ValueError:
@@ -1305,49 +1335,47 @@ class RemoteExecutor:
             return False
 
         remote_config = self._remote_config_for_workstation(workstation_id)
-        if not self.sync_scripts(workstation_id=workstation_id):
-            logger.error("[PostProcess] 远程脚本同步失败，无法启动后处理")
-            return False
-
         try:
-            command, flag_file = self._build_postprocess_command(config_name, remote_config)
+            flag_file = self._postprocess_flag_file(config_name, remote_config)
         except ValueError as e:
-            logger.error(f"[PostProcess] 远程后处理命令构建失败: {e}")
+            logger.error(f"[PostProcess] 远程后处理 flag 构建失败: {e}")
             return False
 
-        logger.info(f"[PostProcess] 启动远程后处理: 构型{config_name}")
-        logger.debug(f"[PostProcess] 远程命令: {command}")
+        solver_task_name = self._remote_tasks.get(
+            self._remote_task_key(config_name, "solver", workstation_id),
+        )
+        if solver_task_name is None:
+            solver_task = self._get_remote_task_from_state(
+                config_name,
+                "solver",
+                workstation_id,
+            )
+            if solver_task is not None:
+                solver_task_name = str(solver_task["task_name"])
+        if not solver_task_name:
+            logger.error(
+                f"[PostProcess] 构型{config_name} 无可接管的 Solver 远程任务，"
+                "无法在同一 Fluent 会话内后处理"
+            )
+            return False
 
-        with self._ssh_lock:
-            try:
-                ssh = self._get_ssh_for_workstation(workstation_id)
-                success, task_name = ssh.exec_background(
-                    command,
-                    flag_file,
-                    working_dir=str(remote_config["working_dir"]),
-                    interactive=True,
-                )
-                if not success:
-                    logger.error(f"[PostProcess] 远程后处理启动失败: 构型{config_name}")
-                    return False
-                self._remember_remote_task(
-                    config_name,
-                    "postprocess",
-                    task_name,
-                    workstation_id,
-                )
-                self._persist_remote_task(
-                    workstation_id=workstation_id,
-                    config_name=config_name,
-                    step_name="postprocess",
-                    task_name=task_name,
-                    flag_file=flag_file,
-                )
-                logger.info(f"[PostProcess] 后处理后台任务已启动: 构型{config_name}")
-                return True
-            except (OSError, ConnectionError) as e:
-                logger.error(f"[PostProcess] 后处理启动异常: {e}")
-                return False
+        self._remember_remote_task(
+            config_name,
+            "postprocess",
+            solver_task_name,
+            workstation_id,
+        )
+        self._persist_remote_task(
+            workstation_id=workstation_id,
+            config_name=config_name,
+            step_name="postprocess",
+            task_name=solver_task_name,
+            flag_file=flag_file,
+        )
+        logger.info(
+            f"[PostProcess] 构型{config_name} 已接管 Solver Fluent 会话，等待后处理完成"
+        )
+        return True
 
     def _read_solver_progress(
         self,
@@ -1486,12 +1514,6 @@ class RemoteExecutor:
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
                             self._clear_solver_progress(progress_file, ssh)
-                            self._cleanup_completed_remote_task(
-                                config_name,
-                                "solver",
-                                ssh,
-                                workstation_id,
-                            )
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 

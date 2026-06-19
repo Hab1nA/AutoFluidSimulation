@@ -72,6 +72,14 @@ def parse_args() -> argparse.Namespace:
                         help='迭代次数 (默认: 1000)')
     parser.add_argument('--progress-file', type=str, default=None,
                         help='可选：写入 Solver 剩余时间进度的 JSON 文件路径')
+    parser.add_argument('--solver-flag-file', type=str, required=True,
+                        help='Solver 完成标志文件路径')
+    parser.add_argument('--post-journal-path', type=str, required=True,
+                        help='后处理 Journal 文件路径 (.jou)')
+    parser.add_argument('--extra-post-journal-path', type=str, default=None,
+                        help='可选额外后处理 Journal 文件路径 (.jou)')
+    parser.add_argument('--postprocess-flag-file', type=str, required=True,
+                        help='PostProcess 完成标志文件路径')
 
     return parser.parse_args()
 
@@ -184,6 +192,17 @@ def _remove_file_if_exists(path: str | None) -> None:
             os.remove(path)
     except OSError as e:
         print(f"[SolverProgress] 删除文件失败: {path}, error: {e}")
+
+
+def _write_flag(flag_file: str) -> None:
+    """Atomically write a step completion flag."""
+    parent = os.path.dirname(flag_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp_file = f"{flag_file}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        f.write("OK\n")
+    os.replace(tmp_file, flag_file)
 
 
 def _tail_transcript_for_progress(
@@ -443,6 +462,7 @@ def main() -> None:
     config_id = args.config_id
     import_file_name = os.path.join(args.msh_dir, f"model_gen4_{config_id}.msh.h5")
     _require_file(args.journal_path, "求解 Journal 文件")
+    _require_file(args.post_journal_path, "后处理 Journal 文件")
     _require_file(import_file_name, "网格文件")
 
     # 设置环境变量
@@ -460,6 +480,10 @@ def main() -> None:
     print(f"[配置] 工作目录 V: {args.working_dir_v}")
     print(f"[配置] 处理器核心数: {args.processor_count}")
     print(f"[配置] 迭代次数: {args.iterate_count}")
+    print(f"[配置] Solver 完成标志: {args.solver_flag_file}")
+    print(f"[配置] 后处理 Journal: {args.post_journal_path}")
+    print(f"[配置] 额外后处理 Journal: {args.extra_post_journal_path or '<none>'}")
+    print(f"[配置] PostProcess 完成标志: {args.postprocess_flag_file}")
 
     # 确保输出目录存在
     for dir_path in (
@@ -517,12 +541,31 @@ def main() -> None:
         solver_session.tui.solve.iterate(args.iterate_count)
         _ensure_session_healthy(solver_session, "迭代后")
 
-        # 6.4 保存算例。后处理已拆分到独立 PostProcess 步骤。
+        # 6.4 保存算例并写 Solver 完成标志；Fluent 会话继续用于后处理。
         case_file_name = f"model_gen4_{config_id}.cas.h5"
         case_full_path = os.path.join(args.output_dir, case_file_name)
         print(f"[{config_id}] 正在保存算例: {case_full_path}")
         solver_session.tui.file.write_case_data(case_full_path)
         print(f"[{config_id}] 算例已保存到 {case_full_path}")
+        _write_flag(args.solver_flag_file)
+        print(f"[{config_id}] Solver 完成标志已写入: {args.solver_flag_file}")
+
+        # 6.5 同一 Fluent 会话内立即执行后处理，避免重新启动 Fluent。
+        print(f"[{config_id}] 正在执行后处理 Journal: {args.post_journal_path}")
+        solver_session.tui.file.read_journal(args.post_journal_path)
+        _ensure_session_healthy(solver_session, "执行后处理 Journal 后")
+
+        if args.extra_post_journal_path and os.path.isfile(args.extra_post_journal_path):
+            print(f"[{config_id}] 正在执行额外后处理 Journal: {args.extra_post_journal_path}")
+            solver_session.tui.file.read_journal(args.extra_post_journal_path)
+            _ensure_session_healthy(solver_session, "执行额外后处理 Journal 后")
+        elif args.extra_post_journal_path:
+            print(f"[{config_id}] 额外后处理 Journal 不存在，跳过: {args.extra_post_journal_path}")
+
+        time.sleep(2)
+        move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
+        _write_flag(args.postprocess_flag_file)
+        print(f"[{config_id}] PostProcess 完成标志已写入: {args.postprocess_flag_file}")
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")

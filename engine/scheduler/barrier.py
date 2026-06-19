@@ -445,13 +445,22 @@ class BarrierCoordinator:
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
+                if not self.runner.register_postprocess_from_solver(config_name):
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_ERROR,
+                        "无法接管远程 Solver 任务进行后处理",
+                    )
+                    return True
+                self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                 remote_executor.forget_remote_task(
                     config_name,
                     "solver",
                     workstation_id=workstation_id,
                 )
                 logger.info(f"[Solver] 构型{config_name} 重启后检测到完成标志")
-                self._execute_postprocess_for_config(config_name)
+                self._wait_for_postprocess_completion(config_name)
                 return True
             if remote_status == "failed":
                 self.state.set_step_status(
@@ -476,7 +485,21 @@ class BarrierCoordinator:
                     self._discard_stale_step_result(config_name, "solver")
                     return False
                 if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
-                    self._execute_postprocess_for_config(config_name)
+                    if self.runner.register_postprocess_from_solver(config_name):
+                        self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
+                        remote_executor.forget_remote_task(
+                            config_name,
+                            "solver",
+                            workstation_id=workstation_id,
+                        )
+                        self._wait_for_postprocess_completion(config_name)
+                    else:
+                        self.state.set_step_status(
+                            config_name,
+                            "postprocess",
+                            STATUS_ERROR,
+                            "无法接管远程 Solver 任务进行后处理",
+                        )
                 return True
             if remote_status == "unknown":
                 self._record_unknown_remote_status(config_name, "solver")
@@ -505,7 +528,22 @@ class BarrierCoordinator:
                 self._discard_stale_step_result(config_name, "solver")
                 return False
             if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
-                self._execute_postprocess_for_config(config_name)
+                if self.runner.register_postprocess_from_solver(config_name):
+                    self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
+                    remote_executor = self.runner.get_remote_executor()
+                    remote_executor.forget_remote_task(
+                        config_name,
+                        "solver",
+                        workstation_id=self._workstation_for_config(config_name),
+                    )
+                    self._wait_for_postprocess_completion(config_name)
+                else:
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_ERROR,
+                        "无法接管远程 Solver 任务进行后处理",
+                    )
         return True
 
     def _execute_or_recover_postprocess_for_config(self, config_name: int) -> None:

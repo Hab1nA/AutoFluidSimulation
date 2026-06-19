@@ -594,6 +594,16 @@ class PipelineScheduler:
                         )
                         if remote_status == "completed":
                             self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                            if step == "solver":
+                                if not self.runner.register_postprocess_from_solver(cn):
+                                    self.state.set_step_status(
+                                        cn,
+                                        "postprocess",
+                                        STATUS_ERROR,
+                                        "无法接管远程 Solver 任务进行后处理",
+                                    )
+                                    break
+                                self.state.set_step_status(cn, "postprocess", STATUS_RUNNING)
                             remote_executor.forget_remote_task(
                                 cn,
                                 step,

@@ -205,6 +205,9 @@ class MockTaskRunner:
         self._postprocess_dispatched.append(config_name)
         return True
 
+    def register_postprocess_from_solver(self, config_name: int) -> bool:
+        return True
+
     def wait_postprocess_completion(self, config_name: int,
                                     paused_event=None, stopped_event=None) -> bool:
         time.sleep(0.1)
