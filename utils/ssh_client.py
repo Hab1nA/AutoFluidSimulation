@@ -42,7 +42,15 @@ class RemoteWorkstation:
     以独立后台进程方式启动，确保 SSH 断开后任务继续运行。
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        key_filename: str | None = None,
+        auth_method: str = "password",
+    ):
         """
         初始化 SSH 客户端配置。
 
@@ -51,11 +59,15 @@ class RemoteWorkstation:
             port: SSH 端口
             username: 用户名
             password: 密码
+            key_filename: 私钥文件路径；为空时使用 Paramiko 默认 key/agent
+            auth_method: 认证方式，支持 password/key/none
         """
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.key_filename = key_filename or None
+        self.auth_method = (auth_method or "password").lower()
         self._ssh: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
         self._task_pid_files: dict[str, str] = {}
@@ -70,17 +82,32 @@ class RemoteWorkstation:
             raise ModuleNotFoundError(
                 "未安装依赖 paramiko。请执行: pip install -r requirements.txt"
             )
+        transport = None
         try:
             self._ssh = paramiko.SSHClient()
             self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            if self.auth_method == "none":
+                transport = paramiko.Transport((self.host, self.port))
+                transport.start_client(timeout=10)
+                transport.auth_none(self.username)
+                self._ssh._transport = transport
+                transport.set_keepalive(30)
+                self._sftp = self._ssh.open_sftp()
+                logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
+                return True
+            password = self.password or None
+            use_key_auth = self.auth_method == "key" or (
+                password is None and self.auth_method != "none"
+            )
             self._ssh.connect(
                 hostname=self.host,
                 port=self.port,
                 username=self.username,
-                password=self.password,
+                password=password,
+                key_filename=self.key_filename,
                 timeout=10,
-                look_for_keys=False,
-                allow_agent=False,
+                look_for_keys=use_key_auth,
+                allow_agent=use_key_auth,
             )
             transport = self._ssh.get_transport()
             if transport:
@@ -90,6 +117,11 @@ class RemoteWorkstation:
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.error(f"[SSH] SSH 连接失败: {e}")
+            if transport is not None:
+                try:
+                    transport.close()
+                except (OSError, EOFError) as close_error:
+                    logger.warning(f"[SSH] Transport 关闭异常: {close_error}")
             self._ssh = None
             self._sftp = None
             return False

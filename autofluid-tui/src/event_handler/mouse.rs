@@ -538,16 +538,18 @@ fn handle_mouse_down(
         if let Some(ref mut ss) = state.settings_state {
             // 编辑模式下阻止鼠标对其他行进行双击/单击操作
             if !ss.focus.editing {
-                if let Some((cat_idx, fi)) = detect_settings_field(col, row, area, ss) {
+                if let Some((cat_idx, fi, workstation_idx)) =
+                    detect_settings_field(col, row, area, ss)
+                {
                     let now = std::time::Instant::now();
                     // Double-click: same field clicked within 400ms
-                    let is_double = ss.last_clicked_field == Some((cat_idx, fi))
+                    let field_key = (cat_idx, fi, workstation_idx);
+                    let is_double = ss.last_clicked_field == Some(field_key)
                         && ss
                             .last_click_time
                             .is_some_and(|t| now.duration_since(t).as_millis() < 400);
                     if is_double {
-                        ss.focus.category_index = cat_idx;
-                        ss.focus.field_index = fi;
+                        ss.set_focus(cat_idx, fi, workstation_idx);
                         let cat = ss.current_category();
                         if cat.is_bool_field(fi) {
                             // Boolean fields: toggle directly, don't enter text editing
@@ -561,11 +563,10 @@ fn handle_mouse_down(
                         ss.last_click_time = None;
                     } else {
                         // Single click: select field + animation + track for double-click
-                        ss.focus.category_index = cat_idx;
-                        ss.focus.field_index = fi;
-                        ss.clicked_field = Some((cat_idx, fi));
+                        ss.set_focus(cat_idx, fi, workstation_idx);
+                        ss.clicked_field = Some(field_key);
                         ss.field_click_time = Some(now);
-                        ss.last_clicked_field = Some((cat_idx, fi));
+                        ss.last_clicked_field = Some(field_key);
                         ss.last_click_time = Some(now);
                     }
                     state.needs_redraw = true;
@@ -1112,13 +1113,13 @@ pub fn detect_dialog_button(
 }
 
 /// 检测鼠标是否悬停在 Settings 对话框的某一行字段上。
-/// 返回 (category_index, field_index)
+/// 返回 (category_index, field_index, workstation_index)
 pub fn detect_settings_field(
     col: u16,
     row: u16,
     area: ratatui::layout::Rect,
     ss: &SettingsState,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, Option<usize>)> {
     let dialog_area = ui::dialogs::centered_rect(90, 90, area);
     if !point_in_rect(col, row, dialog_area) {
         return None;
@@ -1140,9 +1141,10 @@ pub fn detect_settings_field(
     let rel_row = row - content_y;
     let visual_line = ss.scroll + rel_row;
 
-    for (cat_idx, fi, y) in &ss.field_positions {
-        if *y == visual_line {
-            return Some((*cat_idx, *fi));
+    let rel_col = col.saturating_sub(dialog_area.x + 1);
+    for hit in &ss.field_positions {
+        if hit.y == visual_line && rel_col >= hit.x_start && rel_col < hit.x_end {
+            return Some((hit.category_index, hit.field_index, hit.workstation_index));
         }
     }
     None
@@ -1396,5 +1398,69 @@ pub fn sb_horizontal_scroll_from_drag(
         sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
     } else {
         start_scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{SettingsFieldHit, SettingsState};
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn detect_settings_field_returns_workstation_column_from_hit_bounds() {
+        let area = Rect::new(0, 0, 100, 40);
+        let dialog = ui::dialogs::centered_rect(90, 90, area);
+        let content_x = dialog.x + 1;
+        let content_y = dialog.y + 1 + 2;
+
+        let mut state = SettingsState::default_for_tests();
+        state.field_positions = vec![
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(0),
+                y: 5,
+                x_start: 20,
+                x_end: 40,
+            },
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(1),
+                y: 5,
+                x_start: 40,
+                x_end: 60,
+            },
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(2),
+                y: 5,
+                x_start: 60,
+                x_end: 80,
+            },
+        ];
+
+        assert_eq!(
+            detect_settings_field(content_x + 20, content_y + 5, area, &state),
+            Some((1, 0, Some(0)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 40, content_y + 5, area, &state),
+            Some((1, 0, Some(1)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 60, content_y + 5, area, &state),
+            Some((1, 0, Some(2)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 79, content_y + 5, area, &state),
+            Some((1, 0, Some(2)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 80, content_y + 5, area, &state),
+            None
+        );
     }
 }

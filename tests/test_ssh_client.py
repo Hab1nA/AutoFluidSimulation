@@ -9,6 +9,245 @@ import utils.ssh_client as ssh_client_module
 from utils.ssh_client import RemoteWorkstation
 
 
+def test_connect_uses_password_auth_when_password_is_configured(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "secret")
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "secret",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
+
+
+def test_connect_allows_key_auth_when_password_is_empty(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "")
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": None,
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": True,
+        "allow_agent": True,
+    }]
+
+
+def test_connect_uses_configured_key_file(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation(
+        "127.0.0.1",
+        22,
+        "user",
+        "",
+        key_filename=r"C:\Users\XKZ\.ssh\id_ed25519",
+    )
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": None,
+        "key_filename": r"C:\Users\XKZ\.ssh\id_ed25519",
+        "timeout": 10,
+        "look_for_keys": True,
+        "allow_agent": True,
+    }]
+
+
+def test_connect_supports_none_auth(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _Transport:
+        def __init__(self, addr: tuple[str, int]) -> None:
+            calls.append(("transport_init", addr))
+
+        def start_client(self, timeout: int) -> None:
+            calls.append(("start_client", timeout))
+
+        def auth_none(self, username: str) -> None:
+            calls.append(("auth_none", username))
+
+        def set_keepalive(self, _seconds: int) -> None:
+            calls.append(("set_keepalive", _seconds))
+
+        def open_session(self, timeout: int | None = None):
+            calls.append(("open_session", timeout))
+            return object()
+
+    class _SSHClient:
+        def __init__(self) -> None:
+            self.transport = None
+
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            raise AssertionError(f"none auth should not call SSHClient.connect: {kwargs}")
+
+        def get_transport(self):
+            calls.append(("get_transport", None))
+            return self.transport
+
+        def _transport(self, transport):
+            self.transport = transport
+
+        def open_sftp(self):
+            calls.append(("open_sftp", None))
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+        Transport = _Transport
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
+
+    assert host.connect() is True
+    assert ("transport_init", ("127.0.0.1", 22)) in calls
+    assert ("start_client", 10) in calls
+    assert ("auth_none", "user") in calls
+    assert ("open_sftp", None) in calls
+
+
+def test_connect_closes_none_auth_transport_on_failure(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class _Transport:
+        def __init__(self, addr: tuple[str, int]) -> None:
+            calls.append(("transport_init", addr))
+
+        def start_client(self, timeout: int) -> None:
+            calls.append(("start_client", timeout))
+
+        def auth_none(self, username: str) -> None:
+            calls.append(("auth_none", username))
+            raise _Paramiko.SSHException("none auth rejected")
+
+        def close(self) -> None:
+            calls.append(("close", None))
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def open_sftp(self):
+            raise AssertionError("open_sftp should not be reached")
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+        Transport = _Transport
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
+
+    assert host.connect() is False
+    assert ("auth_none", "user") in calls
+    assert ("close", None) in calls
+
+
 def _decode_encoded_command(script: str) -> str:
     encoded_command = script.split("-EncodedCommand ", 1)[1].split(" ", 1)[0]
     return base64.b64decode(encoded_command).decode("utf-16le")

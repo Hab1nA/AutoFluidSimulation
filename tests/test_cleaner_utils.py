@@ -134,6 +134,57 @@ class TestFileCleanerSystemCheck:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_remote_system_check_reports_each_configured_workstation(self, tmp_path):
+        """系统自检应逐台工作站检查 SSH/远端环境，不能只检查第一台。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _SSH:
+            def __init__(self, workstation_id: str, connected: bool) -> None:
+                self.workstation_id = workstation_id
+                self._connected = connected
+
+            def is_connected(self) -> bool:
+                return self._connected
+
+            def check_system(self, **_kwargs: object) -> dict[str, object]:
+                return {
+                    "ssh_connected": True,
+                    "python_version": f"python-on-{self.workstation_id}",
+                }
+
+        seen: list[str] = []
+
+        def _get_ssh(workstation_id: str = "default") -> _SSH:
+            seen.append(workstation_id)
+            return _SSH(workstation_id, workstation_id != "WS-C")
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        WORKSTATIONS[:] = [
+            {**REMOTE_CONFIG, "id": "WS-A", "host": "172.17.135.240"},
+            {**REMOTE_CONFIG, "id": "WS-B", "host": "172.17.135.89"},
+            {**REMOTE_CONFIG, "id": "WS-C", "host": "172.17.135.254"},
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, _get_ssh)
+
+            result = cleaner.run_system_check()
+
+            assert seen == ["WS-A", "WS-B", "WS-C"]
+            per_workstation = result["remote_checks"]["workstations"]
+            assert per_workstation["WS-A"]["ssh"] == "连接成功"
+            assert per_workstation["WS-B"]["python_version"] == "python-on-WS-B"
+            assert per_workstation["WS-C"]["ssh"] == "连接失败"
+            assert result["remote_checks"]["ssh"] == "部分连接失败"
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
     def test_server_mode_warns_about_private_workstation_host(self, tmp_path, monkeypatch):
         """server/ocar 模式下应提示私网工作站地址可能不可达。"""
         from executor.cleaner import FileCleaner

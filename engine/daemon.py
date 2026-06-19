@@ -652,6 +652,9 @@ class PipelineDaemon:
             return None
         missing: list[str] = []
         for workstation in WORKSTATIONS:
+            auth_method = str(workstation.get("auth_method") or "password").lower()
+            if auth_method in {"key", "none"}:
+                continue
             password = str(workstation.get("password") or "").strip()
             if not password or (password.startswith("${") and password.endswith("}")):
                 missing.append(str(workstation.get("id") or "default"))
@@ -1410,12 +1413,33 @@ class PipelineDaemon:
         _, logs, _ = self.handle_get_log_entries(log_params)
         data = {
             "statuses": statuses,
+            "config_workstations": self._build_config_workstation_snapshot(statuses),
             "engine": engine,
             "health": self._build_health_snapshot(),
             "logs": logs,
         }
         self._trim_dashboard_logs_to_budget(data)
         return True, data, ""
+
+    def _build_config_workstation_snapshot(
+        self,
+        statuses: Mapping[Any, Any],
+    ) -> dict[str, str]:
+        """Return config-to-workstation assignments for dashboard consumers."""
+        state = getattr(self, "state", None)
+        get_config_workstation = getattr(state, "get_config_workstation", None)
+        if not callable(get_config_workstation):
+            return {}
+
+        assignments: dict[str, str] = {}
+        for config_name in statuses:
+            try:
+                workstation_id = get_config_workstation(int(config_name))
+            except (TypeError, ValueError):
+                workstation_id = None
+            if workstation_id:
+                assignments[str(config_name)] = str(workstation_id)
+        return assignments
 
     @staticmethod
     def _trim_dashboard_logs_to_budget(data: dict[str, Any]) -> None:

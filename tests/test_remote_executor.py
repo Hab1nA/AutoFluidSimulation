@@ -384,6 +384,91 @@ def test_check_meshing_outputs_exist_ignores_stale_done_flag_without_mesh(monkey
     assert calls == ["D:/msh/model_gen4_4.msh.h5"]
 
 
+def test_check_meshing_outputs_exist_uses_independent_workstation_locks(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "msh_dir": rf"D:\{workstation_id}\msh",
+        },
+    )
+
+    entered: list[str] = []
+    release = threading.Event()
+
+    class _SSH:
+        def __init__(self, workstation_id: str) -> None:
+            self.workstation_id = workstation_id
+
+        def check_remote_file(self, remote_path: str) -> bool:
+            entered.append(self.workstation_id)
+            if self.workstation_id == "WS-A":
+                release.wait(timeout=2)
+            return remote_path.endswith(".msh.h5")
+
+    def _get_ssh(workstation_id: str) -> _SSH:
+        return _SSH(workstation_id)
+
+    executor = RemoteExecutor(_StateRecorder(), _get_ssh, threading.RLock())
+    thread_a = threading.Thread(
+        target=lambda: executor.check_meshing_outputs_exist(1, workstation_id="WS-A")
+    )
+    thread_a.start()
+
+    deadline = remote_executor_module.time.time() + 1.0
+    while entered != ["WS-A"] and remote_executor_module.time.time() < deadline:
+        remote_executor_module.time.sleep(0.01)
+
+    try:
+        started_at = remote_executor_module.time.monotonic()
+        assert executor.check_meshing_outputs_exist(2, workstation_id="WS-B") is True
+        elapsed = remote_executor_module.time.monotonic() - started_at
+        assert "WS-B" in entered
+        assert elapsed < 0.5
+    finally:
+        release.set()
+        thread_a.join(timeout=2)
+
+
+def test_check_meshing_done_uses_workstation_specific_paths_and_lock(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\default_flags")
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "flag_dir": rf"D:\{workstation_id}\flags",
+        },
+    )
+
+    requested_workstations: list[str] = []
+    checked: list[str] = []
+    deleted: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            checked.append(remote_path)
+            return True
+
+        def delete_remote_file(self, remote_path: str) -> None:
+            deleted.append(remote_path)
+
+    def _get_ssh(workstation_id: str) -> _SSH:
+        requested_workstations.append(workstation_id)
+        return _SSH()
+
+    executor = RemoteExecutor(_StateRecorder(), _get_ssh, threading.RLock())
+
+    assert executor.check_meshing_done(3, workstation_id="WS-C") is True
+    assert requested_workstations == ["WS-C"]
+    assert checked == ["D:/WS-C/flags/meshing_done_3.txt"]
+    assert deleted == ["D:/WS-C/flags/meshing_done_3.txt"]
+
+
 def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path, monkeypatch):
     scdoc_dir = tmp_path / "scdoc"
     scdoc_dir.mkdir()

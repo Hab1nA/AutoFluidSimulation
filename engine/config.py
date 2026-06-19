@@ -114,6 +114,8 @@ class RemoteConfig(TypedDict):
 
 class WorkstationConfig(RemoteConfig, total=False):
     id: str
+    auth_method: str
+    key_filename: str
     reachable_host: str
     reachable_port: int
     connectivity_mode: str
@@ -705,6 +707,10 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
     merged: dict[str, Any] = dict(REMOTE_CONFIG)
     merged.update(raw)
     merged["id"] = str(merged.get("id") or f"WS-{index + 1}")
+    auth_method = str(merged.get("auth_method") or "password").lower()
+    merged["auth_method"] = auth_method
+    if auth_method in {"key", "none"} and "password" not in raw:
+        merged["password"] = ""
     for port_key in ("port", "reachable_port"):
         if port_key in merged:
             merged[port_key] = int(merged[port_key])

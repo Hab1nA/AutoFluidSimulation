@@ -869,6 +869,9 @@ class PipelineScheduler:
         elif step == "transfer":
             return self.worker_pool.is_transfer_in_flight(cn)
         elif step == "meshing":
+            is_config_in_flight = getattr(self.meshing_monitor, "is_config_in_flight", None)
+            if callable(is_config_in_flight):
+                return bool(is_config_in_flight(cn))
             return (
                 self.meshing_monitor is not None
                 and self.meshing_monitor.get_in_flight_config() == cn
@@ -987,6 +990,7 @@ class PipelineScheduler:
 
             # 等待关键线程退出
             self.worker_pool.join_worker_threads(timeout=3)
+            self.meshing_monitor.join_worker_threads(timeout=3)
             if self._barrier_thread and self._barrier_thread.is_alive():
                 self._barrier_thread.join(timeout=3)
             self.barrier_coordinator.join_solver_threads(timeout=3)

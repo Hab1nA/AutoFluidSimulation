@@ -815,7 +815,15 @@ class TestTaskRunnerSWDelegates:
         created: list[tuple[str, int, str, str]] = []
 
         class _SSH:
-            def __init__(self, host: str, port: int, username: str, password: str):
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ):
                 created.append((host, port, username, password))
                 self.connected = False
 
@@ -2314,6 +2322,52 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_server_mode_start_allows_passwordless_workstation_auth_methods(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [
+                {
+                    "id": "WS-A",
+                    "host": "172.17.135.89",
+                    "port": 22,
+                    "username": "ps",
+                    "password": "",
+                    "auth_method": "none",
+                },
+                {
+                    "id": "WS-B",
+                    "host": "172.17.135.90",
+                    "port": 22,
+                    "username": "ps",
+                    "password": "",
+                    "auth_method": "key",
+                    "key_filename": r"C:\Users\XKZ\.ssh\id_ed25519",
+                },
+            ],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+        daemon._last_worker_ssh_checks = {"WS-A": "ok", "WS-B": "ok"}
+
+        ok, _data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert "AUTOFLUID_SSH_PASSWORD" not in message
+        assert daemon.scheduler.start_calls == 1
+
     def test_server_mode_start_rejects_failed_worker_ssh_snapshot(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
@@ -3743,6 +3797,48 @@ class TestMeshingMonitor:
         assert status == STATUS_COMPLETED, (
             f"队列中的构型应已被处理为 Completed，实际状态: {status}"
         )
+
+    def test_monitor_processes_different_workstations_concurrently(self):
+        """不同工作站各有一个 Meshing 槽位，应能同时处理。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-C")
+
+        entered: list[int] = []
+        entered_lock = threading.Lock()
+        all_entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_process(config_name: int) -> bool:
+            with entered_lock:
+                entered.append(config_name)
+                if len(entered) == 3:
+                    all_entered.set()
+            assert release.wait(timeout=2), "test did not release workers"
+            return False
+
+        self.monitor._process_single_meshing = _blocking_process
+        self.monitor.submit(1)
+        self.monitor.submit(2)
+        self.monitor.submit(3)
+
+        self.monitor.start_if_needed()
+
+        try:
+            assert all_entered.wait(timeout=1), entered
+            assert self.monitor.is_config_in_flight(1) is True
+            assert self.monitor.is_config_in_flight(2) is True
+            assert self.monitor.is_config_in_flight(3) is True
+        finally:
+            release.set()
+            self.stopped.set()
+
+        assert sorted(entered) == [1, 2, 3]
 
     def test_monitor_paused_waits(self):
         """暂停期间监控循环等待。"""

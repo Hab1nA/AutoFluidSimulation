@@ -49,8 +49,9 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
                 Style::default()
             };
 
+            let config_text = state.config_cell_text(&cn_str);
             let cells: Vec<Cell> = std::iter::once(Cell::new(
-                Text::from(cn_str.clone()).alignment(Alignment::Center),
+                Text::from(config_text).alignment(Alignment::Center),
             ))
             .chain(STEP_NAMES.iter().map(|step| {
                 let text = state.step_cell_text(&cn_str, step);
@@ -64,7 +65,7 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
         .collect();
 
     let widths = {
-        let config_width = ratatui::layout::Constraint::Length(8);
+        let config_width = ratatui::layout::Constraint::Length(12);
         let step_widths = STEP_NAMES
             .iter()
             .map(|_| ratatui::layout::Constraint::Length(18));

@@ -172,6 +172,7 @@ pub struct ScrollbarRenderedInfo {
 pub struct AppState {
     pub connected: bool,
     pub status_data: HashMap<String, HashMap<String, String>>,
+    pub config_workstations: HashMap<String, String>,
     pub configs: Vec<u64>,
     pub engine_info: EngineInfo,
     pub health_info: HealthInfo,
@@ -320,6 +321,28 @@ impl AppState {
             self.configs = config_list;
         }
         self.needs_redraw = true;
+    }
+
+    pub fn update_config_workstations(&mut self, data: &serde_json::Value) {
+        self.config_workstations.clear();
+        if let Some(obj) = data.as_object() {
+            for (config_name, workstation) in obj {
+                if let Some(workstation_id) = workstation.as_str() {
+                    self.config_workstations
+                        .insert(config_name.clone(), workstation_id.to_string());
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn config_cell_text(&self, config: &str) -> String {
+        match self.config_workstations.get(config) {
+            Some(workstation_id) if !workstation_id.is_empty() => {
+                format!("{config} {workstation_id}")
+            }
+            _ => config.to_string(),
+        }
     }
 
     pub fn update_engine_info(&mut self, data: &serde_json::Value) {

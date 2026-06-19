@@ -271,6 +271,20 @@ fn build_check_content_lines(
                 exists: Some(ok),
             });
         }
+        if let Some(workstations) = remote.get("workstations").and_then(|v| v.as_object()) {
+            let mut workstation_ids: Vec<&String> = workstations.keys().collect();
+            workstation_ids.sort();
+            for workstation_id in workstation_ids {
+                let workstation = &workstations[workstation_id];
+                if let Some(ssh_status) = workstation.get("ssh").and_then(|v| v.as_str()) {
+                    conn_items.push(CheckItem {
+                        label: format!("{workstation_id} SSH"),
+                        value: ssh_status.to_string(),
+                        exists: Some(ssh_status.contains("成功")),
+                    });
+                }
+            }
+        }
 
         // 远程目录（从 Python 端传入的结构化数据）
         if let Some(dirs) = remote.get("remote_dirs").and_then(|v| v.as_array()) {
@@ -1089,5 +1103,28 @@ mod tests {
         assert!(text.contains("SSH连接"));
         assert!(text.contains("Excel参数表"));
         assert!(text.contains("远程脚本文件"));
+    }
+
+    #[test]
+    fn check_content_lines_lists_each_remote_workstation_ssh_status() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "remote_checks": {
+                "ssh": "部分连接失败",
+                "workstations": {
+                    "WS-A": {"ssh": "连接成功"},
+                    "WS-B": {"ssh": "连接成功"},
+                    "WS-C": {"ssh": "连接失败"}
+                }
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 80, &theme));
+
+        assert!(text.contains("WS-A SSH"));
+        assert!(text.contains("WS-B SSH"));
+        assert!(text.contains("WS-C SSH"));
+        assert!(text.contains("连接失败"));
+        assert!(text.contains("部分连接失败"));
     }
 }

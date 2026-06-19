@@ -60,6 +60,7 @@ class TaskRunner:
         self._ssh_locks: dict[str, threading.RLock] = {
             DEFAULT_WORKSTATION_ID: self._ssh_lock,
         }
+        self._ssh_locks_guard = threading.Lock()
 
         self._sc_pool = SCProcessPool()
 
@@ -76,12 +77,16 @@ class TaskRunner:
             self.state,
             ssh_getter=self.get_ssh,
             ssh_lock=self._ssh_lock,
+            ssh_locks=self._ssh_locks,
+            ssh_locks_guard=self._ssh_locks_guard,
         )
         self._remote_executor.restore_remote_tasks_from_db()
         self._cleaner = FileCleaner(
             self.state,
             ssh_getter=self.get_ssh,
             ssh_lock=self._ssh_lock,
+            ssh_locks=self._ssh_locks,
+            ssh_locks_guard=self._ssh_locks_guard,
         )
 
     def set_control_events(
@@ -119,7 +124,12 @@ class TaskRunner:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> RemoteWorkstation:
         """获取（或创建）SSH 客户端实例。线程安全。"""
-        lock = self._ssh_locks.setdefault(workstation_id, threading.RLock())
+        locks_guard = getattr(self, "_ssh_locks_guard", None)
+        if locks_guard is None:
+            locks_guard = threading.Lock()
+            self._ssh_locks_guard = locks_guard
+        with locks_guard:
+            lock = self._ssh_locks.setdefault(workstation_id, threading.RLock())
         with lock:
             ssh = self._ssh_pool.get(workstation_id)
             if ssh is None:
@@ -129,6 +139,8 @@ class TaskRunner:
                     port=remote_config["port"],
                     username=remote_config["username"],
                     password=remote_config["password"],
+                    key_filename=str(remote_config.get("key_filename") or "") or None,
+                    auth_method=str(remote_config.get("auth_method") or "password"),
                 )
                 self._ssh_pool[workstation_id] = ssh
                 if workstation_id == DEFAULT_WORKSTATION_ID:
@@ -150,7 +162,12 @@ class TaskRunner:
             return
 
         if workstation_id is not None:
-            lock = ssh_locks.setdefault(workstation_id, threading.RLock())
+            locks_guard = getattr(self, "_ssh_locks_guard", None)
+            if locks_guard is None:
+                locks_guard = threading.Lock()
+                self._ssh_locks_guard = locks_guard
+            with locks_guard:
+                lock = ssh_locks.setdefault(workstation_id, threading.RLock())
             with lock:
                 ssh = ssh_pool.pop(workstation_id, None)
                 if ssh:
@@ -169,7 +186,12 @@ class TaskRunner:
                 default_pooled.disconnect()
 
         for current_id in list(ssh_pool):
-            lock = ssh_locks.setdefault(current_id, threading.RLock())
+            locks_guard = getattr(self, "_ssh_locks_guard", None)
+            if locks_guard is None:
+                locks_guard = threading.Lock()
+                self._ssh_locks_guard = locks_guard
+            with locks_guard:
+                lock = ssh_locks.setdefault(current_id, threading.RLock())
             with lock:
                 pooled = ssh_pool.pop(current_id, None)
                 if pooled:

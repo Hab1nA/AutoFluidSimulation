@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::SettingsConfig;
+use super::{SettingsConfig, WorkstationConfig};
 
 #[derive(Debug, Clone)]
 pub struct ValidationError {
@@ -78,6 +78,13 @@ fn validate_local_paths(config: &SettingsConfig, errors: &mut Vec<ValidationErro
 }
 
 fn validate_remote_connection(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if !config.workstations.is_empty() {
+        for (idx, workstation) in config.workstations.iter().enumerate() {
+            validate_workstation_connection(idx, workstation, errors);
+        }
+        return;
+    }
+
     if config.remote_config.host.is_empty() {
         errors.push(ValidationError {
             field_name: "remote_config.host".to_string(),
@@ -104,6 +111,13 @@ fn validate_remote_connection(config: &SettingsConfig, errors: &mut Vec<Validati
 }
 
 fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    if !config.workstations.is_empty() {
+        for (idx, workstation) in config.workstations.iter().enumerate() {
+            validate_workstation_dirs(idx, workstation, errors);
+        }
+        return;
+    }
+
     let remote_dirs = [
         (
             "remote_config.scripts_dir",
@@ -134,6 +148,73 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
     if config.remote_config.conda_env.is_empty() {
         errors.push(ValidationError {
             field_name: "remote_config.conda_env".to_string(),
+            message: "Conda环境名称为空".to_string(),
+            severity: Severity::Warning,
+        });
+    }
+}
+
+fn validate_workstation_connection(
+    idx: usize,
+    workstation: &WorkstationConfig,
+    errors: &mut Vec<ValidationError>,
+) {
+    let prefix = format!("workstations[{idx}]");
+    if workstation.id.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("{prefix}.id"),
+            message: "工作站ID不能为空".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if workstation.host.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("{prefix}.host"),
+            message: "主机地址不能为空".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if workstation.port == 0 {
+        errors.push(ValidationError {
+            field_name: format!("{prefix}.port"),
+            message: "端口号必须在 1-65535 之间".to_string(),
+            severity: Severity::Error,
+        });
+    }
+    if workstation.username.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("{prefix}.username"),
+            message: "用户名不能为空".to_string(),
+            severity: Severity::Error,
+        });
+    }
+}
+
+fn validate_workstation_dirs(
+    idx: usize,
+    workstation: &WorkstationConfig,
+    errors: &mut Vec<ValidationError>,
+) {
+    let remote_dirs = [
+        ("scripts_dir", &workstation.scripts_dir),
+        ("working_dir", &workstation.working_dir),
+        ("scdoc_dir", &workstation.scdoc_dir),
+        ("ref_files_dir", &workstation.ref_files_dir),
+        ("msh_dir", &workstation.msh_dir),
+        ("result_dir", &workstation.result_dir),
+    ];
+    for (name, path) in &remote_dirs {
+        if path.is_empty() {
+            errors.push(ValidationError {
+                field_name: format!("workstations[{idx}].{name}"),
+                message: "远程路径为空".to_string(),
+                severity: Severity::Warning,
+            });
+        }
+    }
+    if workstation.conda_env.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("workstations[{idx}].conda_env"),
             message: "Conda环境名称为空".to_string(),
             severity: Severity::Warning,
         });
@@ -511,6 +592,60 @@ mod tests {
                 .any(|e| e.field_name == "remote_config.host"
                     && matches!(e.severity, Severity::Error))
         );
+    }
+
+    #[test]
+    fn workstation_validation_reports_indexed_remote_errors() {
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                port: 22,
+                username: "ps".to_string(),
+                conda_env: "pyfluent".to_string(),
+                working_dir: r"D:\xkz_1020\workingdir".to_string(),
+                scripts_dir: r"D:\xkz_1020\scripts".to_string(),
+                ref_files_dir: r"D:\xkz_1020\fluent_chemkin_files".to_string(),
+                scdoc_dir: r"D:\xkz_1020\scdoc".to_string(),
+                msh_dir: r"D:\xkz_1020\msh".to_string(),
+                result_dir: r"D:\xkz_1020\case".to_string(),
+                flag_dir: r"D:\xkz_1020\flags".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                port: 22,
+                username: "ps".to_string(),
+                conda_env: "pyfluent".to_string(),
+                working_dir: r"D:\xkz_1020\workingdir".to_string(),
+                scripts_dir: r"D:\xkz_1020\scripts".to_string(),
+                ref_files_dir: r"D:\xkz_1020\fluent_chemkin_files".to_string(),
+                scdoc_dir: r"D:\xkz_1020\scdoc".to_string(),
+                msh_dir: r"D:\xkz_1020\msh".to_string(),
+                result_dir: r"D:\xkz_1020\case".to_string(),
+                flag_dir: r"D:\xkz_1020\flags".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: String::new(),
+                port: 0,
+                username: "ps".to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        let errors = validate_config(&config);
+
+        assert!(errors.iter().any(|e| {
+            e.field_name == "workstations[2].host" && matches!(e.severity, Severity::Error)
+        }));
+        assert!(errors.iter().any(|e| {
+            e.field_name == "workstations[2].port" && matches!(e.severity, Severity::Error)
+        }));
+        assert!(!errors.iter().any(|e| e.field_name == "remote_config.host"));
     }
 
     #[test]

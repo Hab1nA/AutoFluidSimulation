@@ -484,6 +484,9 @@ class SWPhaseHandler:
         if step == "transfer" and self.worker_pool_manager is not None:
             return bool(self.worker_pool_manager.is_transfer_in_flight(cn))
         if step == "meshing" and self.meshing_monitor is not None:
+            is_config_in_flight = getattr(self.meshing_monitor, "is_config_in_flight", None)
+            if callable(is_config_in_flight):
+                return bool(is_config_in_flight(cn))
             get_in_flight_config = getattr(self.meshing_monitor, "get_in_flight_config", None)
             return callable(get_in_flight_config) and get_in_flight_config() == cn
         return False

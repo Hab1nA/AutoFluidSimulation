@@ -15,6 +15,7 @@ import os
 import re
 import time
 import threading
+from contextlib import AbstractContextManager
 from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -79,17 +80,29 @@ class RemoteExecutor:
     共享同一个 SSH 连接。
     """
 
-    def __init__(self, state_manager: StateManager, ssh_getter: Callable[..., "RemoteWorkstation"], ssh_lock: threading.RLock):
+    def __init__(
+        self,
+        state_manager: StateManager,
+        ssh_getter: Callable[..., "RemoteWorkstation"],
+        ssh_lock: threading.RLock,
+        ssh_locks: dict[str, threading.RLock] | None = None,
+        ssh_locks_guard: threading.Lock | None = None,
+    ):
         """初始化远程执行器。
 
         Args:
             state_manager: StateManager 实例
             ssh_getter: 可调用对象，返回 RemoteWorkstation 实例
             ssh_lock: SSH 连接的线程锁
+            ssh_locks: 可选的按工作站锁池，与 TaskRunner/Cleaner 共享
+            ssh_locks_guard: 保护共享锁池的锁
         """
         self.state = state_manager
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
+        self._ssh_locks = ssh_locks if ssh_locks is not None else {}
+        self._ssh_locks.setdefault(DEFAULT_WORKSTATION_ID, ssh_lock)
+        self._ssh_locks_guard = ssh_locks_guard or threading.Lock()
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
         # 跟踪远程后台任务名称（用于超时后终止）
@@ -158,6 +171,18 @@ class RemoteExecutor:
             if workstation_id != DEFAULT_WORKSTATION_ID:
                 raise
             return self._get_ssh()
+
+    def _ssh_guard(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> AbstractContextManager[object]:
+        """Return the SSH lock that serializes operations for one workstation."""
+        with self._ssh_locks_guard:
+            lock = self._ssh_locks.get(workstation_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._ssh_locks[workstation_id] = lock
+            return lock
 
     @staticmethod
     def _remote_config_for_workstation(
@@ -336,7 +361,7 @@ class RemoteExecutor:
         error_flag_file = str(task["error_flag_file"])
         task_name = str(task["task_name"])
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 if ssh.check_remote_file(flag_file):
@@ -513,7 +538,7 @@ class RemoteExecutor:
             label: 日志标签（如 "脚本"、"引用文件"）
         """
         logger.info(f"[Sync] 检测到{label}远程目录变更，清理旧路径: {remote_dir}")
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 for filename in filenames:
@@ -583,7 +608,7 @@ class RemoteExecutor:
             self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "文件传输超时")
             return False
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
 
@@ -844,7 +869,7 @@ class RemoteExecutor:
         logger.info(f"{log_prefix} 启动远程网格划分: 构型{config_name}")
         logger.debug(f"{log_prefix} 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -909,23 +934,33 @@ class RemoteExecutor:
             workstation_id=workstation_id,
         )
 
-    def check_meshing_done(self, config_name: int) -> bool:
+    def check_meshing_done(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """检查网格划分是否已完成（标志文件是否存在）。
 
         若标志文件存在则清理并返回 True。使用短暂 SSH 锁。
         """
+        remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._meshing_flag_file(config_name)
+            flag_file = self._meshing_flag_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         try:
-            with self._ssh_lock:
-                ssh = self._get_ssh()
+            with self._ssh_guard(workstation_id):
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 if ssh.check_remote_file(flag_file):
                     logger.info(f"[Meshing] 构型{config_name} 网格划分完成（检测到标志文件）")
                     ssh.delete_remote_file(flag_file)
-                    self._cleanup_completed_remote_task(config_name, "meshing", ssh)
+                    self._cleanup_completed_remote_task(
+                        config_name,
+                        "meshing",
+                        ssh,
+                        workstation_id,
+                    )
                     return True
             return False
         except (OSError, ConnectionError) as e:
@@ -956,7 +991,7 @@ class RemoteExecutor:
                 return bool(ssh.check_remote_file(remote_path))
 
         try:
-            with self._ssh_lock:
+            with self._ssh_guard(workstation_id):
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 return mesh_file is not None and _check_remote_file(ssh, mesh_file)
         except (OSError, ConnectionError) as e:
@@ -1009,7 +1044,7 @@ class RemoteExecutor:
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
                         logger.error(
@@ -1299,7 +1334,7 @@ class RemoteExecutor:
         deleted = 0
         failed = 0
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 list_remote_directory = getattr(ssh, "list_remote_directory", None)
@@ -1364,7 +1399,7 @@ class RemoteExecutor:
         logger.info(f"[Solver] 启动远程仿真求解: 构型{config_name}")
         logger.debug(f"[Solver] 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -1442,7 +1477,7 @@ class RemoteExecutor:
         logger.info(f"[PostProcess] 启动独立远程后处理: 构型{config_name}")
         logger.debug(f"[PostProcess] 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -1640,7 +1675,7 @@ class RemoteExecutor:
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
                         logger.error(
@@ -1715,7 +1750,7 @@ class RemoteExecutor:
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
         # 超时后终止远程进程，防止资源泄漏和重试冲突
         self._kill_remote_task_for_config(config_name, "solver", workstation_id)
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 self._clear_solver_progress(progress_file, ssh)
@@ -1765,7 +1800,7 @@ class RemoteExecutor:
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
                         logger.error(f"[PostProcess] 构型{config_name} 后处理远程任务执行失败")
@@ -1802,7 +1837,7 @@ class RemoteExecutor:
             logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
             return
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 ssh.delete_remote_file(flag_file)
@@ -1841,7 +1876,7 @@ class RemoteExecutor:
             logger.debug(f"{self._log_prefix(step_name)} 构型{config_name} 无远程任务记录，跳过终止")
             return
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 ssh.kill_remote_task(task_name)
@@ -2076,7 +2111,7 @@ class RemoteExecutor:
 
         # ---- 阶段 1: 第一级校验 —— 组合哈希快速比对（1 次 SSH 调用） ----
         local_combined = self._compute_combined_hash(local_hashes)
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_combined = ssh.get_remote_combined_file_hash(
@@ -2097,7 +2132,7 @@ class RemoteExecutor:
         )
 
         # ---- 阶段 2: 第二级校验 —— 逐文件比对（N 次 SSH 调用） ----
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_hashes = ssh.get_remote_file_hashes(remote_dir, filenames)
@@ -2139,7 +2174,7 @@ class RemoteExecutor:
 
             # ★ 逐文件获取 SSH 锁，上传完成后立即释放，
             #   允许 Transfer 等操作在文件间插入执行
-            with self._ssh_lock:
+            with self._ssh_guard(workstation_id):
                 try:
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if os.path.splitext(filename)[1] in path_aware_exts:

@@ -26,6 +26,22 @@ class _State:
         return self.solver_progress
 
 
+class _AssignedState(_State):
+    def get_all_statuses(self):
+        return {
+            "1": {"sw": "Completed", "meshing": "Running"},
+            "2": {"sw": "Completed", "meshing": "Running"},
+            "3": {"sw": "Completed", "meshing": "Waiting"},
+        }
+
+    def get_config_workstation(self, config_name):
+        return {
+            1: "WS-A",
+            2: "WS-B",
+            3: "WS-C",
+        }.get(int(config_name))
+
+
 class _LogHandler:
     def __init__(self):
         self.calls = []
@@ -198,6 +214,34 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "include_lifecycle": False,
         "include_config_scoped": False,
     }]
+
+
+def test_handle_get_dashboard_includes_config_workstations(monkeypatch):
+    handler = _LogHandler()
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _AssignedState()
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = None
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({})
+
+    ok, data, _message = daemon.handle_get_dashboard({})
+
+    assert ok is True
+    assert data["statuses"]["1"]["meshing"] == "Running"
+    assert data["statuses"]["2"]["meshing"] == "Running"
+    assert data["config_workstations"] == {
+        "1": "WS-A",
+        "2": "WS-B",
+        "3": "WS-C",
+    }
 
 
 def test_handle_get_dashboard_includes_solver_progress(monkeypatch):

@@ -1245,6 +1245,50 @@ class TestWorkstationLookup:
         with pytest.raises(KeyError):
             cfg.get_workstation_config("missing")
 
+    def test_workstation_key_auth_does_not_inherit_default_password(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "172.17.135.240",
+                        "username": "ps",
+                        "auth_method": "password",
+                    },
+                    {
+                        "id": "WS-B",
+                        "host": "172.17.135.89",
+                        "username": "ps",
+                        "auth_method": "none",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+            ws_b = cfg.get_workstation_config("WS-B")
+
+            assert ws_a["password"] == "default-secret"
+            assert ws_b["password"] == ""
+            assert ws_b["auth_method"] == "none"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
 
 class TestServerModeLocalPaths:
     """验证 server 模式下 daemon 本地产物路径不会落到 Windows 默认路径。"""

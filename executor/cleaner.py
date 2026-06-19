@@ -15,6 +15,7 @@ from collections.abc import Callable as CallableABC, Mapping
 from contextlib import AbstractContextManager, nullcontext
 import ipaddress
 import os
+import threading
 from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -153,6 +154,8 @@ class FileCleaner:
         state_manager: StateManager,
         ssh_getter: Callable[..., "RemoteWorkstation"],
         ssh_lock: AbstractContextManager[object] | None = None,
+        ssh_locks: dict[str, threading.RLock] | None = None,
+        ssh_locks_guard: threading.Lock | None = None,
     ):
         """初始化清理器。
 
@@ -160,14 +163,28 @@ class FileCleaner:
             state_manager: StateManager 实例
             ssh_getter: 可调用对象，返回 RemoteWorkstation 实例
             ssh_lock: 保护共享 SSH/SFTP 客户端的上下文锁
+            ssh_locks: 可选的按工作站锁池，与 TaskRunner/RemoteExecutor 共享
+            ssh_locks_guard: 保护共享锁池的锁
         """
         self.state = state_manager
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
+        self._ssh_locks = ssh_locks
+        self._ssh_locks_guard = ssh_locks_guard or threading.Lock()
 
-    def _ssh_guard(self) -> AbstractContextManager[object]:
+    def _ssh_guard(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> AbstractContextManager[object]:
         """返回远端 SSH/SFTP 操作使用的锁上下文。"""
-        return self._ssh_lock if self._ssh_lock is not None else nullcontext()
+        if self._ssh_locks is None:
+            return self._ssh_lock if self._ssh_lock is not None else nullcontext()
+        with self._ssh_locks_guard:
+            lock = self._ssh_locks.get(workstation_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._ssh_locks[workstation_id] = lock
+            return lock
 
     def _get_ssh_for_workstation(
         self,
@@ -222,52 +239,80 @@ class FileCleaner:
         if not is_server_mode():
             results["local_checks"] = self.run_local_system_check()
 
+        remote_by_workstation: dict[str, dict[str, object]] = {}
+        successful = 0
+        failed = 0
+
         # ---- 远程检查 ----
-        try:
-            with self._ssh_guard():
-                workstation_id = self._configured_workstation_ids()[0]
-                remote_config = self._remote_config_for_workstation(workstation_id)
-                ssh = self._get_ssh_for_workstation(workstation_id)
-                if ssh.is_connected():
-                    remote_checks["ssh"] = "连接成功"
-                    remote_info = ssh.check_system(
-                        conda_exe=str(remote_config["conda_exe"]),
-                        conda_env=str(remote_config["conda_env"]),
-                        remote_dirs={
-                            "仿真工作目录": str(remote_config["working_dir"]),
-                            "脚本部署目录": str(remote_config["scripts_dir"]),
-                            "引用文件目录": str(remote_config["ref_files_dir"]),
-                            "SCDOC接收目录": str(remote_config["scdoc_dir"]),
-                            "网格输出目录": str(remote_config["msh_dir"]),
-                            "仿真输出目录": str(remote_config["result_dir"]),
-                            "仿真标志目录": str(remote_config["flag_dir"]),
-                        },
-                        mpi_bin_dir=str(remote_config["mpi_bin_dir"]),
-                        scripts_dir=str(remote_config["scripts_dir"]),
-                        script_files=REMOTE_SCRIPT_FILES,
-                        ref_files_dir=str(remote_config["ref_files_dir"]),
-                        ref_files=REMOTE_REF_FILES,
-                    )
-                    remote_checks.update(remote_info)
-                else:
-                    remote_checks["ssh"] = "连接失败"
-        except (OSError, ConnectionError) as e:
-            logger.error(f"[SSH] 远程自检异常: {e}")
-            remote_checks["ssh"] = f"错误: {e}"
-            # 保持结构一致性：填充默认值，避免 TUI 缺失字段
-            remote_checks.update({
-                "ssh_connected": False,
-                "conda_available": False,
-                "python_version": "",
-                "disk_space": "",
-                "background_processes": [],
-                "remote_dirs": [],
-                "remote_programs": [],
-                "scripts_status": {"total": 0, "deployed": 0, "missing": []},
-                "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
-            })
+        for workstation_id in self._configured_workstation_ids():
+            workstation_checks: dict[str, object] = {}
+            try:
+                with self._ssh_guard(workstation_id):
+                    remote_config = self._remote_config_for_workstation(workstation_id)
+                    ssh = self._get_ssh_for_workstation(workstation_id)
+                    if ssh.is_connected():
+                        workstation_checks["ssh"] = "连接成功"
+                        remote_info = ssh.check_system(
+                            conda_exe=str(remote_config["conda_exe"]),
+                            conda_env=str(remote_config["conda_env"]),
+                            remote_dirs={
+                                "仿真工作目录": str(remote_config["working_dir"]),
+                                "脚本部署目录": str(remote_config["scripts_dir"]),
+                                "引用文件目录": str(remote_config["ref_files_dir"]),
+                                "SCDOC接收目录": str(remote_config["scdoc_dir"]),
+                                "网格输出目录": str(remote_config["msh_dir"]),
+                                "仿真输出目录": str(remote_config["result_dir"]),
+                                "仿真标志目录": str(remote_config["flag_dir"]),
+                            },
+                            mpi_bin_dir=str(remote_config["mpi_bin_dir"]),
+                            scripts_dir=str(remote_config["scripts_dir"]),
+                            script_files=REMOTE_SCRIPT_FILES,
+                            ref_files_dir=str(remote_config["ref_files_dir"]),
+                            ref_files=REMOTE_REF_FILES,
+                        )
+                        workstation_checks.update(remote_info)
+                        successful += 1
+                    else:
+                        workstation_checks.update(self._default_remote_check_values())
+                        workstation_checks["ssh"] = "连接失败"
+                        failed += 1
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[SSH] 远程自检异常 ({workstation_id}): {e}")
+                workstation_checks.update(self._default_remote_check_values())
+                workstation_checks["ssh"] = f"错误: {e}"
+                failed += 1
+            remote_by_workstation[workstation_id] = workstation_checks
+
+        remote_checks["workstations"] = remote_by_workstation
+        if successful and failed:
+            remote_checks["ssh"] = "部分连接失败"
+        elif successful:
+            remote_checks["ssh"] = "连接成功"
+        else:
+            remote_checks["ssh"] = "连接失败"
+
+        default_id = self._configured_workstation_ids()[0]
+        if default_id in remote_by_workstation:
+            for key, value in remote_by_workstation[default_id].items():
+                if key != "ssh":
+                    remote_checks.setdefault(key, value)
 
         return results
+
+    @staticmethod
+    def _default_remote_check_values() -> dict[str, object]:
+        """Return empty remote-check fields for disconnected workstations."""
+        return {
+            "ssh_connected": False,
+            "conda_available": False,
+            "python_version": "",
+            "disk_space": "",
+            "background_processes": [],
+            "remote_dirs": [],
+            "remote_programs": [],
+            "scripts_status": {"total": 0, "deployed": 0, "missing": []},
+            "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
+        }
 
     def _build_daemon_checks(self) -> dict[str, object]:
         """Build checks for the daemon host itself."""
@@ -381,10 +426,10 @@ class FileCleaner:
     def clean_all_cache(self) -> None:
         """清空远程工作站上运行产生的临时缓存目录内容。"""
         try:
-            with self._ssh_guard():
-                total_deleted = 0
-                total_failed = 0
-                for workstation_id in self._configured_workstation_ids():
+            total_deleted = 0
+            total_failed = 0
+            for workstation_id in self._configured_workstation_ids():
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if not ssh.is_connected():
                         logger.warning(
@@ -411,14 +456,14 @@ class FileCleaner:
                             f"已删除 {deleted_count} 项，失败 {failed_count} 项 ({remote_dir})"
                         )
 
-                logger.info(
-                    "[Cleaner] 远程缓存清理完成："
-                    f"已删除 {total_deleted} 项，失败 {total_failed} 项"
+            logger.info(
+                "[Cleaner] 远程缓存清理完成："
+                f"已删除 {total_deleted} 项，失败 {total_failed} 项"
+            )
+            if total_failed:
+                raise RuntimeError(
+                    f"远程缓存清理未完成：已删除 {total_deleted} 项，失败 {total_failed} 项"
                 )
-                if total_failed:
-                    raise RuntimeError(
-                        f"远程缓存清理未完成：已删除 {total_deleted} 项，失败 {total_failed} 项"
-                    )
         except (OSError, ConnectionError) as e:
             logger.error(f"[Cleaner] 远程缓存清理异常: {e}")
             raise RuntimeError(f"远程缓存清理未完成: {e}") from e
@@ -501,11 +546,11 @@ class FileCleaner:
             file_templates = remote_info[1]
             extra_paths_factory = remote_info[2] if len(remote_info) > 2 else None
             try:
-                with self._ssh_guard():
-                    processed_count = 0
-                    failed_count = 0
-                    for cn in configs:
-                        workstation_id = self._workstation_for_config(int(cn))
+                processed_count = 0
+                failed_count = 0
+                for cn in configs:
+                    workstation_id = self._workstation_for_config(int(cn))
+                    with self._ssh_guard(workstation_id):
                         ssh = self._get_ssh_for_workstation(workstation_id)
                         if not ssh.is_connected():
                             logger.warning(
@@ -550,15 +595,15 @@ class FileCleaner:
                                     _, clear_failed_count = clear_remote_directory(config_dir)
                                     if clear_failed_count:
                                         failed_count += clear_failed_count
-                    logger.info(
-                        f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                logger.info(
+                    f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                    f"已处理 {processed_count} 个，失败 {failed_count} 个"
+                )
+                if failed_count:
+                    raise RuntimeError(
+                        f"远程文件清理未完成: step={step_name}, "
                         f"已处理 {processed_count} 个，失败 {failed_count} 个"
                     )
-                    if failed_count:
-                        raise RuntimeError(
-                            f"远程文件清理未完成: step={step_name}, "
-                            f"已处理 {processed_count} 个，失败 {failed_count} 个"
-                        )
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
                 raise RuntimeError(f"远程文件清理未完成: step={step_name}: {e}") from e

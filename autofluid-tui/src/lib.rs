@@ -252,6 +252,9 @@ pub(crate) fn apply_dashboard_response(
         state.update_status_data(statuses);
         announce_completed_status_transitions(statuses, &previous_statuses, log_buffer);
     }
+    if let Some(config_workstations) = data_obj.get("config_workstations") {
+        state.update_config_workstations(config_workstations);
+    }
     if let Some(engine) = data_obj.get("engine") {
         state.update_engine_info(engine);
     }
@@ -1608,6 +1611,9 @@ mod tests {
             "statuses": {
                 "2": {"sw": "Running"}
             },
+            "config_workstations": {
+                "2": "WS-B"
+            },
             "engine": {
                 "engine_status": "running",
                 "sw_macro_started": true,
@@ -1654,6 +1660,7 @@ mod tests {
         apply_dashboard_response(obj, &mut state, &mut log_buffer);
 
         assert_eq!(state.get_step_status("2", "sw"), "Running");
+        assert_eq!(state.config_cell_text("2"), "2 WS-B");
         assert_eq!(state.engine_info.engine_status, "running");
         assert!(state.engine_info.sw_macro_started);
         assert_eq!(state.engine_info.daemon_started_at, Some(1718000000.0));
