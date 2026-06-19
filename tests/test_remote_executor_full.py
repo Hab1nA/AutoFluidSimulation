@@ -756,7 +756,42 @@ class TestExecutePostprocess:
             "D:/flags/postprocess_done_3.txt"
         )
 
-    def test_wait_postprocess_completion_cleans_remote_task(self, monkeypatch):
+    def test_execute_postprocess_starts_standalone_task_when_solver_task_missing(self, monkeypatch):
+        """Solver task 已清理时，PostProcess 应能独立启动恢复。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+
+        captured: dict[str, object] = {}
+
+        class _SSH:
+            def exec_background(
+                self,
+                command: str,
+                flag_file: str,
+                *,
+                working_dir: str | None = None,
+                interactive: bool = False,
+            ) -> tuple[bool, str]:
+                captured["command"] = command
+                captured["flag_file"] = flag_file
+                captured["working_dir"] = working_dir
+                captured["interactive"] = interactive
+                return True, "AutoFluid_postprocess_standalone"
+
+        state = _StateRecorder()
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+        monkeypatch.setattr(executor, "sync_scripts", lambda workstation_id="default": True)
+
+        assert executor.execute_postprocess(5) is True
+        assert "batch_postprocess_gen4.py" in str(captured["command"])
+        assert captured["flag_file"] == "D:/flags/postprocess_done_5.txt"
+        assert captured["working_dir"] == r"D:\working"
+        assert captured["interactive"] is True
+        assert state.remote_tasks[(5, "postprocess")]["task_name"] == (
+            "AutoFluid_postprocess_standalone"
+        )
+
+    def test_wait_postprocess_completion_keeps_evidence_for_caller_cleanup(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
         monkeypatch.setitem(ENGINE_CONFIG, "postprocess_timeout", 30)
 
@@ -793,10 +828,11 @@ class TestExecutePostprocess:
         executor._remember_remote_task(6, "postprocess", "AutoFluid_postprocess_done_task")
 
         assert executor.wait_postprocess_completion(6) is True
-        assert deleted == ["D:/flags/postprocess_done_6.txt"]
-        assert cleaned == [
-            ("AutoFluid_postprocess_done_task", "D:/flags/autofluid_bg_postprocess_done.pid")
-        ]
+        assert deleted == []
+        assert cleaned == []
+        assert state.remote_tasks[(6, "postprocess")]["task_name"] == (
+            "AutoFluid_postprocess_done_task"
+        )
 
     def test_wait_postprocess_completion_returns_false_on_error_flag(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")

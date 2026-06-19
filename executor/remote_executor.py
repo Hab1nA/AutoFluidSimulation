@@ -1158,6 +1158,10 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
             "--compute-metrics-script",
             _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
+            "--metrics-exit-to-throat-area-ratio",
+            "7.427276607",
+            "--metrics-cstar-reference",
+            "1830.4",
             "--postprocess-flag-file",
             _cmd_arg(postprocess_flag_file),
         ])
@@ -1201,6 +1205,10 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
             "--compute-metrics-script",
             _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
+            "--metrics-exit-to-throat-area-ratio",
+            "7.427276607",
+            "--metrics-cstar-reference",
+            "1830.4",
             "--flag-file",
             _cmd_arg(flag_file),
             "--anim-dir",
@@ -1328,11 +1336,75 @@ class RemoteExecutor:
         """接管同一 Fluent 会话中的后处理阶段。
 
         Solver 远程脚本在同一个 Fluent session 内继续执行 PostProcess。
-        本方法只把正在运行的 solver 后台任务登记为 postprocess 任务，
+        优先把正在运行的 solver 后台任务登记为 postprocess 任务，
         让后续 wait_postprocess_completion() 轮询 postprocess_done flag；
-        不再启动独立 Fluent/PostProcess 脚本。
+        若 solver 任务记录已清理，则启动独立 PostProcess 任务用于恢复。
         """
-        return self._register_postprocess_from_solver(config_name, workstation_id)
+        try:
+            self._validate_config_name(config_name)
+        except ValueError:
+            logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
+        if self._register_postprocess_from_solver(config_name, workstation_id):
+            return True
+        return self._start_standalone_postprocess(config_name, workstation_id)
+
+    def _start_standalone_postprocess(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        """启动独立 PostProcess 后台任务，用于 solver task 已清理后的恢复。"""
+        try:
+            self._validate_config_name(config_name)
+        except ValueError:
+            logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
+            return False
+
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        if not self.sync_scripts(workstation_id=workstation_id):
+            logger.error("[PostProcess] 远程脚本同步失败，无法启动独立后处理")
+            return False
+
+        try:
+            command, flag_file = self._build_postprocess_command(config_name, remote_config)
+        except ValueError as e:
+            logger.error(f"[PostProcess] 远程后处理命令构建失败: {e}")
+            return False
+
+        logger.info(f"[PostProcess] 启动独立远程后处理: 构型{config_name}")
+        logger.debug(f"[PostProcess] 远程命令: {command}")
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh_for_workstation(workstation_id)
+                success, task_name = ssh.exec_background(
+                    command,
+                    flag_file,
+                    working_dir=str(remote_config["working_dir"]),
+                    interactive=True,
+                )
+                if success:
+                    self._remember_remote_task(
+                        config_name,
+                        "postprocess",
+                        task_name,
+                        workstation_id,
+                    )
+                    self._persist_remote_task(
+                        workstation_id=workstation_id,
+                        config_name=config_name,
+                        step_name="postprocess",
+                        task_name=task_name,
+                        flag_file=flag_file,
+                    )
+                    logger.info(f"[PostProcess] 独立后处理后台任务已启动: 构型{config_name}")
+                    return True
+                logger.error(f"[PostProcess] 独立后处理远程任务启动失败: 构型{config_name}")
+                return False
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[PostProcess] 独立后处理启动异常: {e}")
+                return False
 
     def _register_postprocess_from_solver(
         self,
@@ -1364,9 +1436,9 @@ class RemoteExecutor:
             if solver_task is not None:
                 solver_task_name = str(solver_task["task_name"])
         if not solver_task_name:
-            logger.error(
+            logger.warning(
                 f"[PostProcess] 构型{config_name} 无可接管的 Solver 远程任务，"
-                "无法在同一 Fluent 会话内后处理"
+                "将尝试启动独立后处理"
             )
             return False
 
@@ -1639,13 +1711,6 @@ class RemoteExecutor:
                         )
                         return False
                     if ssh.check_remote_file(flag_file):
-                        ssh.delete_remote_file(flag_file)
-                        self._cleanup_completed_remote_task(
-                            config_name,
-                            "postprocess",
-                            ssh,
-                            workstation_id,
-                        )
                         logger.info(f"[PostProcess] 构型{config_name} 后处理完成")
                         return True
             except (OSError, ConnectionError) as e:
@@ -1656,6 +1721,33 @@ class RemoteExecutor:
         logger.error(f"[PostProcess] 构型{config_name} 后处理超时 ({timeout}s)")
         self._kill_remote_task_for_config(config_name, "postprocess", workstation_id)
         return False
+
+    def cleanup_completed_postprocess_task(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> None:
+        """状态已持久化后清理 PostProcess 完成 flag 和远程任务记录。"""
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        try:
+            flag_file = self._postprocess_flag_file(config_name, remote_config)
+        except ValueError:
+            logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
+            return
+
+        with self._ssh_lock:
+            try:
+                ssh = self._get_ssh_for_workstation(workstation_id)
+                ssh.delete_remote_file(flag_file)
+                ssh.delete_remote_file(f"{flag_file}.error")
+                self._cleanup_completed_remote_task(
+                    config_name,
+                    "postprocess",
+                    ssh,
+                    workstation_id,
+                )
+            except (OSError, ConnectionError) as e:
+                logger.warning(f"[PostProcess] 构型{config_name} 完成清理异常: {e}")
 
     # ------------------------------------------------------------------
     # 远程进程生命周期管理

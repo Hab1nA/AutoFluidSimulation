@@ -95,6 +95,10 @@ def parse_args() -> argparse.Namespace:
                         help='混合比统计温度阈值 K')
     parser.add_argument('--metrics-thrust-axis', choices=('x', 'y', 'z'), default='x',
                         help='推力轴向')
+    parser.add_argument('--metrics-exit-to-throat-area-ratio', type=float, default=7.427276607,
+                        help='出口面积与喉部面积比 Ae/At')
+    parser.add_argument('--metrics-cstar-reference', type=float, default=1830.4,
+                        help='CEA 或试验基准特征速度 m/s')
 
     return parser.parse_args()
 
@@ -210,12 +214,13 @@ def _remove_file_if_exists(path: str | None) -> None:
 
 
 def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id: int) -> None:
-    if not args.metrics_script:
+    metrics_script = getattr(args, "metrics_script", None)
+    if not metrics_script:
         print(f"[{config_id}] 未配置五项指标后处理脚本，跳过指标计算")
         return
-    _require_file(args.metrics_script, "五项指标后处理脚本")
-    compute_script = args.compute_metrics_script or os.path.join(
-        os.path.dirname(args.metrics_script),
+    _require_file(metrics_script, "五项指标后处理脚本")
+    compute_script = getattr(args, "compute_metrics_script", None) or os.path.join(
+        os.path.dirname(metrics_script),
         "compute_metrics_gen4.py",
     )
     _require_file(compute_script, "指标计算脚本")
@@ -228,7 +233,7 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
     command = [
         sys.executable,
         "-u",
-        args.metrics_script,
+        metrics_script,
         "--case-data",
         case_path,
         "--output-dir",
@@ -245,6 +250,10 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         str(args.metrics_tcomb),
         "--thrust-axis",
         args.metrics_thrust_axis,
+        "--exit-to-throat-area-ratio",
+        str(args.metrics_exit_to_throat_area_ratio),
+        "--cstar-reference",
+        str(args.metrics_cstar_reference),
     ]
     print(f"[{config_id}] 正在计算五项指标: {metrics_output_dir}")
     subprocess.run(command, check=True)

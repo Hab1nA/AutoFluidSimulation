@@ -653,6 +653,9 @@ class BarrierCoordinator:
             stopped_event=self._stopped,
         ):
             self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+            cleanup = getattr(self.runner, "cleanup_completed_postprocess_task", None)
+            if callable(cleanup):
+                cleanup(config_name)
             logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
         else:
             if self._paused.is_set():

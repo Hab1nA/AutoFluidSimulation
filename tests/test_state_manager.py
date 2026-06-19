@@ -411,6 +411,36 @@ class TestGetAllStatuses:
             assert statuses[1]["sw"] == STATUS_COMPLETED
             assert statuses[1]["sc"] == STATUS_RUNNING
 
+    def test_load_configs_backfills_missing_step_rows_for_existing_config(self):
+        """旧状态库缺少新增步骤行时，重新加载构型应补齐。"""
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            with sm._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM steps WHERE config_name = ? AND step_name = ?",
+                    (1, "postprocess"),
+                )
+
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+
+            statuses = sm.get_all_statuses()
+            assert set(statuses[1].keys()) == set(STEP_NAMES)
+            assert statuses[1]["postprocess"] == STATUS_WAITING
+
+    def test_set_step_status_inserts_missing_step_row_for_existing_config(self):
+        """缺失步骤行不应导致状态更新静默丢失。"""
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            with sm._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM steps WHERE config_name = ? AND step_name = ?",
+                    (1, "postprocess"),
+                )
+
+            sm.set_step_status(1, "postprocess", STATUS_COMPLETED)
+
+            assert sm.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
 
 # ====================================================================
 # increment_retry / get_step_retry_count 测试

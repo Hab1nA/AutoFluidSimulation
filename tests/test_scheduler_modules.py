@@ -925,6 +925,7 @@ class _MockTaskRunner:
         self._postprocess_dispatched = []
         self._postprocess_wait_result = True
         self._postprocess_wait_count = 0
+        self._postprocess_cleanup_calls: list[tuple[int, str]] = []
         self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_in_flight = False
         self._ssh = _MockSSH()
@@ -993,6 +994,21 @@ class _MockTaskRunner:
         self._postprocess_wait_count += 1
         return self._postprocess_wait_result
 
+    def cleanup_completed_postprocess_task(
+        self,
+        config_name: int,
+    ) -> None:
+        workstation_id = "default"
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = str(get_config_workstation(config_name) or "default")
+        self._postprocess_cleanup_calls.append((config_name, workstation_id))
+        self._remote_executor.forget_remote_task(
+            config_name,
+            "postprocess",
+            workstation_id=workstation_id,
+        )
+
     def cleanup_solver_runtime_flag_artifacts(self) -> dict[str, int]:
         self._solver_flag_cleanup_count += 1
         return {"deleted": 2, "failed": 0}
@@ -1032,6 +1048,7 @@ class _MockRemoteExecutor:
         self._remote_task_status_checks: list[tuple[int, str, str]] = []
         self._forgotten_remote_tasks: list[tuple[int, str, str]] = []
         self._postprocess_handoffs: list[tuple[int, str]] = []
+        self._postprocess_handoff_result = True
         self._remote_task_events: list[tuple[str, int, str, str]] = []
         self._meshing_waits: list[tuple[int, str]] = []
 
@@ -1096,6 +1113,8 @@ class _MockRemoteExecutor:
             ("handoff", config_name, "postprocess", workstation_id)
         )
         self._postprocess_handoffs.append((config_name, workstation_id))
+        if not self._postprocess_handoff_result:
+            return False
         self.state.save_remote_task(
             workstation_id=workstation_id,
             config_name=config_name,
@@ -3313,6 +3332,45 @@ class TestBarrierCoordinator:
         self.coordinator.join_solver_threads(timeout=5)
 
         assert self.runner._solver_dispatched == []
+        assert self.runner._postprocess_dispatched == [1]
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_postprocess_cleanup_runs_after_completed_status_is_persisted(self):
+        """后处理完成应先写 Completed，再清理远程任务证据。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_WAITING)
+
+        observed_status_during_cleanup: list[str] = []
+
+        def cleanup_after_status(config_name: int) -> None:
+            observed_status_during_cleanup.append(
+                self.state.get_step_status(config_name, "postprocess")
+            )
+            workstation_id = str(self.state.get_config_workstation(config_name) or "default")
+            self.runner._postprocess_cleanup_calls.append((config_name, workstation_id))
+
+        self.runner.cleanup_completed_postprocess_task = cleanup_after_status
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert observed_status_during_cleanup == [STATUS_COMPLETED]
+        assert self.runner._postprocess_cleanup_calls == [(1, "WS-A")]
+
+    def test_solver_completed_postprocess_waiting_falls_back_when_solver_task_missing(self):
+        """Solver 任务已清理时，PostProcess Waiting 应能独立后处理而非卡住。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_WAITING)
+        self.runner._remote_executor._postprocess_handoff_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
         assert self.runner._postprocess_dispatched == [1]
         assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
 

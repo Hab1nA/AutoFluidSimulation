@@ -303,16 +303,16 @@ class StateManager:
                 for config_name, params in configs.items():
                     is_new = config_name not in existing_configs
                     config_rows.append((config_name, *params))
-                    if is_new:
-                        for step_name in STEP_NAMES:
-                            new_step_rows.append(
-                                (
-                                    config_name,
-                                    step_name,
-                                    STATUS_WAITING,
-                                    DEFAULT_WORKSTATION_ID,
-                                )
+                    for step_name in STEP_NAMES:
+                        new_step_rows.append(
+                            (
+                                config_name,
+                                step_name,
+                                STATUS_WAITING,
+                                DEFAULT_WORKSTATION_ID,
                             )
+                        )
+                    if is_new:
                         added_count += 1
                         logger.debug(f"[State] 新增构型{config_name}: 参数 = {params}")
                     else:
@@ -389,11 +389,49 @@ class StateManager:
 
         with self._lock:
             with self._get_connection() as conn:
-                conn.execute("""
+                cursor = conn.execute("""
                     UPDATE steps
                     SET status = ?, error_message = ?, updated_at = strftime('%s','now')
                     WHERE config_name = ? AND step_name = ?
                 """, (status, error_message, config_name, step_name))
+                if cursor.rowcount == 0:
+                    config_exists = conn.execute(
+                        "SELECT 1 FROM configs WHERE config_name = ?",
+                        (config_name,),
+                    ).fetchone()
+                    if config_exists is None:
+                        logger.warning(
+                            "[State] 状态更新目标构型不存在: 构型%s [%s] -> %s",
+                            config_name,
+                            step_name,
+                            status,
+                        )
+                    elif step_name in STEP_NAMES:
+                        logger.warning(
+                            "[State] 步骤记录缺失，已补齐后更新: 构型%s [%s] -> %s",
+                            config_name,
+                            step_name,
+                            status,
+                        )
+                        conn.execute("""
+                            INSERT INTO steps (
+                                config_name, step_name, status, error_message, workstation_id
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (
+                            config_name,
+                            step_name,
+                            status,
+                            error_message,
+                            DEFAULT_WORKSTATION_ID,
+                        ))
+                    else:
+                        logger.warning(
+                            "[State] 状态更新目标步骤不存在: 构型%s [%s] -> %s",
+                            config_name,
+                            step_name,
+                            status,
+                        )
                 logger.info(f"状态更新: 构型{config_name} [{step_name}] -> {status}")
 
     def get_all_steps_for_config(self, config_name: int) -> dict[str, dict]:

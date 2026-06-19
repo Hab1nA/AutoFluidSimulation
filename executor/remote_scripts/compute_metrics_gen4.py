@@ -16,6 +16,7 @@ from typing import Iterable
 G0 = 9.80665
 LHV_CH4 = 50_000_000.0
 DEFAULT_TCOMB = 1000.0
+DEFAULT_CSTAR_REFERENCE = 1830.4
 EPS = 1.0e-12
 
 SIDEWALL_ZONES = frozenset({"wall_chamber", "wall_nozzle", "wall_throat"})
@@ -125,7 +126,6 @@ def _compute_wall_metrics(rows: list[dict[str, str]]) -> dict[str, float]:
     weighted_terms: list[float] = []
     area_terms: list[float] = []
     all_temperatures: list[float] = []
-    throat_temperatures: list[float] = []
 
     for row in rows:
         zone = row.get("zone", "")
@@ -136,15 +136,12 @@ def _compute_wall_metrics(rows: list[dict[str, str]]) -> dict[str, float]:
         weighted_terms.append(temperature * area)
         area_terms.append(area)
         all_temperatures.append(temperature)
-        if zone == "wall_throat":
-            throat_temperatures.append(temperature)
 
     total_area = _sum(area_terms)
     all_temperatures.sort()
     return {
         "wall_area": total_area,
         "Twall_total": _sum(weighted_terms) / total_area if total_area > 0 else math.nan,
-        "Tmax_throat": max(throat_temperatures) if throat_temperatures else math.nan,
         "Tmax_sidewall": max(all_temperatures) if all_temperatures else math.nan,
         "T_p995_wall": _percentile(all_temperatures, 0.995),
     }
@@ -180,11 +177,10 @@ def compute_metrics(
     else:
         chamber_rows = _read_rows(chamber_cells_path)
         phi_mean, phi_std, hot_volume = _compute_phi(chamber_rows, tcomb, chamber_x_max)
-    if {"wall_area", "Twall_total", "Tmax_throat", "Tmax_sidewall"} <= reports.keys():
+    if {"wall_area", "Twall_total", "Tmax_sidewall"} <= reports.keys():
         wall_metrics = {
             "wall_area": reports["wall_area"],
             "Twall_total": reports["Twall_total"],
-            "Tmax_throat": reports["Tmax_throat"],
             "Tmax_sidewall": reports["Tmax_sidewall"],
             "T_p995_wall": reports.get("T_p995_wall", math.nan),
         }
@@ -195,6 +191,14 @@ def compute_metrics(
         wall_metrics = _compute_wall_metrics(wall_rows)
     qdot_actual = reports["qdot_actual"]
     qdot_theoretical = mdot_fuel * LHV_CH4
+    chamber_pressure_abs = reports.get("chamber_pressure_abs", math.nan)
+    throat_area = reports.get("throat_area", math.nan)
+    cstar_reference = reports.get("cstar_reference", DEFAULT_CSTAR_REFERENCE)
+    cstar_actual = (
+        chamber_pressure_abs * throat_area / mdot_total
+        if mdot_total > 0 and chamber_pressure_abs > 0 and throat_area > 0
+        else math.nan
+    )
 
     metrics = {
         "mdot_oxidizer": mdot_oxidizer,
@@ -209,6 +213,11 @@ def compute_metrics(
         "Qdot_actual": qdot_actual,
         "Qdot_theoretical": qdot_theoretical,
         "eta_c": qdot_actual / qdot_theoretical if qdot_theoretical > 0 else math.nan,
+        "chamber_pressure_abs": chamber_pressure_abs,
+        "throat_area": throat_area,
+        "cstar_actual": cstar_actual,
+        "cstar_reference": cstar_reference,
+        "cstar_efficiency": cstar_actual / cstar_reference if cstar_reference > 0 else math.nan,
         "phi_mean": phi_mean,
         "phi_std": phi_std,
         "hot_volume": hot_volume,

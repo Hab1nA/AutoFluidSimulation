@@ -22,6 +22,8 @@ FLUID_ZONE = "s------6.5076"
 OUTLET_ZONE = "outlet"
 INLET_OXIDIZER = "inlet_oxidizer"
 INLET_FUEL = "inlet_fuel"
+DEFAULT_EXIT_TO_THROAT_AREA_RATIO = 7.427276607
+DEFAULT_CSTAR_REFERENCE = 1830.4
 REPORT_VALUE_RE = re.compile(r"^\s*(?:Net|\S+)\s+([-+0-9.Ee]+)\s*$")
 EXPRESSION_ROW_RE = re.compile(r"^\s*(\S+)\s+([-+0-9.Ee]+)\s+(?:\[.*\])?\s*$")
 REPORT_UNIT_RE = re.compile(r"\[([^\]]+)\]")
@@ -47,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tcomb", type=float, default=1000.0)
     parser.add_argument("--chamber-x-max", type=float, default=None)
     parser.add_argument("--thrust-axis", choices=("x", "y", "z"), default="x")
+    parser.add_argument("--exit-to-throat-area-ratio", type=float, default=DEFAULT_EXIT_TO_THROAT_AREA_RATIO)
+    parser.add_argument("--cstar-reference", type=float, default=DEFAULT_CSTAR_REFERENCE)
     return parser.parse_args()
 
 
@@ -154,6 +158,8 @@ def _collect_reports(
     ambient_pressure: float,
     pressure_reference: float,
     thrust_axis: str,
+    exit_to_throat_area_ratio: float,
+    cstar_reference: float,
 ) -> dict[str, float]:
     report_path = output_dir / "metrics_reports.csv"
     reports_dir = output_dir / "fluent_reports"
@@ -181,6 +187,11 @@ def _collect_reports(
         report_of=f"{thrust_axis}-velocity",
     )
     f_momentum = abs(mdot_outlet_report) * abs(outlet_axis_velocity_mass_avg)
+    outlet_area = _run_report(
+        si.area,
+        reports_dir / "outlet_area.txt",
+        surface_names=[OUTLET_ZONE],
+    )
 
     report_values = {
         "mdot_oxidizer": _run_report(
@@ -201,12 +212,22 @@ def _collect_reports(
             cell_function="heat-release-rate",
         ),
         "outlet_axis_velocity_mass_avg": outlet_axis_velocity_mass_avg,
+        "outlet_area": outlet_area,
+        "throat_area": outlet_area / exit_to_throat_area_ratio,
+        "exit_to_throat_area_ratio": exit_to_throat_area_ratio,
+        "cstar_reference": cstar_reference,
         "F_momentum": f_momentum,
         "F_pressure": _run_report(
             si.integral,
             reports_dir / "F_pressure.txt",
             surface_names=[OUTLET_ZONE],
             report_of=f"cff_thrust_pressure_{thrust_axis}",
+        ),
+        "chamber_pressure_gauge": _run_report(
+            si.area_weighted_avg,
+            reports_dir / "chamber_wall_avg_pressure.txt",
+            surface_names=["wall_chamber"],
+            report_of="pressure",
         ),
         "wall_area": _run_report(
             si.area,
@@ -225,15 +246,10 @@ def _collect_reports(
             surface_names=list(SIDEWALL_ZONES),
             report_of="temperature",
         ),
-        "Tmax_throat": _run_report(
-            si.facet_max,
-            reports_dir / "wall_throat_max_temp.txt",
-            surface_names=["wall_throat"],
-            report_of="temperature",
-        ),
         "chamber_x_max": chamber_x_max,
         "pressure_reference": pressure_reference,
     }
+    report_values["chamber_pressure_abs"] = report_values["chamber_pressure_gauge"] + pressure_reference
 
     zone = FLUID_ZONE
     hot_condition = f"StaticTemperature > {tcomb:g} [K]"
@@ -245,6 +261,7 @@ def _collect_reports(
         "phi_hot_volume": f"Sum(IF({hot_condition}, IF({chamber_condition}, 1, 0), 0), ['{zone}'], Weight=\"Volume\")",
         "phi_sum": f"Sum(IF({hot_condition}, IF({chamber_condition}, {phi}, 0), 0), ['{zone}'], Weight=\"Volume\")",
         "phi2_sum": f"Sum(IF({hot_condition}, IF({chamber_condition}, {phi2}, 0), 0), ['{zone}'], Weight=\"Volume\")",
+        "chamber_volume": f"Sum(IF({chamber_condition}, 1, 0), ['{zone}'], Weight=\"Volume\")",
     }
     for name, definition in expressions.items():
         for old_name in list(named_expressions.get_object_names()):
@@ -294,6 +311,8 @@ def main() -> None:
             args.ambient_pressure,
             args.pressure_reference,
             args.thrust_axis,
+            args.exit_to_throat_area_ratio,
+            args.cstar_reference,
         )
     finally:
         solver.exit()

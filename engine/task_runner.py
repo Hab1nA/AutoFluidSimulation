@@ -431,6 +431,13 @@ class TaskRunner:
             workstation_id=self._workstation_for_config(config_name),
         )
 
+    def cleanup_completed_postprocess_task(self, config_name: int) -> None:
+        """PostProcess 状态已持久化后清理远程完成证据。"""
+        self._remote_executor.cleanup_completed_postprocess_task(
+            config_name,
+            workstation_id=self._workstation_for_config(config_name),
+        )
+
     def cleanup_solver_runtime_flag_artifacts(self) -> dict[str, int]:
         """全部 Solver 成功完成后清理工作站 flags 中的后台 wrapper 产物。"""
         totals = {"deleted": 0, "failed": 0}
