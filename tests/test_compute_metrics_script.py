@@ -76,7 +76,8 @@ def test_compute_metrics_from_export_tables(tmp_path: Path) -> None:
             {"name": "mdot_fuel", "value": 1.0},
             {"name": "mdot_outlet", "value": -3.0},
             {"name": "qdot_actual", "value": 25_000_000.0},
-            {"name": "chamber_pressure_abs", "value": 1_800_000.0},
+            {"name": "chamber_abs_pressure_sum", "value": 7_200_000.0},
+            {"name": "chamber_volume", "value": 4.0},
             {"name": "throat_area", "value": 0.003},
             {"name": "cstar_reference", "value": 1800.0},
         ],
@@ -125,7 +126,8 @@ def test_compute_metrics_from_export_tables(tmp_path: Path) -> None:
     assert metrics["F_pressure"] == 900.0
     assert metrics["F_total"] == 1900.0
     assert metrics["Isp"] == 1900.0 / (3.0 * 9.80665)
-    assert metrics["eta_c"] == 0.5
+    assert "eta_c" not in metrics
+    assert metrics["chamber_pressure_abs"] == 1_800_000.0
     assert metrics["cstar_actual"] == 1800.0
     assert metrics["cstar_efficiency"] == 1.0
     assert metrics["phi_mean"] == 1.0
@@ -188,7 +190,7 @@ def test_cli_writes_metrics_summary(tmp_path: Path, monkeypatch) -> None:
 
     rows = _read_rows(output)
     assert len(rows) == 1
-    assert float(rows[0]["eta_c"]) == 0.5
+    assert "eta_c" not in rows[0]
     assert float(rows[0]["cstar_efficiency"]) == 1.0
 
 
@@ -270,7 +272,7 @@ def test_compute_metrics_from_fluent_integral_reports_only(tmp_path: Path) -> No
 
     assert metrics["F_total"] == 1900.0
     assert metrics["Isp"] == 1900.0 / (3.0 * 9.80665)
-    assert metrics["eta_c"] == 0.5
+    assert "eta_c" not in metrics
     assert metrics["cstar_efficiency"] == 1.0
     assert metrics["phi_mean"] == 1.5
     assert metrics["phi_std"] == 0.5

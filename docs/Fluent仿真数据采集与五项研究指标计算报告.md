@@ -9,7 +9,7 @@
 | 已验证数据 | `D:\xkz_1020\case\model_gen4_1.cas.h5` 与 `model_gen4_1.dat.h5`，1000 代接近稳定结果 |
 | 自动化文件 | `executor/remote_scripts/postprocess_metrics_gen4.py`、`compute_metrics_gen4.py` |
 | 程序接入口 | `batch_solver_gen4.py` 求解后自动调用；`batch_postprocess_gen4.py` 独立后处理路径也可调用 |
-| 输出目标 | `Isp`、`eta_c`、`cstar_efficiency`、`phi_mean/phi_std`、`Twall_total`、`Tmax_sidewall`，并保留质量守恒等 QC 字段 |
+| 输出目标 | `Isp`、`cstar_efficiency`、`phi_mean/phi_std`、`Twall_total`、`Tmax_sidewall`，并保留质量守恒、热释放等 QC 字段 |
 
 ## 1. 方案结论
 
@@ -23,7 +23,7 @@
 
 关键边界约定：
 
-- 当前院所实测数据与仿真设置均为半流量工况；后处理结果中的质量流量、推力、热释放功率对应该半流量工况。`Isp`、`eta_c`、`cstar_efficiency`、`phi` 等比值类指标不需要因半流量额外缩放。
+- 当前院所实测数据与仿真设置均为半流量工况；后处理结果中的质量流量、推力、热释放功率对应该半流量工况。`Isp`、`cstar_efficiency`、`phi` 等比值类指标不需要因半流量额外缩放。
 - 壁面平均温度和最大温度只统计侧壁面：`wall_chamber`、`wall_nozzle`、`wall_throat`。`wall_top`、`wall_gap`、`s------6` 不进入壁温研究指标。
 - 等效混合比只统计燃烧室，即喉部以前的流体域。脚本默认用 `wall_throat` 上 `x-coordinate` 的最小值作为 `chamber_x_max`，并在 Fluent Expression 中筛选 `Position.x <= chamber_x_max`。
 - `Q_actual`、等效混合比和壁面温度均采用 Fluent 体积/面积积分或等价加权求和。
@@ -104,7 +104,7 @@ F_total             = F_momentum + F_pressure
 Isp = F_total / (mdot_total * 9.80665)
 ```
 
-### 4.2 原热释放效率 `eta_c`
+### 4.2 热释放诊断量
 
 实际热释放功率由 Fluent 对反应流体域做体积分：
 
@@ -117,12 +117,12 @@ Qdot_actual = VolumeIntegral(s------6.5076, heat-release-rate)
 ```text
 Qdot_theoretical = abs(mdot_fuel) * LHV_CH4
 LHV_CH4          = 50,000,000 J/kg
-eta_c            = Qdot_actual / Qdot_theoretical
+heat_release_ratio = Qdot_actual / Qdot_theoretical
 ```
 
-这里的 `Qdot_actual` 是 Fluent 体积分结果，不是先导出体平均热释放率再乘总体积。
+这里的 `Qdot_actual` 是 Fluent 体积分结果，不是先导出体平均热释放率再乘总体积。`heat_release_ratio` 可作为诊断量在分析中临时计算，但不再作为最终燃烧效率指标输出。
 
-该字段继续保留，用于沿用原方案中的热释放诊断口径。但在当前 PDF/flamelet 反应模型和富燃工况下，`heat-release-rate` 体积分不一定能直接代表甲烷低热值完全释放比例，因此它不再作为唯一的燃烧效率判断。
+在当前 PDF/flamelet 反应模型和富燃工况下，`heat-release-rate` 体积分不一定能直接代表甲烷低热值完全释放比例，因此旧的热释放效率字段已从最终指标中删除，燃烧效率统一使用 `cstar_efficiency`。
 
 ### 4.3 特征速度燃烧效率 `cstar_efficiency`
 
@@ -139,13 +139,13 @@ cstar_efficiency = cstar_actual / cstar_reference
 outlet_area                  = Area(outlet)
 exit_to_throat_area_ratio    = Ae / At = 7.427276607
 throat_area                  = outlet_area / exit_to_throat_area_ratio
-chamber_pressure_gauge       = AreaWeightedAverage(wall_chamber, pressure)
-chamber_pressure_abs         = chamber_pressure_gauge + pressure_reference
-pressure_reference           = 101325 Pa
+chamber_volume               = Sum(IF(Position.x <= chamber_x_max, 1, 0), fluid_zone, Weight="Volume")
+chamber_abs_pressure_sum     = Sum(IF(Position.x <= chamber_x_max, AbsolutePressure, 0 [Pa]), fluid_zone, Weight="Volume")
+chamber_pressure_abs         = chamber_abs_pressure_sum / chamber_volume
 cstar_reference              = 1830.4 m/s
 ```
 
-`cstar_reference = 1830.4 m/s` 来自当前任务书/CEA 参考工况。当前实现中的燃烧室压力采用 `wall_chamber` 面积加权平均表压加 `101325 Pa` 作为可复现代理值；前期探索中 Fluent Named Expression 对燃烧室体域内 `pressure`、`StaticPressure`、`AbsolutePressure` 的体积表达式均无法稳定求值。后续若几何/网格阶段提供明确的燃烧室体区域或 cell register，可替换为燃烧室体积平均绝压。
+`cstar_reference = 1830.4 m/s` 来自当前任务书/CEA 参考工况。当前实现中的燃烧室压力已改为 Fluent Named Expression 体积积分口径；关键是使用 Fluent Expression 变量名 `AbsolutePressure`，并在 `IF` 的非燃烧室分支写成 `0 [Pa]`，否则 Fluent 会因单位不一致而无法求值。`wall_chamber` 面积加权绝压仍可作为 QC 对照字段保留，但不再作为 `cstar_efficiency` 的压力源。
 
 ### 4.4 等效混合比 `phi_mean` 与 `phi_std`
 
@@ -282,22 +282,25 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
 | `Isp` | `291.8449 s` |
 | `Qdot_actual` | `22342328 W` |
 | `Qdot_theoretical` | `61412320 W` |
-| 原热释放效率 `eta_c` | `0.3638086` |
-| 燃烧室绝压代理 `chamber_pressure_abs` | `1940986.3 Pa` |
-| 实际特征速度 `cstar_actual` | `1732.2283 m/s` |
+| 热释放诊断比 `Qdot_actual / Qdot_theoretical` | `0.3638086` |
+| 燃烧室体积 `chamber_volume` | `0.0028444491 m^3` |
+| 燃烧室绝压体积分 `chamber_abs_pressure_sum` | `5516.9164 Pa·m^3` |
+| 燃烧室体域平均绝压 `chamber_pressure_abs` | `1939537.7 Pa` |
+| 壁面压力对照 `chamber_wall_pressure_abs` | `1940986.3 Pa` |
+| 实际特征速度 `cstar_actual` | `1730.9356 m/s` |
 | 参考特征速度 `cstar_reference` | `1830.4 m/s` |
-| 特征速度燃烧效率 `cstar_efficiency` | `0.9463660` |
+| 特征速度燃烧效率 `cstar_efficiency` | `0.9456597` |
 | `phi_mean` | `0.7094508` |
 | `phi_std` | `0.8556295` |
 | `Twall_total` | `2871.2415 K` |
 | `Tmax_sidewall` | `4368.9741 K` |
 
-该结果与院所半流量设定一致。若以后需要换算到全发动机总推力，在几何/边界确认为严格半模型后，可对总推力和质量流量做 2 倍工程换算；`Isp`、`eta_c`、`cstar_efficiency` 等比值指标不随该换算改变。
+该结果与院所半流量设定一致。若以后需要换算到全发动机总推力，在几何/边界确认为严格半模型后，可对总推力和质量流量做 2 倍工程换算；`Isp`、`cstar_efficiency` 等比值指标不随该换算改变。
 
-两种燃烧效率口径的解释：
+热释放诊断与燃烧效率的解释：
 
-- `eta_c = 0.3638` 是原热释放体积分诊断值，说明当前 Fluent `heat-release-rate` 对低热值理论热输入的积分比例偏低。
-- `cstar_efficiency = 0.9464` 是新增特征速度效率。结合当前 `Isp = 291.8449 s` 与 CEA 参考比冲约 `290.95 s`，该指标更符合发动机性能层面的燃烧效率判断。
+- `Qdot_actual / Qdot_theoretical = 0.3638` 只作为热释放体积分诊断值，说明当前 Fluent `heat-release-rate` 对低热值理论热输入的积分比例偏低。
+- `cstar_efficiency = 0.9457` 是当前保留的燃烧效率指标。结合当前 `Isp = 291.8449 s` 与 CEA 参考比冲约 `290.95 s`，该指标更符合发动机性能层面的燃烧效率判断。
 
 ## 7. 质量控制与风险
 
@@ -309,7 +312,7 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
 | 出口压力 | Fluent `pressure` 为表压，若出口读数为负，应先加 `101325 Pa` 得到绝压后再计算压力推力 |
 | 推力轴向 | 当前按 `x` 轴；若几何轴向变化，通过 `--thrust-axis` 切换并复核出口轴向速度 |
 | 燃烧室截断 | 当前用 `wall_throat` 最小 x 坐标推断喉部以前区域；长期建议在几何/网格阶段显式命名燃烧室体积或稳定截断面 |
-| 特征速度效率 | 当前 `chamber_pressure_abs` 使用 `wall_chamber` 面平均压力代理；如后续得到稳定燃烧室体域压力积分，应替换该压力源并重算 `cstar_efficiency` |
+| 特征速度效率 | 当前 `chamber_pressure_abs` 使用燃烧室体域平均绝压；`chamber_wall_pressure_abs` 只作为壁面压力对照，不参与 `cstar_efficiency` |
 | 壁温边界 | 当前壁温数值偏高，若壁面边界本身不代表真实热结构温度，应考虑热流或 CHT 温度作为后续标签 |
 
 ## 8. 后续建议

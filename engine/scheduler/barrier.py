@@ -366,6 +366,15 @@ class BarrierCoordinator:
         allowed_workstations: set[str] | None = None,
     ) -> int | None:
         """返回下一个可执行 Solver 的构型；没有则返回 None。"""
+        schedulable_statuses = (
+            STATUS_WAITING,
+            STATUS_RUNNING,
+            STATUS_PAUSED,
+            STATUS_RETRYING,
+        )
+
+        # PostProcess 是 Solver 的尾部阶段。若某些构型已经完成 Solver，
+        # 优先补齐这些后处理 backlog，再启动新的 Solver 任务。
         for cn in self.state.get_all_configs():
             if self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
                 continue
@@ -375,20 +384,23 @@ class BarrierCoordinator:
             ):
                 continue
             solver_status = self.state.get_step_status(cn, "solver")
-            if solver_status in (
-                STATUS_WAITING,
-                STATUS_RUNNING,
-                STATUS_PAUSED,
-                STATUS_RETRYING,
+            postprocess_status = self.state.get_step_status(cn, "postprocess")
+            if (
+                solver_status == STATUS_COMPLETED
+                and postprocess_status in schedulable_statuses
             ):
                 return cn
-            postprocess_status = self.state.get_step_status(cn, "postprocess")
-            if solver_status == STATUS_COMPLETED and postprocess_status in (
-                STATUS_WAITING,
-                STATUS_RUNNING,
-                STATUS_PAUSED,
-                STATUS_RETRYING,
+
+        for cn in self.state.get_all_configs():
+            if self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
+                continue
+            if (
+                allowed_workstations is not None
+                and self._workstation_for_config(cn) not in allowed_workstations
             ):
+                continue
+            solver_status = self.state.get_step_status(cn, "solver")
+            if solver_status in schedulable_statuses:
                 return cn
         return None
 

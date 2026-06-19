@@ -1296,6 +1296,15 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.scheduler.barrier_coordinator._solver_terminal_reported is False
 
+    def test_reset_postprocess_clears_terminal_report_gate(self):
+        """reset 仅触及 PostProcess 后也应允许下一轮自然终态再次上报。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.scheduler.barrier_coordinator._solver_terminal_reported = True
+
+        self.scheduler.reset_config(1, "postprocess")
+
+        assert self.scheduler.barrier_coordinator._solver_terminal_reported is False
+
     def test_reset_all_clears_all_workstation_barriers(self):
         """全量 reset 应清理所有工作站屏障缓存。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -3373,6 +3382,63 @@ class TestBarrierCoordinator:
 
         assert self.runner._postprocess_dispatched == [1]
         assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_postprocess_backlog_is_prioritized_before_new_solver(self):
+        """已完成 Solver 的 PostProcess backlog 应先于新的 Solver 执行。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        for cn in (1, 2):
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.state.set_step_status(2, "solver", STATUS_COMPLETED)
+        self.state.set_step_status(2, "postprocess", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._postprocess_dispatched == [2]
+        assert self.runner._solver_dispatched == [1]
+        assert self.state.get_step_status(2, "postprocess") == STATUS_COMPLETED
+
+    def test_all_postprocess_backlog_runs_before_new_solver(self):
+        """多个 PostProcess backlog 应全部完成后才启动后续 Solver。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        for cn in (2, 3):
+            self.state.set_step_status(cn, "solver", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "postprocess", STATUS_WAITING)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+
+        execution_order: list[tuple[str, int]] = []
+
+        def execute_solver(config_name: int) -> bool:
+            execution_order.append(("solver", config_name))
+            return _MockTaskRunner.execute_solver(self.runner, config_name)
+
+        def execute_postprocess(config_name: int) -> bool:
+            execution_order.append(("postprocess", config_name))
+            return _MockTaskRunner.execute_postprocess(self.runner, config_name)
+
+        self.runner.execute_solver = execute_solver
+        self.runner.execute_postprocess = execute_postprocess
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert execution_order == [
+            ("postprocess", 2),
+            ("postprocess", 3),
+            ("solver", 1),
+        ]
 
     def test_postprocess_error_reports_failed_terminal(self):
         """Solver 完成后 PostProcess 失败时应报告失败终态。"""

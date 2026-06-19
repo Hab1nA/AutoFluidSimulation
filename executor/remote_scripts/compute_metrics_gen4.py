@@ -192,6 +192,8 @@ def compute_metrics(
     qdot_actual = reports["qdot_actual"]
     qdot_theoretical = mdot_fuel * LHV_CH4
     chamber_pressure_abs = reports.get("chamber_pressure_abs", math.nan)
+    if math.isnan(chamber_pressure_abs) and reports.get("chamber_volume", 0.0) > 0:
+        chamber_pressure_abs = reports.get("chamber_abs_pressure_sum", math.nan) / reports["chamber_volume"]
     throat_area = reports.get("throat_area", math.nan)
     cstar_reference = reports.get("cstar_reference", DEFAULT_CSTAR_REFERENCE)
     cstar_actual = (
@@ -212,7 +214,6 @@ def compute_metrics(
         "Isp": f_total / (mdot_total * G0) if mdot_total > 0 else math.nan,
         "Qdot_actual": qdot_actual,
         "Qdot_theoretical": qdot_theoretical,
-        "eta_c": qdot_actual / qdot_theoretical if qdot_theoretical > 0 else math.nan,
         "chamber_pressure_abs": chamber_pressure_abs,
         "throat_area": throat_area,
         "cstar_actual": cstar_actual,

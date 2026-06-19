@@ -1047,9 +1047,9 @@ class PipelineScheduler:
             or step_name == "sw"
             or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("sw", 99)
         )
-        need_solver_terminal_reset = (
+        need_pipeline_terminal_reset = (
             step_name is None
-            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("solver", 99)
+            or STEP_INDEX.get(step_name, 99) <= STEP_INDEX.get("postprocess", 99)
         )
         self._mark_reset_generation(config_name, step_name)
 
@@ -1066,7 +1066,7 @@ class PipelineScheduler:
             self.state.reset_all()
             self._barrier_passed.clear()
             self.barrier_coordinator.clear_all_workstation_barriers()
-            if need_solver_terminal_reset:
+            if need_pipeline_terminal_reset:
                 self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             self.runner.reset_sc_pool()
@@ -1081,7 +1081,7 @@ class PipelineScheduler:
                 self.barrier_coordinator.clear_all_workstation_barriers()
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
-            if need_solver_terminal_reset:
+            if need_pipeline_terminal_reset:
                 self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:
@@ -1095,7 +1095,7 @@ class PipelineScheduler:
                 self.barrier_coordinator.clear_workstation_barrier(reset_workstation_id)
                 self.state.set_global_barrier_met(False)
                 self.runner.reset_sc_pool()
-            if need_solver_terminal_reset:
+            if need_pipeline_terminal_reset:
                 self.barrier_coordinator.reset_solver_terminal_reported()
             self._reset_sw_cleanup_if_needed(need_sw_cleanup_reset)
             if need_monitor_reset and _monitor_reset_method:

@@ -249,7 +249,7 @@ def _collect_reports(
         "chamber_x_max": chamber_x_max,
         "pressure_reference": pressure_reference,
     }
-    report_values["chamber_pressure_abs"] = report_values["chamber_pressure_gauge"] + pressure_reference
+    report_values["chamber_wall_pressure_abs"] = report_values["chamber_pressure_gauge"] + pressure_reference
 
     zone = FLUID_ZONE
     hot_condition = f"StaticTemperature > {tcomb:g} [K]"
@@ -262,6 +262,7 @@ def _collect_reports(
         "phi_sum": f"Sum(IF({hot_condition}, IF({chamber_condition}, {phi}, 0), 0), ['{zone}'], Weight=\"Volume\")",
         "phi2_sum": f"Sum(IF({hot_condition}, IF({chamber_condition}, {phi2}, 0), 0), ['{zone}'], Weight=\"Volume\")",
         "chamber_volume": f"Sum(IF({chamber_condition}, 1, 0), ['{zone}'], Weight=\"Volume\")",
+        "chamber_abs_pressure_sum": f"Sum(IF({chamber_condition}, AbsolutePressure, 0 [Pa]), ['{zone}'], Weight=\"Volume\")",
     }
     for name, definition in expressions.items():
         for old_name in list(named_expressions.get_object_names()):
@@ -270,6 +271,12 @@ def _collect_reports(
         named_expressions.compute()
     expression_values = _parse_expression_values(_find_latest_transcript(output_dir / "run"), set(expressions))
     report_values.update(expression_values)
+    chamber_volume = report_values["chamber_volume"]
+    report_values["chamber_pressure_abs"] = (
+        report_values["chamber_abs_pressure_sum"] / chamber_volume
+        if chamber_volume > 0
+        else float("nan")
+    )
 
     for index, (name, value) in enumerate(report_values.items()):
         _write_report_value(report_path, name, value, append=index > 0)
