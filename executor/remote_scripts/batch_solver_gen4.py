@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -80,6 +81,20 @@ def parse_args() -> argparse.Namespace:
                         help='可选额外后处理 Journal 文件路径 (.jou)')
     parser.add_argument('--postprocess-flag-file', type=str, required=True,
                         help='PostProcess 完成标志文件路径')
+    parser.add_argument('--metrics-script', type=str, default=None,
+                        help='可选：五项指标 PyFluent 后处理脚本')
+    parser.add_argument('--compute-metrics-script', type=str, default=None,
+                        help='可选：指标标量组合脚本')
+    parser.add_argument('--metrics-processor-count', type=int, default=1,
+                        help='指标后处理 Fluent 核数')
+    parser.add_argument('--metrics-ambient-pressure', type=float, default=0.0,
+                        help='推力压力项环境压力 Pa')
+    parser.add_argument('--metrics-pressure-reference', type=float, default=101325.0,
+                        help='Fluent 表压转绝压参考 Pa')
+    parser.add_argument('--metrics-tcomb', type=float, default=1000.0,
+                        help='混合比统计温度阈值 K')
+    parser.add_argument('--metrics-thrust-axis', choices=('x', 'y', 'z'), default='x',
+                        help='推力轴向')
 
     return parser.parse_args()
 
@@ -192,6 +207,48 @@ def _remove_file_if_exists(path: str | None) -> None:
             os.remove(path)
     except OSError as e:
         print(f"[SolverProgress] 删除文件失败: {path}, error: {e}")
+
+
+def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id: int) -> None:
+    if not args.metrics_script:
+        print(f"[{config_id}] 未配置五项指标后处理脚本，跳过指标计算")
+        return
+    _require_file(args.metrics_script, "五项指标后处理脚本")
+    compute_script = args.compute_metrics_script or os.path.join(
+        os.path.dirname(args.metrics_script),
+        "compute_metrics_gen4.py",
+    )
+    _require_file(compute_script, "指标计算脚本")
+    metrics_output_dir = os.path.join(
+        args.output_dir,
+        "metrics",
+        f"model_gen4_{config_id}",
+    )
+    os.makedirs(metrics_output_dir, exist_ok=True)
+    command = [
+        sys.executable,
+        "-u",
+        args.metrics_script,
+        "--case-data",
+        case_path,
+        "--output-dir",
+        metrics_output_dir,
+        "--compute-script",
+        compute_script,
+        "--processor-count",
+        str(args.metrics_processor_count),
+        "--ambient-pressure",
+        str(args.metrics_ambient_pressure),
+        "--pressure-reference",
+        str(args.metrics_pressure_reference),
+        "--tcomb",
+        str(args.metrics_tcomb),
+        "--thrust-axis",
+        args.metrics_thrust_axis,
+    ]
+    print(f"[{config_id}] 正在计算五项指标: {metrics_output_dir}")
+    subprocess.run(command, check=True)
+    print(f"[{config_id}] 五项指标后处理完成: {metrics_output_dir}")
 
 
 def _write_flag(flag_file: str) -> None:
@@ -564,8 +621,6 @@ def main() -> None:
 
         time.sleep(2)
         move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
-        _write_flag(args.postprocess_flag_file)
-        print(f"[{config_id}] PostProcess 完成标志已写入: {args.postprocess_flag_file}")
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
@@ -590,6 +645,10 @@ def main() -> None:
 
         # --- 8. 退出 Fluent ---
         close_solver_session(config_id, solver_session)
+
+    _run_metrics_postprocess(args, case_full_path, config_id)
+    _write_flag(args.postprocess_flag_file)
+    print(f"[{config_id}] PostProcess 完成标志已写入: {args.postprocess_flag_file}")
 
     print(f"模型 {config_id} 的仿真计算完成！")
 

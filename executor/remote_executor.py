@@ -56,6 +56,9 @@ REMOTE_SCRIPT_FILES = [
     "solver_gen4.set",
     "solver_post_gen4.jou",
     "postprocess_extra_gen4.jou",
+    "postprocess_metrics_gen4.py",
+    "compute_metrics_gen4.py",
+    "metrics_export_gen4.jou",
 ]
 
 # 远程仿真引用文件列表（部署到 ref_files_dir）
@@ -1151,6 +1154,10 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/solver_post_gen4.jou", force_quote=True),
             "--extra-post-journal-path",
             _cmd_arg(f"{scripts_dir}/postprocess_extra_gen4.jou", force_quote=True),
+            "--metrics-script",
+            _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
+            "--compute-metrics-script",
+            _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
             "--postprocess-flag-file",
             _cmd_arg(postprocess_flag_file),
         ])
@@ -1190,6 +1197,10 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/postprocess_extra_gen4.jou", force_quote=True),
             "--postprocess-output-dir",
             _cmd_arg(postprocess_output_dir, force_quote=True),
+            "--metrics-script",
+            _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
+            "--compute-metrics-script",
+            _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
             "--flag-file",
             _cmd_arg(flag_file),
             "--anim-dir",

@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fluent-path", type=Path, default=Path(r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"))
     parser.add_argument("--processor-count", type=int, default=2)
     parser.add_argument("--ambient-pressure", type=float, default=0.0)
+    parser.add_argument("--pressure-reference", type=float, default=101325.0)
     parser.add_argument("--tcomb", type=float, default=1000.0)
     parser.add_argument("--chamber-x-max", type=float, default=None)
     parser.add_argument("--thrust-axis", choices=("x", "y", "z"), default="x")
@@ -151,6 +152,7 @@ def _collect_reports(
     chamber_x_max: float,
     tcomb: float,
     ambient_pressure: float,
+    pressure_reference: float,
     thrust_axis: str,
 ) -> dict[str, float]:
     report_path = output_dir / "metrics_reports.csv"
@@ -162,23 +164,23 @@ def _collect_reports(
     si = solver.settings.results.report.surface_integrals
     vi = solver.settings.results.report.volume_integrals
 
-    velocity_flux = (
-        "x_velocity*x_face_area + "
-        "y_velocity*y_face_area + "
-        "z_velocity*z_face_area"
-    )
-    axis_velocity = f"{thrust_axis}_velocity"
-    axis_face_area = f"{thrust_axis}_face_area"
-    _define_custom_field_function(
-        solver,
-        f"cff_thrust_momentum_{thrust_axis}",
-        f"density*{axis_velocity}*({velocity_flux})/(face_area_magnitude+1e-30)",
-    )
     _define_custom_field_function(
         solver,
         f"cff_thrust_pressure_{thrust_axis}",
-        f"(pressure - {ambient_pressure:.17g})*{axis_face_area}/(face_area_magnitude+1e-30)",
+        f"pressure + {pressure_reference:.17g} - {ambient_pressure:.17g}",
     )
+    mdot_outlet_report = _run_report(
+        si.mass_flow_rate,
+        reports_dir / "mdot_outlet.txt",
+        surface_names=[OUTLET_ZONE],
+    )
+    outlet_axis_velocity_mass_avg = _run_report(
+        si.mass_weighted_avg,
+        reports_dir / f"outlet_{thrust_axis}_velocity_mass_avg.txt",
+        surface_names=[OUTLET_ZONE],
+        report_of=f"{thrust_axis}-velocity",
+    )
+    f_momentum = abs(mdot_outlet_report) * abs(outlet_axis_velocity_mass_avg)
 
     report_values = {
         "mdot_oxidizer": _run_report(
@@ -191,23 +193,15 @@ def _collect_reports(
             reports_dir / "mdot_fuel.txt",
             surface_names=[INLET_FUEL],
         ),
-        "mdot_outlet": _run_report(
-            si.mass_flow_rate,
-            reports_dir / "mdot_outlet.txt",
-            surface_names=[OUTLET_ZONE],
-        ),
+        "mdot_outlet": mdot_outlet_report,
         "qdot_actual": _run_report(
             vi.volume_integral,
             reports_dir / "qdot_actual.txt",
             cell_zones=[FLUID_ZONE],
             cell_function="heat-release-rate",
         ),
-        "F_momentum": _run_report(
-            si.integral,
-            reports_dir / "F_momentum.txt",
-            surface_names=[OUTLET_ZONE],
-            report_of=f"cff_thrust_momentum_{thrust_axis}",
-        ),
+        "outlet_axis_velocity_mass_avg": outlet_axis_velocity_mass_avg,
+        "F_momentum": f_momentum,
         "F_pressure": _run_report(
             si.integral,
             reports_dir / "F_pressure.txt",
@@ -238,6 +232,7 @@ def _collect_reports(
             report_of="temperature",
         ),
         "chamber_x_max": chamber_x_max,
+        "pressure_reference": pressure_reference,
     }
 
     zone = FLUID_ZONE
@@ -291,7 +286,15 @@ def main() -> None:
             if args.chamber_x_max is not None
             else _infer_chamber_x_max(solver, output_dir / "fluent_reports")
         )
-        _collect_reports(solver, output_dir, chamber_x_max, args.tcomb, args.ambient_pressure, args.thrust_axis)
+        _collect_reports(
+            solver,
+            output_dir,
+            chamber_x_max,
+            args.tcomb,
+            args.ambient_pressure,
+            args.pressure_reference,
+            args.thrust_axis,
+        )
     finally:
         solver.exit()
 
