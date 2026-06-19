@@ -187,7 +187,7 @@ def compute_metrics(
         else math.nan
     )
 
-    metrics: dict[str, str | int | float] = {}
+    metrics: dict[str, int | float] = {}
     if config_id is not None:
         metrics["config_id"] = config_id
     metrics.update({

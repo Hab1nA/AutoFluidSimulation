@@ -58,6 +58,11 @@ solver_iteration_count = 1000
 
 [postprocess]
 postprocess_timeout = 3600
+output_dir = 'D:\xkz_1020\postprocess'
+animation_dir = 'D:\xkz_1020\animation'
+metrics_dir = 'D:\xkz_1020\metrics'
+exit_to_throat_area_ratio = 7.427276607
+cstar_reference = 1830.4
 
 [global_settings]
 watchdog_interval = 1.0

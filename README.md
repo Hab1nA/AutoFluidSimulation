@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.8.2** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v2.8.3** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -13,7 +13,7 @@ AutoFluid 是一个**全自动 CFD 仿真流水线控制系统**，用于批量�
 - **全自动五阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解全流程
 - **C/S 分离架构**: Python 后台守护进程 (Daemon) + Rust TUI 终端界面，独立部署、独立重启
 - **直接 COM API**: 通过 `win32com` 直接调用 SolidWorks COM 接口导出 STEP，无需宏文件
-- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（9 分类 47 字段在线编辑）
+- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（10 分类 55 字段在线编辑）
 - **SQLite WAL 持久化**: 状态实时落盘，支持断点续传，Daemon 重启不丢失进度
 - **DAG 异步调度**: Producer-Consumer 队列 + 全局 Barrier，边导出边处理的并行流水线
 - **SCProcessPool**: 1 槽位常驻进程池管理 SpaceClaim 并发调用（可通过 sc_max_slots 扩展），含等待队列与断点续传
@@ -199,7 +199,7 @@ AutoFluidSimulation/
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
 │       ├── state.rs         # 应用状态模块入口
 │       ├── state/           # 应用状态（app_state / filter / log_buffer）
-│       ├── settings/        # 设置页面（9 分类 47 字段）
+│       ├── settings/        # 设置页面（10 分类 55 字段）
 │       ├── text_buffer.rs   # 文本缓冲区
 │       ├── theme.rs         # 主题配色
 │       ├── ui.rs            # UI 渲染模块入口
@@ -232,7 +232,7 @@ AutoFluidSimulation/
 │   ├── workstation-tunnel-recovery-plan.md # 工作站隧道自恢复方案
 │   └── Fluent仿真数据采集与五项研究指标计算报告.md # 仿真数据采集报告
 │
-└── tests/                   # 测试（39 个测试文件）
+└── tests/                   # 测试（43 个测试文件）
 ```
 
 ---
@@ -635,7 +635,7 @@ python main.py --all           # 同时启动
 | ---------------------- | ------------- | ------------------------------------------------------------------- |
 | **▶ Start**     | `start`     | 启动/继续流水线                                                     |
 | **⏸ Pause**     | `pause`     | 暂停流水线                                                          |
-| **⚙ Settings**  | `settings`  | 可视化配置（9 分类 48 字段在线编辑）                                |
+| **⚙ Settings**  | `settings`  | 可视化配置（10 分类 55 字段在线编辑）                                |
 | **🔧 Check**     | `check`     | 系统自检（弹出结果对话框）                                          |
 | **📊 Status**    | `status`    | 统计摘要（引擎状态/各步骤完成数）                                   |
 | **😈 Daemon**    | 下拉菜单      | 展开子菜单：`daemon start` / `daemon stop` / `daemon restart` |
@@ -725,18 +725,19 @@ python main.py --all           # 同时启动
 
 ### 设置页面（Settings）
 
-输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **9 大分类 47 个字段**：
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **10 大分类 55 个字段**：
 
 | 分类                     | 字段数 | 内容                                                                                    |
 | ------------------------ | ------ | --------------------------------------------------------------------------------------- |
 | **本地文件路径**   | 6      | SW/SpaceClaim 可执行文件、模型、Excel 参数表、STEP/SCDOC 输出目录                      |
 | **远程工作站连接** | 4      | 主机地址、SSH 端口、用户名、密码（密码字段掩码显示，写入 `.env` 文件）                |
-| **远程执行目录**   | 10     | 工作目录、脚本/引用文件目录、SCDOC/网格/结果/标志目录、Conda 环境名/路径、MPI 目录      |
-| **步骤文件模板**   | 5      | SW / SC / Meshing / Solver / SolverData 各步骤输出文件命名模式（`{config}` 占位） |
+| **远程执行目录**   | 11     | 工作目录、脚本/引用文件目录、SCDOC/网格/结果/标志/动画目录、Conda 环境名/路径、MPI 目录      |
+| **步骤文件模板**   | 6      | SW / SC / Meshing / Solver / SolverData / PostProcess 各步骤输出文件命名模式（`{config}` 占位） |
 | **SolidWorks**     | 5      | 宏超时、完成后关闭文档、显示窗口、启动超时、调度启动延迟                                |
-| **SpaceClaim**     | 5      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待                            |
+| **SpaceClaim**     | 8      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待、最大槽位、常驻模式、单次回退  |
 | **网格划分**       | 2      | 网格超时、网格核心数                                                                    |
 | **仿真求解**       | 3      | 求解超时、求解核心数、求解迭代次数                                                      |
+| **后处理**         | 3      | 后处理超时、输出目录、指标目录                                                          |
 | **全局设置**       | 7      | 看门狗间隔、状态刷新间隔、传输超时、SSH 连接/上传重试、最大重试、目录递归深度           |
 
 **设置页面操作**：
@@ -770,6 +771,7 @@ python main.py --all           # 同时启动
 | `[spaceclaim]`         | SpaceClaim 自动化参数（脚本超时、轮询间隔、GUI 就绪检测等） |
 | `[meshing]`            | 网格划分参数（超时、处理器数）                               |
 | `[solver]`             | 求解器参数（超时、处理器数、迭代数）                         |
+| `[postprocess]`        | 后处理参数（超时、输出目录、面积比、C*参考值等）            |
 | `[global_settings]`    | 全局引擎参数（看门狗、各阶段超时、重试、SSH 上传等）        |
 
 > **向后兼容**：Python 侧硬编码默认值仍使用 `[engine_config]` 和 `[operation_timeouts]` 键名，TOML 中使用上述新键名即可覆盖。
@@ -883,4 +885,4 @@ compile_noref.bat    # 免引用版本
 
 ---
 
-> **版本**: v2.8.2 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v2.8.3 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）

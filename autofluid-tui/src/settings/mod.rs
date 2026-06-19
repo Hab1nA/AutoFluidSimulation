@@ -170,6 +170,29 @@ impl Default for SolverConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostProcessConfig {
+    pub postprocess_timeout: u64,
+    pub output_dir: String,
+    pub animation_dir: String,
+    pub metrics_dir: String,
+    pub exit_to_throat_area_ratio: f64,
+    pub cstar_reference: f64,
+}
+
+impl Default for PostProcessConfig {
+    fn default() -> Self {
+        Self {
+            postprocess_timeout: 3600,
+            output_dir: String::new(),
+            animation_dir: String::new(),
+            metrics_dir: String::new(),
+            exit_to_throat_area_ratio: 7.427276607,
+            cstar_reference: 1830.4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSettings {
     pub watchdog_interval: f64,
     pub transfer_timeout: u64,
@@ -211,6 +234,8 @@ pub struct SettingsConfig {
     #[serde(default)]
     pub solver: SolverConfig,
     #[serde(default)]
+    pub postprocess: PostProcessConfig,
+    #[serde(default)]
     pub global_settings: GlobalSettings,
 }
 
@@ -224,11 +249,12 @@ pub enum SettingCategory {
     SpaceClaim,
     Meshing,
     Solver,
+    PostProcess,
     GlobalSettings,
 }
 
 impl SettingCategory {
-    pub const ALL: [SettingCategory; 9] = [
+    pub const ALL: [SettingCategory; 10] = [
         SettingCategory::LocalPaths,
         SettingCategory::RemoteConnection,
         SettingCategory::RemoteDirs,
@@ -237,6 +263,7 @@ impl SettingCategory {
         SettingCategory::SpaceClaim,
         SettingCategory::Meshing,
         SettingCategory::Solver,
+        SettingCategory::PostProcess,
         SettingCategory::GlobalSettings,
     ];
 
@@ -250,6 +277,7 @@ impl SettingCategory {
             SettingCategory::SpaceClaim => "SpaceClaim",
             SettingCategory::Meshing => "网格划分",
             SettingCategory::Solver => "仿真求解",
+            SettingCategory::PostProcess => "后处理",
             SettingCategory::GlobalSettings => "全局设置",
         }
     }
@@ -264,6 +292,7 @@ impl SettingCategory {
             SettingCategory::SpaceClaim => 8,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
+            SettingCategory::PostProcess => 3,
             SettingCategory::GlobalSettings => 7,
         }
     }
@@ -339,6 +368,12 @@ impl SettingCategory {
                 2 => "solver_iteration_count",
                 _ => panic!("Solver: invalid field index {idx}"),
             },
+            SettingCategory::PostProcess => match idx {
+                0 => "postprocess_timeout",
+                1 => "output_dir",
+                2 => "metrics_dir",
+                _ => panic!("PostProcess: invalid field index {idx}"),
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => "watchdog_interval",
                 1 => "state_refresh_interval",
@@ -409,7 +444,7 @@ impl SettingCategory {
                 4 => "窗口稳定等待(秒)",
                 5 => "常驻槽位数",
                 6 => "启用常驻Bridge",
-                7 => "常驻失败回退一次性Bridge",
+                7 => "失败回退一次性Bridge",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -422,6 +457,12 @@ impl SettingCategory {
                 1 => "求解核心数",
                 2 => "求解迭代次数",
                 _ => panic!("Solver: invalid field index {idx}"),
+            },
+            SettingCategory::PostProcess => match idx {
+                0 => "后处理超时(秒)",
+                1 => "后处理输出目录",
+                2 => "指标输出目录",
+                _ => panic!("PostProcess: invalid field index {idx}"),
             },
             SettingCategory::GlobalSettings => match idx {
                 0 => "看门狗间隔(秒)",
@@ -458,14 +499,16 @@ impl SettingCategory {
             SettingCategory::SpaceClaim => format!("spaceclaim.{}", self.field_name(idx)),
             SettingCategory::Meshing => format!("meshing.{}", self.field_name(idx)),
             SettingCategory::Solver => format!("solver.{}", self.field_name(idx)),
+            SettingCategory::PostProcess => format!("postprocess.{}", self.field_name(idx)),
             SettingCategory::GlobalSettings => format!("global_settings.{}", self.field_name(idx)),
         }
     }
 
     /// 判断字段是否为本地文件/目录路径（需要存在性检查）。
     /// 当前仅 `LocalPaths` category 的所有字段为本地路径。
-    pub fn is_path_field(self, _idx: usize) -> bool {
+    pub fn is_path_field(self, idx: usize) -> bool {
         matches!(self, SettingCategory::LocalPaths)
+            || (matches!(self, SettingCategory::PostProcess) && matches!(idx, 1..=2))
     }
 }
 
@@ -627,6 +670,12 @@ impl SettingsState {
                 2 => field_val!(self.config.solver, solver_iteration_count),
                 _ => String::new(),
             },
+            SettingCategory::PostProcess => match idx {
+                0 => field_val!(self.config.postprocess, postprocess_timeout),
+                1 => field_val!(self.config.postprocess, output_dir, string),
+                2 => field_val!(self.config.postprocess, metrics_dir, string),
+                _ => String::new(),
+            },
             SettingCategory::GlobalSettings => match idx {
                 0 => field_val!(self.config.global_settings, watchdog_interval),
                 1 => field_val!(self.config.global_settings, state_refresh_interval),
@@ -776,6 +825,16 @@ impl SettingsState {
                         self.config.solver.solver_iteration_count = v;
                     }
                 }
+                _ => {}
+            },
+            SettingCategory::PostProcess => match idx {
+                0 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.postprocess.postprocess_timeout = v;
+                    }
+                }
+                1 => self.config.postprocess.output_dir = value.to_string(),
+                2 => self.config.postprocess.metrics_dir = value.to_string(),
                 _ => {}
             },
             SettingCategory::GlobalSettings => match idx {
@@ -1145,6 +1204,7 @@ mod tests {
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
+        assert_eq!(SettingCategory::PostProcess.field_count(), 3);
         assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
     }
 
@@ -1166,6 +1226,67 @@ mod tests {
             r"D:\animation"
         );
         assert_eq!(state.config.remote_config.animation_dir, r"D:\animation");
+    }
+
+    #[test]
+    fn postprocess_settings_expose_user_editable_paths_and_metrics() {
+        assert_eq!(SettingCategory::ALL.len(), 10);
+        assert_eq!(SettingCategory::PostProcess.field_count(), 3);
+        assert_eq!(
+            SettingCategory::PostProcess.field_name(0),
+            "postprocess_timeout"
+        );
+        assert_eq!(SettingCategory::PostProcess.field_name(1), "output_dir");
+        assert_eq!(SettingCategory::PostProcess.field_name(2), "metrics_dir");
+        assert_eq!(
+            SettingCategory::PostProcess.field_full_name(2),
+            "postprocess.metrics_dir"
+        );
+        assert!(SettingCategory::PostProcess.is_path_field(1));
+        assert!(SettingCategory::PostProcess.is_path_field(2));
+
+        let visible_fields = (0..SettingCategory::PostProcess.field_count())
+            .map(|idx| SettingCategory::PostProcess.field_name(idx))
+            .collect::<Vec<_>>();
+        assert!(!visible_fields.contains(&"animation_dir"));
+        assert!(!visible_fields.contains(&"exit_to_throat_area_ratio"));
+        assert!(!visible_fields.contains(&"cstar_reference"));
+
+        let mut state = SettingsState::new();
+        state.config = SettingsConfig::default();
+        state.set_field_value(SettingCategory::PostProcess, 0, "4200");
+        state.set_field_value(SettingCategory::PostProcess, 1, r"D:\post\output");
+        state.set_field_value(SettingCategory::PostProcess, 2, r"D:\post\metrics");
+
+        assert_eq!(state.config.postprocess.postprocess_timeout, 4200);
+        assert_eq!(state.config.postprocess.output_dir, r"D:\post\output");
+        assert_eq!(state.config.postprocess.metrics_dir, r"D:\post\metrics");
+        assert_eq!(state.config.postprocess.animation_dir, String::new());
+        assert_eq!(
+            state.config.postprocess.exit_to_throat_area_ratio,
+            7.427276607
+        );
+        assert_eq!(state.config.postprocess.cstar_reference, 1830.4);
+    }
+
+    #[test]
+    fn display_labels_fit_settings_label_column() {
+        const SETTINGS_LABEL_WIDTH: usize = 20;
+        for cat in SettingCategory::ALL {
+            for idx in 0..cat.field_count() {
+                let label = cat.display_label(idx);
+                let width = unicode_width::UnicodeWidthStr::width(label);
+                assert!(
+                    width <= SETTINGS_LABEL_WIDTH,
+                    "{:?}.{} label `{}` width {} exceeds {}",
+                    cat,
+                    idx,
+                    label,
+                    width,
+                    SETTINGS_LABEL_WIDTH
+                );
+            }
+        }
     }
 
     #[test]

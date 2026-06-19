@@ -1,6 +1,6 @@
 # 当前 Daemon 分布式架构说明
 
-> 文档日期：2026-06-10  
+> 文档日期：2026-06-20  
 > 适用范围：当前已落地的 daemon 拆分实现  
 > 关联文档：`docs/architecture-refactoring-plan.md`
 
@@ -303,10 +303,13 @@ watcher 通过 IPC 拉取 `WARNING` 及以上日志，按 `level + source + raw_
 以下内容属于 `architecture-refactoring-plan.md` 中的远期规划，不应误认为当前已经完整落地：
 
 - 多台工作站的生产级调度策略和容量治理。
-- `PostProcess` 独立阶段。
 - `ResultCollector` / `ResultFetcher` 自动结果回收。
 - 服务器暂存区到本地归档目录的离线补收机制。
 - TUI 中完整的 LocalWorker/工作站管理 UI。
+
+> **2026-06-20 更新**：`PostProcess` 独立阶段已落地实现。`STEP_NAMES` 包含 `"postprocess"`，
+> `TaskRunner.execute_postprocess()` 委托 `RemoteExecutor.execute_postprocess()` 执行，
+> `BarrierCoordinator` 在 Solver 完成后自动调度 PostProcess 步骤。
 
 当前已经落地的是：daemon 迁移到 ocar 后，可以通过 `LocalWorker` 获得本地 SW/SC 能力，并在本地 PC 离线后继续通过 ocar 与工作站推进远程阶段。
 

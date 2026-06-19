@@ -1,7 +1,7 @@
 # AutoFluid 代码写作规范
 
 > 本文档总结了本项目的代码命名和风格约定，适用于所有 Python 和 Rust 代码的编写与审查。
-> 最后更新：2026-06-17
+> 最后更新：2026-06-20
 
 ---
 
@@ -58,6 +58,7 @@ execute_{步骤名}_step()
 | `execute_transfer()` | 文件传输 |
 | `execute_meshing()` | 网格划分 |
 | `execute_solver()` | 仿真求解 |
+| `execute_postprocess()` | 后处理 |
 
 **注意**：使用 `_step` 后缀而非 `_macro` 或其他历史名称。
 
@@ -98,6 +99,8 @@ scan_completed_downstream()   # 同步下游步骤状态与文件系统（SWPhas
 execute_with_retry()          # 通用重试包装器（RetryManager）
 monitor_loop()                # 全局屏障监控线程（BarrierCoordinator）
 _dispatch_solver_tasks()      # 屏障通过后分发 Solver（BarrierCoordinator）
+_execute_or_recover_postprocess_for_config()  # 恢复/启动 PostProcess（BarrierCoordinator）
+_wait_for_postprocess_completion()  # 轮询 PostProcess 完成标志（BarrierCoordinator）
 pause_aware_sleep()           # 可响应暂停/停止的 sleep（独立函数）
 ```
 

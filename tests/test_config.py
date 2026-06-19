@@ -772,29 +772,29 @@ class TestReloadConfigFromToml:
         monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
         try:
             assert cfg.reload_config_from_toml() is True
-            assert WORKSTATIONS == [
-                {
-                    "id": "WS-A",
-                    "host": "10.0.0.10",
-                    "reachable_host": "100.64.1.20",
-                    "reachable_port": 2222,
-                    "connectivity_mode": "tailscale",
-                    "port": 2222,
-                    "username": "ps",
-                    "password": "secret-a",
-                    "working_dir": r"D:\work",
-                    "scripts_dir": r"D:\scripts",
-                    "ref_files_dir": r"D:\refs",
-                    "scdoc_dir": r"D:\scdoc",
-                    "msh_dir": r"D:\msh",
-                    "result_dir": r"D:\case",
-                    "animation_dir": r"D:\animation",
-                    "flag_dir": r"D:\flags",
-                    "conda_env": "pyfluent",
-                    "conda_exe": r"C:\conda.exe",
-                    "mpi_bin_dir": r"C:\mpi",
-                }
-            ]
+            workstation = WORKSTATIONS[0]
+            assert workstation["id"] == "WS-A"
+            assert workstation["host"] == "10.0.0.10"
+            assert workstation["reachable_host"] == "100.64.1.20"
+            assert workstation["reachable_port"] == 2222
+            assert workstation["connectivity_mode"] == "tailscale"
+            assert workstation["port"] == 2222
+            assert workstation["username"] == "ps"
+            assert workstation["password"] == "secret-a"
+            assert workstation["working_dir"] == r"D:\work"
+            assert workstation["scripts_dir"] == r"D:\scripts"
+            assert workstation["ref_files_dir"] == r"D:\refs"
+            assert workstation["scdoc_dir"] == r"D:\scdoc"
+            assert workstation["msh_dir"] == r"D:\msh"
+            assert workstation["result_dir"] == r"D:\case"
+            assert workstation["animation_dir"] == r"D:\animation"
+            assert workstation["flag_dir"] == r"D:\flags"
+            assert workstation["conda_env"] == "pyfluent"
+            assert workstation["conda_exe"] == r"C:\conda.exe"
+            assert workstation["mpi_bin_dir"] == r"C:\mpi"
+            assert "postprocess_output_dir" in workstation
+            assert "postprocess_animation_dir" in workstation
+            assert "postprocess_metrics_dir" in workstation
         finally:
             WORKSTATIONS[:] = original
 
@@ -999,6 +999,88 @@ class TestReloadConfigFromToml:
         finally:
             ENGINE_CONFIG["solver_iteration_count"] = original
             monkeypatch.delenv("AUTOFLUID_SOLVER_ITERATION_COUNT", raising=False)
+
+    def test_postprocess_section_configures_export_paths_and_metrics(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import ENGINE_CONFIG, REMOTE_CONFIG, WORKSTATIONS
+
+        original_engine = dict(ENGINE_CONFIG)
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "postprocess": {
+                    "postprocess_timeout": 4200,
+                    "output_dir": r"D:\post\output",
+                    "animation_dir": r"D:\post\animation",
+                    "metrics_dir": r"D:\post\metrics",
+                    "exit_to_throat_area_ratio": 8.5,
+                    "cstar_reference": 1900.0,
+                }
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert ENGINE_CONFIG["postprocess_timeout"] == 4200
+            assert ENGINE_CONFIG["postprocess_output_dir"] == r"D:\post\output"
+            assert ENGINE_CONFIG["postprocess_animation_dir"] == r"D:\post\animation"
+            assert ENGINE_CONFIG["postprocess_metrics_dir"] == r"D:\post\metrics"
+            assert ENGINE_CONFIG["postprocess_exit_to_throat_area_ratio"] == 8.5
+            assert ENGINE_CONFIG["postprocess_cstar_reference"] == 1900.0
+            assert WORKSTATIONS[0]["postprocess_output_dir"] == r"D:\post\output"
+            assert WORKSTATIONS[0]["postprocess_animation_dir"] == r"D:\post\animation"
+            assert WORKSTATIONS[0]["postprocess_metrics_dir"] == r"D:\post\metrics"
+        finally:
+            ENGINE_CONFIG.clear()
+            ENGINE_CONFIG.update(original_engine)
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_workstation_postprocess_output_overrides_section_default(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import WORKSTATIONS
+
+        original = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "postprocess": {
+                    "output_dir": r"D:\post\default",
+                    "metrics_dir": r"D:\post\metrics-default",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "10.0.0.10",
+                        "port": 22,
+                        "username": "ps",
+                        "password": "pw",
+                        "working_dir": r"D:\work",
+                        "scripts_dir": r"D:\scripts",
+                        "ref_files_dir": r"D:\refs",
+                        "scdoc_dir": r"D:\scdoc",
+                        "msh_dir": r"D:\msh",
+                        "result_dir": r"D:\case",
+                        "animation_dir": r"D:\animation",
+                        "flag_dir": r"D:\flags",
+                        "conda_env": "pyfluent",
+                        "conda_exe": r"C:\conda.exe",
+                        "mpi_bin_dir": r"C:\mpi",
+                        "postprocess_output_dir": r"E:\ws-a\post",
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert WORKSTATIONS[0]["postprocess_output_dir"] == r"E:\ws-a\post"
+            assert WORKSTATIONS[0]["postprocess_metrics_dir"] == r"D:\post\metrics-default"
+        finally:
+            WORKSTATIONS[:] = original
 
 
 class TestConfigDictCompleteness:

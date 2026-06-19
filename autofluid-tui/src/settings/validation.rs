@@ -25,6 +25,7 @@ pub fn validate_config(config: &SettingsConfig) -> Vec<ValidationError> {
     validate_spaceclaim(config, &mut errors);
     validate_meshing(config, &mut errors);
     validate_solver(config, &mut errors);
+    validate_postprocess(config, &mut errors);
     validate_global_settings(config, &mut errors);
     errors
 }
@@ -309,6 +310,29 @@ fn validate_solver(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     }
 }
 
+fn validate_postprocess(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
+    let remote_dirs = [
+        ("postprocess.output_dir", &config.postprocess.output_dir),
+        ("postprocess.metrics_dir", &config.postprocess.metrics_dir),
+    ];
+    for (name, path) in &remote_dirs {
+        if path.is_empty() {
+            errors.push(ValidationError {
+                field_name: name.to_string(),
+                message: "远程路径为空".to_string(),
+                severity: Severity::Warning,
+            });
+        }
+    }
+    if config.postprocess.postprocess_timeout == 0 {
+        errors.push(ValidationError {
+            field_name: "postprocess.postprocess_timeout".to_string(),
+            message: "超时值必须大于 0".to_string(),
+            severity: Severity::Error,
+        });
+    }
+}
+
 fn validate_global_settings(config: &SettingsConfig, errors: &mut Vec<ValidationError>) {
     if config.global_settings.watchdog_interval <= 0.0 {
         errors.push(ValidationError {
@@ -498,5 +522,38 @@ mod tests {
             .iter()
             .any(|e| e.field_name == "remote_config.username"
                 && matches!(e.severity, Severity::Error)));
+    }
+
+    #[test]
+    fn test_postprocess_visible_empty_paths_warn_and_zero_timeout_errors() {
+        let mut config = SettingsConfig::default();
+        config.postprocess.postprocess_timeout = 0;
+        config.postprocess.output_dir = String::new();
+        config.postprocess.animation_dir = String::new();
+        config.postprocess.metrics_dir = String::new();
+        config.postprocess.exit_to_throat_area_ratio = 0.0;
+        config.postprocess.cstar_reference = 0.0;
+
+        let errors = validate_config(&config);
+
+        assert!(errors.iter().any(|e| {
+            e.field_name == "postprocess.output_dir" && matches!(e.severity, Severity::Warning)
+        }));
+        assert!(errors.iter().any(|e| {
+            e.field_name == "postprocess.metrics_dir" && matches!(e.severity, Severity::Warning)
+        }));
+        assert!(errors.iter().any(|e| {
+            e.field_name == "postprocess.postprocess_timeout"
+                && matches!(e.severity, Severity::Error)
+        }));
+        assert!(!errors
+            .iter()
+            .any(|e| e.field_name == "postprocess.animation_dir"));
+        assert!(!errors
+            .iter()
+            .any(|e| e.field_name == "postprocess.exit_to_throat_area_ratio"));
+        assert!(!errors
+            .iter()
+            .any(|e| e.field_name == "postprocess.cstar_reference"));
     }
 }

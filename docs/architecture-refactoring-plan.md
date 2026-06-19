@@ -1,9 +1,9 @@
 # AutoFluid 远期改进计划：从单机架构到分布式三层架构
 
-> 文档版本：v1.5<br>
+> 文档版本：v1.6<br>
 > 创建日期：2026-05-09<br>
-> 最后更新：2026-06-18<br>
-> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.2)
+> 最后更新：2026-06-20<br>
+> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.3)
 
 ---
 
@@ -825,39 +825,59 @@ class WorkstationMesher:
 
 ### 4.4 后处理阶段 (PostProcess)
 
-#### 4.4.1 阶段定义与实际运行方式
+> **2026-06-20 状态更新**：PostProcess 已作为独立流水线阶段落地实现。以下原始设计描述中的
+> 「内嵌在仿真脚本中」方案已被实际实现取代。保留原始设计供决策追溯。
 
-PostProcess 是流水线中紧接在 Solver 之后的阶段。**关键理解**：后处理步骤并不是独立的流水线阶段，而是内嵌在仿真运行阶段所调用的 Python 脚本中的——仿真求解完成后，该 Python 程序会即刻调用另一个后处理脚本自动完成当前构型的后处理。因此：
+#### 4.4.1 当前实现概览
 
-- **完成一个仿真就会自动触发其对应的后处理**，不需要额外的调度触发
-- **后处理是构型级任务**（每构型一个），而非工作站级任务
-- **不需要 Solver 屏障来同步所有构型**：各构型的后处理独立进行，互不依赖
+PostProcess 已实现为流水线第 6 阶段（`STEP_NAMES` 中位于 `"solver"` 之后）：
 
-#### 4.4.2 完成判断依据（重要）
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| `TaskRunner.execute_postprocess()` | `engine/task_runner.py` | 委托 `RemoteExecutor` 执行 |
+| `RemoteExecutor.execute_postprocess()` | `executor/remote_executor.py` | 复用 Solver 的计划任务远程执行后处理脚本 |
+| `BarrierCoordinator._execute_or_recover_postprocess_for_config()` | `engine/scheduler/barrier.py` | Solver 完成后自动调度 PostProcess |
+| `PipelineScheduler` | `engine/scheduler/main.py` | 将 `"postprocess"` 纳入下游步骤扫描和恢复逻辑 |
 
-由于仿真和后处理由同一个 Python 程序执行，**不能以 Python 程序退出作为"仿真完成"的信号**——因为此时后处理正在运行，程序尚未退出。会导致 TUI 上仿真完成状态的显示不准确。
+完成判断依据：`postprocess_done_{config}.txt` 标志文件（在 `step_file_patterns.postprocess` 中定义）。
 
-**正确做法**：以结果文件的产生作为各阶段的完成判断依据：
+调度策略：Solver 完成后，`BarrierCoordinator` 自动触发对应构型的 PostProcess，各构型独立执行，不依赖全局屏障。
 
-| 阶段 | 判断依据（结果文件） | 说明 |
-|------|---------------------|------|
-| Solver（仿真求解） | `.cas` + `.dat` 文件 | Fluent 求解完成后生成的 case/data 文件对 |
-| PostProcess（后处理） | `待定` | 后处理脚本输出的结果文件格式待定，后续补充 |
+#### 4.4.2 原始设计（已过时，保留供追溯）
 
-具体实现方式：在远程工作站上，Fluent 求解完成后会生成 `.cas` / `.dat` 文件，Daemon 通过 SSH 轮询检测这些文件是否产生来判断 Solver 是否完成。后处理同理，检测后处理脚本预计输出的结果文件。
+~~PostProcess 是流水线中紧接在 Solver 之后的阶段。**关键理解**：后处理步骤并不是独立的流水线阶段，而是内嵌在仿真运行阶段所调用的 Python 脚本中的——仿真求解完成后，该 Python 程序会即刻调用另一个后处理脚本自动完成当前构型的后处理。因此：~~
 
-#### 4.4.3 对架构设计的影响
+- ~~完成一个仿真就会自动触发其对应的后处理，不需要额外的调度触发~~（已变更为独立调度）
+- ~~后处理是构型级任务（每构型一个），而非工作站级任务~~（保持）
+- ~~不需要 Solver 屏障来同步所有构型~~（保持，当前实现中各构型 PostProcess 独立执行）
 
-由于后处理内嵌在仿真脚本中自动执行，早期架构设想中的以下内容需要调整：
+#### 4.4.2 完成判断依据（当前实现）
 
-1. **不需要 Solver 屏障**：各构型 Solver 完成后自动进入 PostProcess，无需等待同工作站其他构型
-2. **不需要独立的 PostProcess 调度逻辑**：`_solver_barrier_monitor_loop` / `_start_postprocess` 等方法不再需要
-3. **Solver 完成状态标记时机变更**：从 "Python 程序退出时标记" 改为 "检测到 .cas/.dat 文件时标记"
-4. **PostProcess 完成状态标记**：从 "Python 程序退出时标记" 改为 "检测到后处理输出文件时标记"
+当前 PostProcess 完成判断使用标志文件模式：
 
-#### 4.4.4 代码改造要点
+| 阶段 | 判断依据 | 配置文件字段 |
+|------|---------|-------------|
+| Solver（仿真求解） | `solver_done_{config}.txt` 标志文件 | `step_file_patterns.solver` |
+| PostProcess（后处理） | `postprocess_done_{config}.txt` 标志文件 | `step_file_patterns.postprocess` |
 
-**config.py** 扩展：
+`RemoteExecutor.execute_postprocess()` 复用 Solver 的远程计划任务机制，通过
+`register_postprocess_from_solver()` 将 Solver 已完成的后处理标记为 Running，
+然后轮询 `postprocess_done_{config}.txt` 文件等待完成。
+
+#### 4.4.3 架构影响（2026-06-20 更新）
+
+当前实现中：
+1. PostProcess 是**独立流水线阶段**，在 `STEP_NAMES` 中位于 `"solver"` 之后
+2. `BarrierCoordinator` 在 Solver 完成后自动调度 PostProcess，**存在独立的 PostProcess 调度逻辑**
+3. 完成判断使用**标志文件**（`postprocess_done_{config}.txt`）而非直接检测 Python 进程退出
+4. 各构型 PostProcess 仍**独立执行**，不依赖全局屏障
+
+#### 4.4.4 原始设计（已过时，保留供追溯）
+
+~~以下是 PostProcess 方案早期的设计讨论。当时设想后处理内嵌在 Solver 脚本中，
+不设独立调度。后续实现中选择独立阶段方案，以下内容仅作历史记录。~~
+
+~~**config.py** 扩展：~~
 
 ```python
 STEP_NAMES = ["sw", "sc", "transfer", "meshing", "solver", "postprocess", "collect"]
@@ -876,7 +896,7 @@ STEP_COMPLETION_FILES = {
 }
 ```
 
-**TaskRunner** 改造要点：
+~~**TaskRunner** 改造要点：~~
 
 ```python
 def wait_solver_completion(self, config_name: int, workstation_id: str) -> bool:
@@ -888,7 +908,7 @@ def wait_postprocess_completion(self, config_name: int, workstation_id: str) -> 
     ...
 ```
 
-**Scheduler** 改造要点：
+~~**Scheduler** 改造要点：~~
 
 ```python
 def _execute_solver_for_config(self, config_name: int, workstation_id: str):

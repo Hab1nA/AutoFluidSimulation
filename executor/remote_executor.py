@@ -32,6 +32,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
+
 
 def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
     """Return a cmd.exe-safe argument for the generated remote batch script."""
@@ -1091,6 +1093,60 @@ class RemoteExecutor:
             return default_count
         return processor_count
 
+    @staticmethod
+    def _postprocess_path_config(
+        config: dict[str, object],
+        *,
+        allow_config_override: bool = True,
+    ) -> dict[str, str]:
+        """Resolve workstation-local postprocess export directories."""
+        output_dir = str(
+            (config.get("postprocess_output_dir") if allow_config_override else None)
+            or ENGINE_CONFIG.get("postprocess_output_dir")
+            or config.get("result_dir")
+            or config.get("working_dir")
+            or ""
+        )
+        engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
+        config_postprocess_animation_dir = (
+            config.get("postprocess_animation_dir") if allow_config_override else None
+        )
+        if (
+            config_postprocess_animation_dir
+            and config_postprocess_animation_dir != engine_animation_dir
+        ):
+            animation_source = config_postprocess_animation_dir
+        elif allow_config_override and config.get("animation_dir"):
+            animation_source = config.get("animation_dir")
+        elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir"):
+            animation_source = config.get("animation_dir")
+        else:
+            animation_source = engine_animation_dir or config.get("animation_dir") or ""
+        animation_dir = str(
+            animation_source
+        )
+        metrics_dir = str(
+            (config.get("postprocess_metrics_dir") if allow_config_override else None)
+            or ENGINE_CONFIG.get("postprocess_metrics_dir")
+            or (f"{output_dir}/metrics" if output_dir else "")
+        )
+        return {
+            "output_dir": output_dir,
+            "animation_dir": animation_dir,
+            "metrics_dir": metrics_dir,
+        }
+
+    @staticmethod
+    def _postprocess_metric_constants() -> dict[str, str]:
+        return {
+            "exit_to_throat_area_ratio": str(
+                ENGINE_CONFIG.get("postprocess_exit_to_throat_area_ratio", 7.427276607)
+            ),
+            "cstar_reference": str(
+                ENGINE_CONFIG.get("postprocess_cstar_reference", 1830.4)
+            ),
+        }
+
     def _build_solver_command(
         self,
         config_name: int,
@@ -1113,9 +1169,14 @@ class RemoteExecutor:
         scripts_dir = config["scripts_dir"]
         processor_count = self._solver_processor_count()
         iteration_count = ENGINE_CONFIG["solver_iteration_count"]
+        postprocess_paths = self._postprocess_path_config(
+            config,
+            allow_config_override=remote_config is not None,
+        )
+        metric_constants = self._postprocess_metric_constants()
 
         # 构建参数化命令（所有路径均为必需参数，无默认值）
-        anim_dir = str(config["animation_dir"])
+        anim_dir = postprocess_paths["animation_dir"]
         command = " ".join([
             _cmd_arg(conda_exe, force_quote=True),
             "run",
@@ -1134,6 +1195,8 @@ class RemoteExecutor:
             _cmd_arg(config["msh_dir"], force_quote=True),
             "--output-dir",
             _cmd_arg(config["result_dir"], force_quote=True),
+            "--postprocess-output-dir",
+            _cmd_arg(postprocess_paths["output_dir"], force_quote=True),
             "--anim-dir",
             _cmd_arg(anim_dir, force_quote=True),
             "--working-dir",
@@ -1158,10 +1221,12 @@ class RemoteExecutor:
             _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
             "--compute-metrics-script",
             _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
+            "--metrics-output-dir",
+            _cmd_arg(postprocess_paths["metrics_dir"], force_quote=True),
             "--metrics-exit-to-throat-area-ratio",
-            "7.427276607",
+            metric_constants["exit_to_throat_area_ratio"],
             "--metrics-cstar-reference",
-            "1830.4",
+            metric_constants["cstar_reference"],
             "--postprocess-flag-file",
             _cmd_arg(postprocess_flag_file),
         ])
@@ -1178,11 +1243,11 @@ class RemoteExecutor:
         conda_env = config["conda_env"]
         conda_exe = config["conda_exe"]
         scripts_dir = config["scripts_dir"]
-        postprocess_output_dir = str(
-            config.get("postprocess_output_dir")
-            or config.get("result_dir")
-            or config.get("working_dir")
+        postprocess_paths = self._postprocess_path_config(
+            config,
+            allow_config_override=remote_config is not None,
         )
+        metric_constants = self._postprocess_metric_constants()
         command = " ".join([
             _cmd_arg(conda_exe, force_quote=True),
             "run",
@@ -1200,19 +1265,21 @@ class RemoteExecutor:
             "--extra-post-journal-path",
             _cmd_arg(f"{scripts_dir}/postprocess_extra_gen4.jou", force_quote=True),
             "--postprocess-output-dir",
-            _cmd_arg(postprocess_output_dir, force_quote=True),
+            _cmd_arg(postprocess_paths["output_dir"], force_quote=True),
             "--metrics-script",
             _cmd_arg(f"{scripts_dir}/postprocess_metrics_gen4.py", force_quote=True),
             "--compute-metrics-script",
             _cmd_arg(f"{scripts_dir}/compute_metrics_gen4.py", force_quote=True),
+            "--metrics-output-dir",
+            _cmd_arg(postprocess_paths["metrics_dir"], force_quote=True),
             "--metrics-exit-to-throat-area-ratio",
-            "7.427276607",
+            metric_constants["exit_to_throat_area_ratio"],
             "--metrics-cstar-reference",
-            "1830.4",
+            metric_constants["cstar_reference"],
             "--flag-file",
             _cmd_arg(flag_file),
             "--anim-dir",
-            _cmd_arg(config["animation_dir"], force_quote=True),
+            _cmd_arg(postprocess_paths["animation_dir"], force_quote=True),
             "--working-dir",
             _cmd_arg(config["working_dir"], force_quote=True),
             "--working-dir-t",
@@ -1933,6 +2000,7 @@ class RemoteExecutor:
     ) -> tuple[object, ...]:
         """构建一次成功同步的本地内容和远程路径指纹。"""
         config = remote_config or self._remote_config_for_workstation()
+        postprocess_paths = self._postprocess_path_config(config)
         placeholder_inputs = (
             str(config["scripts_dir"]),
             str(config["scdoc_dir"]),
@@ -1940,6 +2008,9 @@ class RemoteExecutor:
             str(config["ref_files_dir"]),
             str(config["msh_dir"]),
             str(config["result_dir"]),
+            postprocess_paths["output_dir"],
+            postprocess_paths["animation_dir"],
+            postprocess_paths["metrics_dir"],
             STEP_FILE_PATTERNS.get("sc", ""),
         )
         return (
@@ -2161,6 +2232,10 @@ class RemoteExecutor:
         content = content.replace('{{REMOTE_REF_FILES_DIR}}', fluent_path(config["ref_files_dir"]))
         content = content.replace('{{REMOTE_MSH_DIR}}', fluent_path(config["msh_dir"]))
         content = content.replace('{{REMOTE_RESULT_DIR}}', fluent_path(config["result_dir"]))
+        postprocess_paths = self._postprocess_path_config(config)
+        content = content.replace('{{REMOTE_POSTPROCESS_OUTPUT_DIR}}', fluent_path(postprocess_paths["output_dir"]))
+        content = content.replace('{{REMOTE_POSTPROCESS_ANIMATION_DIR}}', fluent_path(postprocess_paths["animation_dir"]))
+        content = content.replace('{{REMOTE_POSTPROCESS_METRICS_DIR}}', fluent_path(postprocess_paths["metrics_dir"]))
         sc_pattern = STEP_FILE_PATTERNS.get("sc", "")
         if sc_pattern:
             content = content.replace('{{SC_FILENAME}}', sc_pattern)

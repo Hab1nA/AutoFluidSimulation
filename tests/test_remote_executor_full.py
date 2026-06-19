@@ -365,6 +365,7 @@ class TestBuildPostprocessCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         command, flag_file = executor._build_postprocess_command(2)
@@ -379,6 +380,63 @@ class TestBuildPostprocessCommand:
         assert '--postprocess-output-dir "D:\\post"' in command
         assert "--flag-file D:/flags/postprocess_done_2.txt" in command
         assert flag_file == "D:/flags/postprocess_done_2.txt"
+
+    def test_solver_and_postprocess_commands_use_postprocess_config(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\legacy-animation")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 64)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_iteration_count", 20)
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_exit_to_throat_area_ratio", 8.5)
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_cstar_reference", 1900.0)
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        solver_command, _ = executor._build_solver_command(3)
+        postprocess_command, _ = executor._build_postprocess_command(3)
+
+        for command in (solver_command, postprocess_command):
+            assert '--postprocess-output-dir "D:\\post\\output"' in command
+            assert '--metrics-output-dir "D:\\post\\metrics"' in command
+            assert "--metrics-exit-to-throat-area-ratio 8.5" in command
+            assert "--metrics-cstar-reference 1900.0" in command
+            assert '"D:\\post\\animation"' in command
+
+    def test_workstation_postprocess_paths_override_global_defaults(self, monkeypatch):
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
+        monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
+        monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\scripts")
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+        monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+        monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
+        monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\legacy-animation")
+        monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\default")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+
+        executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+        command, _ = executor._build_postprocess_command(
+            4,
+            {
+                **REMOTE_CONFIG,
+                "postprocess_output_dir": r"E:\ws-a\post",
+                "postprocess_metrics_dir": r"E:\ws-a\metrics",
+                "postprocess_animation_dir": r"E:\ws-a\animation",
+            },
+        )
+
+        assert '--postprocess-output-dir "E:\\ws-a\\post"' in command
+        assert '--metrics-output-dir "E:\\ws-a\\metrics"' in command
+        assert '--anim-dir "E:\\ws-a\\animation"' in command
 
     def test_command_uses_configured_solver_processor_count(self, monkeypatch):
         """Solver 命令使用配置的核心数。"""

@@ -119,6 +119,8 @@ class WorkstationConfig(RemoteConfig, total=False):
     connectivity_mode: str
     postprocess_script: str
     postprocess_output_dir: str
+    postprocess_animation_dir: str
+    postprocess_metrics_dir: str
     notes: str
 
 
@@ -163,6 +165,11 @@ class EngineConfig(TypedDict):
     solver_processor_count: int
     solver_iteration_count: int
     postprocess_timeout: int
+    postprocess_output_dir: str
+    postprocess_animation_dir: str
+    postprocess_metrics_dir: str
+    postprocess_exit_to_throat_area_ratio: float
+    postprocess_cstar_reference: float
     max_retries: int
     state_refresh_interval: float
     sc_max_slots: int
@@ -466,6 +473,32 @@ ENGINE_CONFIG: EngineConfig = {
     "solver_iteration_count": _toml_or_default("solver", "solver_iteration_count", 1000),
     # 后处理超时（秒）。后处理是工作站本地结果生成，不包含后续服务器上传。
     "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 3600),
+    # 后处理工作站导出目录。TOML 中使用 [postprocess].output_dir / animation_dir / metrics_dir。
+    "postprocess_output_dir": _toml_or_default(
+        "postprocess",
+        "output_dir",
+        _toml_or_default("remote_config", "postprocess_output_dir", REMOTE_CONFIG["result_dir"]),
+    ),
+    "postprocess_animation_dir": _toml_or_default(
+        "postprocess",
+        "animation_dir",
+        REMOTE_CONFIG["animation_dir"],
+    ),
+    "postprocess_metrics_dir": _toml_or_default(
+        "postprocess",
+        "metrics_dir",
+        r"D:\xkz_1020\metrics",
+    ),
+    "postprocess_exit_to_throat_area_ratio": _toml_or_default(
+        "postprocess",
+        "exit_to_throat_area_ratio",
+        7.427276607,
+    ),
+    "postprocess_cstar_reference": _toml_or_default(
+        "postprocess",
+        "cstar_reference",
+        1830.4,
+    ),
     # 最大重试次数
     "max_retries": _toml_or_default("global_settings", "max_retries", 3),
     # 全局状态刷新间隔（秒）
@@ -574,6 +607,7 @@ def _apply_env_overrides():
 def _sync_default_workstation() -> None:
     """Keep WORKSTATIONS[0] aligned with REMOTE_CONFIG in legacy mode."""
     default = _workstation_from_remote_config()
+    _apply_postprocess_defaults_to_workstation(default)
     if not WORKSTATIONS:
         WORKSTATIONS.append(default)
         return
@@ -625,6 +659,47 @@ def _expand_config_value(value: Any) -> Any:
         return [_expand_config_value(v) for v in value]
     return _expand_env_vars(value)
 
+
+def _postprocess_section_engine_updates(section: dict[str, Any]) -> dict[str, Any]:
+    """Translate public [postprocess] TOML keys into internal ENGINE_CONFIG keys."""
+    key_map = {
+        "postprocess_timeout": "postprocess_timeout",
+        "output_dir": "postprocess_output_dir",
+        "animation_dir": "postprocess_animation_dir",
+        "metrics_dir": "postprocess_metrics_dir",
+        "exit_to_throat_area_ratio": "postprocess_exit_to_throat_area_ratio",
+        "cstar_reference": "postprocess_cstar_reference",
+    }
+    return {
+        target: section[source]
+        for source, target in key_map.items()
+        if source in section
+    }
+
+
+def _sync_postprocess_defaults_to_remote_config() -> None:
+    """Keep legacy REMOTE_CONFIG postprocess keys aligned with [postprocess]."""
+    remote_config = cast(dict[str, Any], REMOTE_CONFIG)
+    remote_config["postprocess_output_dir"] = ENGINE_CONFIG["postprocess_output_dir"]
+    remote_config["postprocess_animation_dir"] = ENGINE_CONFIG["postprocess_animation_dir"]
+    remote_config["postprocess_metrics_dir"] = ENGINE_CONFIG["postprocess_metrics_dir"]
+
+
+def _apply_postprocess_defaults_to_workstation(workstation: WorkstationConfig) -> None:
+    """Fill optional workstation postprocess paths without overriding explicit values."""
+    workstation.setdefault(
+        "postprocess_output_dir",
+        str(ENGINE_CONFIG.get("postprocess_output_dir") or workstation.get("result_dir", "")),
+    )
+    workstation.setdefault(
+        "postprocess_animation_dir",
+        str(ENGINE_CONFIG.get("postprocess_animation_dir") or workstation.get("animation_dir", "")),
+    )
+    workstation.setdefault(
+        "postprocess_metrics_dir",
+        str(ENGINE_CONFIG.get("postprocess_metrics_dir") or ""),
+    )
+
 def _normalize_workstation_config(raw: dict[str, Any], index: int) -> WorkstationConfig:
     """Merge a TOML workstation entry with legacy defaults."""
     merged: dict[str, Any] = dict(REMOTE_CONFIG)
@@ -633,7 +708,9 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
     for port_key in ("port", "reachable_port"):
         if port_key in merged:
             merged[port_key] = int(merged[port_key])
-    return cast(WorkstationConfig, merged)
+    workstation = cast(WorkstationConfig, merged)
+    _apply_postprocess_defaults_to_workstation(workstation)
+    return workstation
 
 
 def reload_config_from_toml() -> bool:
@@ -658,15 +735,6 @@ def reload_config_from_toml() -> bool:
             if "port" in ipc_updates:
                 ipc_updates["port"] = int(ipc_updates["port"])
             IPC_CONFIG.update(cast(IPCConfig, ipc_updates))
-        explicit_workstations = "workstations" in toml_data
-        if explicit_workstations:
-            workstation_items = toml_data["workstations"]
-            if isinstance(workstation_items, list):
-                WORKSTATIONS[:] = [
-                    _normalize_workstation_config(item, idx)
-                    for idx, item in enumerate(workstation_items)
-                    if isinstance(item, dict)
-                ]
         if "step_file_patterns" in toml_data:
             STEP_FILE_PATTERNS.update(toml_data["step_file_patterns"])
         # 新分类格式：按工具维度拆分为 solidworks / spaceclaim / global_settings
@@ -700,9 +768,23 @@ def reload_config_from_toml() -> bool:
             )
         if "postprocess" in toml_data:
             ENGINE_CONFIG.update(
-                cast(EngineConfig, {k: v for k, v in toml_data["postprocess"].items()
-                 if k in ENGINE_CONFIG})
+                cast(
+                    EngineConfig,
+                    _postprocess_section_engine_updates(toml_data["postprocess"]),
+                )
             )
+            _sync_postprocess_defaults_to_remote_config()
+        else:
+            _sync_postprocess_defaults_to_remote_config()
+        explicit_workstations = "workstations" in toml_data
+        if explicit_workstations:
+            workstation_items = toml_data["workstations"]
+            if isinstance(workstation_items, list):
+                WORKSTATIONS[:] = [
+                    _normalize_workstation_config(item, idx)
+                    for idx, item in enumerate(workstation_items)
+                    if isinstance(item, dict)
+                ]
         if "global_settings" in toml_data:
             ENGINE_CONFIG.update(
                 cast(EngineConfig, {k: v for k, v in toml_data["global_settings"].items()

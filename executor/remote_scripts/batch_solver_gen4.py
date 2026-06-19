@@ -55,6 +55,8 @@ def parse_args() -> argparse.Namespace:
                         help='网格输入目录')
     parser.add_argument('--output-dir', type=str, required=True,
                         help='算例输出目录')
+    parser.add_argument('--postprocess-output-dir', type=str, required=True,
+                        help='后处理业务输出目录')
     parser.add_argument('--anim-dir', type=str, required=True,
                         help='动画输出目录')
     parser.add_argument('--working-dir', type=str, required=True,
@@ -85,6 +87,8 @@ def parse_args() -> argparse.Namespace:
                         help='可选：五项指标 PyFluent 后处理脚本')
     parser.add_argument('--compute-metrics-script', type=str, default=None,
                         help='可选：指标标量组合脚本')
+    parser.add_argument('--metrics-output-dir', type=str, required=True,
+                        help='指标 CSV 输出根目录')
     parser.add_argument('--metrics-processor-count', type=int, default=1,
                         help='指标后处理 Fluent 核数')
     parser.add_argument('--metrics-ambient-pressure', type=float, default=0.0,
@@ -224,11 +228,7 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         "compute_metrics_gen4.py",
     )
     _require_file(compute_script, "指标计算脚本")
-    metrics_output_dir = os.path.join(
-        args.output_dir,
-        "metrics",
-        f"model_gen4_{config_id}",
-    )
+    metrics_output_dir = os.path.join(args.metrics_output_dir, f"model_gen4_{config_id}")
     os.makedirs(metrics_output_dir, exist_ok=True)
     command = [
         sys.executable,

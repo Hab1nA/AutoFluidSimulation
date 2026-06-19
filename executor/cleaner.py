@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable as CallableABC, Mapping
 from contextlib import AbstractContextManager, nullcontext
 import ipaddress
 import os
@@ -23,12 +23,14 @@ if TYPE_CHECKING:
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID, IPC_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, WORKSTATIONS,
-    STEP_NAMES, STEP_FILE_PATTERNS, get_workstation_config, is_server_mode,
+    STEP_NAMES, STEP_FILE_PATTERNS, ENGINE_CONFIG, get_workstation_config, is_server_mode,
 )
 from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
 
 
 def _is_private_ip(host: str) -> bool:
@@ -54,6 +56,69 @@ def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int
         return []
     flag_file = f"{flag_dir}/{stem}_{config_name}.txt"
     return [flag_file, f"{flag_file}.error"]
+
+
+def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -> list[str]:
+    """Return per-config postprocess result and runtime files to delete."""
+    flag_dir = str(config.get("flag_dir", "")).replace("\\", "/").rstrip("/")
+    engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
+    config_postprocess_animation_dir = config.get("postprocess_animation_dir")
+    if (
+        config_postprocess_animation_dir
+        and config_postprocess_animation_dir != engine_animation_dir
+    ):
+        animation_source = config_postprocess_animation_dir
+    elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir", ""):
+        animation_source = config.get("animation_dir", "")
+    else:
+        animation_source = config.get("animation_dir", "") or engine_animation_dir
+    animation_dir = str(animation_source).replace("\\", "/").rstrip("/")
+    metrics_dir = str(
+        config.get("postprocess_metrics_dir")
+        or ENGINE_CONFIG.get("postprocess_metrics_dir")
+        or config.get("postprocess_output_dir")
+        or ENGINE_CONFIG.get("postprocess_output_dir")
+        or config.get("result_dir", "")
+    ).replace("\\", "/").rstrip("/")
+    paths: list[str] = []
+    if flag_dir:
+        paths.extend([
+            f"{flag_dir}/postprocess_done_{config_name}.txt",
+            f"{flag_dir}/postprocess_done_{config_name}.txt.error",
+        ])
+    if metrics_dir:
+        paths.extend([
+            f"{metrics_dir}/model_gen4_{config_name}.csv",
+            f"{metrics_dir}/metrics_summary.csv",
+        ])
+    if animation_dir:
+        paths.extend([
+            f"{animation_dir}/t_gen4_{config_name}.mp4",
+            f"{animation_dir}/v_gen4_{config_name}.mp4",
+        ])
+    if flag_dir:
+        paths.extend([
+            f"{flag_dir}/autofluid_bg_postprocess_{config_name}.cmd",
+            f"{flag_dir}/autofluid_bg_postprocess_{config_name}.log",
+            f"{flag_dir}/autofluid_bg_postprocess_{config_name}.pid",
+        ])
+    return paths
+
+
+def _postprocess_metrics_config_dir(
+    config: Mapping[str, object],
+    config_name: int,
+) -> str | None:
+    metrics_dir = str(
+        config.get("postprocess_metrics_dir")
+        or ENGINE_CONFIG.get("postprocess_metrics_dir")
+        or config.get("postprocess_output_dir")
+        or ENGINE_CONFIG.get("postprocess_output_dir")
+        or config.get("result_dir", "")
+    ).replace("\\", "/").rstrip("/")
+    if not metrics_dir:
+        return None
+    return f"{metrics_dir}/model_gen4_{config_name}"
 
 
 class FileCleaner:
@@ -378,10 +443,17 @@ class FileCleaner:
 
     def _clean_remote_single_step(self, step_name: str, config_name: int | None = None) -> None:
         """清理单个步骤的远程文件。"""
-        remote_patterns = {
+        remote_patterns: dict[
+            str,
+            tuple[
+                str | None,
+                list[str],
+                CallableABC[[int, Mapping[str, object]], list[str]] | None,
+            ] | None,
+        ] = {
             "sw":       None,
             "sc":       None,
-            "transfer": ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]]),
+            "transfer": ("scdoc_dir",  [STEP_FILE_PATTERNS["sc"]], None),
             "meshing":  (
                 "msh_dir",
                 [STEP_FILE_PATTERNS["meshing"]],
@@ -393,9 +465,9 @@ class FileCleaner:
                 lambda cn, cfg: _remote_flag_paths(cfg, "solver_done", cn),
             ),
             "postprocess": (
-                "flag_dir",
-                [STEP_FILE_PATTERNS["postprocess"]],
-                lambda cn, cfg: _remote_flag_paths(cfg, "postprocess_done", cn),
+                None,
+                [],
+                lambda cn, cfg: _postprocess_cleanup_paths(cfg, cn),
             ),
         }
         configs = [config_name] if config_name is not None else self.state.get_all_configs()
@@ -419,8 +491,8 @@ class FileCleaner:
                             failed_count += len(file_templates)
                             continue
                         remote_config = self._remote_config_for_workstation(workstation_id)
-                        target_dir = str(remote_config.get(dir_key, ""))
-                        remote_dir = target_dir.replace("\\", "/")
+                        target_dir = str(remote_config.get(dir_key, "")) if dir_key else ""
+                        remote_dir = target_dir.replace("\\", "/").rstrip("/")
                         remote_paths = []
                         for file_template in file_templates:
                             filename = str(file_template).format(config=cn)
@@ -431,7 +503,8 @@ class FileCleaner:
                                 for path in extra_paths_factory(cn, remote_config)
                                 if path
                             )
-                        for remote_path in remote_paths:
+                        deduped_remote_paths = list(dict.fromkeys(remote_paths))
+                        for remote_path in deduped_remote_paths:
                             if ssh.delete_remote_file(remote_path):
                                 processed_count += 1
                                 logger.info(
@@ -440,6 +513,16 @@ class FileCleaner:
                                 )
                             else:
                                 failed_count += 1
+                        if step_name == "postprocess":
+                            metrics_config_dir = _postprocess_metrics_config_dir(
+                                remote_config,
+                                int(cn),
+                            )
+                            clear_remote_directory = getattr(ssh, "clear_remote_directory", None)
+                            if metrics_config_dir and callable(clear_remote_directory):
+                                _, clear_failed_count = clear_remote_directory(metrics_config_dir)
+                                if clear_failed_count:
+                                    failed_count += clear_failed_count
                     logger.info(
                         f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
                         f"已处理 {processed_count} 个，失败 {failed_count} 个"
