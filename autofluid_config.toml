@@ -54,7 +54,7 @@ meshing_processor_count = 8
 [solver]
 solver_timeout = 10800
 solver_processor_count = 128
-solver_iteration_count = 25
+solver_iteration_count = 1000
 
 [postprocess]
 postprocess_timeout = 3600

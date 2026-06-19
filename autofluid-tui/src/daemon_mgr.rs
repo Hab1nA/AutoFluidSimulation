@@ -1,5 +1,6 @@
 use std::fs;
 use std::fs::File;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -572,8 +573,52 @@ impl DaemonManager {
         send_server_start_stage(progress, "正在检查服务器 IPC 隧道...");
         Self::run_server_ipc_tunnel_script(project_dir)?;
         log::info!("服务器 IPC 隧道阶段完成，准备启动远端 daemon");
+        Self::sync_server_config(project_dir, progress)?;
         send_server_start_stage(progress, "服务器 IPC 隧道已就绪，正在启动远端 daemon...");
         Self::run_server_daemon_command(ServerDaemonAction::Start, progress)
+    }
+
+    fn sync_server_config(
+        project_dir: &str,
+        progress: Option<&mpsc::Sender<ServerStartEvent>>,
+    ) -> Result<(), String> {
+        let local_config = PathBuf::from(project_dir).join("autofluid_config.toml");
+        if !local_config.exists() {
+            log::warn!(
+                "本地配置文件不存在，跳过服务器配置同步: {}",
+                local_config.display()
+            );
+            return Ok(());
+        }
+
+        let config_bytes = fs::read(&local_config).map_err(|e| {
+            format!(
+                "读取本地配置文件失败: {}, error={}",
+                local_config.display(),
+                e
+            )
+        })?;
+        let command = ServerDaemonSshCommand::from_env(ServerDaemonAction::Start)?;
+        let remote_project_dir = default_server_project_dir();
+        let remote_command = format!(
+            "tmp=$(mktemp {remote_project_dir}/.autofluid_config.toml.XXXXXX) && \
+             cat > \"$tmp\" && mv \"$tmp\" {remote_project_dir}/autofluid_config.toml"
+        );
+
+        send_server_start_stage(progress, "正在同步本地配置到服务器...");
+        run_server_config_sync_command(
+            &command.ssh_exe,
+            &command.target,
+            &remote_command,
+            &config_bytes,
+        )?;
+        log::info!(
+            "已同步本地配置到服务器: {} -> {}/autofluid_config.toml",
+            local_config.display(),
+            remote_project_dir
+        );
+        send_server_start_stage(progress, "本地配置已同步到服务器");
+        Ok(())
     }
 
     fn stop_server_daemon(&mut self) -> Result<(), String> {
@@ -761,6 +806,75 @@ fn run_tunnel_script_command_with_timeout(
     let stdout = read_and_remove_temp_output(&stdout_path);
     let stderr = read_and_remove_temp_output(&stderr_path);
     Ok((status, stdout, stderr))
+}
+
+fn run_server_config_sync_command(
+    ssh_exe: &str,
+    target: &str,
+    remote_command: &str,
+    config_bytes: &[u8],
+) -> Result<(), String> {
+    let mut command = Command::new(ssh_exe);
+    command
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            target,
+            remote_command,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动配置同步命令失败: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(config_bytes) {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(format!("写入服务器配置同步数据失败: {}", e));
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("读取配置同步命令输出失败: {}", e))?;
+                if output.status.success() {
+                    return Ok(());
+                }
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                return if detail.is_empty() {
+                    Err(format!("配置同步命令退出状态: {}", output.status))
+                } else {
+                    Err(format!(
+                        "配置同步命令退出状态: {}, {}",
+                        output.status, detail
+                    ))
+                };
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err("配置同步命令执行超时 (30s)".to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!("检查配置同步命令状态失败: {}", e));
+            }
+        }
+    }
 }
 
 fn read_and_remove_temp_output(path: &std::path::Path) -> String {
@@ -1253,6 +1367,46 @@ mod tests {
     }
 
     #[test]
+    fn launch_syncs_local_config_before_server_daemon_start() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        let config_text = "[solver]\nsolver_iteration_count = 1000\n";
+        fs::write(project_dir.join("autofluid_config.toml"), config_text)
+            .expect("write local config");
+        let marker = project_dir.join("launch-config-order.log");
+        let captured_config = project_dir.join("captured-autofluid-config.toml");
+        let powershell_exe = fake_marker_exe(&project_dir, "fake_pwsh", &marker, "tunnel");
+        let ssh_exe = fake_config_sync_ssh_exe(&project_dir, &marker, &captured_config);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_START_CMD", "exit 0");
+        let mut daemon = DaemonManager::new();
+
+        let result = daemon.launch(project_dir.to_str().expect("utf8 temp path"));
+
+        assert_eq!(result, Ok(0));
+        let order = fs::read_to_string(&marker).expect("read marker file");
+        let lines: Vec<&str> = order.lines().collect();
+        assert_eq!(lines, vec!["tunnel", "sync", "daemon"]);
+        assert_eq!(
+            normalize_line_endings(
+                &fs::read_to_string(&captured_config).expect("read captured config")
+            ),
+            normalize_line_endings(config_text)
+        );
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn restart_stops_remote_daemon_over_ipc_then_starts_server_daemon() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -1689,5 +1843,64 @@ mod tests {
             fs::set_permissions(&path, permissions).expect("chmod fake marker");
             path
         }
+    }
+
+    fn fake_config_sync_ssh_exe(
+        project_dir: &std::path::Path,
+        marker: &std::path::Path,
+        captured_config: &std::path::Path,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_config_sync_ssh.cmd");
+            fs::write(
+                &path,
+                format!(
+                    "@echo off\r\n\
+                     if not exist \"{}\" (\r\n\
+                     echo sync>>\"{}\"\r\n\
+                     more > \"{}\"\r\n\
+                     exit /b 0\r\n\
+                     )\r\n\
+                     echo daemon>>\"{}\"\r\n\
+                     exit /b 0\r\n",
+                    captured_config.display(),
+                    marker.display(),
+                    captured_config.display(),
+                    marker.display()
+                ),
+            )
+            .expect("write fake config sync ssh cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_config_sync_ssh.sh");
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n\
+                     case \"$*\" in\n\
+                     *autofluid_config.toml*) echo sync >> '{}'; cat > '{}'; exit 0 ;;\n\
+                     *) echo daemon >> '{}'; exit 0 ;;\n\
+                     esac\n",
+                    marker.display(),
+                    captured_config.display(),
+                    marker.display()
+                ),
+            )
+            .expect("write fake config sync ssh shell");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake config sync metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake config sync ssh");
+            path
+        }
+    }
+
+    fn normalize_line_endings(value: &str) -> String {
+        value.replace("\r\n", "\n").trim_end().to_string()
     }
 }
