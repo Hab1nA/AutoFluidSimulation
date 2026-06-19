@@ -118,8 +118,10 @@ def test_compute_metrics_from_export_tables(tmp_path: Path) -> None:
         ambient_pressure=100_000.0,
         tcomb=1000.0,
         chamber_x_max=0.0,
+        config_id=7,
     )
 
+    assert metrics["config_id"] == 7
     assert metrics["mdot_total"] == 3.0
     assert metrics["mass_imbalance"] == 0.0
     assert metrics["F_momentum"] == 1000.0
@@ -183,6 +185,8 @@ def test_cli_writes_metrics_summary(tmp_path: Path, monkeypatch) -> None:
             "100000",
             "--chamber-x-max",
             "0.0",
+            "--config-id",
+            "3",
         ],
     )
 
@@ -190,6 +194,8 @@ def test_cli_writes_metrics_summary(tmp_path: Path, monkeypatch) -> None:
 
     rows = _read_rows(output)
     assert len(rows) == 1
+    assert rows[0]["config_id"] == "3"
+    assert "config_name" not in rows[0]
     assert "eta_c" not in rows[0]
     assert float(rows[0]["cstar_efficiency"]) == 1.0
 
@@ -355,6 +361,52 @@ def test_length_report_parser_converts_mm_to_m(tmp_path: Path, monkeypatch) -> N
         module._parse_report_file(report) * module.LENGTH_TO_M[module._parse_report_unit(report)],
         -0.017418265,
     )
+
+
+def test_default_config_name_strips_fluent_case_suffix(monkeypatch) -> None:
+    module = _load_postprocess_module(monkeypatch)
+
+    assert module._default_config_name(Path("model_gen4_12.cas.h5")) == "model_gen4_12"
+    assert module._default_config_name(Path("model_gen4_12.dat.h5")) == "model_gen4_12"
+    assert module._default_config_name(Path("custom.case")) == "custom"
+
+
+def test_config_named_metrics_csv_is_single_row(tmp_path: Path) -> None:
+    module = _load_module()
+    output = tmp_path / "model_gen4_8.csv"
+    metrics = {
+        "config_id": 8,
+        "mdot_oxidizer": 2.6,
+        "mdot_fuel": 1.2,
+        "mdot_total": 3.8,
+        "mdot_outlet": 3.7,
+        "mass_imbalance": 0.02,
+        "chamber_pressure_abs": 1_900_000.0,
+        "throat_area": 0.0034,
+        "cstar_actual": 1730.0,
+        "cstar_reference": 1830.4,
+        "cstar_efficiency": 0.94,
+        "F_momentum": 10_000.0,
+        "F_pressure": 900.0,
+        "F_total": 10_900.0,
+        "Isp": 290.0,
+        "Qdot_actual": 22_000_000.0,
+        "Qdot_theoretical": 61_000_000.0,
+        "phi_mean": 0.7,
+        "phi_std": 0.85,
+        "hot_volume": 0.0027,
+        "wall_area": 0.16,
+        "Twall_total": 2871.0,
+        "Tmax_sidewall": 4369.0,
+    }
+
+    module._write_metrics(output, metrics)
+
+    rows = _read_rows(output)
+    assert len(rows) == 1
+    assert output.name == "model_gen4_8.csv"
+    assert list(rows[0]) == list(metrics)
+    assert rows[0]["config_id"] == "8"
 
 
 def test_parse_expression_values_collects_multiple_tables(tmp_path: Path, monkeypatch) -> None:

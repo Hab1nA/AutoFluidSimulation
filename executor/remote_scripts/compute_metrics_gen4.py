@@ -48,20 +48,6 @@ def _sum(values: Iterable[float]) -> float:
     return math.fsum(values)
 
 
-def _percentile(sorted_values: list[float], fraction: float) -> float:
-    if not sorted_values:
-        return math.nan
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    index = (len(sorted_values) - 1) * fraction
-    lower = math.floor(index)
-    upper = math.ceil(index)
-    if lower == upper:
-        return sorted_values[lower]
-    weight = index - lower
-    return sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight
-
-
 def _compute_exit_forces(
     rows: list[dict[str, str]],
     ambient_pressure: float,
@@ -143,7 +129,6 @@ def _compute_wall_metrics(rows: list[dict[str, str]]) -> dict[str, float]:
         "wall_area": total_area,
         "Twall_total": _sum(weighted_terms) / total_area if total_area > 0 else math.nan,
         "Tmax_sidewall": max(all_temperatures) if all_temperatures else math.nan,
-        "T_p995_wall": _percentile(all_temperatures, 0.995),
     }
 
 
@@ -156,7 +141,8 @@ def compute_metrics(
     ambient_pressure: float,
     tcomb: float,
     chamber_x_max: float | None = None,
-) -> dict[str, float]:
+    config_id: int | None = None,
+) -> dict[str, int | float]:
     reports = _read_report_values(reports_path)
 
     mdot_oxidizer = abs(reports["mdot_oxidizer"])
@@ -182,7 +168,6 @@ def compute_metrics(
             "wall_area": reports["wall_area"],
             "Twall_total": reports["Twall_total"],
             "Tmax_sidewall": reports["Tmax_sidewall"],
-            "T_p995_wall": reports.get("T_p995_wall", math.nan),
         }
     else:
         if wall_faces_path is None:
@@ -202,32 +187,35 @@ def compute_metrics(
         else math.nan
     )
 
-    metrics = {
+    metrics: dict[str, str | int | float] = {}
+    if config_id is not None:
+        metrics["config_id"] = config_id
+    metrics.update({
         "mdot_oxidizer": mdot_oxidizer,
         "mdot_fuel": mdot_fuel,
         "mdot_total": mdot_total,
         "mdot_outlet": mdot_outlet,
         "mass_imbalance": abs(mdot_total - mdot_outlet) / mdot_total if mdot_total > 0 else math.nan,
+        "chamber_pressure_abs": chamber_pressure_abs,
+        "throat_area": throat_area,
+        "cstar_actual": cstar_actual,
+        "cstar_reference": cstar_reference,
+        "cstar_efficiency": cstar_actual / cstar_reference if cstar_reference > 0 else math.nan,
         "F_momentum": f_momentum,
         "F_pressure": f_pressure,
         "F_total": f_total,
         "Isp": f_total / (mdot_total * G0) if mdot_total > 0 else math.nan,
         "Qdot_actual": qdot_actual,
         "Qdot_theoretical": qdot_theoretical,
-        "chamber_pressure_abs": chamber_pressure_abs,
-        "throat_area": throat_area,
-        "cstar_actual": cstar_actual,
-        "cstar_reference": cstar_reference,
-        "cstar_efficiency": cstar_actual / cstar_reference if cstar_reference > 0 else math.nan,
         "phi_mean": phi_mean,
         "phi_std": phi_std,
         "hot_volume": hot_volume,
-    }
+    })
     metrics.update(wall_metrics)
     return metrics
 
 
-def _write_metrics(path: Path, metrics: dict[str, float]) -> None:
+def _write_metrics(path: Path, metrics: dict[str, int | float]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(metrics))
@@ -249,6 +237,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--ambient-pressure", type=float, default=0.0)
     parser.add_argument("--tcomb", type=float, default=DEFAULT_TCOMB)
+    parser.add_argument("--config-id", type=int, default=None)
     parser.add_argument(
         "--chamber-x-max",
         type=float,
@@ -268,6 +257,7 @@ def main() -> None:
         ambient_pressure=args.ambient_pressure,
         tcomb=args.tcomb,
         chamber_x_max=args.chamber_x_max,
+        config_id=args.config_id,
     )
     _write_metrics(args.output, metrics)
 

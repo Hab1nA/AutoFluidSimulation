@@ -9,7 +9,7 @@
 | 已验证数据 | `D:\xkz_1020\case\model_gen4_1.cas.h5` 与 `model_gen4_1.dat.h5`，1000 代接近稳定结果 |
 | 自动化文件 | `executor/remote_scripts/postprocess_metrics_gen4.py`、`compute_metrics_gen4.py` |
 | 程序接入口 | `batch_solver_gen4.py` 求解后自动调用；`batch_postprocess_gen4.py` 独立后处理路径也可调用 |
-| 输出目标 | `Isp`、`cstar_efficiency`、`phi_mean/phi_std`、`Twall_total`、`Tmax_sidewall`，并保留质量守恒、热释放等 QC 字段 |
+| 输出目标 | 以构型名命名的单行 CSV，包含构型信息、必要仿真结果数据和研究指标数据 |
 
 ## 1. 方案结论
 
@@ -18,7 +18,7 @@
 1. PyFluent 启动 Fluent 2024 R1 solver，并读取 `case/data`。
 2. Fluent 内部完成 surface integral、volume integral、facet max/min、area-weighted average 和 Named Expression 求和。
 3. Fluent 只输出小型标量表 `metrics_reports.csv`。
-4. Python 脚本 `compute_metrics_gen4.py` 读取标量表，组合得到五项研究指标和质量控制量。
+4. Python 脚本 `compute_metrics_gen4.py` 读取标量表，组合得到构型信息、必要仿真结果数据和研究指标数据。
 5. 大规模 CSV 导出只作为诊断回退，不是最终指标计算的默认路径。
 
 关键边界约定：
@@ -50,22 +50,53 @@
 
 | 文件/目录 | 内容 |
 | --- | --- |
+| `<config_name>.csv` | 面向程序接入的最终单行 CSV，文件名即构型名称 |
+| `metrics_summary.csv` | 与 `<config_name>.csv` 内容相同的兼容别名，后续可逐步停用 |
 | `metrics_reports.csv` | Fluent 直接输出的标量报告值 |
-| `metrics_summary.csv` | Python 计算后的最终指标与质量控制量 |
 | `fluent_reports/` | 每个 Fluent report 的原始文本，便于追溯单位和 Net 值 |
 | `run/` | Fluent transcript 和运行目录 |
 
-程序主流程中，求解后指标默认输出到：
+程序主流程中，求解后最终 CSV 默认输出到：
 
 ```text
-<result_dir>\metrics\model_gen4_<config_id>\metrics_summary.csv
+<result_dir>\metrics\model_gen4_<config_id>\model_gen4_<config_id>.csv
 ```
 
 当前配置下即：
 
 ```text
-D:\xkz_1020\case\metrics\model_gen4_<config_id>\metrics_summary.csv
+D:\xkz_1020\case\metrics\model_gen4_<config_id>\model_gen4_<config_id>.csv
 ```
+
+该 CSV 只有一行数据。主流水线会传入 `config_id` 写入 CSV；`config_name` 只用于决定输出文件名，不再作为 CSV 字段。当前标准字段顺序如下：
+
+| 顺序 | 字段 | 单位/类型 | 类别 | 含义 |
+| ---: | --- | --- | --- | --- |
+| 1 | `config_id` | integer | 构型信息 | 构型编号，例如 `1` |
+| 2 | `mdot_oxidizer` | kg/s | 必要仿真结果 | 氧化剂入口质量流量绝对值 |
+| 3 | `mdot_fuel` | kg/s | 必要仿真结果 | 燃料入口质量流量绝对值 |
+| 4 | `mdot_total` | kg/s | 必要仿真结果 | 推进剂总质量流量，`mdot_oxidizer + mdot_fuel` |
+| 5 | `mdot_outlet` | kg/s | QC/追溯 | 出口质量流量绝对值，用于质量守恒检查 |
+| 6 | `mass_imbalance` | dimensionless | QC/追溯 | 质量不平衡比例，`abs(mdot_total - mdot_outlet) / mdot_total` |
+| 7 | `chamber_pressure_abs` | Pa | 必要仿真结果 | 燃烧室体域平均绝压，由 `chamber_abs_pressure_sum / chamber_volume` 得到 |
+| 8 | `throat_area` | m^2 | QC/几何追溯 | 喉部面积，`outlet_area / exit_to_throat_area_ratio` |
+| 9 | `cstar_actual` | m/s | 研究指标中间量 | 实际特征速度，`chamber_pressure_abs * throat_area / mdot_total` |
+| 10 | `cstar_reference` | m/s | 研究指标参数 | CEA 或试验基准特征速度，当前默认 `1830.4` |
+| 11 | `cstar_efficiency` | dimensionless | 研究指标 | 特征速度燃烧效率，`cstar_actual / cstar_reference` |
+| 12 | `F_momentum` | N | 必要仿真结果 | 出口动量推力，`abs(mdot_outlet) * abs(u_axis_out)` |
+| 13 | `F_pressure` | N | 必要仿真结果 | 出口压力推力，对 `pressure + pressure_reference - ambient_pressure` 做面积分 |
+| 14 | `F_total` | N | 必要仿真结果/研究指标输入 | 总推力，`F_momentum + F_pressure` |
+| 15 | `Isp` | s | 研究指标 | 比冲，`F_total / (mdot_total * 9.80665)` |
+| 16 | `Qdot_actual` | W | QC/热释放诊断 | Fluent 对反应流体域 `heat-release-rate` 的体积分 |
+| 17 | `Qdot_theoretical` | W | QC/热释放诊断 | 甲烷低热值理论热输入，`mdot_fuel * 50,000,000` |
+| 18 | `phi_mean` | dimensionless | 研究指标 | 燃烧室高温区体积加权等效混合比均值 |
+| 19 | `phi_std` | dimensionless | 研究指标 | 燃烧室高温区体积加权等效混合比标准差 |
+| 20 | `hot_volume` | m^3 | QC/混合比追溯 | 参与 `phi_mean/phi_std` 统计的燃烧室高温区体积 |
+| 21 | `wall_area` | m^2 | QC/壁温追溯 | 侧壁面总面积，统计 `wall_chamber + wall_nozzle + wall_throat` |
+| 22 | `Twall_total` | K | 研究指标 | 侧壁面积加权平均温度 |
+| 23 | `Tmax_sidewall` | K | 研究指标 | 侧壁最大温度 |
+
+若手动调用 `compute_metrics_gen4.py` 时不传 `--config-id`，`config_id` 字段会省略；主流水线和独立后处理路径都会传入该字段。
 
 ## 4. 研究指标计算步骤
 
@@ -233,7 +264,9 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
   --tcomb 1000 ^
   --thrust-axis x ^
   --exit-to-throat-area-ratio 7.427276607 ^
-  --cstar-reference 1830.4
+  --cstar-reference 1830.4 ^
+  --config-name model_gen4_1 ^
+  --config-id 1
 ```
 
 程序接入状态：
@@ -241,7 +274,7 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
 - `REMOTE_SCRIPT_FILES` 已包含 `postprocess_metrics_gen4.py`、`compute_metrics_gen4.py`，会随远程脚本部署上传到 `scripts_dir`。
 - 主流水线的 `batch_solver_gen4.py` 在求解、保存 case/data、执行原有后处理 journal、关闭 Fluent 会话后，调用 `postprocess_metrics_gen4.py` 生成指标；随后才写 `postprocess_done` flag。
 - 独立后处理路径 `batch_postprocess_gen4.py` 也支持同样的 `--metrics-script` 参数，可用于只对已有 case/data 补算指标。
-- 主流水线和独立后处理路径都会传入默认 `--metrics-exit-to-throat-area-ratio 7.427276607` 与 `--metrics-cstar-reference 1830.4`，因此新指标可直接进入后续程序化后处理。
+- 主流水线和独立后处理路径都会传入默认 `--metrics-exit-to-throat-area-ratio 7.427276607`、`--metrics-cstar-reference 1830.4`、`--config-name model_gen4_<id>` 与 `--config-id <id>`；其中 `--config-name` 只控制最终 CSV 文件名，CSV 数据内以 `config_id` 作为构型标识，可直接进入后续程序化后处理。
 - 指标 Fluent 默认使用 1 核启动，避免对主求解资源造成明显影响；如需要可通过 `--metrics-processor-count` 调整。
 
 ## 6. 真实算例后处理结果
@@ -272,7 +305,7 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
 | 出口质量加权 `x` 速度 | `2679.0292 m/s` |
 | 出口面积平均 Mach | `3.0388148` |
 
-`metrics_summary.csv` 中关键指标：
+`model_gen4_1.csv` 中关键字段：
 
 | 指标 | 数值 |
 | --- | ---: |
@@ -317,6 +350,6 @@ C:\ProgramData\anaconda3\Scripts\conda.exe run --no-capture-output -n pyfluent p
 
 ## 8. 后续建议
 
-1. 在训练标签汇总脚本中扫描 `result_dir/metrics/model_gen4_<id>/metrics_summary.csv`，并保留 `mass_imbalance`、`hot_volume`、`chamber_x_max`、`Tmax_sidewall` 等 QC 字段。
+1. 在训练标签汇总脚本中扫描 `result_dir/metrics/model_gen4_<id>/model_gen4_<id>.csv`，并保留 `mass_imbalance`、`hot_volume`、`chamber_x_max`、`Tmax_sidewall` 等 QC 字段。
 2. 在配置文件中显式加入后处理参数时，优先暴露 `metrics_thrust_axis`、`metrics_tcomb`、`metrics_pressure_reference`、`metrics_exit_to_throat_area_ratio`、`metrics_cstar_reference`。
 3. 长期在几何/网格流程中增加显式燃烧室体区域或稳定截断面，替代通过 `wall_throat` 坐标推断燃烧室。

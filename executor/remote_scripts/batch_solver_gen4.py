@@ -254,6 +254,10 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         str(args.metrics_exit_to_throat_area_ratio),
         "--cstar-reference",
         str(args.metrics_cstar_reference),
+        "--config-name",
+        f"model_gen4_{config_id}",
+        "--config-id",
+        str(config_id),
     ]
     print(f"[{config_id}] 正在计算五项指标: {metrics_output_dir}")
     subprocess.run(command, check=True)

@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thrust-axis", choices=("x", "y", "z"), default="x")
     parser.add_argument("--exit-to-throat-area-ratio", type=float, default=DEFAULT_EXIT_TO_THROAT_AREA_RATIO)
     parser.add_argument("--cstar-reference", type=float, default=DEFAULT_CSTAR_REFERENCE)
+    parser.add_argument("--config-name", type=str, default=None)
+    parser.add_argument("--config-id", type=int, default=None)
     return parser.parse_args()
 
 
@@ -138,6 +140,14 @@ def _find_latest_transcript(run_dir: Path) -> Path:
     if not transcripts:
         raise FileNotFoundError(f"no Fluent transcript found in {run_dir}")
     return transcripts[-1]
+
+
+def _default_config_name(case_data: Path) -> str:
+    name = case_data.name
+    for suffix in (".cas.h5", ".dat.h5", ".cas", ".dat"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return case_data.stem
 
 
 def _infer_chamber_x_max(solver: Any, reports_dir: Path) -> float:
@@ -325,6 +335,7 @@ def main() -> None:
         solver.exit()
 
     compute_module = _load_compute_module(args.compute_script)
+    config_name = args.config_name or _default_config_name(args.case_data)
     metrics = compute_module.compute_metrics(
         reports_path=output_dir / "metrics_reports.csv",
         exit_surface_path=None,
@@ -333,7 +344,9 @@ def main() -> None:
         ambient_pressure=args.ambient_pressure,
         tcomb=args.tcomb,
         chamber_x_max=None,
+        config_id=args.config_id,
     )
+    compute_module._write_metrics(output_dir / f"{config_name}.csv", metrics)
     compute_module._write_metrics(output_dir / "metrics_summary.csv", metrics)
 
 
