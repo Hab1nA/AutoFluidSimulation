@@ -22,7 +22,7 @@ pub struct RemoteConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    #[serde(skip_serializing, default)]
+    #[serde(skip, default)]
     pub password: String,
     pub working_dir: String,
     pub scripts_dir: String,
@@ -48,7 +48,7 @@ pub struct WorkstationConfig {
     pub auth_method: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key_filename: String,
-    #[serde(skip_serializing, default)]
+    #[serde(skip, default)]
     pub password: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reachable_host: String,
@@ -669,10 +669,7 @@ impl SettingsState {
     pub fn new() -> Self {
         let mut config = config_io::load_config().unwrap_or_default();
         // 密码始终从 .env 文件读取（TOML 中不存储密码）
-        let env_pwd = config_io::read_env_password();
-        if !env_pwd.is_empty() {
-            config.remote_config.password = env_pwd;
-        }
+        config_io::apply_env_passwords(&mut config);
         Self {
             config,
             focus: SettingsFocus::default(),
@@ -1333,8 +1330,14 @@ impl SettingsState {
                 severity: crate::settings::validation::Severity::Error,
             }]
         })?;
-        // Write password to .env (always write to allow clearing)
-        let _ = config_io::write_env_password(&self.config.remote_config.password);
+        // Write passwords to .env (always write to allow clearing).
+        config_io::write_env_passwords(&self.config).map_err(|e| {
+            vec![ValidationError {
+                field_name: ".env".to_string(),
+                message: e,
+                severity: crate::settings::validation::Severity::Error,
+            }]
+        })?;
         Ok(())
     }
 
@@ -1360,6 +1363,19 @@ impl SettingsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_project_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "autofluid-tui-settings-{}",
+            crate::generate_request_id()
+        ))
+    }
 
     #[test]
     fn settings_config_round_trips_three_workstations() {
@@ -1368,6 +1384,7 @@ mod tests {
 host = "172.17.135.240"
 port = 22
 username = "ps"
+password = "toml-remote-secret"
 working_dir = 'D:\xkz_1020\workingdir'
 scripts_dir = 'D:\xkz_1020\scripts'
 ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
@@ -1384,6 +1401,7 @@ id = "WS-A"
 host = "172.17.135.240"
 port = 22
 username = "ps"
+password = "toml-secret"
 reachable_host = "127.0.0.1"
 reachable_port = 2222
 connectivity_mode = "reverse_tunnel"
@@ -1438,8 +1456,10 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
 
         let config: SettingsConfig = toml::from_str(toml_text).expect("parse workstations");
 
+        assert_eq!(config.remote_config.password, "");
         assert_eq!(config.workstations.len(), 3);
         assert_eq!(config.workstations[0].id, "WS-A");
+        assert_eq!(config.workstations[0].password, "");
         assert_eq!(config.workstations[1].host, "172.17.135.89");
         assert_eq!(config.workstations[1].auth_method, "none");
         assert_eq!(
@@ -1497,6 +1517,163 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
             state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 3),
             r"D:\ws-b\scdoc"
         );
+    }
+
+    #[test]
+    fn settings_page_round_trips_three_workstation_passwords_through_env_only() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        let sw_model = project_dir.join("model.SLDPRT");
+        let excel = project_dir.join("params.xlsx");
+        std::fs::write(&sw_model, "").expect("write model placeholder");
+        std::fs::write(&excel, "").expect("write excel placeholder");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            r#"
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "toml-a-ignored"
+working_dir = 'D:\work-a'
+scripts_dir = 'D:\scripts-a'
+ref_files_dir = 'D:\refs-a'
+scdoc_dir = 'D:\scdoc-a'
+msh_dir = 'D:\msh-a'
+result_dir = 'D:\case-a'
+flag_dir = 'D:\flags-a'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+password = "toml-b-ignored"
+working_dir = 'D:\work-b'
+scripts_dir = 'D:\scripts-b'
+ref_files_dir = 'D:\refs-b'
+scdoc_dir = 'D:\scdoc-b'
+msh_dir = 'D:\msh-b'
+result_dir = 'D:\case-b'
+flag_dir = 'D:\flags-b'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.254"
+port = 22
+username = "ps"
+password = "toml-c-ignored"
+working_dir = 'D:\work-c'
+scripts_dir = 'D:\scripts-c'
+ref_files_dir = 'D:\refs-c'
+scdoc_dir = 'D:\scdoc-c'
+msh_dir = 'D:\msh-c'
+result_dir = 'D:\case-c'
+flag_dir = 'D:\flags-c'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+"#,
+        )
+        .expect("write config");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_WS_A_SSH_PASSWORD=old-a\nAUTOFLUID_WS_B_SSH_PASSWORD=old-b\nAUTOFLUID_WS_C_SSH_PASSWORD=old-c\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut state = SettingsState::new();
+        state.config.local_paths.sw_model = sw_model.to_string_lossy().into_owned();
+        state.config.local_paths.excel = excel.to_string_lossy().into_owned();
+        assert_eq!(
+            state.get_workstation_field_value(0, SettingCategory::RemoteConnection, 3),
+            "old-a"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::RemoteConnection, 3),
+            "old-b"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(2, SettingCategory::RemoteConnection, 3),
+            "old-c"
+        );
+
+        for (workstation_index, password) in ["new-a", "new-b", "new-c"].iter().enumerate() {
+            state.set_focus(1, 3, Some(workstation_index));
+            state.begin_edit_current_field();
+            assert_eq!(
+                state.buffer.text,
+                format!("old-{}", (b'a' + workstation_index as u8) as char)
+            );
+            state.buffer = TextBuffer::with_text((*password).to_string());
+            state.commit_edit_current_field();
+        }
+        state.save().expect("save settings");
+
+        let env_contents = std::fs::read_to_string(project_dir.join(".env")).expect("read env");
+        assert!(env_contents.contains("AUTOFLUID_WS_A_SSH_PASSWORD=new-a\n"));
+        assert!(env_contents.contains("AUTOFLUID_WS_B_SSH_PASSWORD=new-b\n"));
+        assert!(env_contents.contains("AUTOFLUID_WS_C_SSH_PASSWORD=new-c\n"));
+
+        let toml_contents =
+            std::fs::read_to_string(project_dir.join("autofluid_config.toml")).expect("read toml");
+        assert!(!toml_contents.contains("old-a"));
+        assert!(!toml_contents.contains("old-b"));
+        assert!(!toml_contents.contains("old-c"));
+        assert!(!toml_contents.contains("new-a"));
+        assert!(!toml_contents.contains("new-b"));
+        assert!(!toml_contents.contains("new-c"));
+        assert!(!toml_contents.contains("toml-a-ignored"));
+        assert!(!toml_contents.contains("toml-b-ignored"));
+        assert!(!toml_contents.contains("toml-c-ignored"));
+
+        let reopened = SettingsState::new();
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+
+        assert_eq!(
+            reopened.get_workstation_field_value(0, SettingCategory::RemoteConnection, 3),
+            "new-a"
+        );
+        assert_eq!(
+            reopened.get_workstation_field_value(1, SettingCategory::RemoteConnection, 3),
+            "new-b"
+        );
+        assert_eq!(
+            reopened.get_workstation_field_value(2, SettingCategory::RemoteConnection, 3),
+            "new-c"
+        );
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn serializing_config_keeps_workstation_password_out_of_toml() {
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![WorkstationConfig {
+            id: "WS-A".to_string(),
+            host: "172.17.135.240".to_string(),
+            port: 22,
+            username: "ps".to_string(),
+            password: "secret".to_string(),
+            ..WorkstationConfig::default()
+        }];
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("password"));
     }
 
     #[test]

@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::SettingsConfig;
+use super::{SettingsConfig, WorkstationConfig};
 
 pub fn config_file_path() -> PathBuf {
     crate::utils::resolve_project_dir().join("autofluid_config.toml")
@@ -68,26 +69,124 @@ pub fn env_file_path() -> PathBuf {
     crate::utils::resolve_project_dir().join(".env")
 }
 
-pub fn read_env_password() -> String {
+fn read_env_values() -> HashMap<String, String> {
     let path = env_file_path();
     if !path.exists() {
-        return String::new();
+        return HashMap::new();
     }
     match fs::read_to_string(&path) {
-        Ok(contents) => {
-            for line in contents.lines() {
+        Ok(contents) => contents
+            .lines()
+            .filter_map(|line| {
                 let trimmed = line.trim();
-                if let Some(value) = trimmed.strip_prefix("AUTOFLUID_SSH_PASSWORD=") {
-                    return value.to_string();
+                let (key, value) = trimmed.split_once('=')?;
+                if key.is_empty() || key.starts_with('#') {
+                    return None;
                 }
-            }
-            String::new()
-        }
-        Err(_) => String::new(),
+                Some((key.to_string(), value.to_string()))
+            })
+            .collect(),
+        Err(_) => HashMap::new(),
     }
 }
 
-pub fn write_env_password(password: &str) -> Result<(), String> {
+fn workstation_env_token(workstation_id: &str) -> String {
+    let mut token = String::new();
+    let mut last_was_separator = false;
+    for ch in workstation_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch.to_ascii_uppercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !token.is_empty() {
+            token.push('_');
+            last_was_separator = true;
+        }
+    }
+    while token.ends_with('_') {
+        token.pop();
+    }
+    if token.is_empty() {
+        "DEFAULT".to_string()
+    } else {
+        token
+    }
+}
+
+fn workstation_password_env_key(workstation: &WorkstationConfig) -> String {
+    let token = workstation_env_token(&workstation.id);
+    format!("AUTOFLUID_{token}_SSH_PASSWORD")
+}
+
+fn legacy_workstation_password_env_key(workstation: &WorkstationConfig) -> String {
+    let token = workstation_env_token(&workstation.id);
+    format!("AUTOFLUID_{token}_PASSWORD")
+}
+
+pub fn apply_env_passwords(config: &mut SettingsConfig) {
+    let env_values = read_env_values();
+    if let Some(password) = env_values.get("AUTOFLUID_SSH_PASSWORD") {
+        config.remote_config.password = password.clone();
+    }
+    for workstation in &mut config.workstations {
+        let key = workstation_password_env_key(workstation);
+        if let Some(password) = env_values.get(&key) {
+            workstation.password = password.clone();
+            if password.trim().is_empty() && !workstation.auth_method.eq_ignore_ascii_case("key") {
+                workstation.auth_method = "none".to_string();
+            } else if !password.trim().is_empty() {
+                workstation.auth_method = "password".to_string();
+            }
+        }
+    }
+}
+
+fn remove_env_line(contents: &mut String, key: &str) {
+    let prefix = format!("{key}=");
+    let mut rebuilt = String::with_capacity(contents.len());
+
+    for segment in contents.split_inclusive('\n') {
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let candidate = line.trim_start();
+        if candidate.starts_with(&prefix) && !candidate.starts_with('#') {
+            continue;
+        }
+        rebuilt.push_str(segment);
+    }
+
+    *contents = rebuilt;
+}
+
+fn replace_or_append_env_line(contents: &mut String, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    let new_line = format!("{prefix}{value}");
+    let mut replaced = false;
+    let mut rebuilt = String::with_capacity(contents.len() + new_line.len() + 1);
+
+    for segment in contents.split_inclusive('\n') {
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let newline = &segment[line.len()..];
+        let candidate = line.trim_start();
+        if !replaced && candidate.starts_with(&prefix) && !candidate.starts_with('#') {
+            rebuilt.push_str(&new_line);
+            rebuilt.push_str(newline);
+            replaced = true;
+        } else {
+            rebuilt.push_str(segment);
+        }
+    }
+
+    if !replaced {
+        if !rebuilt.is_empty() && !rebuilt.ends_with('\n') {
+            rebuilt.push('\n');
+        }
+        rebuilt.push_str(&new_line);
+        rebuilt.push('\n');
+    }
+
+    *contents = rebuilt;
+}
+
+pub fn write_env_passwords(config: &SettingsConfig) -> Result<(), String> {
     let path = env_file_path();
     let mut contents = if path.exists() {
         fs::read_to_string(&path).unwrap_or_default()
@@ -95,35 +194,16 @@ pub fn write_env_password(password: &str) -> Result<(), String> {
         String::new()
     };
 
-    let key = "AUTOFLUID_SSH_PASSWORD=";
-    let new_line = format!("{}{}", key, password);
-
-    if let Some(line_start) = contents.find(key) {
-        // 处理 \r\n 和 \n 两种换行符
-        let after_key = &contents[line_start..];
-        let line_end = after_key
-            .find('\n')
-            .map(|i| line_start + i + 1) // 包含 \n
-            .unwrap_or(contents.len());
-        // 去掉尾部的 \r\n 或 \n
-        let trim_end = if line_end > line_start
-            && contents.as_bytes().get(line_end - 1) == Some(&b'\n')
-        {
-            if line_end > line_start + 1 && contents.as_bytes().get(line_end - 2) == Some(&b'\r') {
-                line_end - 2
-            } else {
-                line_end - 1
-            }
-        } else {
-            line_end
-        };
-        contents.replace_range(line_start..trim_end, &new_line);
-    } else {
-        if !contents.is_empty() && !contents.ends_with('\n') {
-            contents.push('\n');
-        }
-        contents.push_str(&new_line);
-        contents.push('\n');
+    replace_or_append_env_line(
+        &mut contents,
+        "AUTOFLUID_SSH_PASSWORD",
+        &config.remote_config.password,
+    );
+    for workstation in &config.workstations {
+        let legacy_key = legacy_workstation_password_env_key(workstation);
+        remove_env_line(&mut contents, &legacy_key);
+        let key = workstation_password_env_key(workstation);
+        replace_or_append_env_line(&mut contents, &key, &workstation.password);
     }
 
     let mut file = fs::File::create(&path).map_err(|e| format!("写入 .env 文件失败: {}", e))?;
@@ -147,6 +227,27 @@ mod tests {
             "autofluid-tui-config-{}",
             crate::generate_request_id()
         ))
+    }
+
+    #[test]
+    fn workstation_env_token_normalizes_edge_cases() {
+        let cases = [
+            ("", "DEFAULT"),
+            ("  ", "DEFAULT"),
+            ("___", "DEFAULT"),
+            ("WS-A", "WS_A"),
+            ("WS--A", "WS_A"),
+            ("-WS-A", "WS_A"),
+            ("WS_A_", "WS_A"),
+            ("my__ws", "MY_WS"),
+            ("WS 01", "WS_01"),
+            ("ws.a", "WS_A"),
+            ("alpha/beta", "ALPHA_BETA"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(workstation_env_token(input), expected);
+        }
     }
 
     #[test]
@@ -180,6 +281,160 @@ scdoc_dir = ''
         let config = config.expect("load config from project root");
 
         assert_eq!(config.local_paths.sw_exe, r"C:\AutoFluid\Test\SLDWORKS.exe");
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn write_env_passwords_persists_per_workstation_passwords() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_SERVER_MODE=server\nAUTOFLUID_SSH_PASSWORD=old\nAUTOFLUID_WS_A_PASSWORD=legacy-a\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut config = SettingsConfig::default();
+        config.remote_config.password = "legacy".to_string();
+        config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                password: "secret-a".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                password: String::new(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                password: String::new(),
+                ..Default::default()
+            },
+        ];
+
+        let result = write_env_passwords(&config);
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        result.expect("write passwords");
+
+        let contents = std::fs::read_to_string(project_dir.join(".env")).expect("read env");
+        assert!(contents.contains("AUTOFLUID_SERVER_MODE=server\n"));
+        assert!(contents.contains("AUTOFLUID_SSH_PASSWORD=legacy\n"));
+        assert!(contents.contains("AUTOFLUID_WS_A_SSH_PASSWORD=secret-a\n"));
+        assert!(contents.contains("AUTOFLUID_WS_B_SSH_PASSWORD=\n"));
+        assert!(contents.contains("AUTOFLUID_WS_C_SSH_PASSWORD=\n"));
+        assert!(!contents.contains("AUTOFLUID_WS_A_PASSWORD=legacy-a\n"));
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn write_env_passwords_ignores_commented_matching_keys() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join(".env"),
+            "#AUTOFLUID_WS_A_SSH_PASSWORD=old\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![crate::settings::WorkstationConfig {
+            id: "WS-A".to_string(),
+            password: "secret-a".to_string(),
+            ..Default::default()
+        }];
+
+        let result = write_env_passwords(&config);
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        result.expect("write passwords");
+
+        let contents = std::fs::read_to_string(project_dir.join(".env")).expect("read env");
+        assert!(contents.contains("#AUTOFLUID_WS_A_SSH_PASSWORD=old\n"));
+        assert!(contents.contains("AUTOFLUID_WS_A_SSH_PASSWORD=secret-a\n"));
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn apply_env_passwords_reads_blank_workstation_passwords() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_SSH_PASSWORD=legacy\nAUTOFLUID_WS_A_SSH_PASSWORD=secret-a\nAUTOFLUID_WS_B_SSH_PASSWORD=\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                password: "toml-a".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                password: "toml-b".to_string(),
+                auth_method: "password".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_env_passwords(&mut config);
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+
+        assert_eq!(config.remote_config.password, "legacy");
+        assert_eq!(config.workstations[0].password, "secret-a");
+        assert_eq!(config.workstations[1].password, "");
+        assert_eq!(config.workstations[1].auth_method, "none");
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn apply_env_passwords_ignores_legacy_workstation_password_key() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_WS_A_PASSWORD=secret-a\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![crate::settings::WorkstationConfig {
+            id: "WS-A".to_string(),
+            password: "toml-a".to_string(),
+            ..Default::default()
+        }];
+
+        apply_env_passwords(&mut config);
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+
+        assert_eq!(config.workstations[0].password, "toml-a");
 
         let _ = std::fs::remove_dir_all(project_dir);
     }

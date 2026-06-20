@@ -401,8 +401,15 @@ class FileCleaner:
             target_config_name = int(config_name)
 
         if step_name == "all":
+            failures: list[str] = []
             for s in STEP_NAMES:
-                self._clean_single_step(s, target_config_name)
+                try:
+                    self._clean_single_step(s, target_config_name)
+                except RuntimeError as exc:
+                    failures.append(str(exc))
+                    logger.warning("[Cleaner] 步骤 %s 清理未完全成功: %s", s, exc)
+            if failures:
+                raise RuntimeError("远程文件清理未完成: " + "; ".join(failures))
         else:
             self._clean_single_step(step_name, target_config_name)
 

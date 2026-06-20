@@ -671,4 +671,52 @@ mod tests {
         assert_eq!(host_hits[2].workstation_index, Some(2));
         assert_eq!((host_hits[2].x_start, host_hits[2].x_end), (60, 80));
     }
+
+    #[test]
+    fn workstation_passwords_are_masked_until_the_focused_field_is_edited() {
+        let mut state = state_with_three_workstations();
+        state.config.workstations[0].password = "secret-a".to_string();
+        state.config.workstations[1].password = "secret-b".to_string();
+        state.config.workstations[2].password = "secret-c".to_string();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            80,
+            &theme,
+        );
+        let password_line = raw_lines[4].to_string();
+
+        assert_eq!(password_line.matches("************").count(), 3);
+        assert!(!password_line.contains("secret-a"));
+        assert!(!password_line.contains("secret-b"));
+        assert!(!password_line.contains("secret-c"));
+
+        state.set_focus(1, 3, Some(1));
+        state.begin_edit_current_field();
+        raw_lines.clear();
+        field_positions.clear();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            80,
+            &theme,
+        );
+        let editing_password_line = raw_lines[4].to_string();
+
+        assert!(editing_password_line.contains("secret-b"));
+        assert!(!editing_password_line.contains("secret-a"));
+        assert!(!editing_password_line.contains("secret-c"));
+        assert_eq!(editing_password_line.matches("************").count(), 2);
+    }
 }

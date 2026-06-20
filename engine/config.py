@@ -250,7 +250,7 @@ REMOTE_CONFIG: RemoteConfig = {
     "host": os.environ.get("AUTOFLUID_SSH_HOST", _toml_or_default("remote_config", "host", "172.17.135.240")),
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", _toml_or_default("remote_config", "port", "22"))),
     "username": os.environ.get("AUTOFLUID_SSH_USER", _toml_or_default("remote_config", "username", "ps")),
-    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", _toml_or_default("remote_config", "password", "")),
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
     # 仿真工作目录
     "working_dir": _toml_or_default("remote_config", "working_dir", r"D:\xkz_1020\workingdir"),
     # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
@@ -575,6 +575,10 @@ def _apply_env_overrides():
     remote_env_overrides: dict[str, str | int] = {}
     for key, env_name in _env_remote_keys:
         env_val = os.environ.get(env_name)
+        if key == "password":
+            REMOTE_CONFIG[key] = env_val or ""
+            remote_env_overrides[key] = REMOTE_CONFIG[key]
+            continue
         if env_val:
             if key in {"port", "reachable_port"}:
                 REMOTE_CONFIG[key] = int(env_val)
@@ -702,14 +706,40 @@ def _apply_postprocess_defaults_to_workstation(workstation: WorkstationConfig) -
         str(ENGINE_CONFIG.get("postprocess_metrics_dir") or ""),
     )
 
+
+def _workstation_env_token(workstation_id: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", workstation_id).strip("_").upper()
+    return token or "DEFAULT"
+
+
+def _workstation_password_env_names(workstation_id: str) -> tuple[str, ...]:
+    token = _workstation_env_token(workstation_id)
+    return (f"AUTOFLUID_{token}_SSH_PASSWORD",)
+
+
+def _workstation_password_from_env(workstation_id: str) -> tuple[bool, str]:
+    for env_name in _workstation_password_env_names(workstation_id):
+        if env_name in os.environ:
+            return True, os.environ[env_name]
+    return False, ""
+
+
 def _normalize_workstation_config(raw: dict[str, Any], index: int) -> WorkstationConfig:
     """Merge a TOML workstation entry with legacy defaults."""
     merged: dict[str, Any] = dict(REMOTE_CONFIG)
     merged.update(raw)
     merged["id"] = str(merged.get("id") or f"WS-{index + 1}")
+    merged["password"] = ""
     auth_method = str(merged.get("auth_method") or "password").lower()
     merged["auth_method"] = auth_method
-    if auth_method in {"key", "none"} and "password" not in raw:
+    env_password_present, env_password = _workstation_password_from_env(merged["id"])
+    if env_password_present:
+        merged["password"] = env_password
+        if env_password.strip():
+            merged["auth_method"] = "password"
+        elif auth_method != "key":
+            merged["auth_method"] = "none"
+    if str(merged.get("auth_method") or "").lower() in {"key", "none"}:
         merged["password"] = ""
     for port_key in ("port", "reachable_port"):
         if port_key in merged:
@@ -722,16 +752,25 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
 def reload_config_from_toml() -> bool:
     """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。
 
-    TOML 中支持 ${VAR} 语法引用环境变量（如 ``password = "${AUTOFLUID_SSH_PASSWORD}"``）。
+    密码只从环境变量读取，不从 TOML 读取。
     """
     toml_data = load_toml_config()
     if toml_data:
-        # 展开 ${VAR} 环境变量引用（如 password = "${AUTOFLUID_SSH_PASSWORD}"）
+        # 展开非密码配置中的 ${VAR} 环境变量引用。
         toml_data = cast(dict[str, Any], _expand_config_value(toml_data))
         if "local_paths" in toml_data:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:
-            REMOTE_CONFIG.update(toml_data["remote_config"])
+            REMOTE_CONFIG.update(
+                cast(
+                    RemoteConfig,
+                    {
+                        key: value
+                        for key, value in toml_data["remote_config"].items()
+                        if key != "password"
+                    },
+                )
+            )
         if "ipc_config" in toml_data:
             ipc_updates = {
                 key: value
@@ -824,8 +863,7 @@ def validate_config() -> list[str]:
 
     if not REMOTE_CONFIG["password"]:
         warnings.append(
-            "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
-            "或在 config.py 中配置 password 字段"
+            "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD"
         )
 
     if is_server_mode():

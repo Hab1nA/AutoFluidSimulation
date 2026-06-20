@@ -1032,10 +1032,11 @@ class _MockSSH:
     """最小 SSH Mock，用于调度恢复扫描的远程产物检查。"""
 
     def __init__(self):
+        self.connected = True
         self.remote_file_sizes: dict[str, int] = {}
 
     def is_connected(self) -> bool:
-        return True
+        return self.connected
 
     def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None) -> int | None:
         return self.remote_file_sizes.get(remote_path.replace("\\", "/"))
@@ -1340,6 +1341,7 @@ class TestPipelineSchedulerStartRecovery:
         *,
         meshing: bool = False,
         solver: bool = False,
+        postprocess: bool = False,
     ) -> None:
         if meshing:
             self.runner._ssh.remote_file_sizes[
@@ -1352,6 +1354,11 @@ class TestPipelineSchedulerStartRecovery:
             self.runner._ssh.remote_file_sizes[
                 f"D:/xkz_1020/case/model_gen4_{config_name}.dat.h5"
             ] = 1024
+        if postprocess:
+            output_dir = str(
+                ENGINE_CONFIG.get("postprocess_output_dir") or "D:/xkz_1020/case"
+            ).replace("\\", "/").rstrip("/")
+            self.runner._ssh.remote_file_sizes[f"{output_dir}/model_gen4_{config_name}.csv"] = 1024
 
     def test_resume_scan_keeps_running_meshing_when_remote_task_running(self):
         """启动扫描遇到仍在运行的远程 Meshing 时不能重置或入队重启。"""
@@ -1437,6 +1444,62 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+
+    def test_completed_postprocess_without_durable_output_resets_to_waiting(self):
+        """恢复扫描应复核 PostProcess 输出，不能只相信 Completed 状态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.scheduler._remote_files_exist = lambda cn, steps: False
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "postprocess") == STATUS_WAITING
+
+    def test_completed_postprocess_kept_when_remote_probe_unavailable(self):
+        """远程 SSH 暂不可达时不能把 Completed PostProcess 当作输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, meshing=True, solver=True, postprocess=True)
+        self.runner._ssh.connected = False
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_completed_postprocess_kept_when_remote_probe_drops_mid_check(self):
+        """远程 SSH 初始可达但检查中断开时不能误判 PostProcess 输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        def raise_connection_error(remote_path: str, *, timeout: float | None = None) -> int | None:
+            raise ConnectionError("ssh tunnel dropped")
+
+        self.runner._ssh.get_remote_file_size = raise_connection_error
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_postprocess_artifact_exists_accepts_linux_absolute_path(self, monkeypatch):
+        """多工作站支持 Linux 绝对路径时，PostProcess 产物探测不能被前导 / 过滤掉。"""
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", "")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", "")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", "")
+        remote_config = {
+            "postprocess_output_dir": "/opt/autofluid/post",
+            "postprocess_metrics_dir": "",
+            "postprocess_animation_dir": "",
+            "result_dir": "/opt/autofluid/case",
+            "animation_dir": "/opt/autofluid/animation",
+        }
+        self.runner._ssh.remote_file_sizes["/opt/autofluid/post/model_gen4_1.csv"] = 1024
+
+        assert self.scheduler._postprocess_artifact_exists(1, remote_config, self.runner._ssh) is True
 
     def test_stale_sc_completion_after_reset_does_not_submit_transfer(
         self,
@@ -1689,7 +1752,7 @@ class TestPipelineSchedulerStartRecovery:
             error_flag_file="D:/flags/solver_done_1.txt.error",
             started_at=time.time(),
         )
-        self._record_remote_outputs(1, meshing=True, solver=True)
+        self._record_remote_outputs(1, meshing=True, solver=True, postprocess=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -3673,7 +3736,6 @@ class TestBarrierCoordinator:
 
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
-
 # ====================================================================
 # MeshingMonitor 测试
 # ====================================================================
@@ -3839,6 +3901,38 @@ class TestMeshingMonitor:
             self.stopped.set()
 
         assert sorted(entered) == [1, 2, 3]
+
+    def test_stale_meshing_completion_after_reset_does_not_dispatch_solver(self):
+        """reset 期间完成的旧 Meshing 结果不应触发下游 Solver 分发。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
+        self.remote._meshing_wait_result = True
+        generation = {"value": 0}
+        dispatched: list[int] = []
+        original_set_step_status = self.state.set_step_status
+
+        def get_reset_generation(config_name: int, step_name: str) -> int:
+            assert config_name == 1
+            assert step_name == "meshing"
+            return generation["value"]
+
+        def reset_before_completion(config_name: int, step_name: str, status: str, msg: str | None = None) -> None:
+            assert config_name == 1
+            assert step_name == "meshing"
+            assert status == STATUS_COMPLETED
+            generation["value"] += 1
+            self.state.reset_config_steps(1, "meshing")
+            original_set_step_status(config_name, step_name, status, msg)
+
+        self.monitor._get_reset_generation = get_reset_generation
+        self.monitor._on_meshing_completed = lambda config_name: dispatched.append(config_name)
+        self.state.set_step_status = reset_before_completion
+
+        self.monitor._process_single_meshing(1)
+
+        assert dispatched == []
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
 
     def test_monitor_paused_waits(self):
         """暂停期间监控循环等待。"""

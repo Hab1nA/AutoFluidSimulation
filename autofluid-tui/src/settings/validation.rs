@@ -188,6 +188,13 @@ fn validate_workstation_connection(
             severity: Severity::Error,
         });
     }
+    if workstation.auth_method.eq_ignore_ascii_case("key") && workstation.key_filename.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("{prefix}.key_filename"),
+            message: "密钥认证必须填写密钥文件路径".to_string(),
+            severity: Severity::Error,
+        });
+    }
 }
 
 fn validate_workstation_dirs(
@@ -646,6 +653,26 @@ mod tests {
             e.field_name == "workstations[2].port" && matches!(e.severity, Severity::Error)
         }));
         assert!(!errors.iter().any(|e| e.field_name == "remote_config.host"));
+    }
+
+    #[test]
+    fn workstation_key_auth_requires_key_filename() {
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![WorkstationConfig {
+            id: "WS-A".to_string(),
+            host: "172.17.135.240".to_string(),
+            port: 22,
+            username: "ps".to_string(),
+            auth_method: "key".to_string(),
+            key_filename: String::new(),
+            ..WorkstationConfig::default()
+        }];
+
+        let errors = validate_config(&config);
+
+        assert!(errors.iter().any(|e| {
+            e.field_name == "workstations[0].key_filename" && matches!(e.severity, Severity::Error)
+        }));
     }
 
     #[test]

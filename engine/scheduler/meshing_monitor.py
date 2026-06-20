@@ -435,7 +435,11 @@ class MeshingMonitor:
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
                 return False
 
-        should_requeue = self._wait_for_meshing_completion(config_name, workstation_id)
+        should_requeue = self._wait_for_meshing_completion(
+            config_name,
+            workstation_id,
+            generation,
+        )
         if self._is_stale_step_result(config_name, "meshing", generation):
             self._discard_stale_step_result(config_name, "meshing")
             return False
@@ -445,6 +449,7 @@ class MeshingMonitor:
         self,
         config_name: int,
         workstation_id: str | None = None,
+        generation: int | None = None,
     ) -> bool:
         """轮询等待 Meshing 完成，并按控制状态更新数据库。"""
         workstation_id = workstation_id or self._workstation_for_config(config_name)
@@ -457,6 +462,12 @@ class MeshingMonitor:
         ):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成 ✓")
+            if (
+                generation is not None
+                and self._is_stale_step_result(config_name, "meshing", generation)
+            ):
+                self._discard_stale_step_result(config_name, "meshing")
+                return False
             if self._on_meshing_completed is not None:
                 self._on_meshing_completed(config_name)
         else:

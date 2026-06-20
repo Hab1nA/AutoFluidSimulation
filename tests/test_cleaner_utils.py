@@ -552,6 +552,100 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_clean_all_continues_other_steps_after_offline_workstation(
+        self, tmp_path, monkeypatch
+    ):
+        """单个工作站离线时，clean all 仍应尽量清理在线构型的后续步骤。"""
+        workstations = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\ws_a\working",
+                "scripts_dir": r"D:\ws_a\scripts",
+                "ref_files_dir": r"D:\ws_a\refs",
+                "scdoc_dir": r"D:\ws_a\scdoc",
+                "msh_dir": r"D:\ws_a\msh",
+                "result_dir": r"D:\ws_a\case",
+                "flag_dir": r"D:\ws_a\flags",
+                "postprocess_output_dir": r"D:\ws_a\post",
+                "postprocess_metrics_dir": r"D:\ws_a\metrics",
+                "animation_dir": r"D:\ws_a\animation",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+            {
+                "id": "WS-B",
+                "host": "10.0.0.2",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"E:\ws_b\working",
+                "scripts_dir": r"E:\ws_b\scripts",
+                "ref_files_dir": r"E:\ws_b\refs",
+                "scdoc_dir": r"E:\ws_b\scdoc",
+                "msh_dir": r"E:\ws_b\msh",
+                "result_dir": r"E:\ws_b\case",
+                "flag_dir": r"E:\ws_b\flags",
+                "postprocess_output_dir": r"E:\ws_b\post",
+                "postprocess_metrics_dir": r"E:\ws_b\metrics",
+                "animation_dir": r"E:\ws_b\animation",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+        ]
+        monkeypatch.setattr("engine.config.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.get_workstation_config", lambda wid: next(
+            dict(ws) for ws in workstations if ws["id"] == wid
+        ))
+
+        class _SSH:
+            def __init__(self, connected: bool) -> None:
+                self.connected = connected
+                self.deleted: list[str] = []
+                self.cleared: list[str] = []
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared.append(remote_dir)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            state.set_config_workstation(1, "WS-A")
+            state.set_config_workstation(2, "WS-B")
+            ssh_by_id = {"WS-A": _SSH(True), "WS-B": _SSH(False)}
+
+            cleaner = FileCleaner(state, lambda workstation_id="default": ssh_by_id[workstation_id])
+
+            with pytest.raises(RuntimeError, match="远程文件清理未完成"):
+                cleaner.clean_step_files("all")
+
+            assert any(path.endswith("meshing_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("postprocess_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
     def test_remote_step_file_cleanup_holds_ssh_lock(self, tmp_path, monkeypatch):
         """远程步骤文件清理应在共享 SSH 锁内执行。"""
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\xkz_1020\scdoc")

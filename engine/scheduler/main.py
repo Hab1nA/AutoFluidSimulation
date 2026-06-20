@@ -20,6 +20,7 @@ DAG 任务调度器 (Pipeline Scheduler)
 """
 import threading
 import os
+from typing import Any
 
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
@@ -543,10 +544,10 @@ class PipelineScheduler:
 
                 if status == STATUS_COMPLETED:
                     if (
-                        step in {"sw", "sc", "meshing", "solver"}
-                        and not self._completed_step_output_exists(
+                        step in {"sw", "sc", "meshing", "solver", "postprocess"}
+                        and self._completed_step_output_exists(
                             cn, step, step_dir, scdoc_dir
-                        )
+                        ) is False
                     ):
                         logger.warning(
                             f"{log_prefix} 构型{cn} [{step}] 状态为 Completed "
@@ -774,7 +775,7 @@ class PipelineScheduler:
 
     def _completed_step_output_exists(
         self, cn: int, step: str, step_dir: str, scdoc_dir: str
-    ) -> bool:
+    ) -> bool | None:
         """Validate Completed status against durable artifacts, not only flags."""
         if step in {"sw", "sc"}:
             if is_server_mode():
@@ -785,31 +786,37 @@ class PipelineScheduler:
         if step == "solver":
             return self._remote_files_exist(cn, ("solver", "solverdata"))
         if step == "postprocess":
-            return True
+            return self._remote_files_exist(cn, ("postprocess",))
         return True
 
-    def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool:
+    def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool | None:
+        """Return True/False for confirmed remote output state, or None if SSH is indeterminate."""
         workstation_id = self._workstation_for_config(cn)
         remote_config = self._remote_config_for_workstation(workstation_id)
         ssh = None
         try:
             ssh = self.runner.get_ssh(workstation_id)
         except Exception:
-            return False
+            return None
 
         try:
             if not ssh.is_connected():
-                return False
+                return None
         except Exception:
-            return False
+            return None
 
         for output_step in output_steps:
+            if output_step == "postprocess":
+                postprocess_exists = self._postprocess_artifact_exists(cn, remote_config, ssh)
+                if postprocess_exists is None:
+                    return None
+                if not postprocess_exists:
+                    return False
+                continue
             filename = get_step_filename(output_step, cn)
             if not filename:
                 return False
             directory_key = "msh_dir" if output_step == "meshing" else "result_dir"
-            if output_step == "postprocess":
-                directory_key = "flag_dir"
             remote_dir = str(remote_config[directory_key]).replace("\\", "/")
             remote_path = f"{remote_dir}/{filename}"
             try:
@@ -824,8 +831,59 @@ class PipelineScheduler:
                 if not ssh.check_remote_file(remote_path):
                     return False
             except Exception:
-                return False
+                return None
         return True
+
+    def _postprocess_artifact_exists(
+        self,
+        cn: int,
+        remote_config: dict[str, object],
+        ssh: Any,
+    ) -> bool | None:
+        """Return postprocess output state, or None when SSH probing cannot be trusted."""
+        output_dir = str(
+            remote_config.get("postprocess_output_dir")
+            or ENGINE_CONFIG.get("postprocess_output_dir")
+            or remote_config.get("result_dir", "")
+        ).replace("\\", "/").rstrip("/")
+        metrics_dir = str(
+            remote_config.get("postprocess_metrics_dir")
+            or ENGINE_CONFIG.get("postprocess_metrics_dir")
+            or output_dir
+        ).replace("\\", "/").rstrip("/")
+        animation_dir = str(
+            remote_config.get("postprocess_animation_dir")
+            or ENGINE_CONFIG.get("postprocess_animation_dir")
+            or remote_config.get("animation_dir", "")
+        ).replace("\\", "/").rstrip("/")
+        candidates = []
+        if output_dir:
+            candidates.extend([
+                f"{output_dir}/model_gen4_{cn}.csv",
+                f"{output_dir}/model_gen4_{cn}.json",
+            ])
+        if metrics_dir:
+            candidates.append(f"{metrics_dir}/model_gen4_{cn}.csv")
+        if animation_dir:
+            candidates.extend([
+                f"{animation_dir}/t_gen4_{cn}.mp4",
+                f"{animation_dir}/v_gen4_{cn}.mp4",
+            ])
+        for remote_path in candidates:
+            try:
+                if hasattr(ssh, "get_remote_file_size"):
+                    size = ssh.get_remote_file_size(remote_path, timeout=5.0)
+                    if size is not None and size > 0:
+                        return True
+                    continue
+                if ssh.check_remote_file(remote_path, timeout=5.0):
+                    return True
+            except TypeError:
+                if ssh.check_remote_file(remote_path):
+                    return True
+            except Exception:
+                return None
+        return False
 
     def _forget_completed_config_remote_tasks(self, cn: int) -> None:
         """清理已完成构型残留的远程任务元数据。"""
