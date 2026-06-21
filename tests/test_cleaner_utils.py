@@ -993,6 +993,18 @@ class TestProcessUtils:
         pid_file.write_text("not_a_number", encoding="utf-8")
         assert read_pid_file(str(pid_file)) is None
 
+    def test_read_reserved_pid_file_returns_none(self, tmp_path):
+        """PID 1 属于系统 init，不应被 PID 文件逻辑当作可管理进程。"""
+        from utils.process_utils import read_pid_file
+        pid_file = tmp_path / "reserved.pid"
+        pid_file.write_text("1", encoding="utf-8")
+        assert read_pid_file(str(pid_file)) is None
+
+    def test_is_process_alive_rejects_reserved_pid(self):
+        """PID 1 即使存在也必须视为不可由 AutoFluid 管理。"""
+        from utils.process_utils import is_process_alive
+        assert is_process_alive(1) is False
+
     def test_remove_nonexistent_pid_file_no_error(self, tmp_path):
         """删除不存在的 PID 文件不抛异常。"""
         from utils.process_utils import remove_pid_file

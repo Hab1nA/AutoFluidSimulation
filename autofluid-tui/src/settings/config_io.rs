@@ -215,11 +215,10 @@ pub fn write_env_passwords(config: &SettingsConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     fn cwd_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        &crate::TEST_ENV_LOCK
     }
 
     fn unique_temp_project_dir() -> PathBuf {

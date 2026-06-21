@@ -332,6 +332,8 @@ class PipelineScheduler:
         self.worker_pool.join_worker_threads(timeout=3)
 
         try:
+            self.runner.disconnect_ssh(lock_timeout=1.0)
+        except TypeError:
             self.runner.disconnect_ssh()
         except Exception as e:
             logger.warning(f"[Scheduler] 自然收尾断开 SSH 异常: {e}")
@@ -1057,6 +1059,8 @@ class PipelineScheduler:
 
         try:
             # 断开 SSH
+            self.runner.disconnect_ssh(lock_timeout=1.0)
+        except TypeError:
             self.runner.disconnect_ssh()
         except Exception as e:
             logger.debug(f"SSH 断开异常（已忽略）: {e}")

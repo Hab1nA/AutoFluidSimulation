@@ -20,6 +20,11 @@ SPACECLAIM_TRANSIT_SOURCE = (
     / "executor"
     / "spaceclaim_transit.py"
 )
+DEPLOY_SCRIPT_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "deploy_linux_server.sh"
+)
 
 
 def _source() -> str:
@@ -52,6 +57,15 @@ def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
     assert '"local", "services", "spaceclaim"' in source
     assert "spaceclaim_transit_slot{}_{}.log" in source
     assert "spaceclaim_transit_{}.log" in source
+
+
+def test_linux_daemon_unit_declares_lifecycle_boundaries() -> None:
+    source = DEPLOY_SCRIPT_SOURCE.read_text(encoding="utf-8")
+
+    assert "KillMode=control-group" in source
+    assert "TimeoutStopSec=30" in source
+    assert "Restart=on-failure" in source
+    assert "RestartSec=5" in source
 
 
 def test_daemon_service_logs_use_structured_service_paths() -> None:

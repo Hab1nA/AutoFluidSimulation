@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::ipc::client::IpcClient;
 use crate::state::LogBuffer;
-use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout};
+use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout, wait_for_pid_dead};
 
 /// 进程终止结果
 enum StopResult {
@@ -475,7 +475,9 @@ impl WorkerManager {
         let pid = raw_pid.trim().parse::<u32>().ok();
         let mut success = true;
         if let Some(pid) = pid {
-            success = kill_process_tree(pid) || !is_pid_alive(pid);
+            let killed = kill_process_tree(pid);
+            success =
+                !is_pid_alive(pid) || (killed && wait_for_pid_dead(pid, Duration::from_secs(2)));
         }
         if success {
             let _ = std::fs::remove_file(pid_file);
@@ -813,7 +815,7 @@ mod tests {
 
         assert!(result);
         assert!(!pid_file.exists());
-        let exited = child.try_wait().expect("query child status").is_some();
+        let exited = wait_for_pid_dead(child.id(), Duration::from_secs(2));
         if !exited {
             let _ = child.kill();
             let _ = child.wait();
@@ -988,7 +990,11 @@ mod tests {
         drop(manager);
 
         assert!(crate::utils::is_pid_alive(pid));
-        assert!(crate::utils::kill_process_tree(pid) || !crate::utils::is_pid_alive(pid));
+        let killed = crate::utils::kill_process_tree(pid);
+        assert!(
+            !crate::utils::is_pid_alive(pid)
+                || (killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2)))
+        );
     }
 
     #[test]

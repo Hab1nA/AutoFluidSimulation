@@ -16,7 +16,7 @@ import subprocess
 from engine.config import LOCAL_PATHS
 
 
-MIN_VALID_PID = 1
+MIN_VALID_PID = 2
 WORKER_PID_KINDS = (
     "local_worker",
     "tunnel_workstation",
@@ -67,13 +67,17 @@ def read_pid_file(pid_file: str) -> int | None:
         pid_file: PID 文件路径
 
     Returns:
-        读取的 PID（整数），失败或文件不存在时返回 None
+        读取的 PID（整数），失败、文件不存在或 PID 不可管理时返回 None
     """
     try:
         with open(pid_file, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
+            pid = int(f.read().strip())
     except (FileNotFoundError, ValueError):
         return None
+    if pid < MIN_VALID_PID:
+        logger.warning("忽略保留或无效 PID 文件: %s, pid=%s", pid_file, pid)
+        return None
+    return pid
 
 
 def write_pid_file(pid_file: str, pid: int) -> None:

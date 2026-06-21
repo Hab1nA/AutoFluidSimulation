@@ -146,11 +146,30 @@ class TaskRunner:
                 if workstation_id == DEFAULT_WORKSTATION_ID:
                     self._ssh = ssh
             if not ssh.is_connected():
+                stopped_event = getattr(self, "_stopped_event", None)
+                if stopped_event is not None and stopped_event.is_set():
+                    logger.debug("调度器已停止，跳过 SSH 重连: %s", workstation_id)
+                    return ssh
                 if not ssh.connect():
                     logger.error("SSH 重连失败: %s", workstation_id)
             return ssh
 
-    def disconnect_ssh(self, workstation_id: str | None = None) -> None:
+    def _acquire_ssh_lock(
+        self,
+        lock: threading.RLock,
+        lock_timeout: float | None,
+    ) -> bool:
+        """Acquire an SSH lock, optionally using a timeout for shutdown cleanup."""
+        if lock_timeout is None:
+            lock.acquire()
+            return True
+        return bool(lock.acquire(timeout=lock_timeout))
+
+    def disconnect_ssh(
+        self,
+        workstation_id: str | None = None,
+        lock_timeout: float | None = None,
+    ) -> None:
         """断开 SSH 连接。"""
         ssh_pool = getattr(self, "_ssh_pool", None)
         ssh_locks = getattr(self, "_ssh_locks", None)
@@ -168,12 +187,18 @@ class TaskRunner:
                 self._ssh_locks_guard = locks_guard
             with locks_guard:
                 lock = ssh_locks.setdefault(workstation_id, threading.RLock())
-            with lock:
+            acquired = self._acquire_ssh_lock(lock, lock_timeout)
+            if not acquired:
+                logger.warning("SSH 锁忙，跳过断开连接: %s", workstation_id)
+                return
+            try:
                 ssh = ssh_pool.pop(workstation_id, None)
                 if ssh:
                     ssh.disconnect()
                 if workstation_id == DEFAULT_WORKSTATION_ID:
                     self._ssh = None
+            finally:
+                lock.release()
             return
 
         with self._ssh_lock:
@@ -192,10 +217,17 @@ class TaskRunner:
                 self._ssh_locks_guard = locks_guard
             with locks_guard:
                 lock = ssh_locks.setdefault(current_id, threading.RLock())
-            with lock:
+            acquired = self._acquire_ssh_lock(lock, lock_timeout)
+            if not acquired:
+                logger.warning("SSH 锁忙，跳过断开连接: %s", current_id)
+                continue
+            try:
                 pooled = ssh_pool.pop(current_id, None)
                 if pooled:
                     pooled.disconnect()
+            finally:
+                lock.release()
+
 
     def _workstation_for_config(self, config_name: int) -> str:
         """Return assigned workstation for a config, falling back to legacy default."""

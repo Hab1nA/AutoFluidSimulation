@@ -165,21 +165,40 @@ def test_worker_stop_still_cleans_local_resources_when_ipc_is_down(monkeypatch):
     }
 
 
-def test_daemon_restart_uses_configured_systemd_service():
+def test_daemon_systemctl_actions_use_expected_arguments(monkeypatch):
+    monkeypatch.delenv("AUTOFLUID_DAEMON_SERVICE", raising=False)
     calls = []
 
     def runner(args):
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, stdout="done\n", stderr="")
 
-    result, payload = _run(
-        ["daemon", "restart"],
-        runner=runner,
-    )
+    for action in ["start", "stop", "restart", "status"]:
+        result, payload = _run(["daemon", action], runner=runner)
+        assert result.exit_code == 0
+        assert payload["ok"] is True
+
+    assert calls == [
+        ["systemctl", "start", "autofluid-daemon"],
+        ["systemctl", "stop", "autofluid-daemon"],
+        ["systemctl", "restart", "autofluid-daemon"],
+        ["systemctl", "status", "autofluid-daemon", "--no-pager"],
+    ]
+
+
+def test_daemon_systemctl_uses_custom_service_name(monkeypatch):
+    monkeypatch.setenv("AUTOFLUID_DAEMON_SERVICE", "autofluid-daemon-prod")
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="done\n", stderr="")
+
+    result, payload = _run(["daemon", "stop"], runner=runner)
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert calls == [["systemctl", "restart", "autofluid-daemon"]]
+    assert calls == [["systemctl", "stop", "autofluid-daemon-prod"]]
 
 
 def test_alert_watcher_posts_warning_once_per_cooldown(monkeypatch):

@@ -250,16 +250,44 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+pub fn wait_for_pid_dead(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !is_pid_alive(pid)
+}
+
 pub fn kill_process_tree(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
-        Command::new("taskkill")
+        let taskkill_ok = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map(|status| status.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if taskkill_ok {
+            return true;
+        }
+
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let terminated = TerminateProcess(handle, 1) != 0;
+            CloseHandle(handle);
+            terminated
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

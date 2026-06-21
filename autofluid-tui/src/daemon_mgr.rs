@@ -196,7 +196,8 @@ impl DaemonManager {
             return Ok(());
         }
 
-        let stopped = kill_process_tree(pid) || !is_pid_alive(pid);
+        let killed = kill_process_tree(pid);
+        let stopped = !is_pid_alive(pid) || (killed && Self::wait_for_pid_dead(pid, 2));
         if stopped {
             match fs::remove_file(&pid_file) {
                 Ok(()) => {
@@ -262,6 +263,17 @@ impl DaemonManager {
         }
         log::warn!("等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
         false
+    }
+
+    fn wait_for_pid_dead(pid: u32, timeout_secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        while Instant::now() < deadline {
+            if !is_pid_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !is_pid_alive(pid)
     }
 
     // ------------------------------------------------------------------
@@ -420,6 +432,24 @@ impl DaemonManager {
         project_dir: &str,
     ) -> bool {
         let server_mode = is_server_mode();
+        if server_mode {
+            if ipc.is_connected() {
+                rt.block_on(ipc.disconnect());
+            }
+            match self.stop(project_dir) {
+                Ok(()) => {
+                    state.mark_daemon_stopped();
+                    log_buffer.push_info("✅ 已向服务器发送 daemon 停止命令".to_string());
+                    log_buffer.push_info("✅ 服务器后台引擎已停止或正在停止".to_string());
+                    return true;
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ 停止服务器 daemon 失败: {}", e));
+                    state.connected = ipc.is_connected();
+                    return false;
+                }
+            }
+        }
         let mut stop_sent_over_ipc = false;
         if ipc.is_connected() {
             log::info!("发送后台引擎停止请求");
@@ -987,6 +1017,9 @@ fn local_daemon_python(project_dir: &str) -> String {
 
 fn default_server_start_command() -> String {
     let project_dir = default_server_project_dir();
+    let service_name = daemon_service_name();
+    let service = shell_single_quote(&service_name);
+    let service_unit = shell_single_quote(&daemon_service_unit_name(&service_name));
     let remote_ipc_port = first_env_non_empty(&[
         "AUTOFLUID_SERVER_DAEMON_IPC_PORT",
         "AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT",
@@ -994,8 +1027,14 @@ fn default_server_start_command() -> String {
     .unwrap_or_else(|| "9527".to_string());
     format!(
         "cd {project_dir} && mkdir -p logs/server/services/daemon-bootstrap && \
-         {{ env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/server/services/daemon-bootstrap/autofluid-daemon.out 2>&1 < /dev/null & \
-         daemon_pid=$!; }}; \
+         if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files {service_unit} >/dev/null 2>&1; then \
+             systemctl start {service}; \
+             systemctl is-active --quiet {service}; \
+             daemon_pid=$(systemctl show -p MainPID --value {service} 2>/dev/null || echo 0); \
+         else \
+             {{ env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/server/services/daemon-bootstrap/autofluid-daemon.out 2>&1 < /dev/null & \
+             daemon_pid=$!; }}; \
+         fi; \
          ready_count=0; \
          for i in $(seq 1 60); do \
              if .venv/bin/python -c \"import json,socket; s=socket.create_connection(('127.0.0.1', {remote_ipc_port}), 1); s.settimeout(2); s.sendall((json.dumps(dict(command='get_engine_status', params=dict(), request_id='daemon-start-probe'))+'\\n').encode()); data=s.recv(4096); s.close(); resp=json.loads(data.decode().strip()); raise SystemExit(0 if resp.get('status') == 'ok' else 1)\" >/dev/null 2>&1; then \
@@ -1022,7 +1061,29 @@ fn default_server_start_command() -> String {
 
 fn default_server_stop_command() -> String {
     let project_dir = default_server_project_dir();
-    format!("cd {project_dir} && .venv/bin/python main.py --stop")
+    let service_name = daemon_service_name();
+    let service = shell_single_quote(&service_name);
+    let service_unit = shell_single_quote(&daemon_service_unit_name(&service_name));
+    format!(
+        "cd {project_dir} && \
+         if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files {service_unit} >/dev/null 2>&1; then \
+             systemctl stop {service}; \
+         else \
+             .venv/bin/python main.py --stop; \
+         fi"
+    )
+}
+
+fn daemon_service_name() -> String {
+    env_non_empty("AUTOFLUID_DAEMON_SERVICE").unwrap_or_else(|| "autofluid-daemon".to_string())
+}
+
+fn daemon_service_unit_name(service_name: &str) -> String {
+    if service_name.ends_with(".service") {
+        service_name.to_string()
+    } else {
+        format!("{service_name}.service")
+    }
 }
 
 fn default_server_project_dir() -> String {
@@ -1195,6 +1256,16 @@ mod tests {
             .iter()
             .any(|message| message.contains("正在检查服务器 IPC 隧道")));
 
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && daemon.pending_server_start.is_some() {
+            daemon.poll_server_start(&mut state, &mut log_buffer);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            daemon.pending_server_start.is_none(),
+            "server start background task must finish before test releases env"
+        );
+
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_START_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
         std::env::remove_var("AUTOFLUID_SSH_EXE");
@@ -1262,10 +1333,13 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_IPC_PORT");
         std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
         std::env::remove_var("AUTOFLUID_IPC_PORT");
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
 
         let command = default_server_start_command();
 
-        assert!(command.contains("&& { env AUTOFLUID_SERVER_MODE=server nohup"));
+        assert!(command.contains("systemctl start 'autofluid-daemon'"));
+        assert!(command.contains("is-active --quiet 'autofluid-daemon'"));
+        assert!(command.contains("nohup .venv/bin/python start_daemon.py"));
         assert!(command.contains("daemon_pid=$!"));
         assert!(command.contains("kill -0 \"$daemon_pid\""));
         assert!(command.contains("socket.create_connection(('127.0.0.1', 9527)"));
@@ -1285,6 +1359,7 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_IPC_PORT");
         std::env::set_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT", "19527");
         std::env::set_var("AUTOFLUID_IPC_PORT", "18000");
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
 
         let command = default_server_start_command();
 
@@ -1293,6 +1368,48 @@ mod tests {
 
         std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
         std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
+
+    #[test]
+    fn default_server_start_command_uses_custom_systemd_service_name() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_DAEMON_SERVICE", "autofluid-daemon-prod");
+
+        let command = default_server_start_command();
+
+        assert!(command.contains("systemctl start 'autofluid-daemon-prod'"));
+        assert!(command.contains("autofluid-daemon-prod.service"));
+        assert!(command.contains("nohup .venv/bin/python start_daemon.py"));
+
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
+    }
+
+    #[test]
+    fn default_server_stop_command_prefers_systemd_and_keeps_process_fallback() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
+
+        let command = default_server_stop_command();
+
+        assert!(command.contains("systemctl stop 'autofluid-daemon'"));
+        assert!(command.contains("autofluid-daemon.service"));
+        assert!(command.contains(".venv/bin/python main.py --stop"));
+    }
+
+    #[test]
+    fn default_server_stop_command_uses_custom_systemd_service_name() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_DAEMON_SERVICE", "autofluid-daemon-prod");
+
+        let command = default_server_stop_command();
+
+        assert!(command.contains("systemctl stop 'autofluid-daemon-prod'"));
+        assert!(command.contains("autofluid-daemon-prod.service"));
+        assert!(command.contains(".venv/bin/python main.py --stop"));
+
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
     }
 
     #[test]
@@ -1477,7 +1594,10 @@ mod tests {
         let bytes = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("server byte count");
-        assert!(bytes > 0, "restart must send full_quit in server mode");
+        assert_eq!(
+            bytes, 0,
+            "restart must use server stop command instead of IPC full_quit"
+        );
         assert!(log_buffer
             .info_messages
             .iter()
@@ -1557,7 +1677,9 @@ mod tests {
             .expect("server stop should succeed");
 
         let marker_text = fs::read_to_string(&marker).expect("read marker");
-        assert_eq!(marker_text.trim(), "stop");
+        let marker_lines: Vec<&str> = marker_text.lines().collect();
+        assert!(!marker_lines.is_empty());
+        assert!(marker_lines.iter().all(|line| *line == "stop"));
 
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
@@ -1587,7 +1709,7 @@ mod tests {
             .stop(project_dir.to_str().expect("utf8 temp path"))
             .expect("server stop should succeed");
 
-        let exited = child.try_wait().expect("query child status").is_some();
+        let exited = wait_for_child_exit(&mut child, 2);
         if !exited {
             let _ = child.kill();
             let _ = child.wait();
@@ -1606,11 +1728,12 @@ mod tests {
     }
 
     #[test]
-    fn stop_with_ipc_skips_server_stop_after_successful_full_quit() {
+    fn stop_with_ipc_prefers_server_stop_command_even_when_ipc_connected() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
         let project_dir = unique_temp_project_dir();
         let marker = project_dir.join("ssh-stop-after-ipc-marker.txt");
+        let full_quit_marker = project_dir.join("full-quit-seen.txt");
         let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "stop");
         std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
         std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
@@ -1622,21 +1745,28 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test ipc");
         let port = listener.local_addr().expect("listener addr").port();
+        let full_quit_marker_for_server = full_quit_marker.clone();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept ipc client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("set read timeout");
             let mut buf = [0_u8; 1024];
             let handshake_bytes = stream.read(&mut buf).expect("read handshake");
             assert!(handshake_bytes > 0, "connect should send handshake");
-            let _ = stream.write_all(
-                br#"{"status":"ok","data":{"engine_status":"stopped"},"message":"","request_id":"test"}"#,
+            let handshake_text = String::from_utf8_lossy(&buf[..handshake_bytes]);
+            let handshake_id = extract_request_id(&handshake_text);
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
             );
+            let _ = stream.write_all(handshake_response.as_bytes());
             let _ = stream.write_all(b"\n");
-            let full_quit_bytes = stream.read(&mut buf).expect("read full_quit");
-            assert!(full_quit_bytes > 0, "stop should send full_quit");
-            let _ = stream.write_all(
-                br#"{"status":"ok","data":{},"message":"daemon stopping","request_id":"test"}"#,
-            );
-            let _ = stream.write_all(b"\n");
+            if let Ok(bytes) = stream.read(&mut buf) {
+                if bytes > 0 {
+                    fs::write(&full_quit_marker_for_server, &buf[..bytes])
+                        .expect("write full quit marker");
+                }
+            }
         });
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1660,19 +1790,17 @@ mod tests {
 
         assert!(stopped);
         server.join().expect("server thread");
+        assert!(marker.exists(), "server stop must issue SSH/systemd stop");
         assert!(
-            !marker.exists(),
-            "successful IPC stop should not issue a second SSH stop"
+            !full_quit_marker.exists(),
+            "server stop must not block on IPC full_quit"
         );
-        let exited = child.try_wait().expect("query child status").is_some();
+        let exited = wait_for_child_exit(&mut child, 2);
         if !exited {
             let _ = child.kill();
             let _ = child.wait();
         }
-        assert!(
-            exited,
-            "server IPC stop path should still terminate the tunnel PID"
-        );
+        assert!(exited, "server stop path should terminate the tunnel PID");
         assert!(!pid_file.exists(), "server IPC tunnel PID file removed");
 
         std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
@@ -1680,6 +1808,27 @@ mod tests {
         std::env::remove_var("AUTOFLUID_SSH_EXE");
         std::env::remove_var("AUTOFLUID_SERVER_MODE");
         let _ = fs::remove_dir_all(project_dir);
+    }
+
+    fn wait_for_child_exit(child: &mut Child, timeout_secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        while Instant::now() < deadline {
+            if child.try_wait().expect("query child status").is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        child.try_wait().expect("query child status").is_some()
+    }
+
+    fn extract_request_id(text: &str) -> String {
+        let marker = "\"request_id\":\"";
+        let start = text.find(marker).expect("request_id marker") + marker.len();
+        let end = text[start..]
+            .find('"')
+            .map(|offset| start + offset)
+            .expect("request_id end");
+        text[start..end].to_string()
     }
 
     fn fake_success_ssh_exe(project_dir: &std::path::Path) -> PathBuf {

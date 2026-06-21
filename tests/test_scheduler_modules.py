@@ -864,6 +864,89 @@ class TestTaskRunnerSWDelegates:
             ("WS-B.example", 22, "ps", "pw"),
         ]
 
+    def test_get_ssh_skips_reconnect_after_stop_event(self, monkeypatch):
+        """调度器停止后不应再触发新的 SSH 重连。"""
+        import engine.task_runner as task_runner_module
+
+        class _SSH:
+            connect_calls = 0
+
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ) -> None:
+                self.connected = False
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def connect(self) -> bool:
+                _SSH.connect_calls += 1
+                self.connected = True
+                return True
+
+        monkeypatch.setattr(
+            task_runner_module,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "host": f"{workstation_id}.example",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+            },
+        )
+        monkeypatch.setattr(task_runner_module, "RemoteWorkstation", _SSH)
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh_pool = {}
+        runner._ssh_locks = {}
+        runner._ssh_locks_guard = threading.Lock()
+        runner._ssh_lock = threading.RLock()
+        runner._ssh = None
+        runner._stopped_event = threading.Event()
+        runner._stopped_event.set()
+
+        ssh = runner.get_ssh("WS-A")
+
+        assert ssh.is_connected() is False
+        assert _SSH.connect_calls == 0
+
+    def test_disconnect_ssh_can_skip_locked_workstation(self):
+        """停止流程遇到被占用的工作站锁时应限时跳过而非阻塞。"""
+        class _SSH:
+            def __init__(self) -> None:
+                self.disconnected = False
+
+            def disconnect(self) -> None:
+                self.disconnected = True
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh = None
+        runner._ssh_lock = threading.RLock()
+        runner._ssh_pool = {"WS-A": _SSH()}
+        locked = threading.Lock()
+        assert locked.acquire(timeout=0.1)
+        runner._ssh_locks = {"WS-A": locked}
+        runner._ssh_locks_guard = threading.Lock()
+
+        try:
+            started_at = time.monotonic()
+            runner.disconnect_ssh(lock_timeout=0.01)
+            elapsed = time.monotonic() - started_at
+        finally:
+            locked.release()
+
+        assert elapsed < 0.5
+        assert "WS-A" in runner._ssh_pool
+        assert runner._ssh_pool["WS-A"].disconnected is False
+
+
     def test_remote_stage_delegates_use_assigned_workstation(self):
         """Transfer/Meshing/Solver 委托时应使用构型分配的工作站。"""
         from engine.config import DEFAULT_WORKSTATION_ID
