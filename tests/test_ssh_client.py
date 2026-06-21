@@ -191,6 +191,51 @@ def test_connect_supports_passwordless_auth_as_empty_password(monkeypatch):
     }]
 
 
+def test_passwordless_auth_ignores_configured_key_file(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation(
+        "127.0.0.1",
+        22,
+        "user",
+        "",
+        key_filename=r"${USERPROFILE}\.ssh\id_ed25519",
+        auth_method="none",
+    )
+
+    assert host.connect() is True
+    assert calls[0]["password"] == ""
+    assert calls[0]["key_filename"] is None
+    assert calls[0]["look_for_keys"] is False
+    assert calls[0]["allow_agent"] is False
+
+
 def test_connect_rejects_passwordless_auth_without_key_fallback(monkeypatch):
     calls: list[dict[str, object]] = []
 

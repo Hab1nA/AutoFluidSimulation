@@ -93,12 +93,13 @@ class RemoteWorkstation:
             use_key_auth = self.auth_method == "key" or (
                 password is None and self.auth_method != "none"
             )
+            key_filename = self.key_filename if use_key_auth else None
             self._ssh.connect(
                 hostname=self.host,
                 port=self.port,
                 username=self.username,
                 password=password,
-                key_filename=self.key_filename,
+                key_filename=key_filename,
                 timeout=10,
                 look_for_keys=use_key_auth,
                 allow_agent=use_key_auth,
