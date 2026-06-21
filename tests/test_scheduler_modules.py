@@ -2708,13 +2708,13 @@ class TestPipelineDaemonCleanStep:
 
         class _Runner:
             def __init__(self) -> None:
-                self.disconnect_calls = 0
+                self.disconnect_calls: list[float | None] = []
 
-            def disconnect_ssh(self) -> None:
-                self.disconnect_calls += 1
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                self.disconnect_calls.append(lock_timeout)
 
             def get_ssh(self, workstation_id: str = "default") -> _SSH:
-                return _SSH(self.disconnect_calls > 0)
+                return _SSH(bool(self.disconnect_calls))
 
         monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
         monkeypatch.setattr(
@@ -2733,7 +2733,7 @@ class TestPipelineDaemonCleanStep:
         assert ok is True
         assert message == "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
         assert reload_calls == ["reload"]
-        assert runner.disconnect_calls == 1
+        assert runner.disconnect_calls == [1.0]
         assert data["ssh_checks"] == {"default": "ok"}
         assert daemon._last_worker_ssh_checks == {"default": "ok"}
         assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"

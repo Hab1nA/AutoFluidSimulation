@@ -18,6 +18,10 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -33,6 +37,9 @@ use state::{AppState, LogBuffer};
 use ui::layout::AppLayout;
 
 pub use utils::format_local_time;
+
+const MIN_TERMINAL_WIDTH: u16 = 80;
+const MIN_TERMINAL_HEIGHT: u16 = 16;
 
 fn format_log_record(
     buf: &mut env_logger::fmt::Formatter,
@@ -832,6 +839,28 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
     }
 }
 
+fn terminal_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+fn render_terminal_too_small(frame: &mut ratatui::Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "终端窗口过小",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("当前 {}x{}", area.width, area.height)),
+        Line::from(format!(
+            "至少需要 {}x{}",
+            MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT
+        )),
+    ];
+    let widget = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(widget, area);
+}
+
 fn do_redraw(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -840,6 +869,11 @@ fn do_redraw(
     terminal
         .draw(|frame| {
             let area = frame.area();
+            if terminal_too_small(area) {
+                render_terminal_too_small(frame, area);
+                return;
+            }
+
             let layout = AppLayout::new(area);
 
             state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
@@ -1215,6 +1249,14 @@ mod tests {
         assert!(month >= 1 && month <= 12, "月份应在1-12之间");
         let day: u32 = parts[0][6..8].parse().expect("日期应为数字");
         assert!(day >= 1 && day <= 31, "日期应在1-31之间");
+    }
+
+    #[test]
+    fn terminal_size_guard_matches_layout_minimum() {
+        assert!(terminal_too_small(Rect::new(0, 0, 79, 24)));
+        assert!(terminal_too_small(Rect::new(0, 0, 120, 15)));
+        assert!(!terminal_too_small(Rect::new(0, 0, 80, 16)));
+        assert!(!terminal_too_small(Rect::new(0, 0, 120, 30)));
     }
 
     #[test]

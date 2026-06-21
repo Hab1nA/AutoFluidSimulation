@@ -147,51 +147,29 @@ def test_connect_uses_configured_key_file(monkeypatch):
     }]
 
 
-def test_connect_supports_none_auth(monkeypatch):
-    calls: list[tuple[str, object]] = []
+def test_connect_supports_passwordless_auth_as_empty_password(monkeypatch):
+    calls: list[dict[str, object]] = []
 
     class _Transport:
-        def __init__(self, addr: tuple[str, int]) -> None:
-            calls.append(("transport_init", addr))
-
-        def start_client(self, timeout: int) -> None:
-            calls.append(("start_client", timeout))
-
-        def auth_none(self, username: str) -> None:
-            calls.append(("auth_none", username))
-
         def set_keepalive(self, _seconds: int) -> None:
-            calls.append(("set_keepalive", _seconds))
-
-        def open_session(self, timeout: int | None = None):
-            calls.append(("open_session", timeout))
-            return object()
+            pass
 
     class _SSHClient:
-        def __init__(self) -> None:
-            self.transport = None
-
         def set_missing_host_key_policy(self, _policy: object) -> None:
             pass
 
         def connect(self, **kwargs: object) -> None:
-            raise AssertionError(f"none auth should not call SSHClient.connect: {kwargs}")
+            calls.append(kwargs)
 
         def get_transport(self):
-            calls.append(("get_transport", None))
-            return self.transport
-
-        def _transport(self, transport):
-            self.transport = transport
+            return _Transport()
 
         def open_sftp(self):
-            calls.append(("open_sftp", None))
             return object()
 
     class _Paramiko:
         SSHException = Exception
         SSHClient = _SSHClient
-        Transport = _Transport
 
         class AutoAddPolicy:
             pass
@@ -201,31 +179,33 @@ def test_connect_supports_none_auth(monkeypatch):
     host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
 
     assert host.connect() is True
-    assert ("transport_init", ("127.0.0.1", 22)) in calls
-    assert ("start_client", 10) in calls
-    assert ("auth_none", "user") in calls
-    assert ("open_sftp", None) in calls
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
 
 
-def test_connect_closes_none_auth_transport_on_failure(monkeypatch):
-    calls: list[tuple[str, object]] = []
-
-    class _Transport:
-        def __init__(self, addr: tuple[str, int]) -> None:
-            calls.append(("transport_init", addr))
-
-        def start_client(self, timeout: int) -> None:
-            calls.append(("start_client", timeout))
-
-        def auth_none(self, username: str) -> None:
-            calls.append(("auth_none", username))
-            raise _Paramiko.SSHException("none auth rejected")
-
-        def close(self) -> None:
-            calls.append(("close", None))
+def test_connect_rejects_passwordless_auth_without_key_fallback(monkeypatch):
+    calls: list[dict[str, object]] = []
 
     class _SSHClient:
         def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+            raise _Paramiko.SSHException("passwordless rejected")
+
+        def get_transport(self):
+            return None
+
+        def close(self) -> None:
             pass
 
         def open_sftp(self):
@@ -234,7 +214,6 @@ def test_connect_closes_none_auth_transport_on_failure(monkeypatch):
     class _Paramiko:
         SSHException = Exception
         SSHClient = _SSHClient
-        Transport = _Transport
 
         class AutoAddPolicy:
             pass
@@ -244,8 +223,16 @@ def test_connect_closes_none_auth_transport_on_failure(monkeypatch):
     host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
 
     assert host.connect() is False
-    assert ("auth_none", "user") in calls
-    assert ("close", None) in calls
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
 
 
 def _decode_encoded_command(script: str) -> str:

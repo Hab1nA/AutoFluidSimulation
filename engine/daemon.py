@@ -1079,6 +1079,8 @@ class PipelineDaemon:
 
         if reload_config_from_toml() and self.runner is not None:
             try:
+                self.runner.disconnect_ssh(lock_timeout=1.0)
+            except TypeError:
                 self.runner.disconnect_ssh()
             except Exception as e:
                 logger.warning("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)

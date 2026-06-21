@@ -86,16 +86,10 @@ class RemoteWorkstation:
         try:
             self._ssh = paramiko.SSHClient()
             self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            if self.auth_method == "none":
-                transport = paramiko.Transport((self.host, self.port))
-                transport.start_client(timeout=10)
-                transport.auth_none(self.username)
-                self._ssh._transport = transport
-                transport.set_keepalive(30)
-                self._sftp = self._ssh.open_sftp()
-                logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
-                return True
-            password = self.password or None
+            # "none" represents passwordless workstation accounts in config.
+            # Windows OpenSSH commonly implements this as password auth with an
+            # empty password, not as the SSH protocol "none" auth method.
+            password = "" if self.auth_method == "none" else self.password or None
             use_key_auth = self.auth_method == "key" or (
                 password is None and self.auth_method != "none"
             )
