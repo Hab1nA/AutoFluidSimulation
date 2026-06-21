@@ -34,6 +34,7 @@ DEFAULT_IPC_HOST = "127.0.0.1"
 DEFAULT_IPC_PORT = 9527
 DEFAULT_TIMEOUT_SECONDS = 5.0
 CHECK_TIMEOUT_SECONDS = 60.0
+WORKER_TIMEOUT_SECONDS = 60.0
 DEFAULT_ALERT_LIMIT = 50
 DEFAULT_ALERT_INTERVAL_SECONDS = 5.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 600.0
@@ -408,7 +409,7 @@ def run_cli(
                 "restart": CMD_WORKER_RESTART,
             }
             command = worker_commands[args.action]
-            response = client.request(command)
+            response = client.request(command, timeout=WORKER_TIMEOUT_SECONDS)
             if args.action == "stop":
                 response = _add_local_worker_stop_cleanup(response)
             return _ipc_result(f"worker {args.action}", response)

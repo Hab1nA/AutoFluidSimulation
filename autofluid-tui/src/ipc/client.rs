@@ -14,6 +14,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 const RESET_TIMEOUT: Duration = Duration::from_secs(60);
 /// clean 可能跨多台工作站执行 SSH 文件删除，不能使用普通轮询级超时。
 const CLEAN_TIMEOUT: Duration = Duration::from_secs(60);
+/// worker start/restart 会触发多工作站 SSH 探测，不能使用普通轮询级超时。
+const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB 行长度上限
 /// 自动重连冷却时间：防止 daemon 不可用时频繁重连。
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
@@ -460,8 +462,11 @@ impl IpcClient {
     }
 
     pub async fn worker_start(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_START))
-            .await
+        self.send_request_with_timeout(
+            &IpcRequest::new(super::protocol::CMD_WORKER_START),
+            WORKER_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn worker_stop(&mut self) -> Result<IpcResponse, String> {
@@ -471,8 +476,11 @@ impl IpcClient {
 
     #[allow(dead_code)]
     pub async fn worker_restart(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_RESTART))
-            .await
+        self.send_request_with_timeout(
+            &IpcRequest::new(super::protocol::CMD_WORKER_RESTART),
+            WORKER_TIMEOUT,
+        )
+        .await
     }
 }
 
@@ -984,6 +992,68 @@ mod tests {
         assert!(
             result.is_ok(),
             "clean should not use the default IPC timeout"
+        );
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn worker_start_accepts_response_after_default_timeout_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut worker_start = String::new();
+            reader
+                .read_line(&mut worker_start)
+                .expect("read worker start");
+            let request: Value =
+                serde_json::from_str(worker_start.trim()).expect("worker start json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_WORKER_START)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":{{"ssh_checks":{{"WS-A":"ok"}}}},"message":"Worker ready","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write worker start response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.worker_start());
+
+        assert!(
+            result.is_ok(),
+            "worker start should not use the default IPC timeout"
         );
         rt.block_on(client.disconnect());
         server.join().expect("server thread");

@@ -98,7 +98,17 @@ def test_worker_restart_sends_worker_restart():
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert client.calls == [("worker_restart", {}, None)]
+    assert client.calls == [("worker_restart", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
+
+
+def test_worker_start_uses_longer_timeout():
+    client = _FakeClient()
+
+    result, payload = _run(["worker", "start"], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [("worker_start", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
 
 
 def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
@@ -125,7 +135,7 @@ def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert client.calls == [("worker_stop", {}, None)]
+    assert client.calls == [("worker_stop", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
     assert payload["data"]["remote"] == "stopped"
     assert payload["data"]["local_watchdog_cleanup"] == {
         "Workstation": {"status": "uninstalled"},
