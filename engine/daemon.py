@@ -421,23 +421,35 @@ class PipelineDaemon:
             remove_pid_file(worker_pid_file("local_worker"))
 
     def _assign_config_workstations(self) -> None:
-        """Persist stable workstation assignments for newly loaded configs."""
+        """Persist stable workstation assignments for current configs."""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
 
         workstation_ids = [str(ws.get("id")) for ws in WORKSTATIONS if ws.get("id")]
         assigner = ConfigAssigner(workstation_ids, self.state.get_all_configs())
         assigned_count = 0
+        reassigned_count = 0
+        valid_workstation_ids = set(workstation_ids)
         for config_name in self.state.get_all_configs():
-            if self.state.get_config_workstation(config_name) is not None:
+            current_workstation_id = self.state.get_config_workstation(config_name)
+            if current_workstation_id in valid_workstation_ids:
                 continue
+            assigned_workstation_id = assigner.get_workstation(config_name)
             self.state.set_config_workstation(
                 config_name,
-                assigner.get_workstation(config_name),
+                assigned_workstation_id,
             )
-            assigned_count += 1
+            if current_workstation_id is None:
+                assigned_count += 1
+            else:
+                reassigned_count += 1
         if assigned_count:
             logger.info("[Config] 已持久化 %d 个构型的工作站分配", assigned_count)
+        if reassigned_count:
+            logger.warning(
+                "[Config] 已修正 %d 个无效/遗留工作站分配",
+                reassigned_count,
+            )
 
     def _start_alert_watcher(self) -> None:
         """Start the server-side alert watcher as a daemon-owned child process."""

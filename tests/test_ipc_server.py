@@ -1,4 +1,5 @@
-from ipc.server import IPCServer
+import logging
+
 from ipc.protocol import (
     CMD_GET_DASHBOARD,
     CMD_WORKER_HEARTBEAT,
@@ -9,6 +10,7 @@ from ipc.protocol import (
     create_request,
     serialize,
 )
+from ipc.server import IPCServer
 
 
 class DummyHandler:
@@ -43,6 +45,31 @@ def test_process_message_handler_returns_false():
     assert resp["status"] == "error"
     assert resp["request_id"] == req["request_id"]
     assert "failed" in resp["message"]
+
+
+def test_process_message_debug_log_summarizes_large_params(caplog):
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request(
+        "test_cmd",
+        {
+            "result": {
+                "scdoc_file": {
+                    "filename": "model.scdoc",
+                    "content_b64": "A" * 2048,
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ipc.server"):
+        resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "ok"
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "content_b64" in log_text
+    assert "<str len=2048" in log_text
+    assert "A" * 1024 not in log_text
 
 
 def test_process_message_handler_raises_exception():

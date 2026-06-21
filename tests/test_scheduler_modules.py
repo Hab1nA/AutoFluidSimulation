@@ -3079,6 +3079,35 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.assignments == {1: "WS-A", 2: "WS-B", 3: "WS-A"}
         assert daemon.state.set_calls == [(1, "WS-A"), (3, "WS-A")]
 
+    def test_assign_config_workstations_replaces_legacy_default(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+        )
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _AssignmentState(
+            [1, 2, 3, 4],
+            assignments={1: "default", 2: "WS-B", 3: "stale"},
+        )
+
+        daemon._assign_config_workstations()
+
+        assert daemon.state.assignments == {
+            1: "WS-A",
+            2: "WS-B",
+            3: "WS-C",
+            4: "WS-A",
+        }
+        assert daemon.state.set_calls == [
+            (1, "WS-A"),
+            (3, "WS-C"),
+            (4, "WS-A"),
+        ]
+
     def test_clean_sw_requests_scheduler_file_monitor_reset(self):
         from engine.daemon import PipelineDaemon
 

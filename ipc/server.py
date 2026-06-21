@@ -32,6 +32,16 @@ from utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 
+def _summarize_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _summarize_for_log(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_summarize_for_log(item) for item in value]
+    if isinstance(value, str) and len(value) > 512:
+        return f"<str len={len(value)} prefix={value[:64]!r}>"
+    return value
+
+
 class IPCServer:
     """
     IPC 服务器。
@@ -294,7 +304,7 @@ class IPCServer:
         params = msg.get("params", {})
         request_id = msg.get("request_id", "")
 
-        logger.debug(f"[IPC] 收到命令: {command}, params={params}")
+        logger.debug("[IPC] 收到命令: %s, params=%s", command, _summarize_for_log(params))
 
         if self._auth_token:
             incoming_token = msg.get("auth_token", "")
