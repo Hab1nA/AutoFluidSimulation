@@ -864,6 +864,57 @@ class TestTaskRunnerSWDelegates:
             ("WS-B.example", 22, "ps", "pw"),
         ]
 
+    def test_get_ssh_can_skip_connect_for_passive_health(self, monkeypatch):
+        """被动健康检查可取得 SSH 客户端但不触发连接。"""
+        import engine.task_runner as task_runner_module
+
+        class _SSH:
+            connect_calls = 0
+
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ) -> None:
+                self.connected = False
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def connect(self) -> bool:
+                _SSH.connect_calls += 1
+                self.connected = True
+                return True
+
+        monkeypatch.setattr(
+            task_runner_module,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "host": f"{workstation_id}.example",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+            },
+        )
+        monkeypatch.setattr(task_runner_module, "RemoteWorkstation", _SSH)
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh_pool = {}
+        runner._ssh_locks = {}
+        runner._ssh_locks_guard = threading.Lock()
+        runner._ssh_lock = threading.RLock()
+        runner._ssh = None
+
+        ssh = runner.get_ssh("WS-A", connect=False)
+
+        assert ssh.is_connected() is False
+        assert _SSH.connect_calls == 0
+
     def test_get_ssh_skips_reconnect_after_stop_event(self, monkeypatch):
         """调度器停止后不应再触发新的 SSH 重连。"""
         import engine.task_runner as task_runner_module

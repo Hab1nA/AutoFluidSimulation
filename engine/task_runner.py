@@ -122,8 +122,15 @@ class TaskRunner:
     def get_ssh(
         self,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
+        *,
+        connect: bool = True,
     ) -> RemoteWorkstation:
-        """获取（或创建）SSH 客户端实例。线程安全。"""
+        """获取（或创建）SSH 客户端实例。线程安全。
+
+        Args:
+            workstation_id: 工作站 ID。
+            connect: True 时确保连接可用；False 时只返回缓存/新建客户端，不发起网络连接。
+        """
         locks_guard = getattr(self, "_ssh_locks_guard", None)
         if locks_guard is None:
             locks_guard = threading.Lock()
@@ -145,6 +152,8 @@ class TaskRunner:
                 self._ssh_pool[workstation_id] = ssh
                 if workstation_id == DEFAULT_WORKSTATION_ID:
                     self._ssh = ssh
+            if not connect:
+                return ssh
             if not ssh.is_connected():
                 stopped_event = getattr(self, "_stopped_event", None)
                 if stopped_event is not None and stopped_event.is_set():

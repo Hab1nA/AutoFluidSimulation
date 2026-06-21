@@ -27,10 +27,18 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
 def test_tunnel_watchdog_is_installed_by_default_startup() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
-    assert "if (-not $NoWatchdog -and -not $Check -and -not $Monitor)" in source
+    assert 'if ($TunnelKind -eq "Workstation" -and -not $NoWatchdog -and -not $Check -and -not $Monitor)' in source
     assert "Install-TunnelWatchdogTask -RemotePort $remotePort" in source
     assert "Install-TunnelWatchdogTask" in source
     assert "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready" in source
+
+
+
+def test_local_worker_tunnel_does_not_install_watchdog_by_default() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    assert 'if ($TunnelKind -eq "Workstation" -and -not $NoWatchdog -and -not $Check -and -not $Monitor)' in source
+    assert 'if (-not $NoWatchdog -and -not $Check -and -not $Monitor)' not in source
 
 
 def test_tunnel_watchdog_uses_task_scheduler_safe_repetition_duration() -> None:

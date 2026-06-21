@@ -141,6 +141,14 @@ class _RefreshRunner:
         return self._ssh_by_id[workstation_id]
 
 
+class _NoConnectRefreshRunner:
+    def __init__(self, ssh_pool=None):
+        self._ssh_pool = ssh_pool or {}
+
+    def get_ssh(self, workstation_id="default"):
+        raise AssertionError("background SSH health check must not create connections")
+
+
 def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
     handler = _LogHandler()
     monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
@@ -552,13 +560,37 @@ def test_ssh_health_check_once_refreshes_last_worker_checks(monkeypatch):
         }],
     )
     daemon = PipelineDaemon.__new__(PipelineDaemon)
-    daemon.runner = _RefreshRunner({"WS-A": _Ssh(True)})
+    daemon.runner = _NoConnectRefreshRunner({"WS-A": _Ssh(True)})
     daemon._last_worker_ssh_checks = {"WS-A": "disconnected"}
 
     result = daemon._run_workstation_ssh_health_check_once()
 
     assert result["ssh_checks"] == {"WS-A": "ok"}
     assert daemon._last_worker_ssh_checks == {"WS-A": "ok"}
+
+
+
+def test_background_ssh_health_check_is_passive_without_existing_connection(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{
+            "id": "WS-A",
+            "host": "172.17.135.240",
+            "port": 22,
+            "reachable_host": "127.0.0.1",
+            "reachable_port": 2222,
+            "connectivity_mode": "reverse_tunnel",
+        }],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = _NoConnectRefreshRunner()
+    daemon._last_worker_ssh_checks = {}
+
+    result = daemon._run_workstation_ssh_health_check_once()
+
+    assert result["ssh_checks"] == {"WS-A": "unknown"}
+    assert daemon._last_worker_ssh_checks == {"WS-A": "unknown"}
 
 
 def test_ssh_health_monitor_disabled_when_interval_zero(monkeypatch):

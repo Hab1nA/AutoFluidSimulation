@@ -347,6 +347,9 @@ impl WorkerManager {
             ),
         )
         .current_dir(project_dir);
+        if tunnel_kind == "LocalWorker" {
+            cmd.arg("-NoWatchdog");
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -1045,12 +1048,16 @@ mod tests {
         assert!(result);
         let order = wait_for_marker_lines(&marker, 4);
         let lines: Vec<&str> = order.lines().collect();
-        assert!(lines
+        let workstation_tunnel_line = lines
             .iter()
-            .any(|line| line.contains("-TunnelKind Workstation")));
-        assert!(lines
+            .find(|line| line.contains("-TunnelKind Workstation"))
+            .expect("workstation tunnel command");
+        let local_worker_tunnel_line = lines
             .iter()
-            .any(|line| line.contains("-TunnelKind LocalWorker")));
+            .find(|line| line.contains("-TunnelKind LocalWorker"))
+            .expect("local worker tunnel command");
+        assert!(!workstation_tunnel_line.contains("-NoWatchdog"));
+        assert!(local_worker_tunnel_line.contains("-NoWatchdog"));
         let daemon_idx = lines
             .iter()
             .position(|line| *line == "daemon")

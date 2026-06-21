@@ -1114,8 +1114,12 @@ class PipelineDaemon:
             return True, results, f"部分工作站 SSH 连通检查失败: {failed_ssh_checks}"
         return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
 
-    def _refresh_workstation_ssh_checks(self) -> dict[str, Any]:
-        """Refresh workstation SSH readiness using the current runner."""
+    def _refresh_workstation_ssh_checks(self, *, connect: bool = True) -> dict[str, Any]:
+        """Refresh workstation SSH readiness using the current runner.
+
+        Args:
+            connect: True for explicit readiness checks; False for passive background health.
+        """
         results: dict[str, Any] = {
             "ssh_checks": {},
             "ssh_targets": {},
@@ -1124,17 +1128,33 @@ class PipelineDaemon:
             return results
 
         previous_checks = dict(getattr(self, "_last_worker_ssh_checks", {}))
+        ssh_pool = getattr(self.runner, "_ssh_pool", {})
+        if not isinstance(ssh_pool, dict):
+            ssh_pool = {}
         for ws in WORKSTATIONS:
             ws_id = str(ws.get("id", "default"))
             target = self._workstation_ssh_target(ws)
             results["ssh_targets"][ws_id] = target
             try:
-                ssh = self.runner.get_ssh(ws_id)
-                ensure_connected = getattr(ssh, "ensure_connected", None)
-                if callable(ensure_connected):
-                    connected = bool(ensure_connected())
+                if connect:
+                    ssh = self.runner.get_ssh(ws_id)
+                    ensure_connected = getattr(ssh, "ensure_connected", None)
+                    if callable(ensure_connected):
+                        connected = bool(ensure_connected())
+                    else:
+                        connected = bool(ssh.is_connected())
                 else:
-                    connected = bool(ssh.is_connected())
+                    ssh = ssh_pool.get(ws_id)
+                    if ssh is None:
+                        results["ssh_checks"][ws_id] = str(
+                            previous_checks.get(ws_id, "unknown")
+                        )
+                        continue
+                    connection_is_active = getattr(ssh, "connection_is_active", None)
+                    if callable(connection_is_active):
+                        connected = bool(connection_is_active())
+                    else:
+                        connected = bool(ssh.is_connected())
                 results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
                 if connected and previous_checks.get(ws_id) not in (None, "ok"):
                     logger.warning(
@@ -1191,7 +1211,7 @@ class PipelineDaemon:
         if self.runner is None:
             return {"ssh_checks": {}, "ssh_targets": {}}
         try:
-            return self._refresh_workstation_ssh_checks()
+            return self._refresh_workstation_ssh_checks(connect=False)
         except Exception as exc:
             logger.warning("[ServerMode] 后台工作站 SSH 健康检查失败: %s", exc)
             return {"ssh_checks": {}, "ssh_targets": {}}

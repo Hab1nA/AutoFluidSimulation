@@ -636,7 +636,7 @@ if ($InstallWatchdog) {
     exit 0
 }
 
-if (-not $NoWatchdog -and -not $Check -and -not $Monitor) {
+if ($TunnelKind -eq "Workstation" -and -not $NoWatchdog -and -not $Check -and -not $Monitor) {
     try {
         $taskName = Install-TunnelWatchdogTask -RemotePort $remotePort -PowerShellExe (Resolve-PowerShellExe)
         Write-Host "AutoFluid $tunnelLabel reverse SSH tunnel watchdog task is ready: $taskName"
