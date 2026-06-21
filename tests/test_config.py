@@ -1448,6 +1448,48 @@ class TestWorkstationLookup:
             REMOTE_CONFIG.update(original_remote)
             WORKSTATIONS[:] = original_workstations
 
+    def test_per_workstation_reachable_env_overrides_toml(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_REACHABLE_PORT", "2222")
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_PORT", "2224")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                },
+                "workstations": [
+                    {"id": "WS-A", "host": "172.17.135.240", "username": "ps"},
+                    {"id": "WS-B", "host": "172.17.135.89", "username": "ps"},
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+            ws_b = cfg.get_workstation_config("WS-B")
+
+            assert ws_a["reachable_host"] == "127.0.0.1"
+            assert ws_a["reachable_port"] == 2222
+            assert ws_a["connectivity_mode"] == "reverse_tunnel"
+            assert ws_b["reachable_host"] == "127.0.0.1"
+            assert ws_b["reachable_port"] == 2224
+            assert ws_b["connectivity_mode"] == "reverse_tunnel"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
 
 class TestServerModeLocalPaths:
     """验证 server 模式下 daemon 本地产物路径不会落到 Windows 默认路径。"""

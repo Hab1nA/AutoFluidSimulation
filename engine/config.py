@@ -290,25 +290,64 @@ def _workstation_from_remote_config(
 WORKSTATIONS: list[WorkstationConfig] = [_workstation_from_remote_config()]
 
 
+def _workstation_env_token(workstation_id: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", workstation_id).strip("_").upper()
+    return token or "DEFAULT"
+
+
+def _first_env_value(env_names: tuple[str, ...]) -> str | None:
+    for env_name in env_names:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            return env_val
+    return None
+
+
+def _apply_workstation_reachable_env(
+    workstation: WorkstationConfig,
+    *,
+    include_legacy: bool = False,
+) -> None:
+    """Apply per-workstation server reachability overrides from environment."""
+    token = _workstation_env_token(str(workstation.get("id", DEFAULT_WORKSTATION_ID)))
+    env_groups: dict[str, tuple[str, ...]] = {
+        "reachable_host": (f"AUTOFLUID_{token}_SSH_REACHABLE_HOST",),
+        "reachable_port": (f"AUTOFLUID_{token}_SSH_REACHABLE_PORT",),
+        "connectivity_mode": (f"AUTOFLUID_{token}_SSH_CONNECTIVITY_MODE",),
+    }
+    if include_legacy:
+        env_groups = {
+            "reachable_host": (
+                *env_groups["reachable_host"],
+                "AUTOFLUID_SSH_REACHABLE_HOST",
+            ),
+            "reachable_port": (
+                *env_groups["reachable_port"],
+                "AUTOFLUID_SSH_REACHABLE_PORT",
+            ),
+            "connectivity_mode": (
+                *env_groups["connectivity_mode"],
+                "AUTOFLUID_SSH_CONNECTIVITY_MODE",
+            ),
+        }
+
+    for key, env_names in env_groups.items():
+        env_val = _first_env_value(env_names)
+        if env_val is None:
+            continue
+        if key == "reachable_host":
+            workstation["reachable_host"] = env_val
+        elif key == "reachable_port":
+            workstation["reachable_port"] = int(env_val)
+        elif key == "connectivity_mode":
+            workstation["connectivity_mode"] = env_val
+
+
 def _sync_default_workstation_reachable_env() -> None:
     """Apply server-reachable env overrides to the legacy default workstation."""
     if not WORKSTATIONS:
         return
-    default_workstation = WORKSTATIONS[0]
-    for key, env_name in [
-        ("reachable_host", "AUTOFLUID_SSH_REACHABLE_HOST"),
-        ("reachable_port", "AUTOFLUID_SSH_REACHABLE_PORT"),
-        ("connectivity_mode", "AUTOFLUID_SSH_CONNECTIVITY_MODE"),
-    ]:
-        env_val = os.environ.get(env_name)
-        if not env_val:
-            continue
-        if key == "reachable_host":
-            default_workstation["reachable_host"] = env_val
-        elif key == "reachable_port":
-            default_workstation["reachable_port"] = int(env_val)
-        else:
-            default_workstation["connectivity_mode"] = env_val
+    _apply_workstation_reachable_env(WORKSTATIONS[0], include_legacy=True)
 
 
 _sync_default_workstation_reachable_env()
@@ -707,11 +746,6 @@ def _apply_postprocess_defaults_to_workstation(workstation: WorkstationConfig) -
     )
 
 
-def _workstation_env_token(workstation_id: str) -> str:
-    token = re.sub(r"[^A-Za-z0-9]+", "_", workstation_id).strip("_").upper()
-    return token or "DEFAULT"
-
-
 def _workstation_password_env_names(workstation_id: str) -> tuple[str, ...]:
     token = _workstation_env_token(workstation_id)
     return (f"AUTOFLUID_{token}_SSH_PASSWORD",)
@@ -741,6 +775,7 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
             merged["auth_method"] = "none"
     if str(merged.get("auth_method") or "").lower() in {"key", "none"}:
         merged["password"] = ""
+    _apply_workstation_reachable_env(cast(WorkstationConfig, merged))
     for port_key in ("port", "reachable_port"):
         if port_key in merged:
             merged[port_key] = int(merged[port_key])
