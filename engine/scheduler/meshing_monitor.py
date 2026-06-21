@@ -214,9 +214,10 @@ class MeshingMonitor:
             except queue.Empty:
                 continue
 
-            logger.info(
+            queue_depth = self._meshing_queue.qsize()
+            logger.debug(
                 f"[MeshingMonitor] 从队列取出构型{config_name} "
-                f"(剩余队列深度: {self._meshing_queue.qsize()})"
+                f"(剩余队列深度: {queue_depth})"
             )
 
             workstation_id = self._workstation_for_config(config_name)
@@ -229,6 +230,11 @@ class MeshingMonitor:
                 self._meshing_queue.requeue(config_name)
                 if not pause_aware_sleep(0.2, self._paused, self._stopped):
                     break
+            else:
+                logger.info(
+                    f"[MeshingMonitor] 启动构型{config_name} Meshing worker: "
+                    f"workstation={workstation_id}, queue_depth={queue_depth}"
+                )
 
         logger.info("[MeshingMonitor] 监控循环退出")
 
@@ -482,8 +488,12 @@ class MeshingMonitor:
                     "引擎已停止",
                 )
             else:
+                error = str(
+                    getattr(self._remote_executor, "last_meshing_error", "")
+                    or "网格划分失败"
+                )
                 self.state.set_step_status(
-                    config_name, "meshing", STATUS_ERROR, "网格划分超时",
+                    config_name, "meshing", STATUS_ERROR, error,
                 )
         return False
 

@@ -110,6 +110,7 @@ class RemoteExecutor:
         self._sync_cache_lock = threading.Lock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
         self._last_successful_sync_signatures: dict[str, tuple[object, ...]] = {}
+        self.last_meshing_error = ""
 
     # 步骤名 → 日志前缀映射（项目规范：中文消息 + 英文标签前缀）
     _STEP_LOG_PREFIX: dict[str, str] = {
@@ -1025,6 +1026,7 @@ class RemoteExecutor:
             "meshing",
             workstation_id,
         )
+        self.last_meshing_error = ""
 
         logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
@@ -1047,8 +1049,17 @@ class RemoteExecutor:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
+                        error_summary = self._read_remote_task_error_summary(
+                            ssh,
+                            config_name,
+                            "meshing",
+                            workstation_id,
+                            error_flag,
+                        )
+                        self.last_meshing_error = error_summary
                         logger.error(
-                            f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
+                            f"[Meshing] 构型{config_name} 网格划分远程任务执行失败: "
+                            f"{error_summary}"
                         )
                         ssh.delete_remote_file(error_flag)
                         self._cleanup_completed_remote_task(
@@ -1100,9 +1111,48 @@ class RemoteExecutor:
             time.sleep(poll_interval)
 
         logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
+        self.last_meshing_error = f"网格划分超时 ({timeout}s)"
         # 超时后终止远程进程，防止资源泄漏和重试冲突
         self._kill_remote_task_for_config(config_name, "meshing", workstation_id)
         return False
+
+    def _read_remote_task_error_summary(
+        self,
+        ssh: "RemoteWorkstation",
+        config_name: int,
+        step_name: str,
+        workstation_id: str,
+        error_flag: str,
+    ) -> str:
+        """Return a compact remote task error summary before cleanup removes markers."""
+        read_text = getattr(ssh, "read_remote_text_file", None)
+        if not callable(read_text):
+            return "远程任务失败（当前 SSH 客户端不支持读取错误详情）"
+
+        parts: list[str] = []
+        try:
+            error_text = read_text(error_flag, timeout=5)
+            if error_text:
+                parts.append(error_text.strip())
+        except (OSError, ConnectionError) as exc:
+            parts.append(f"读取错误标志失败: {exc}")
+
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
+        log_file = str((task or {}).get("log_file") or "")
+        if log_file:
+            try:
+                log_text = read_text(log_file, timeout=5)
+                if log_text:
+                    parts.append(log_text.strip())
+            except (OSError, ConnectionError) as exc:
+                parts.append(f"读取远程任务日志失败: {exc}")
+
+        summary = "\n".join(part for part in parts if part).strip()
+        if not summary:
+            return "远程任务失败（未读取到错误详情）"
+        lines = [line.strip() for line in summary.splitlines() if line.strip()]
+        tail = "\n".join(lines[-8:])
+        return tail[-1200:]
 
     # ------------------------------------------------------------------
     # 仿真求解

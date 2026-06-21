@@ -651,20 +651,49 @@ def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeyp
     error_flag = "D:/flags/meshing_done_3.txt.error"
     checked: list[str] = []
     deleted: list[str] = []
+    read_paths: list[str] = []
+    cleaned: list[tuple[str, str | None]] = []
 
     class _SSH:
         def check_remote_file(self, remote_path: str) -> bool:
             checked.append(remote_path)
-            return remote_path == error_flag
+            return remote_path.replace("\\", "/") == error_flag
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            read_paths.append(remote_path)
+            normalized = remote_path.replace("\\", "/")
+            if normalized == error_flag:
+                return "REMOTE_ERROR_FLAG"
+            if normalized == "D:/logs/meshing_3.log":
+                return "\n".join(
+                    [
+                        "line before",
+                        "FileNotFoundError: MPI bin 目录不存在",
+                        "ERROR conda.cli.main_run",
+                    ]
+                )
+            return ""
 
         def delete_remote_file(self, remote_path: str) -> bool:
             deleted.append(remote_path)
             return True
 
-        def kill_remote_task(self, task_name: str) -> bool:
+        def cleanup_remote_task_entry(self, task_name: str, pid_file: str | None = None) -> bool:
+            cleaned.append((task_name, pid_file))
             return True
 
-    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+    state = _StateRecorder()
+    state.remote_tasks[(3, "meshing")] = {
+        "config_name": 3,
+        "step_name": "meshing",
+        "task_name": "AutoFluid_meshing",
+        "flag_file": "D:/flags/meshing_done_3.txt",
+        "error_flag_file": error_flag,
+        "log_file": "D:/logs/meshing_3.log",
+        "pid_file": "D:/flags/autofluid_bg_meshing.pid",
+        "started_at": 0.0,
+    }
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor._remote_tasks[3] = "AutoFluid_meshing"
     monkeypatch.setattr(
         "executor.remote_executor.time.sleep",
@@ -672,11 +701,20 @@ def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeyp
             AssertionError("error flag should stop Meshing polling immediately")
         ),
     )
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: 0.0)
 
     assert executor.wait_meshing_completion(3) is False
-    assert checked == [error_flag]
+    assert [path.replace("\\", "/") for path in checked] == [error_flag]
+    assert [path.replace("\\", "/") for path in read_paths] == [
+        error_flag,
+        "D:/logs/meshing_3.log",
+    ]
+    assert "FileNotFoundError: MPI bin" in executor.last_meshing_error
+    assert "ERROR conda.cli.main_run" in executor.last_meshing_error
     assert deleted == [error_flag]
+    assert cleaned == [("AutoFluid_meshing", "D:/flags/autofluid_bg_meshing.pid")]
     assert 3 not in executor._remote_tasks
+    assert (3, "meshing") not in state.remote_tasks
 
 
 def test_wait_meshing_completion_requires_mesh_after_done_flag(monkeypatch):

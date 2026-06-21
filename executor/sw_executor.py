@@ -520,9 +520,10 @@ class SWExecutor:
                     logger.info("[SW-Cleanup] ✓ 残留 SolidWorks 进程已终止，等待 3 秒...")
                     time.sleep(3)
                 else:
+                    stderr = kill_result.stderr or ""
                     logger.warning(
                         f"[SW-Cleanup] taskkill 返回非零码 {kill_result.returncode}: "
-                        f"{kill_result.stderr.strip()}"
+                        f"{stderr.strip()}"
                     )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[SW-Cleanup] 检查/终止 SW 进程时异常: {e}")
@@ -540,7 +541,8 @@ class SWExecutor:
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.debug(f"[SW-Cleanup] 检查 SolidWorks 进程时异常: {e}")
             return False
-        return "SLDWORKS.exe" in result.stdout
+        stdout = result.stdout or ""
+        return "SLDWORKS.exe" in stdout
 
     @staticmethod
     def _is_com_rpc_failure(exc: Exception | None) -> bool:

@@ -4097,6 +4097,30 @@ class TestMeshingMonitor:
         assert dispatched == []
         assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
 
+    def test_wait_failure_preserves_remote_error_summary(self):
+        """远程 Meshing 失败摘要应写入状态，供 TUI/日志定位真实原因。"""
+        self.state.load_configs({3: [9.0, 10.0, 11.0, 12.0]})
+        self.state.set_config_workstation(3, "WS-C")
+        self.remote.last_meshing_error = "FileNotFoundError: MPI bin 目录不存在"
+
+        def fail_wait(
+            config_name: int,
+            paused_event=None,
+            stopped_event=None,
+            workstation_id: str = "default",
+        ) -> bool:
+            self.remote._meshing_waits.append((config_name, workstation_id))
+            return False
+
+        self.remote.wait_meshing_completion = fail_wait
+
+        self.monitor._wait_for_meshing_completion(3)
+
+        step = self.state.get_all_steps_for_config(3)["meshing"]
+        assert step["status"] == STATUS_ERROR
+        assert step["error_message"] == "FileNotFoundError: MPI bin 目录不存在"
+        assert self.remote._meshing_waits == [(3, "WS-C")]
+
     def test_monitor_paused_waits(self):
         """暂停期间监控循环等待。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
