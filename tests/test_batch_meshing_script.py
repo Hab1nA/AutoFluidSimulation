@@ -60,6 +60,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
     return argparse.Namespace(
         config_id=config_id,
         mpi_bin_dir=str(mpi_bin_dir),
+        fluent_path=str(tmp_path / "fluent.exe"),
         workflow_path=str(workflow_path),
         journal_path=str(journal_path),
         scdoc_dir=str(scdoc_dir),
@@ -185,6 +186,25 @@ def test_launch_does_not_force_localized_fluent_gui(tmp_path, monkeypatch):
     assert "env" not in launch_kwargs
     assert launch_kwargs["ui_mode"] == "gui"
     assert launch_kwargs["start_watchdog"] is False
+
+
+def test_launch_uses_configured_fluent_path(tmp_path, monkeypatch):
+    launch_kwargs: dict[str, Any] = {}
+    session = _SuccessfulMeshingSession()
+
+    def launch_fluent(**kwargs: Any):
+        launch_kwargs.update(kwargs)
+        return session
+
+    module = _load_batch_meshing_module(monkeypatch, launch_fluent)
+    args = _make_args(tmp_path)
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert launch_kwargs["fluent_path"] == args.fluent_path
 
 
 def test_launch_uses_configured_working_dir(tmp_path, monkeypatch):

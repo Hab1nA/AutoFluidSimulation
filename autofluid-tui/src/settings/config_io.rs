@@ -12,10 +12,15 @@ pub fn config_file_path() -> PathBuf {
 pub fn load_config() -> Result<SettingsConfig, String> {
     let path = config_file_path();
     if !path.exists() {
-        return Ok(SettingsConfig::default());
+        let mut config = SettingsConfig::default();
+        config.apply_derived_defaults();
+        return Ok(config);
     }
     let contents = fs::read_to_string(&path).map_err(|e| format!("读取配置文件失败: {}", e))?;
-    toml::from_str(&contents).map_err(|e| format!("解析配置文件失败: {}", e))
+    let mut config: SettingsConfig =
+        toml::from_str(&contents).map_err(|e| format!("解析配置文件失败: {}", e))?;
+    config.apply_derived_defaults();
+    Ok(config)
 }
 
 pub fn save_config(config: &SettingsConfig) -> Result<(), String> {

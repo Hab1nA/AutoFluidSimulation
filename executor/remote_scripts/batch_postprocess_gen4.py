@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument("config_id", type=int, help="模型编号")
+    parser.add_argument("--fluent-path", type=str, required=True, help="Fluent 可执行文件完整路径")
     parser.add_argument("--case-dir", type=str, required=True, help="Solver case/data 输出目录")
     parser.add_argument("--post-journal-path", type=str, required=True, help="后处理 Journal 文件")
     parser.add_argument(
@@ -176,6 +177,8 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         metrics_output_dir,
         "--compute-script",
         compute_script,
+        "--fluent-path",
+        args.fluent_path,
         "--processor-count",
         str(args.metrics_processor_count),
         "--ambient-pressure",
@@ -230,6 +233,7 @@ def main() -> None:
         os.makedirs(dir_path, exist_ok=True)
 
     print(f"[配置] 模型编号: {config_id}")
+    print(f"[配置] Fluent 可执行文件: {args.fluent_path}")
     print(f"[配置] Case 目录: {args.case_dir}")
     print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 额外后处理 Journal: {args.extra_post_journal_path or '<none>'}")
@@ -239,6 +243,7 @@ def main() -> None:
         mode=pyfluent.FluentMode.SOLVER,
         precision=pyfluent.Precision.DOUBLE,
         product_version=pyfluent.FluentVersion.v241,
+        fluent_path=args.fluent_path,
         cleanup_on_exit=True,
         ui_mode="gui",
         cwd=args.working_dir,

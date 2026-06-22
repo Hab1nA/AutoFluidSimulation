@@ -185,6 +185,7 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 8)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -206,6 +207,7 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 4)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -220,6 +222,7 @@ class TestBuildMeshingCommand:
         assert "--output-dir" in command
         assert '--working-dir "D:\\working"' in command
         assert "--processor-count 4" in command
+        assert r'--fluent-path "D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"' in command
 
     def test_command_quotes_spaces_and_escapes_percent(self, monkeypatch):
         """路径参数按 cmd 脚本语义转义，避免空格和百分号破坏命令。"""
@@ -325,6 +328,7 @@ class TestBuildSolverCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"E:\Fluent\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 128)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -339,6 +343,7 @@ class TestBuildSolverCommand:
         assert "--extra-post-journal-path" in command
         assert "postprocess_extra_gen4.jou" in command
         assert "--postprocess-flag-file D:/flags/postprocess_done_2.txt" in command
+        assert r'--fluent-path "E:\Fluent\v241\fluent\ntbin\win64\fluent.exe"' in command
 
 
 class TestBuildPostprocessCommand:
@@ -365,6 +370,7 @@ class TestBuildPostprocessCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"F:\Ansys\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -379,6 +385,7 @@ class TestBuildPostprocessCommand:
         assert "postprocess_extra_gen4.jou" in command
         assert '--postprocess-output-dir "D:\\post"' in command
         assert "--flag-file D:/flags/postprocess_done_2.txt" in command
+        assert r'--fluent-path "F:\Ansys\v241\fluent\ntbin\win64\fluent.exe"' in command
         assert flag_file == "D:/flags/postprocess_done_2.txt"
 
     def test_solver_and_postprocess_commands_use_postprocess_config(self, monkeypatch):

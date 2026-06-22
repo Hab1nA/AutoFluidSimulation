@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case-data", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--compute-script", type=Path, default=Path(__file__).with_name("compute_metrics_gen4.py"))
-    parser.add_argument("--fluent-path", type=Path, default=Path(r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"))
+    parser.add_argument("--fluent-path", type=Path, required=True)
     parser.add_argument("--processor-count", type=int, default=2)
     parser.add_argument("--ambient-pressure", type=float, default=0.0)
     parser.add_argument("--pressure-reference", type=float, default=101325.0)

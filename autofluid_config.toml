@@ -21,6 +21,7 @@ flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-A"
@@ -44,6 +45,7 @@ postprocess_animation_dir = 'D:\xkz_1020\animation'
 postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 notes = "existing workstation; reachable locally, use reachable_host/reachable_port in server mode"
 
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 [[workstations]]
 id = "WS-B"
 host = "172.17.135.89"
@@ -67,6 +69,7 @@ postprocess_animation_dir = 'D:\xkz_1020\animation'
 postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 notes = "key-auth workstation; conda/fluent paths must be rechecked before production runs"
 
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 [[workstations]]
 id = "WS-C"
 host = "172.17.135.115"
@@ -85,6 +88,7 @@ flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 notes = "currently offline/unreachable; check/status must report disconnected"
 
 [step_file_patterns]

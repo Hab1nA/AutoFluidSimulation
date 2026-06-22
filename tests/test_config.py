@@ -765,6 +765,7 @@ class TestReloadConfigFromToml:
                         "flag_dir": r"D:\flags",
                         "conda_env": "pyfluent",
                         "conda_exe": r"C:\conda.exe",
+                        "fluent_path": r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
                         "mpi_bin_dir": r"C:\mpi",
                     }
                 ]
@@ -792,12 +793,61 @@ class TestReloadConfigFromToml:
             assert workstation["flag_dir"] == r"D:\flags"
             assert workstation["conda_env"] == "pyfluent"
             assert workstation["conda_exe"] == r"C:\conda.exe"
+            assert workstation["fluent_path"] == r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
             assert workstation["mpi_bin_dir"] == r"C:\mpi"
             assert "postprocess_output_dir" in workstation
             assert "postprocess_animation_dir" in workstation
             assert "postprocess_metrics_dir" in workstation
         finally:
             WORKSTATIONS[:] = original
+
+    def test_workstation_fluent_path_inherits_and_overrides_remote_default(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, get_workstation_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "remote_config": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "ps",
+                    "fluent_path": r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+                    "mpi_bin_dir": r"C:\mpi",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "10.0.0.1",
+                        "port": 22,
+                        "username": "ps",
+                    },
+                    {
+                        "id": "WS-C",
+                        "host": "10.0.0.3",
+                        "port": 22,
+                        "username": "bh",
+                        "fluent_path": r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert get_workstation_config("WS-A")["fluent_path"] == (
+                r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+            )
+            assert get_workstation_config("WS-C")["fluent_path"] == (
+                r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+            )
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
 
     def test_remote_config_backfills_default_workstation(self, monkeypatch):
         import engine.config as cfg

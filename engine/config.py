@@ -109,6 +109,7 @@ class RemoteConfig(TypedDict):
     flag_dir: str
     conda_env: str
     conda_exe: str
+    fluent_path: str
     mpi_bin_dir: str
 
 
@@ -271,7 +272,9 @@ REMOTE_CONFIG: RemoteConfig = {
     "conda_env": _toml_or_default("remote_config", "conda_env", "pyfluent"),
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
     "conda_exe": _toml_or_default("remote_config", "conda_exe", r"C:\ProgramData\anaconda3\Scripts\conda.exe"),
-    # 远程 ANSYS 安装根目录
+    # Fluent 可执行文件完整路径（用于 PyFluent 显式启动，避免依赖 AWP_ROOT241）
+    "fluent_path": os.environ.get("AUTOFLUID_REMOTE_FLUENT_PATH", _toml_or_default("remote_config", "fluent_path", r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")),
+    # 远程 ANSYS MPI bin 目录
     "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", _toml_or_default("remote_config", "mpi_bin_dir", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin")),
 }
 

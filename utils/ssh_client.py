@@ -978,6 +978,7 @@ class RemoteWorkstation:
 
     def check_system(self, conda_exe: str = "", conda_env: str = "",
                      remote_dirs: dict[str, str] | None = None,
+                     fluent_path: str = "",
                      mpi_bin_dir: str = "",
                      scripts_dir: str = "",
                      script_files: list[str] | None = None,
@@ -993,6 +994,7 @@ class RemoteWorkstation:
             conda_exe: conda 可执行文件的完整远程路径
             conda_env: conda 环境名称
             remote_dirs: 需要检查存在性的远程目录 {显示名: 路径}
+            fluent_path: Fluent 可执行文件完整路径
             mpi_bin_dir: ANSYS Fluent MPI 安装目录
             scripts_dir: 远程脚本部署目录
             script_files: 需要检查部署的脚本文件列表
@@ -1015,8 +1017,38 @@ class RemoteWorkstation:
         }
 
         if not self.ensure_connected():
+            results["ssh_connected"] = False
+            results["remote_dirs"].extend(
+                {"label": label, "path": path, "exists": None}
+                for label, path in (remote_dirs or {}).items()
+            )
+            results["remote_programs"].extend([
+                {
+                    "label": "Conda可执行文件",
+                    "path": conda_exe or "(PATH)",
+                    "exists": None,
+                },
+                {
+                    "label": "Conda环境",
+                    "path": conda_env or "(未设置)",
+                    "exists": None,
+                },
+            ])
+            if fluent_path:
+                results["remote_programs"].append({
+                    "label": "Fluent可执行文件",
+                    "path": fluent_path,
+                    "exists": None,
+                })
+            if mpi_bin_dir:
+                results["remote_programs"].append({
+                    "label": "MPI安装目录",
+                    "path": mpi_bin_dir,
+                    "exists": None,
+                })
+            results["scripts_status"] = {"status": "skipped", "message": "SSH 未连接，未检查"}
+            results["ref_files_status"] = {"status": "skipped", "message": "SSH 未连接，未检查"}
             return results
-
         # ---- Conda 检查（1 次 SSH） ----
         if conda_exe:
             out, _, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
@@ -1057,9 +1089,11 @@ class RemoteWorkstation:
         # 将目录、脚本、引用文件三类路径合并为一次 PowerShell Test-Path 调用，
         # 避免 23+ 次独立 SSH exec_command 导致总耗时超过 TUI 超时。
         all_paths: list[tuple[str, str, str]] = []  # (kind, label, path)
-        # kind: "dir" | "mpi" | "script" | "ref"
+        # kind: "dir" | "program" | "mpi" | "script" | "ref"
 
         all_dirs: dict[str, str] = dict(remote_dirs) if remote_dirs else {}
+        if fluent_path:
+            all_paths.append(("program", "Fluent可执行文件", fluent_path))
         if mpi_bin_dir:
             all_dirs["MPI安装目录"] = mpi_bin_dir
         for label, path in all_dirs.items():
@@ -1125,7 +1159,7 @@ class RemoteWorkstation:
             script_missing: list[str] = []
             ref_missing: list[str] = []
             for (kind, label, path), exists in zip(all_paths, flags):
-                if kind == "mpi":
+                if kind in {"mpi", "program"}:
                     results["remote_programs"].append({
                         "label": label, "path": path, "exists": exists,
                     })

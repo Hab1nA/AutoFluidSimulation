@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     # ANSYS 路径参数（必需）
     parser.add_argument('--mpi-bin-dir', type=str, required=True,
                         help='Intel MPI bin 目录路径')
+    parser.add_argument('--fluent-path', type=str, required=True,
+                        help='Fluent 可执行文件完整路径')
 
     # 文件路径参数（必需）
     parser.add_argument('--journal-path', type=str, required=True,
@@ -240,6 +242,8 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         metrics_output_dir,
         "--compute-script",
         compute_script,
+        "--fluent-path",
+        args.fluent_path,
         "--processor-count",
         str(args.metrics_processor_count),
         "--ambient-pressure",
@@ -541,6 +545,7 @@ def main() -> None:
     # 打印配置信息
     print(f"[配置] 模型编号: {args.config_id}")
     print(f"[配置] MPI bin 目录: {args.mpi_bin_dir}")
+    print(f"[配置] Fluent 可执行文件: {args.fluent_path}")
     print(f"[配置] 求解 Journal: {args.journal_path}")
     print(f"[配置] 网格目录: {args.msh_dir}")
     print(f"[配置] 输出目录: {args.output_dir}")
@@ -572,6 +577,7 @@ def main() -> None:
         precision=pyfluent.Precision.DOUBLE,
         processor_count=args.processor_count,
         product_version=pyfluent.FluentVersion.v241,
+        fluent_path=args.fluent_path,
         cleanup_on_exit=True,
         ui_mode="gui",
         cwd=args.working_dir,

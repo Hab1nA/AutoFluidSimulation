@@ -1200,7 +1200,14 @@ mod tests {
                         "ok": true,
                         "ssh": "连接成功",
                         "remote_dirs": [{"label": "仿真工作目录", "path": "D:/ws-a/work", "exists": true}],
-                        "remote_programs": [{"label": "MPI", "path": "C:/mpi", "exists": true}],
+                        "remote_programs": [
+                            {"label": "MPI", "path": "C:/mpi", "exists": true},
+                            {
+                                "label": "Fluent可执行文件",
+                                "path": "D:/ANSYS Inc/v241/fluent/ntbin/win64/fluent.exe",
+                                "exists": true
+                            }
+                        ],
                         "scripts_status": {"total": 2, "deployed": 2, "missing": []},
                         "ref_files_status": {"total": 1, "deployed": 1, "missing": []},
                         "python_version": "Python 3.11",
@@ -1237,6 +1244,8 @@ mod tests {
         assert!(text.contains("缺少 reachable_host"));
         assert!(text.contains("工作站 WS-A"));
         assert!(text.contains("D:/ws-a/work"));
+        assert!(text.contains("Fluent可执行文件"));
+        assert!(text.contains("D:/ANSYS Inc/v241/fluent/ntbin/win64/fluent.exe"));
         assert!(text.contains("Python 3.11"));
         assert!(text.contains("工作站 WS-B"));
         assert!(text.contains("D:/ws-b/work"));

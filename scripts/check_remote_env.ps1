@@ -32,6 +32,7 @@ param(
     [Alias("Host")]
     [string]$RemoteHost,
     [string]$User,
+    [string]$WorkstationId,
     [int]$Port,
     [string]$PyFluentVersion = "0.37.2",
     [switch]$NoPause
@@ -103,6 +104,42 @@ function Get-TomlInt {
     $pattern = "(?m)^\s*$Key\s*=\s*(\d+)"
     if ($Content -match $pattern) { return [int]$Matches[1] }
     return $DefaultValue
+}
+
+function Get-TomlWorkstationSection {
+    param(
+        [string]$Content,
+        [string]$Id,
+        [string]$Host
+    )
+
+    $matches = [regex]::Matches($Content, "(?ms)^\[\[workstations\]\]\s*(.*?)(?=^\[\[workstations\]\]|^\[[^\[]|\z)")
+    foreach ($match in $matches) {
+        $section = $match.Groups[1].Value
+        $sectionId = Get-TomlString $section "id" ""
+        $sectionHost = Get-TomlString $section "host" ""
+        if ($Id -and $sectionId -eq $Id) { return $section }
+        if (-not $Id -and $Host -and $sectionHost -eq $Host) { return $section }
+    }
+    return ""
+}
+
+function Apply-WorkstationTomlDefaults {
+    param([string]$Section)
+
+    if (-not $Section) { return }
+    $script:SshPort = Get-TomlInt $Section "port" $script:SshPort
+    $script:RemoteWorkingDir = Get-TomlString $Section "working_dir" $script:RemoteWorkingDir
+    $script:RemoteScriptsDir = Get-TomlString $Section "scripts_dir" $script:RemoteScriptsDir
+    $script:RemoteRefFilesDir = Get-TomlString $Section "ref_files_dir" $script:RemoteRefFilesDir
+    $script:RemoteScdocDir = Get-TomlString $Section "scdoc_dir" $script:RemoteScdocDir
+    $script:RemoteMshDir = Get-TomlString $Section "msh_dir" $script:RemoteMshDir
+    $script:RemoteResultDir = Get-TomlString $Section "result_dir" $script:RemoteResultDir
+    $script:RemoteFlagDir = Get-TomlString $Section "flag_dir" $script:RemoteFlagDir
+    $script:CondaEnv = Get-TomlString $Section "conda_env" $script:CondaEnv
+    $script:CondaExe = Get-TomlString $Section "conda_exe" $script:CondaExe
+    $script:FluentPath = Get-TomlString $Section "fluent_path" $script:FluentPath
+    $script:MpiBinDir = Get-TomlString $Section "mpi_bin_dir" $script:MpiBinDir
 }
 
 function ConvertTo-CmdExecutable {
@@ -323,6 +360,7 @@ $ConfigToml = Join-Path $ProjectDir "autofluid_config.toml"
 $EnvFile = Join-Path $ProjectDir ".env"
 $script:VenvPython = Join-Path $ProjectDir ".venv\Scripts\python.exe"
 $script:SshPassword = [Environment]::GetEnvironmentVariable("AUTOFLUID_SSH_PASSWORD")
+$script:TomlContent = ""
 if (Test-Path -LiteralPath $EnvFile -PathType Leaf) {
     $envContent = Get-Content $EnvFile -Raw
     if ($envContent -match "AUTOFLUID_SSH_PASSWORD=") {
@@ -341,10 +379,12 @@ $defaultResultDir = "D:\xkz_1020\case"
 $defaultFlagDir = "D:\xkz_1020\flags"
 $defaultCondaEnv = "pyfluent"
 $defaultCondaExe = "C:\ProgramData\anaconda3\Scripts\conda.exe"
+$defaultFluentPath = "C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
 $defaultMpiBinDir = "C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
 
 if (Test-Path -LiteralPath $ConfigToml -PathType Leaf) {
     $tomlContent = Get-Content $ConfigToml -Raw
+    $script:TomlContent = $tomlContent
     $remoteMatch = [regex]::Match($tomlContent, "(?ms)^\[remote_config\]\s*(.*?)(?=^\[|\z)")
     $remoteSection = if ($remoteMatch.Success) { $remoteMatch.Groups[1].Value } else { $tomlContent }
     $defaultWorkingDir = Get-TomlString $remoteSection "working_dir" $defaultWorkingDir
@@ -356,6 +396,7 @@ if (Test-Path -LiteralPath $ConfigToml -PathType Leaf) {
     $defaultFlagDir = Get-TomlString $remoteSection "flag_dir" $defaultFlagDir
     $defaultCondaEnv = Get-TomlString $remoteSection "conda_env" $defaultCondaEnv
     $defaultCondaExe = Get-TomlString $remoteSection "conda_exe" $defaultCondaExe
+    $defaultFluentPath = Get-TomlString $remoteSection "fluent_path" $defaultFluentPath
     $defaultMpiBinDir = Get-TomlString $remoteSection "mpi_bin_dir" $defaultMpiBinDir
 }
 
@@ -381,7 +422,12 @@ $script:RemoteResultDir = $defaultResultDir
 $script:RemoteFlagDir = $defaultFlagDir
 $script:CondaEnv = $defaultCondaEnv
 $script:CondaExe = $defaultCondaExe
+$script:FluentPath = $defaultFluentPath
 $script:MpiBinDir = $defaultMpiBinDir
+if ($script:TomlContent) {
+    $workstationSection = Get-TomlWorkstationSection $script:TomlContent $WorkstationId $script:SshHost
+    Apply-WorkstationTomlDefaults $workstationSection
+}
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
@@ -524,7 +570,7 @@ else {
 Write-Host "`n[6/8] ANSYS Fluent" -ForegroundColor Yellow
 
 # Fluent v241 可执行文件
-$fluentExe = "C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+$fluentExe = $script:FluentPath
 $fluentCheck = Invoke-Remote "if exist `"$fluentExe`" (echo EXISTS) else (echo NOT_FOUND)"
 if ($fluentCheck.Output -match "EXISTS") {
     Write-Check "ANSYS Fluent 24.1" "Pass" $fluentExe

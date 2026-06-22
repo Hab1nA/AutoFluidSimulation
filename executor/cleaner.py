@@ -418,21 +418,31 @@ class FileCleaner:
                                 "仿真输出目录": str(remote_config["result_dir"]),
                                 "仿真标志目录": str(remote_config["flag_dir"]),
                             },
+                            fluent_path=str(remote_config["fluent_path"]),
                             mpi_bin_dir=str(remote_config["mpi_bin_dir"]),
                             scripts_dir=str(remote_config["scripts_dir"]),
                             script_files=REMOTE_SCRIPT_FILES,
                             ref_files_dir=str(remote_config["ref_files_dir"]),
                             ref_files=REMOTE_REF_FILES,
                         )
+                        if remote_info.get("ssh_connected") is False:
+                            workstation_checks["ssh"] = "连接失败"
+                            failed += 1
+                        else:
+                            successful += 1
                         workstation_checks.update(remote_info)
-                        successful += 1
                     else:
-                        workstation_checks.update(self._default_remote_check_values())
+                        workstation_checks.update(
+                            self._default_remote_check_values(remote_config)
+                        )
                         workstation_checks["ssh"] = "连接失败"
                         failed += 1
             except (OSError, ConnectionError) as e:
                 logger.error(f"[SSH] 远程自检异常 ({workstation_id}): {e}")
-                workstation_checks.update(self._default_remote_check_values())
+                fallback_config = self._remote_config_for_workstation(workstation_id)
+                workstation_checks.update(
+                    self._default_remote_check_values(fallback_config)
+                )
                 workstation_checks["ssh"] = f"错误: {e}"
                 failed += 1
             _apply_remote_workstation_status(workstation_checks)
@@ -488,16 +498,80 @@ class FileCleaner:
         return results
 
     @staticmethod
-    def _default_remote_check_values() -> dict[str, object]:
-        """Return empty remote-check fields for disconnected workstations."""
+    def _default_remote_check_values(
+        remote_config: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Return remote-check fields for disconnected workstations."""
+        remote_dirs: list[dict[str, object]] = []
+        remote_programs: list[dict[str, object]] = []
+        if remote_config is not None:
+            remote_dirs.extend([
+                {
+                    "label": "仿真工作目录",
+                    "path": str(remote_config.get("working_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "脚本部署目录",
+                    "path": str(remote_config.get("scripts_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "引用文件目录",
+                    "path": str(remote_config.get("ref_files_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "SCDOC接收目录",
+                    "path": str(remote_config.get("scdoc_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "网格输出目录",
+                    "path": str(remote_config.get("msh_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "仿真输出目录",
+                    "path": str(remote_config.get("result_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "仿真标志目录",
+                    "path": str(remote_config.get("flag_dir", "")),
+                    "exists": None,
+                },
+            ])
+            remote_programs.extend([
+                {
+                    "label": "Conda可执行文件",
+                    "path": str(remote_config.get("conda_exe", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "Conda环境",
+                    "path": str(remote_config.get("conda_env", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "Fluent可执行文件",
+                    "path": str(remote_config.get("fluent_path", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "MPI安装目录",
+                    "path": str(remote_config.get("mpi_bin_dir", "")),
+                    "exists": None,
+                },
+            ])
         return {
             "ssh_connected": False,
             "conda_available": False,
             "python_version": "",
             "disk_space": "",
             "background_processes": [],
-            "remote_dirs": [],
-            "remote_programs": [],
+            "remote_dirs": remote_dirs,
+            "remote_programs": remote_programs,
             "scripts_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
             "ref_files_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
         }

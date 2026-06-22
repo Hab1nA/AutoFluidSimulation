@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::settings::validation::{validate_config, ValidationError};
 use crate::text_buffer::TextBuffer;
 
+pub const DEFAULT_FLUENT_PATH: &str =
+    r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalPaths {
     pub sw_exe: String,
@@ -35,6 +38,8 @@ pub struct RemoteConfig {
     pub flag_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
+    #[serde(default)]
+    pub fluent_path: String,
     pub mpi_bin_dir: String,
 }
 
@@ -67,6 +72,8 @@ pub struct WorkstationConfig {
     pub flag_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
+    #[serde(default)]
+    pub fluent_path: String,
     pub mpi_bin_dir: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub postprocess_output_dir: String,
@@ -102,6 +109,7 @@ impl Default for WorkstationConfig {
             flag_dir: remote.flag_dir,
             conda_env: remote.conda_env,
             conda_exe: remote.conda_exe,
+            fluent_path: remote.fluent_path,
             mpi_bin_dir: remote.mpi_bin_dir,
             postprocess_output_dir: String::new(),
             postprocess_animation_dir: String::new(),
@@ -134,6 +142,7 @@ impl WorkstationConfig {
             flag_dir: remote.flag_dir.clone(),
             conda_env: remote.conda_env.clone(),
             conda_exe: remote.conda_exe.clone(),
+            fluent_path: remote.fluent_path.clone(),
             mpi_bin_dir: remote.mpi_bin_dir.clone(),
             postprocess_output_dir: String::new(),
             postprocess_animation_dir: String::new(),
@@ -160,6 +169,7 @@ impl Default for RemoteConfig {
             flag_dir: String::new(),
             conda_env: String::new(),
             conda_exe: String::new(),
+            fluent_path: DEFAULT_FLUENT_PATH.to_string(),
             mpi_bin_dir: String::new(),
         }
     }
@@ -346,6 +356,20 @@ pub struct SettingsConfig {
     pub global_settings: GlobalSettings,
 }
 
+impl SettingsConfig {
+    pub fn apply_derived_defaults(&mut self) {
+        if self.remote_config.fluent_path.trim().is_empty() {
+            self.remote_config.fluent_path = DEFAULT_FLUENT_PATH.to_string();
+        }
+
+        for workstation in &mut self.workstations {
+            if workstation.fluent_path.trim().is_empty() {
+                workstation.fluent_path = self.remote_config.fluent_path.clone();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingCategory {
     LocalPaths,
@@ -393,7 +417,7 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
-            SettingCategory::RemoteDirs => 10,
+            SettingCategory::RemoteDirs => 11,
             SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 5,
             SettingCategory::SpaceClaim => 8,
@@ -433,6 +457,7 @@ impl SettingCategory {
                 7 => "conda_env",
                 8 => "conda_exe",
                 9 => "mpi_bin_dir",
+                10 => "fluent_path",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -523,6 +548,7 @@ impl SettingCategory {
                 7 => "Conda环境名",
                 8 => "Conda可执行文件",
                 9 => "MPI安装目录",
+                10 => "Fluent可执行文件",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -807,6 +833,7 @@ impl SettingsState {
                 7 => field_val!(self.config.remote_config, conda_env, string),
                 8 => field_val!(self.config.remote_config, conda_exe, string),
                 9 => field_val!(self.config.remote_config, mpi_bin_dir, string),
+                10 => field_val!(self.config.remote_config, fluent_path, string),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -907,6 +934,7 @@ impl SettingsState {
                 7 => workstation.conda_env,
                 8 => workstation.conda_exe,
                 9 => workstation.mpi_bin_dir,
+                10 => workstation.fluent_path,
                 _ => String::new(),
             },
             SettingCategory::PostProcess => match idx {
@@ -972,6 +1000,7 @@ impl SettingsState {
                 7 => self.config.remote_config.conda_env = value.to_string(),
                 8 => self.config.remote_config.conda_exe = value.to_string(),
                 9 => self.config.remote_config.mpi_bin_dir = value.to_string(),
+                10 => self.config.remote_config.fluent_path = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {
@@ -1180,6 +1209,7 @@ impl SettingsState {
                 7 => workstation.conda_env = value.to_string(),
                 8 => workstation.conda_exe = value.to_string(),
                 9 => workstation.mpi_bin_dir = value.to_string(),
+                10 => workstation.fluent_path = value.to_string(),
                 _ => {}
             },
             SettingCategory::PostProcess => match idx {
@@ -1438,6 +1468,7 @@ flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-A"
@@ -1458,6 +1489,7 @@ flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-B"
@@ -1476,6 +1508,7 @@ flag_dir = 'D:\xkz_1020\flags_b'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-C"
@@ -1495,6 +1528,7 @@ flag_dir = 'D:\xkz_1020\flags_c'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 "#;
 
         let config: SettingsConfig = toml::from_str(toml_text).expect("parse workstations");
@@ -1511,6 +1545,10 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
         );
         assert_eq!(config.workstations[1].scdoc_dir, r"D:\xkz_1020\scdoc_b");
         assert_eq!(config.workstations[2].notes, "offline during development");
+        assert_eq!(
+            config.workstations[2].fluent_path,
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
 
         let serialized = toml::to_string_pretty(&config).expect("serialize workstations");
 
@@ -1519,6 +1557,7 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
         assert!(serialized.contains("host = \"172.17.135.89\""));
         assert!(serialized.contains("auth_method = \"none\""));
         assert!(serialized.contains("key_filename"));
+        assert!(serialized.contains("fluent_path"));
         assert!(
             serialized.contains("scdoc_dir = 'D:\\xkz_1020\\scdoc_c'")
                 || serialized.contains("scdoc_dir = \"D:\\\\xkz_1020\\\\scdoc_c\"")
@@ -1559,6 +1598,94 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
         assert_ne!(
             state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 3),
             r"D:\ws-b\scdoc"
+        );
+    }
+
+    #[test]
+    fn derived_defaults_backfill_missing_fluent_path() {
+        let mut config: SettingsConfig = toml::from_str(
+            r#"
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+working_dir = 'D:\working'
+scripts_dir = 'D:\scripts'
+ref_files_dir = 'D:\ref'
+scdoc_dir = 'D:\scdoc'
+msh_dir = 'D:\msh'
+result_dir = 'D:\case'
+flag_dir = 'D:\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.115"
+port = 22
+username = "bh"
+working_dir = 'D:\working'
+scripts_dir = 'D:\scripts'
+ref_files_dir = 'D:\ref'
+scdoc_dir = 'D:\scdoc'
+msh_dir = 'D:\msh'
+result_dir = 'D:\case'
+flag_dir = 'D:\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'D:\mpi'
+"#,
+        )
+        .expect("parse legacy config");
+
+        config.apply_derived_defaults();
+
+        assert_eq!(config.remote_config.fluent_path, DEFAULT_FLUENT_PATH);
+        assert_eq!(config.workstations[0].fluent_path, DEFAULT_FLUENT_PATH);
+    }
+    #[test]
+    fn workstation_fluent_path_edits_do_not_cross_columns() {
+        let mut state = SettingsState::default_for_tests();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.115".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        state.set_workstation_field_value(
+            2,
+            SettingCategory::RemoteDirs,
+            10,
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+        );
+
+        assert_eq!(
+            state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(0, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(1, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
         );
     }
 
@@ -1708,6 +1835,7 @@ flag_dir = 'D:\flags-a'
 conda_env = "pyfluent"
 conda_exe = 'C:\conda.exe'
 mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-B"
@@ -1725,6 +1853,7 @@ flag_dir = 'D:\flags-b'
 conda_env = "pyfluent"
 conda_exe = 'C:\conda.exe'
 mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
 [[workstations]]
 id = "WS-C"
@@ -1742,6 +1871,7 @@ flag_dir = 'D:\flags-c'
 conda_env = "pyfluent"
 conda_exe = 'C:\conda.exe'
 mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 "#,
         )
         .expect("write config");
@@ -1966,7 +2096,7 @@ mpi_bin_dir = 'C:\mpi'
         // Verify field_count is consistent across all categories
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
         assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
@@ -1978,12 +2108,13 @@ mpi_bin_dir = 'C:\mpi'
 
     #[test]
     fn remote_dirs_do_not_expose_animation_dir() {
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         let visible_fields = (0..SettingCategory::RemoteDirs.field_count())
             .map(|idx| SettingCategory::RemoteDirs.field_name(idx))
             .collect::<Vec<_>>();
         assert!(!visible_fields.contains(&"animation_dir"));
         assert_eq!(SettingCategory::RemoteDirs.field_name(6), "flag_dir");
+        assert_eq!(SettingCategory::RemoteDirs.field_name(10), "fluent_path");
         assert_eq!(
             SettingCategory::RemoteDirs.field_full_name(6),
             "remote_config.flag_dir"

@@ -895,3 +895,37 @@ def test_get_remote_combined_file_hash_uses_cmd_batch_hashes():
 
     assert combined == expected
     batch_hashes.assert_called_once_with(r"D:\remote", ["alpha.txt", "missing.txt"])
+
+
+def test_check_system_reports_configured_paths_when_reconnect_fails():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+    with patch.object(host, "is_connected", return_value=True):
+        with patch.object(host, "ensure_connected", return_value=False):
+            result = host.check_system(
+                conda_exe=r"C:\ProgramData\miniconda3\Scripts\conda.exe",
+                conda_env="pyfluent",
+                remote_dirs={"仿真工作目录": r"D:\AutoFluid\work"},
+                fluent_path=fluent_path,
+                mpi_bin_dir=mpi_bin_dir,
+            )
+
+    assert result["ssh_connected"] is False
+    assert {
+        "label": "仿真工作目录",
+        "path": r"D:\AutoFluid\work",
+        "exists": None,
+    } in result["remote_dirs"]
+    assert {
+        "label": "Fluent可执行文件",
+        "path": fluent_path,
+        "exists": None,
+    } in result["remote_programs"]
+    assert {
+        "label": "MPI安装目录",
+        "path": mpi_bin_dir,
+        "exists": None,
+    } in result["remote_programs"]
+    assert result["scripts_status"] == {"status": "skipped", "message": "SSH 未连接，未检查"}

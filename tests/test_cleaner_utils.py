@@ -190,6 +190,180 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
 
+    def test_system_check_reports_configured_fluent_path_per_workstation(self, tmp_path):
+        """CHECK 返回内容应包含每台工作站配置的 Fluent 可执行文件路径。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+        class _SSH:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] = {}
+
+            def is_connected(self) -> bool:
+                return True
+
+            def check_system(self, **kwargs: object) -> dict[str, object]:
+                self.kwargs = kwargs
+                return {
+                    "ssh_connected": True,
+                    "remote_programs": [
+                        {
+                            "label": "Fluent可执行文件",
+                            "path": kwargs["fluent_path"],
+                            "exists": True,
+                        }
+                    ],
+                }
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+                "mpi_bin_dir": mpi_bin_dir,
+            }
+        ]
+        ssh = _SSH()
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": ssh)
+
+            result = cleaner.run_system_check()
+
+            assert ssh.kwargs["fluent_path"] == fluent_path
+            programs = result["remote_checks"]["workstations"]["WS-C"]["remote_programs"]
+            assert {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": True,
+            } in programs
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_reports_configured_paths_when_workstation_disconnected(self, tmp_path):
+        """即使 SSH 断开，CHECK 也应显示配置的 Fluent/MPI 路径为未检查。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+                "mpi_bin_dir": mpi_bin_dir,
+            }
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            dirs = result["remote_checks"]["workstations"]["WS-C"]["remote_dirs"]
+            work_dir = next(p for p in dirs if p["label"] == "仿真工作目录")
+            assert work_dir["path"] == REMOTE_CONFIG["working_dir"]
+            assert work_dir["exists"] is None
+            programs = result["remote_checks"]["workstations"]["WS-C"]["remote_programs"]
+            fluent_program = next(p for p in programs if p["label"] == "Fluent可执行文件")
+            mpi_program = next(p for p in programs if p["label"] == "MPI安装目录")
+            assert fluent_program == {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": None,
+            }
+            assert mpi_program["path"] == mpi_bin_dir
+            assert mpi_program["exists"] is None
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_marks_reconnect_failure_as_failed(self, tmp_path):
+        """SSH 检查中途重连失败时，CHECK 不应把工作站误计为成功。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+
+        class _StaleSSH:
+            def is_connected(self) -> bool:
+                return True
+
+            def check_system(self, **kwargs: object) -> dict[str, object]:
+                return {
+                    "ssh_connected": False,
+                    "remote_programs": [
+                        {
+                            "label": "Fluent可执行文件",
+                            "path": kwargs["fluent_path"],
+                            "exists": None,
+                        }
+                    ],
+                    "remote_dirs": [
+                        {
+                            "label": "仿真工作目录",
+                            "path": kwargs["remote_dirs"]["仿真工作目录"],
+                            "exists": None,
+                        }
+                    ],
+                }
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+            }
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": _StaleSSH())
+
+            result = cleaner.run_system_check()
+
+            checks = result["remote_checks"]
+            ws_check = checks["workstations"]["WS-C"]
+            assert checks["status"] == "failed"
+            assert checks["ok"] is False
+            assert ws_check["ssh"] == "连接失败"
+            assert ws_check["ok"] is False
+            assert {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": None,
+            } in ws_check["remote_programs"]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
     def test_system_check_returns_structured_summary(self, tmp_path):
         """CHECK 应返回可直接驱动新版页面的结构化总览。"""
         from executor.cleaner import FileCleaner

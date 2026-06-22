@@ -701,10 +701,11 @@ fn workstation_tunnel_specs_for_project(project_dir: &str) -> Vec<WorkstationTun
 }
 
 fn workstation_tunnel_specs_for_path(project_dir: &std::path::Path) -> Vec<WorkstationTunnelSpec> {
-    let config = std::fs::read_to_string(project_dir.join("autofluid_config.toml"))
+    let mut config = std::fs::read_to_string(project_dir.join("autofluid_config.toml"))
         .ok()
         .and_then(|contents| toml::from_str::<SettingsConfig>(&contents).ok())
         .unwrap_or_default();
+    config.apply_derived_defaults();
     let workstations = if config.workstations.is_empty() {
         vec![default_workstation_from_remote_config(&config)]
     } else {
@@ -769,6 +770,7 @@ fn default_workstation_from_remote_config(config: &SettingsConfig) -> Workstatio
         flag_dir: config.remote_config.flag_dir.clone(),
         conda_env: config.remote_config.conda_env.clone(),
         conda_exe: config.remote_config.conda_exe.clone(),
+        fluent_path: config.remote_config.fluent_path.clone(),
         mpi_bin_dir: config.remote_config.mpi_bin_dir.clone(),
         ..Default::default()
     }

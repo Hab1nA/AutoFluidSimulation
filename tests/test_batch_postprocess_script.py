@@ -67,6 +67,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
         working_dir=str(working_dir),
         working_dir_t=str(working_dir_t),
         working_dir_v=str(working_dir_v),
+        fluent_path=str(tmp_path / "fluent.exe"),
     )
 
 
@@ -148,3 +149,54 @@ def test_postprocess_does_not_write_flag_when_journal_fails(tmp_path, monkeypatc
         module.main()
 
     assert not Path(args.flag_file).exists()
+
+
+def test_postprocess_launch_uses_configured_fluent_path(tmp_path, monkeypatch):
+    launch_kwargs: dict[str, object] = {}
+    session = _SuccessfulPostprocessSession()
+
+    def launch_fluent(**kwargs: object):
+        launch_kwargs.update(kwargs)
+        return session
+
+    module = _load_batch_postprocess_module(monkeypatch, launch_fluent)
+    args = _make_args(tmp_path)
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert launch_kwargs["fluent_path"] == args.fluent_path
+
+
+def test_postprocess_metrics_receives_configured_fluent_path(tmp_path, monkeypatch):
+    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: None)
+    args = _make_args(tmp_path)
+    args.metrics_script = str(tmp_path / "postprocess_metrics_gen4.py")
+    args.compute_metrics_script = str(tmp_path / "compute_metrics_gen4.py")
+    args.metrics_output_dir = str(tmp_path / "metrics")
+    args.metrics_processor_count = 2
+    args.metrics_ambient_pressure = 0.0
+    args.metrics_pressure_reference = 101325.0
+    args.metrics_tcomb = 1000.0
+    args.metrics_thrust_axis = "x"
+    args.metrics_exit_to_throat_area_ratio = 7.42
+    args.metrics_cstar_reference = 1830.4
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    Path(args.metrics_script).write_text("# metrics", encoding="utf-8")
+    Path(args.compute_metrics_script).write_text("# compute", encoding="utf-8")
+    case_path = str(tmp_path / "case.cas.h5")
+    Path(case_path).write_text("case", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], check: bool) -> None:
+        commands.append(command)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module._run_metrics_postprocess(args, case_path, args.config_id)
+
+    assert commands
+    assert "--fluent-path" in commands[0]
+    assert commands[0][commands[0].index("--fluent-path") + 1] == args.fluent_path

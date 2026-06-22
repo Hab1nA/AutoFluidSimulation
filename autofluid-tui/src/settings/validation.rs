@@ -152,6 +152,13 @@ fn validate_remote_dirs(config: &SettingsConfig, errors: &mut Vec<ValidationErro
             severity: Severity::Warning,
         });
     }
+    if config.remote_config.fluent_path.is_empty() {
+        errors.push(ValidationError {
+            field_name: "remote_config.fluent_path".to_string(),
+            message: "Fluent可执行文件路径不能为空".to_string(),
+            severity: Severity::Error,
+        });
+    }
 }
 
 fn validate_workstation_connection(
@@ -224,6 +231,13 @@ fn validate_workstation_dirs(
             field_name: format!("workstations[{idx}].conda_env"),
             message: "Conda环境名称为空".to_string(),
             severity: Severity::Warning,
+        });
+    }
+    if workstation.fluent_path.is_empty() {
+        errors.push(ValidationError {
+            field_name: format!("workstations[{idx}].fluent_path"),
+            message: "Fluent可执行文件路径不能为空".to_string(),
+            severity: Severity::Error,
         });
     }
 }
@@ -653,6 +667,25 @@ mod tests {
             e.field_name == "workstations[2].port" && matches!(e.severity, Severity::Error)
         }));
         assert!(!errors.iter().any(|e| e.field_name == "remote_config.host"));
+    }
+
+    #[test]
+    fn validates_missing_workstation_fluent_path() {
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![WorkstationConfig {
+            id: "WS-A".to_string(),
+            host: "172.17.135.240".to_string(),
+            port: 22,
+            username: "ps".to_string(),
+            fluent_path: String::new(),
+            ..WorkstationConfig::default()
+        }];
+
+        let errors = validate_config(&config);
+
+        assert!(errors.iter().any(|e| {
+            e.field_name == "workstations[0].fluent_path" && matches!(e.severity, Severity::Error)
+        }));
     }
 
     #[test]
