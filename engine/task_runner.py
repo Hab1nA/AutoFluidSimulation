@@ -543,7 +543,41 @@ class TaskRunner:
                 result["local_worker_checks"] = dict(
                     local_worker_result.get("local_checks", local_worker_result)
                 )
+            self._refresh_system_check_summary(result)
         return result
+
+    @staticmethod
+    def _refresh_system_check_summary(result: dict) -> None:
+        passed = int(result.get("summary", {}).get("passed", 0) or 0)
+        failed = int(result.get("summary", {}).get("failed", 0) or 0)
+        warnings = int(result.get("summary", {}).get("warnings", 0) or 0)
+        local_worker_checks = result.get("local_worker_checks")
+        if isinstance(local_worker_checks, dict):
+            lw_passed = 0
+            lw_failed = 0
+            for key, value in local_worker_checks.items():
+                if key in {"ok", "status", "summary"} or not isinstance(value, dict):
+                    continue
+                state = value.get("ok")
+                if not isinstance(state, bool):
+                    state = value.get("exists")
+                if isinstance(state, bool):
+                    if state:
+                        lw_passed += 1
+                    else:
+                        lw_failed += 1
+            local_worker_checks["ok"] = lw_failed == 0
+            local_worker_checks["status"] = "failed" if lw_failed else ("passed" if lw_passed else "skipped")
+            local_worker_checks["summary"] = {
+                "passed": lw_passed,
+                "failed": lw_failed,
+                "warnings": 0,
+            }
+            passed += lw_passed
+            failed += lw_failed
+        result["summary"] = {"passed": passed, "failed": failed, "warnings": warnings}
+        result["overall_ok"] = failed == 0
+        result["status"] = "failed" if failed else ("warning" if warnings else "passed")
 
     def run_local_system_check(self) -> dict:
         """执行 LocalWorker 本地系统自检（委托给 FileCleaner）。"""

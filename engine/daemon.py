@@ -800,7 +800,44 @@ class PipelineDaemon:
             raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
         results = dict(self.runner.run_system_check())
         results["health"] = self._build_health_snapshot()
+        self._refresh_check_summary_from_health(results)
         return True, results, "系统自检完成"
+
+    @staticmethod
+    def _refresh_check_summary_from_health(results: dict[str, Any]) -> None:
+        health = results.get("health")
+        if not isinstance(health, dict):
+            return
+        summary = dict(results.get("summary") or {})
+        passed = int(summary.get("passed", 0) or 0)
+        failed = int(summary.get("failed", 0) or 0)
+        warnings = int(summary.get("warnings", 0) or 0)
+
+        local_worker_online = health.get("local_worker_online")
+        if isinstance(local_worker_online, bool):
+            if local_worker_online:
+                passed += 1
+            else:
+                failed += 1
+        status = health.get("server_to_local_ssh")
+        if status == "ok":
+            passed += 1
+        elif status in {"disconnected", "error"}:
+            failed += 1
+        details = health.get("workstation_ssh_details")
+        if isinstance(details, dict):
+            for status in details.values():
+                if status == "ok":
+                    passed += 1
+                elif status == "disconnected" or str(status).startswith("error:"):
+                    failed += 1
+        config_warnings = health.get("config_warnings")
+        if isinstance(config_warnings, list):
+            warnings += len(config_warnings)
+
+        results["summary"] = {"passed": passed, "failed": failed, "warnings": warnings}
+        results["overall_ok"] = failed == 0
+        results["status"] = "failed" if failed else ("warning" if warnings else "passed")
 
     def handle_worker_register(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """Handle LocalWorker registration."""
@@ -1448,7 +1485,7 @@ class PipelineDaemon:
                 workstation_id = get_config_workstation(int(config_name))
             except (TypeError, ValueError):
                 workstation_id = None
-            if workstation_id:
+            if workstation_id and str(workstation_id) != "default":
                 assignments[str(config_name)] = str(workstation_id)
         return assignments
 

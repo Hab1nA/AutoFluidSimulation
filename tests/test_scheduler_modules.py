@@ -2176,7 +2176,10 @@ def test_task_runner_server_mode_merges_local_worker_check(monkeypatch):
     result = runner.run_system_check()
 
     assert result["local_checks"] == {}
-    assert result["local_worker_checks"] == {"SW可执行文件": {"exists": True}}
+    assert result["local_worker_checks"]["SW可执行文件"] == {"exists": True}
+    assert result["local_worker_checks"]["ok"] is True
+    assert result["local_worker_checks"]["status"] == "passed"
+    assert result["overall_ok"] is True
 
 
 def test_task_runner_server_mode_reports_active_local_worker_check_failure(monkeypatch):
@@ -2204,13 +2207,13 @@ def test_task_runner_server_mode_reports_active_local_worker_check_failure(monke
 
     result = runner.run_system_check()
 
-    assert result["local_worker_checks"] == {
-        "active_check": {
-            "exists": False,
-            "message": "LocalWorker 主动自检超时",
-        }
+    assert result["local_worker_checks"]["active_check"] == {
+        "exists": False,
+        "message": "LocalWorker 主动自检超时",
     }
-
+    assert result["local_worker_checks"]["ok"] is False
+    assert result["local_worker_checks"]["status"] == "failed"
+    assert result["overall_ok"] is False
 
 def test_task_runner_server_mode_delegates_local_file_clean(monkeypatch):
     from engine.task_runner import TaskRunner
@@ -3284,6 +3287,66 @@ class TestPipelineDaemonCleanStep:
         assert data["local_worker_checks"] == expected["local_worker_checks"]
         assert message == "系统自检完成"
 
+    def test_check_summary_includes_health_warnings_and_failures(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.system_check_result = {
+            "overall_ok": True,
+            "status": "passed",
+            "summary": {"passed": 1, "failed": 0, "warnings": 0},
+            "local_checks": {},
+            "remote_checks": {},
+            "daemon_checks": {},
+            "workstation_checks": {},
+        }
+        daemon._build_health_snapshot = lambda: {
+            "local_worker_online": False,
+            "server_to_local_ssh": "disconnected",
+            "server_to_workstation_ssh": "disconnected",
+            "workstation_ssh_details": {"WS-A": "error: timed out"},
+            "config_warnings": ["工作站 WS-A 缺少 reachable_host"],
+        }
+
+        ok, data, _message = daemon.handle_check({})
+
+        assert ok is True
+        assert data["overall_ok"] is False
+        assert data["status"] == "failed"
+        assert data["summary"]["failed"] == 3
+        assert data["summary"]["warnings"] == 1
+
+    def test_check_summary_counts_workstation_health_leaf_items_once(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.system_check_result = {
+            "overall_ok": True,
+            "status": "passed",
+            "summary": {"passed": 1, "failed": 0, "warnings": 0},
+            "local_checks": {},
+            "remote_checks": {},
+            "daemon_checks": {},
+            "workstation_checks": {},
+        }
+        daemon._build_health_snapshot = lambda: {
+            "local_worker_online": True,
+            "server_to_local_ssh": "ok",
+            "server_to_workstation_ssh": "ok",
+            "workstation_ssh_details": {
+                "WS-A": "ok",
+                "WS-B": "disconnected",
+            },
+            "config_warnings": [],
+        }
+
+        ok, data, _message = daemon.handle_check({})
+
+        assert ok is True
+        assert data["overall_ok"] is False
+        assert data["summary"] == {"passed": 4, "failed": 1, "warnings": 0}
     def test_clean_rejects_when_pipeline_running(self):
         from engine.daemon import PipelineDaemon
 

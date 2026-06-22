@@ -1702,7 +1702,8 @@ mod tests {
         apply_dashboard_response(obj, &mut state, &mut log_buffer);
 
         assert_eq!(state.get_step_status("2", "sw"), "Running");
-        assert_eq!(state.config_cell_text("2"), "2 WS-B");
+        assert_eq!(state.config_cell_text("2"), "2");
+        assert_eq!(state.work_location_cell_text("2"), "本地");
         assert_eq!(state.engine_info.engine_status, "running");
         assert!(state.engine_info.sw_macro_started);
         assert_eq!(state.engine_info.daemon_started_at, Some(1718000000.0));

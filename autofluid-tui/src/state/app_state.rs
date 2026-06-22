@@ -337,12 +337,34 @@ impl AppState {
     }
 
     pub fn config_cell_text(&self, config: &str) -> String {
-        match self.config_workstations.get(config) {
-            Some(workstation_id) if !workstation_id.is_empty() => {
-                format!("{config} {workstation_id}")
+        config.to_string()
+    }
+
+    pub fn work_location_cell_text(&self, config: &str) -> String {
+        let Some(steps) = self.status_data.get(config) else {
+            return String::new();
+        };
+
+        for step in STEP_NAMES {
+            if steps.get(step).map(String::as_str) != Some(STATUS_RUNNING) {
+                continue;
             }
-            _ => config.to_string(),
+            return match step {
+                "sw" | "sc" => "本地".to_string(),
+                "transfer" | "meshing" | "solver" | "postprocess" => self
+                    .config_workstations
+                    .get(config)
+                    .map(String::as_str)
+                    .filter(|workstation_id| {
+                        !workstation_id.is_empty() && *workstation_id != "default"
+                    })
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
         }
+
+        String::new()
     }
 
     pub fn update_engine_info(&mut self, data: &serde_json::Value) {
@@ -879,6 +901,33 @@ mod tests {
             status_color(STATUS_RUNNING)
         );
         assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
+    }
+
+    #[test]
+    fn work_location_cell_text_reflects_only_running_step_location() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "1": {"sw": STATUS_RUNNING},
+            "2": {"sc": STATUS_RUNNING},
+            "3": {"meshing": STATUS_RUNNING},
+            "4": {"solver": STATUS_PAUSED},
+            "5": {"postprocess": STATUS_COMPLETED},
+            "6": {"transfer": STATUS_RUNNING},
+            "7": {"solver": STATUS_RUNNING}
+        }));
+        state.update_config_workstations(&serde_json::json!({
+            "3": "WS-B",
+            "6": "default"
+        }));
+
+        assert_eq!(state.config_cell_text("3"), "3");
+        assert_eq!(state.work_location_cell_text("1"), "本地");
+        assert_eq!(state.work_location_cell_text("2"), "本地");
+        assert_eq!(state.work_location_cell_text("3"), "WS-B");
+        assert_eq!(state.work_location_cell_text("4"), "");
+        assert_eq!(state.work_location_cell_text("5"), "");
+        assert_eq!(state.work_location_cell_text("6"), "");
+        assert_eq!(state.work_location_cell_text("7"), "");
     }
 
     #[test]

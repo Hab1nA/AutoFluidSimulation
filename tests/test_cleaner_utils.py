@@ -94,9 +94,13 @@ class TestFileCleanerSystemCheck:
 
             assert "local_checks" in result
             for name, info in result["local_checks"].items():
+                if name in {"ok", "status", "summary"}:
+                    continue
                 assert info["exists"] is True, f"{name}: {info['path']} should exist"
-            # SSH 未连接时应报告连接失败
-            assert result["remote_checks"]["ssh"] == "连接失败"
+            remote_checks = result["remote_checks"]
+            assert remote_checks["status"] == "failed"
+            assert remote_checks["ok"] is False
+            assert remote_checks["workstations"]["default"]["ssh"] == "连接失败"
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
@@ -180,10 +184,45 @@ class TestFileCleanerSystemCheck:
             assert per_workstation["WS-A"]["ssh"] == "连接成功"
             assert per_workstation["WS-B"]["python_version"] == "python-on-WS-B"
             assert per_workstation["WS-C"]["ssh"] == "连接失败"
-            assert result["remote_checks"]["ssh"] == "部分连接失败"
+            assert result["remote_checks"]["status"] == "partial"
+            assert result["remote_checks"]["ok"] is False
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_returns_structured_summary(self, tmp_path):
+        """CHECK 应返回可直接驱动新版页面的结构化总览。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        cfg.IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            assert result["overall_ok"] is False
+            assert result["summary"]["failed"] >= 1
+            assert result["summary"]["passed"] >= 1
+            assert result["summary"]["warnings"] == 0
+            assert result["remote_checks"]["ok"] is False
+            assert result["remote_checks"]["status"] == "failed"
+            assert result["remote_checks"]["workstations"]["default"]["ok"] is False
+            deployment = result["remote_checks"]["workstations"]["default"]["scripts_status"]
+            assert deployment["status"] == "skipped"
+            assert deployment["message"] == "SSH 未连接，未检查"
+            assert result["daemon_checks"]["ok"] in {True, False}
+            assert result["local_checks"]["ok"] in {True, False}
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
 
     def test_server_mode_warns_about_private_workstation_host(self, tmp_path, monkeypatch):
         """server/ocar 模式下应提示私网工作站地址可能不可达。"""
@@ -244,7 +283,9 @@ class TestFileCleanerSystemCheck:
 
             result = cleaner.run_system_check()
 
-            assert result["local_checks"] == {}
+            assert result["local_checks"]["status"] == "skipped"
+            assert result["local_checks"]["summary"] == {"passed": 0, "failed": 0, "warnings": 0}
+            assert "SW可执行文件" not in result["local_checks"]
             assert result["daemon_checks"]["server_mode"]["value"] is True
             assert "scdoc_dir" in result["daemon_checks"]
             assert "workstation_checks" in result

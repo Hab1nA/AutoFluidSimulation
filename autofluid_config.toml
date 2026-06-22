@@ -17,9 +17,6 @@ scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
 animation_dir = 'D:\xkz_1020\animation'
-postprocess_output_dir = 'D:\xkz_1020\postprocess'
-postprocess_animation_dir = 'D:\xkz_1020\animation'
-postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
@@ -38,13 +35,13 @@ scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
 animation_dir = 'D:\xkz_1020\animation'
-postprocess_output_dir = 'D:\xkz_1020\postprocess'
-postprocess_animation_dir = 'D:\xkz_1020\animation'
-postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+postprocess_output_dir = 'D:\xkz_1020\postprocess'
+postprocess_animation_dir = 'D:\xkz_1020\animation'
+postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 notes = "existing workstation; reachable locally, use reachable_host/reachable_port in server mode"
 
 [[workstations]]
@@ -61,13 +58,13 @@ scdoc_dir = 'D:\xkz_1020\scdoc'
 msh_dir = 'D:\xkz_1020\msh'
 result_dir = 'D:\xkz_1020\case'
 animation_dir = 'D:\xkz_1020\animation'
-postprocess_output_dir = 'D:\xkz_1020\postprocess'
-postprocess_animation_dir = 'D:\xkz_1020\animation'
-postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
 mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+postprocess_output_dir = 'D:\xkz_1020\postprocess'
+postprocess_animation_dir = 'D:\xkz_1020\animation'
+postprocess_metrics_dir = 'D:\xkz_1020\metrics'
 notes = "key-auth workstation; conda/fluent paths must be rechecked before production runs"
 
 [[workstations]]
@@ -87,7 +84,7 @@ animation_dir = 'D:\xkz_1020\animation'
 flag_dir = 'D:\xkz_1020\flags'
 conda_env = "pyfluent"
 conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
-mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+mpi_bin_dir = 'D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
 notes = "currently offline/unreachable; check/status must report disconnected"
 
 [step_file_patterns]

@@ -13,10 +13,13 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
     let total_rows = state.configs.len();
     let scroll = state.table_scroll_offset as usize;
 
-    let header_cells: Vec<Cell> = std::iter::once(
+    let header_cells: Vec<Cell> = [
         Cell::new(Text::from("构型").alignment(Alignment::Center))
             .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
+        Cell::new(Text::from("工作位置").alignment(Alignment::Center))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+    ]
+    .into_iter()
     .chain(STEP_NAMES.iter().map(|step| {
         Cell::new(Text::from(step_display_name(step)).alignment(Alignment::Center))
             .style(Style::default().add_modifier(Modifier::BOLD))
@@ -50,9 +53,12 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
             };
 
             let config_text = state.config_cell_text(&cn_str);
-            let cells: Vec<Cell> = std::iter::once(Cell::new(
-                Text::from(config_text).alignment(Alignment::Center),
-            ))
+            let work_location_text = state.work_location_cell_text(&cn_str);
+            let cells: Vec<Cell> = [
+                Cell::new(Text::from(config_text).alignment(Alignment::Center)),
+                Cell::new(Text::from(work_location_text).alignment(Alignment::Center)),
+            ]
+            .into_iter()
             .chain(STEP_NAMES.iter().map(|step| {
                 let text = state.step_cell_text(&cn_str, step);
                 let color = state.step_cell_color(&cn_str, step);
@@ -65,11 +71,13 @@ pub fn render_table(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppS
         .collect();
 
     let widths = {
-        let config_width = ratatui::layout::Constraint::Length(12);
+        let config_width = ratatui::layout::Constraint::Length(8);
+        let work_location_width = ratatui::layout::Constraint::Length(10);
         let step_widths = STEP_NAMES
             .iter()
             .map(|_| ratatui::layout::Constraint::Length(18));
-        std::iter::once(config_width)
+        [config_width, work_location_width]
+            .into_iter()
             .chain(step_widths)
             .collect::<Vec<_>>()
     };

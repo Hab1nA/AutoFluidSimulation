@@ -146,6 +146,160 @@ def _postprocess_output_config_dir(
     return f"{output_dir}/model_gen4_{config_name}"
 
 
+_CHECK_METADATA_KEYS = {"ok", "status", "summary"}
+
+
+def _status_from_counts(passed: int, failed: int, warnings: int, *, empty_status: str = "skipped") -> str:
+    if failed:
+        return "failed"
+    if warnings:
+        return "warning"
+    if passed:
+        return "passed"
+    return empty_status
+
+
+def _state_from_check_item(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    severity = value.get("severity")
+    if severity == "error":
+        return "failed"
+    if severity == "warning":
+        return "warning"
+    status = value.get("status")
+    if status in {"passed", "failed", "warning"}:
+        return str(status)
+    ok = value.get("ok")
+    if isinstance(ok, bool):
+        return "passed" if ok else "failed"
+    exists = value.get("exists")
+    if isinstance(exists, bool):
+        return "passed" if exists else "failed"
+    return None
+
+
+def _summarize_states(states: list[str]) -> dict[str, int]:
+    return {
+        "passed": states.count("passed"),
+        "failed": states.count("failed"),
+        "warnings": states.count("warning"),
+    }
+
+
+def _check_mapping_states(mapping: Mapping[str, object]) -> list[str]:
+    states: list[str] = []
+    for key, value in mapping.items():
+        if key in _CHECK_METADATA_KEYS:
+            continue
+        state = _state_from_check_item(value)
+        if state is not None:
+            states.append(state)
+    return states
+
+
+def _apply_check_section_status(
+    section: dict[str, object],
+    *,
+    empty_status: str = "skipped",
+) -> None:
+    counts = _summarize_states(_check_mapping_states(section))
+    section["ok"] = counts["failed"] == 0
+    section["status"] = _status_from_counts(
+        counts["passed"],
+        counts["failed"],
+        counts["warnings"],
+        empty_status=empty_status,
+    )
+    section["summary"] = counts
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, (int, float, str, bytes, bytearray)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _list_value(value: object) -> list[object]:
+    return list(value) if isinstance(value, list | tuple) else []
+
+
+def _remote_deployment_state(info: Mapping[str, object]) -> str | None:
+    status = info.get("status")
+    if status == "skipped":
+        return None
+    total = _int_value(info.get("total", 0))
+    deployed = _int_value(info.get("deployed", 0))
+    missing = _list_value(info.get("missing", []))
+    if total == 0 and deployed == 0 and not missing:
+        return None
+    if missing or deployed < total:
+        return "failed"
+    return "passed"
+
+
+def _remote_workstation_states(checks: Mapping[str, object]) -> list[str]:
+    states: list[str] = []
+    ssh_status = str(checks.get("ssh", ""))
+    if ssh_status:
+        states.append("passed" if "成功" in ssh_status else "failed")
+    for key in ("conda_available", "ssh_connected"):
+        value = checks.get(key)
+        if isinstance(value, bool):
+            states.append("passed" if value else "failed")
+    python_version = checks.get("python_version")
+    if isinstance(python_version, str):
+        states.append("passed" if python_version else "failed")
+    for collection_key in ("remote_dirs", "remote_programs"):
+        for item in _list_value(checks.get(collection_key, [])):
+            state = _state_from_check_item(item)
+            if state is not None:
+                states.append(state)
+    for deployment_key in ("scripts_status", "ref_files_status"):
+        deployment = checks.get(deployment_key)
+        if isinstance(deployment, Mapping):
+            state = _remote_deployment_state(deployment)
+            if state is not None:
+                states.append(state)
+    return states
+
+
+def _apply_remote_workstation_status(checks: dict[str, object]) -> None:
+    counts = _summarize_states(_remote_workstation_states(checks))
+    checks["ok"] = counts["failed"] == 0
+    checks["status"] = _status_from_counts(
+        counts["passed"],
+        counts["failed"],
+        counts["warnings"],
+        empty_status="unknown",
+    )
+    checks["summary"] = counts
+
+
+def _collect_result_summary(result: Mapping[str, object]) -> dict[str, int]:
+    states: list[str] = []
+    for section_name in ("local_checks", "daemon_checks"):
+        section = result.get(section_name)
+        if isinstance(section, Mapping):
+            states.extend(_check_mapping_states(section))
+    workstation_checks = result.get("workstation_checks")
+    if isinstance(workstation_checks, Mapping):
+        for workstation in workstation_checks.get("workstations") or []:
+            state = _state_from_check_item(workstation)
+            if state is not None:
+                states.append(state)
+    remote_checks = result.get("remote_checks")
+    if isinstance(remote_checks, Mapping):
+        workstations = remote_checks.get("workstations")
+        if isinstance(workstations, Mapping):
+            for workstation in workstations.values():
+                if isinstance(workstation, Mapping):
+                    states.extend(_remote_workstation_states(workstation))
+    return _summarize_states(states)
+
 class FileCleaner:
     """文件清理与系统自检器。"""
 
@@ -281,21 +435,55 @@ class FileCleaner:
                 workstation_checks.update(self._default_remote_check_values())
                 workstation_checks["ssh"] = f"错误: {e}"
                 failed += 1
+            _apply_remote_workstation_status(workstation_checks)
             remote_by_workstation[workstation_id] = workstation_checks
 
         remote_checks["workstations"] = remote_by_workstation
         if successful and failed:
-            remote_checks["ssh"] = "部分连接失败"
+            remote_checks["status"] = "partial"
         elif successful:
-            remote_checks["ssh"] = "连接成功"
+            remote_checks["status"] = "passed"
         else:
-            remote_checks["ssh"] = "连接失败"
+            remote_checks["status"] = "failed"
+        remote_checks["ok"] = failed == 0 and successful > 0
+        remote_counts = {"passed": 0, "failed": 0, "warnings": 0}
+        for workstation_checks in remote_by_workstation.values():
+            summary = workstation_checks.get("summary")
+            if isinstance(summary, Mapping):
+                remote_counts["passed"] += int(summary.get("passed", 0) or 0)
+                remote_counts["failed"] += int(summary.get("failed", 0) or 0)
+                remote_counts["warnings"] += int(summary.get("warnings", 0) or 0)
+        remote_checks["summary"] = remote_counts
 
-        default_id = self._configured_workstation_ids()[0]
-        if default_id in remote_by_workstation:
-            for key, value in remote_by_workstation[default_id].items():
-                if key != "ssh":
-                    remote_checks.setdefault(key, value)
+        local_checks = results.get("local_checks")
+        if isinstance(local_checks, dict):
+            _apply_check_section_status(local_checks)
+        daemon_checks = results.get("daemon_checks")
+        if isinstance(daemon_checks, dict):
+            _apply_check_section_status(daemon_checks)
+        workstation_section = results.get("workstation_checks")
+        if isinstance(workstation_section, dict):
+            workstation_states = [
+                _state_from_check_item(workstation)
+                for workstation in _list_value(workstation_section.get("workstations", []))
+            ]
+            counts = _summarize_states([state for state in workstation_states if state is not None])
+            workstation_section["ok"] = counts["failed"] == 0
+            workstation_section["status"] = _status_from_counts(
+                counts["passed"],
+                counts["failed"],
+                counts["warnings"],
+            )
+            workstation_section["summary"] = counts
+
+        summary = _collect_result_summary(results)
+        results["summary"] = summary
+        results["overall_ok"] = summary["failed"] == 0
+        results["status"] = _status_from_counts(
+            summary["passed"],
+            summary["failed"],
+            summary["warnings"],
+        )
 
         return results
 
@@ -310,8 +498,8 @@ class FileCleaner:
             "background_processes": [],
             "remote_dirs": [],
             "remote_programs": [],
-            "scripts_status": {"total": 0, "deployed": 0, "missing": []},
-            "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
+            "scripts_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
+            "ref_files_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
         }
 
     def _build_daemon_checks(self) -> dict[str, object]:

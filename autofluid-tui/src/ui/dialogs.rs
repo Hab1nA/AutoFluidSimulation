@@ -180,10 +180,14 @@ pub fn render_confirm_dialog(
 
 fn build_check_content_lines(
     data: &serde_json::Value,
-    _content_width: usize,
+    content_width: usize,
     theme: &AppTheme,
 ) -> Vec<Line<'static>> {
-    let label_width: u16 = 20;
+    let label_width: u16 = (content_width / 4).clamp(14, 24) as u16;
+    let value_width = content_width
+        .saturating_sub(label_width as usize)
+        .saturating_sub(8)
+        .max(24);
 
     struct CheckItem {
         label: String,
@@ -193,10 +197,40 @@ fn build_check_content_lines(
 
     let mut raw_lines: Vec<Line> = Vec::new();
 
+    let passed = data
+        .get("summary")
+        .and_then(|summary| summary.get("passed"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let failed = data
+        .get("summary")
+        .and_then(|summary| summary.get("failed"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let warnings = data
+        .get("summary")
+        .and_then(|summary| summary.get("warnings"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let overall_ok = data
+        .get("overall_ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(failed == 0);
+    let overview_items = vec![CheckItem {
+        label: "总体结论".to_string(),
+        value: format!(
+            "{} | 通过 {passed} | 失败 {failed} | 告警 {warnings}",
+            if overall_ok { "通过" } else { "未通过" }
+        ),
+        exists: Some(overall_ok),
+    }];
+
     // ---- 本地环境检查 ----
+    let overview_header = "─── 总览 ──";
     let daemon_header = "─── Daemon 检查 ──";
     let local_header = "─── 本地环境检查 ──";
     let local_worker_health_header = "─── LocalWorker 在线状态 ──";
+    let config_warning_header = "─── 配置告警 ──";
     let local_worker_header = "─── LocalWorker 本地环境检查 ──";
     let workstation_header = "─── 工作站配置检查 ──";
     let remote_header = "─── 远程工作站检查 ──";
@@ -258,24 +292,22 @@ fn build_check_content_lines(
     let mut dir_items: Vec<CheckItem> = Vec::new();
     let mut prog_items: Vec<CheckItem> = Vec::new();
     let mut sys_items: Vec<CheckItem> = Vec::new();
-    let mut scripts_info: Option<(usize, usize, Vec<String>)> = None;
-    let mut ref_files_info: Option<(usize, usize, Vec<String>)> = None;
 
     if let Some(remote) = data.get("remote_checks").and_then(|v| v.as_object()) {
-        // 连接状态
-        if let Some(ssh_status) = remote.get("ssh").and_then(|v| v.as_str()) {
-            let ok = ssh_status.contains("成功");
-            conn_items.push(CheckItem {
-                label: "SSH连接".to_string(),
-                value: ssh_status.to_string(),
-                exists: Some(ok),
-            });
-        }
         if let Some(workstations) = remote.get("workstations").and_then(|v| v.as_object()) {
             let mut workstation_ids: Vec<&String> = workstations.keys().collect();
             workstation_ids.sort();
             for workstation_id in workstation_ids {
                 let workstation = &workstations[workstation_id];
+                conn_items.push(CheckItem {
+                    label: format!("工作站 {workstation_id}"),
+                    value: workstation
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    exists: workstation.get("ok").and_then(|v| v.as_bool()),
+                });
                 if let Some(ssh_status) = workstation.get("ssh").and_then(|v| v.as_str()) {
                     conn_items.push(CheckItem {
                         label: format!("{workstation_id} SSH"),
@@ -283,136 +315,134 @@ fn build_check_content_lines(
                         exists: Some(ssh_status.contains("成功")),
                     });
                 }
+                if let Some(dirs) = workstation.get("remote_dirs").and_then(|v| v.as_array()) {
+                    for d in dirs {
+                        let label = d
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("远程目录");
+                        let path = d.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        dir_items.push(CheckItem {
+                            label: format!("{workstation_id} {label}"),
+                            value: if path.is_empty() {
+                                "(未设置)".to_string()
+                            } else {
+                                path.to_string()
+                            },
+                            exists: d.get("exists").and_then(|v| v.as_bool()),
+                        });
+                    }
+                }
+                if let Some(progs) = workstation
+                    .get("remote_programs")
+                    .and_then(|v| v.as_array())
+                {
+                    for p in progs {
+                        let label = p
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("远程程序");
+                        let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        prog_items.push(CheckItem {
+                            label: format!("{workstation_id} {label}"),
+                            value: if path.is_empty() {
+                                "(未设置)".to_string()
+                            } else {
+                                path.to_string()
+                            },
+                            exists: p.get("exists").and_then(|v| v.as_bool()),
+                        });
+                    }
+                }
+                if let Some(scripts) = workstation.get("scripts_status") {
+                    let (value, exists) = deployment_status_item(scripts);
+                    dir_items.push(CheckItem {
+                        label: format!("{workstation_id} 远程脚本文件"),
+                        value,
+                        exists,
+                    });
+                }
+                if let Some(refs) = workstation.get("ref_files_status") {
+                    let (value, exists) = deployment_status_item(refs);
+                    dir_items.push(CheckItem {
+                        label: format!("{workstation_id} 仿真引用文件"),
+                        value,
+                        exists,
+                    });
+                }
+                if let Some(py_ver) = workstation.get("python_version").and_then(|v| v.as_str()) {
+                    sys_items.push(CheckItem {
+                        label: format!("{workstation_id} Python版本"),
+                        value: if py_ver.is_empty() {
+                            "未安装或无法检测".to_string()
+                        } else {
+                            py_ver.to_string()
+                        },
+                        exists: Some(!py_ver.is_empty()),
+                    });
+                }
+                if let Some(disk) = workstation.get("disk_space").and_then(|v| v.as_str()) {
+                    sys_items.push(CheckItem {
+                        label: format!("{workstation_id} 磁盘空间"),
+                        value: if disk.is_empty() {
+                            "未知".to_string()
+                        } else {
+                            disk.to_string()
+                        },
+                        exists: None,
+                    });
+                }
+                if let Some(procs) = workstation
+                    .get("background_processes")
+                    .and_then(|v| v.as_array())
+                {
+                    let proc_list: Vec<&str> =
+                        procs.iter().map(|v| v.as_str().unwrap_or("?")).collect();
+                    sys_items.push(CheckItem {
+                        label: format!("{workstation_id} 后台进程"),
+                        value: if proc_list.is_empty() {
+                            "无".to_string()
+                        } else {
+                            proc_list.join(", ")
+                        },
+                        exists: None,
+                    });
+                }
             }
-        }
-
-        // 远程目录（从 Python 端传入的结构化数据）
-        if let Some(dirs) = remote.get("remote_dirs").and_then(|v| v.as_array()) {
-            for d in dirs {
-                let label = d
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let path = d
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let exists = d.get("exists").and_then(|v| v.as_bool());
-                let value = if path.is_empty() {
-                    "(未设置)".to_string()
-                } else {
-                    path
-                };
-                dir_items.push(CheckItem {
-                    label,
-                    value,
-                    exists,
-                });
-            }
-        }
-
-        // 远程程序（Conda、MPI 等）
-        if let Some(progs) = remote.get("remote_programs").and_then(|v| v.as_array()) {
-            for p in progs {
-                let label = p
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let path = p
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let exists = p.get("exists").and_then(|v| v.as_bool());
-                let value = if path.is_empty() {
-                    "(未设置)".to_string()
-                } else {
-                    path
-                };
-                prog_items.push(CheckItem {
-                    label,
-                    value,
-                    exists,
-                });
-            }
-        }
-
-        // 脚本部署状态
-        if let Some(scripts) = remote.get("scripts_status") {
-            let total = scripts.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let deployed = scripts
-                .get("deployed")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let missing: Vec<String> = scripts
-                .get("missing")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            scripts_info = Some((total, deployed, missing));
-        }
-
-        // 引用文件部署状态
-        if let Some(refs) = remote.get("ref_files_status") {
-            let total = refs.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let deployed = refs.get("deployed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let missing: Vec<String> = refs
-                .get("missing")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            ref_files_info = Some((total, deployed, missing));
-        }
-
-        // 系统信息
-        if let Some(py_ver) = remote.get("python_version").and_then(|v| v.as_str()) {
-            let ok = !py_ver.is_empty();
-            sys_items.push(CheckItem {
-                label: "Python版本".to_string(),
-                value: if ok {
-                    py_ver.to_string()
-                } else {
-                    "未安装或无法检测".to_string()
-                },
-                exists: Some(ok),
-            });
-        }
-        if let Some(disk) = remote.get("disk_space").and_then(|v| v.as_str()) {
-            sys_items.push(CheckItem {
-                label: "磁盘空间".to_string(),
-                value: disk.to_string(),
-                exists: None,
-            });
-        }
-        if let Some(procs) = remote
-            .get("background_processes")
-            .and_then(|v| v.as_array())
-        {
-            let proc_list: Vec<&str> = procs.iter().map(|v| v.as_str().unwrap_or("?")).collect();
-            let display = if proc_list.is_empty() {
-                "无".to_string()
-            } else {
-                proc_list.join(", ")
-            };
-            sys_items.push(CheckItem {
-                label: "后台进程".to_string(),
-                value: display,
-                exists: None,
-            });
         }
     }
 
+    fn deployment_status_item(status: &serde_json::Value) -> (String, Option<bool>) {
+        if status.get("status").and_then(|v| v.as_str()) == Some("skipped") {
+            let message = status
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未检查");
+            return (message.to_string(), None);
+        }
+        let total = status.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let deployed = status.get("deployed").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let missing: Vec<String> = status
+            .get("missing")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if total == 0 && deployed == 0 && missing.is_empty() {
+            return ("未检查".to_string(), None);
+        }
+        if missing.is_empty() && deployed >= total {
+            (format!("全部就绪 ({}/{})", deployed, total), Some(true))
+        } else {
+            (
+                format!("缺失 {} 个: {}", missing.len(), missing.join(", ")),
+                Some(false),
+            )
+        }
+    }
     fn json_value_to_display(value: &serde_json::Value) -> String {
         if let Some(text) = value.as_str() {
             text.to_string()
@@ -454,7 +484,15 @@ fn build_check_content_lines(
                 None => json_value_to_display(info),
             });
         CheckItem {
-            label: label.to_string(),
+            label: match label {
+                "server_mode" => "服务模式".to_string(),
+                "ipc" => "IPC 配置".to_string(),
+                "data_dir" => "数据目录".to_string(),
+                "scdoc_dir" => "SCDOC 目录".to_string(),
+                "remote_scripts_dir" => "远程脚本目录".to_string(),
+                "active_check" => "主动自检".to_string(),
+                _ => label.to_string(),
+            },
             value,
             exists,
         }
@@ -465,6 +503,7 @@ fn build_check_content_lines(
     ) -> Vec<CheckItem> {
         object
             .iter()
+            .filter(|(label, _)| !matches!(label.as_str(), "ok" | "status" | "summary"))
             .map(|(label, info)| object_entry_to_check_item(label, info))
             .collect()
     }
@@ -475,6 +514,7 @@ fn build_check_content_lines(
         .map(object_to_check_items)
         .unwrap_or_default();
 
+    let mut config_warning_items: Vec<CheckItem> = Vec::new();
     let local_worker_health_items = data
         .get("health")
         .and_then(|v| v.as_object())
@@ -502,6 +542,52 @@ fn build_check_content_lines(
                     value: status.to_string(),
                     exists,
                 });
+            }
+            if let Some(status) = health
+                .get("server_to_workstation_ssh")
+                .and_then(|v| v.as_str())
+            {
+                let exists = match status {
+                    "ok" => Some(true),
+                    "disconnected" | "error" => Some(false),
+                    _ => None,
+                };
+                items.push(CheckItem {
+                    label: "S→W工作站SSH".to_string(),
+                    value: status.to_string(),
+                    exists,
+                });
+            }
+            if let Some(details) = health
+                .get("workstation_ssh_details")
+                .and_then(|v| v.as_object())
+            {
+                let mut workstation_ids: Vec<&String> = details.keys().collect();
+                workstation_ids.sort();
+                for workstation_id in workstation_ids {
+                    if let Some(status) = details[workstation_id].as_str() {
+                        let exists = match status {
+                            "ok" => Some(true),
+                            "disconnected" | "error" => Some(false),
+                            _ if status.starts_with("error:") => Some(false),
+                            _ => None,
+                        };
+                        items.push(CheckItem {
+                            label: format!("{workstation_id} SSH详情"),
+                            value: status.to_string(),
+                            exists,
+                        });
+                    }
+                }
+            }
+            if let Some(warnings) = health.get("config_warnings").and_then(|v| v.as_array()) {
+                for (idx, warning) in warnings.iter().filter_map(|v| v.as_str()).enumerate() {
+                    config_warning_items.push(CheckItem {
+                        label: format!("配置告警 {}", idx + 1),
+                        value: warning.to_string(),
+                        exists: Some(false),
+                    });
+                }
             }
             items
         })
@@ -596,6 +682,7 @@ fn build_check_content_lines(
         items: &[CheckItem],
         label_width: u16,
         theme: &AppTheme,
+        value_width: usize,
     ) {
         for item in items {
             let icon = match item.exists {
@@ -610,7 +697,7 @@ fn build_check_content_lines(
                     Style::default().fg(theme.gray_4).bg(theme.bg),
                 ),
                 Span::styled(
-                    truncate_for_display(&item.value, 50),
+                    truncate_for_display(&item.value, value_width),
                     Style::default().fg(theme.gray_3).bg(theme.bg),
                 ),
             ];
@@ -631,6 +718,7 @@ fn build_check_content_lines(
         items: &[CheckItem],
         label_width: u16,
         theme: &AppTheme,
+        value_width: usize,
     ) {
         let header_dw = unicode_width::UnicodeWidthStr::width(header);
         let header_pad = if header_dw < target_header_w {
@@ -646,7 +734,7 @@ fn build_check_content_lines(
                 .add_modifier(Modifier::BOLD),
         )));
         raw_lines.push(Line::from(""));
-        render_items(raw_lines, items, label_width, theme);
+        render_items(raw_lines, items, label_width, theme, value_width);
     }
 
     fn render_sub_header(
@@ -668,6 +756,16 @@ fn build_check_content_lines(
         )));
     }
 
+    render_section(
+        &mut raw_lines,
+        overview_header,
+        target_header_w,
+        &overview_items,
+        label_width,
+        theme,
+        value_width,
+    );
+
     if !daemon_items.is_empty() {
         render_section(
             &mut raw_lines,
@@ -676,6 +774,7 @@ fn build_check_content_lines(
             &daemon_items,
             label_width,
             theme,
+            value_width,
         );
     }
 
@@ -688,6 +787,7 @@ fn build_check_content_lines(
             &local_items,
             label_width,
             theme,
+            value_width,
         );
     }
 
@@ -699,6 +799,19 @@ fn build_check_content_lines(
             &local_worker_health_items,
             label_width,
             theme,
+            value_width,
+        );
+    }
+
+    if !config_warning_items.is_empty() {
+        render_section(
+            &mut raw_lines,
+            config_warning_header,
+            target_header_w,
+            &config_warning_items,
+            label_width,
+            theme,
+            value_width,
         );
     }
 
@@ -710,6 +823,7 @@ fn build_check_content_lines(
             &local_worker_items,
             label_width,
             theme,
+            value_width,
         );
     }
 
@@ -721,6 +835,7 @@ fn build_check_content_lines(
             &workstation_items,
             label_width,
             theme,
+            value_width,
         );
     }
 
@@ -728,8 +843,6 @@ fn build_check_content_lines(
     let has_remote = !conn_items.is_empty()
         || !dir_items.is_empty()
         || !prog_items.is_empty()
-        || scripts_info.is_some()
-        || ref_files_info.is_some()
         || !sys_items.is_empty();
     if has_remote {
         // 主标题
@@ -749,61 +862,24 @@ fn build_check_content_lines(
         raw_lines.push(Line::from(""));
 
         // 连接状态
-        render_items(&mut raw_lines, &conn_items, label_width, theme);
+        render_items(&mut raw_lines, &conn_items, label_width, theme, value_width);
 
         // 远程目录
         if !dir_items.is_empty() {
             render_sub_header(&mut raw_lines, "远程目录", target_header_w, theme);
-            render_items(&mut raw_lines, &dir_items, label_width, theme);
+            render_items(&mut raw_lines, &dir_items, label_width, theme, value_width);
         }
 
         // 远程程序
         if !prog_items.is_empty() {
             render_sub_header(&mut raw_lines, "远程程序", target_header_w, theme);
-            render_items(&mut raw_lines, &prog_items, label_width, theme);
-        }
-
-        // 脚本与引用文件部署
-        if scripts_info.is_some() || ref_files_info.is_some() {
-            render_sub_header(&mut raw_lines, "文件部署", target_header_w, theme);
-            if let Some((total, deployed, ref missing)) = scripts_info {
-                let (value, exists) = if missing.is_empty() {
-                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
-                } else {
-                    (
-                        format!("缺失 {} 个: {}", missing.len(), missing.join(", ")),
-                        Some(false),
-                    )
-                };
-                let items = vec![CheckItem {
-                    label: "远程脚本文件".to_string(),
-                    value,
-                    exists,
-                }];
-                render_items(&mut raw_lines, &items, label_width, theme);
-            }
-            if let Some((total, deployed, ref missing)) = ref_files_info {
-                let (value, exists) = if missing.is_empty() {
-                    (format!("全部就绪 ({}/{})", deployed, total), Some(true))
-                } else {
-                    (
-                        format!("缺失 {} 个: {}", missing.len(), missing.join(", ")),
-                        Some(false),
-                    )
-                };
-                let items = vec![CheckItem {
-                    label: "仿真引用文件".to_string(),
-                    value,
-                    exists,
-                }];
-                render_items(&mut raw_lines, &items, label_width, theme);
-            }
+            render_items(&mut raw_lines, &prog_items, label_width, theme, value_width);
         }
 
         // 系统信息
         if !sys_items.is_empty() {
             render_sub_header(&mut raw_lines, "系统信息", target_header_w, theme);
-            render_items(&mut raw_lines, &sys_items, label_width, theme);
+            render_items(&mut raw_lines, &sys_items, label_width, theme, value_width);
         }
     }
 
@@ -1037,13 +1113,13 @@ mod tests {
         let text = line_text(&build_check_content_lines(&data, 80, &theme));
 
         assert!(text.contains("Daemon"));
-        assert!(text.contains("server_mode"));
+        assert!(text.contains("服务模式"));
         assert!(text.contains("LocalWorker"));
         assert!(text.contains("LW注册状态"));
         assert!(text.contains("在线"));
         assert!(text.contains("S→L反向隧道"));
         assert!(text.contains("ok"));
-        assert!(text.contains("active_check"));
+        assert!(text.contains("主动自检"));
         assert!(text.contains("主动自检超时"));
         assert!(text.contains("✅"));
         assert!(text.contains("❌"));
@@ -1077,40 +1153,11 @@ mod tests {
     }
 
     #[test]
-    fn check_content_lines_keeps_legacy_local_remote_schema() {
-        let theme = AppTheme::default();
-        let data = json!({
-            "local_checks": {
-                "Excel参数表": {
-                    "path": "C:\\models\\params.xlsx",
-                    "exists": true
-                }
-            },
-            "remote_checks": {
-                "ssh": "连接成功",
-                "scripts_status": {
-                    "total": 1,
-                    "deployed": 1,
-                    "missing": []
-                }
-            }
-        });
-
-        let text = line_text(&build_check_content_lines(&data, 80, &theme));
-
-        assert!(text.contains("本地环境检查"));
-        assert!(text.contains("远程工作站检查"));
-        assert!(text.contains("SSH连接"));
-        assert!(text.contains("Excel参数表"));
-        assert!(text.contains("远程脚本文件"));
-    }
-
-    #[test]
     fn check_content_lines_lists_each_remote_workstation_ssh_status() {
         let theme = AppTheme::default();
         let data = json!({
             "remote_checks": {
-                "ssh": "部分连接失败",
+                "status": "partial",
                 "workstations": {
                     "WS-A": {"ssh": "连接成功"},
                     "WS-B": {"ssh": "连接成功"},
@@ -1125,6 +1172,77 @@ mod tests {
         assert!(text.contains("WS-B SSH"));
         assert!(text.contains("WS-C SSH"));
         assert!(text.contains("连接失败"));
-        assert!(text.contains("部分连接失败"));
+        assert!(!text.contains("SSH连接"));
+    }
+
+    #[test]
+    fn check_content_lines_renders_new_summary_health_and_per_workstation_details() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "overall_ok": false,
+            "summary": {"passed": 7, "failed": 2, "warnings": 1},
+            "health": {
+                "local_worker_online": true,
+                "server_to_local_ssh": "ok",
+                "server_to_workstation_ssh": "disconnected",
+                "workstation_ssh_details": {
+                    "WS-A": "ok",
+                    "WS-B": "error: timed out"
+                },
+                "config_warnings": ["工作站 WS-B 缺少 reachable_host"]
+            },
+            "remote_checks": {
+                "status": "partial",
+                "ok": false,
+                "workstations": {
+                    "WS-A": {
+                        "status": "passed",
+                        "ok": true,
+                        "ssh": "连接成功",
+                        "remote_dirs": [{"label": "仿真工作目录", "path": "D:/ws-a/work", "exists": true}],
+                        "remote_programs": [{"label": "MPI", "path": "C:/mpi", "exists": true}],
+                        "scripts_status": {"total": 2, "deployed": 2, "missing": []},
+                        "ref_files_status": {"total": 1, "deployed": 1, "missing": []},
+                        "python_version": "Python 3.11",
+                        "disk_space": "100 GB free",
+                        "background_processes": []
+                    },
+                    "WS-B": {
+                        "status": "failed",
+                        "ok": false,
+                        "ssh": "连接失败",
+                        "remote_dirs": [{"label": "仿真工作目录", "path": "D:/ws-b/work", "exists": false}],
+                        "remote_programs": [{"label": "MPI", "path": "C:/missing-mpi", "exists": false}],
+                        "scripts_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
+                        "ref_files_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
+                        "python_version": "",
+                        "disk_space": "",
+                        "background_processes": ["fluent.exe"]
+                    }
+                }
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 100, &theme));
+
+        assert!(text.contains("总体结论"));
+        assert!(text.contains("未通过"));
+        assert!(text.contains("通过 7"));
+        assert!(text.contains("失败 2"));
+        assert!(text.contains("告警 1"));
+        assert!(text.contains("S→W工作站SSH"));
+        assert!(text.contains("WS-B SSH详情"));
+        assert!(text.contains("timed out"));
+        assert!(text.contains("配置告警"));
+        assert!(text.contains("缺少 reachable_host"));
+        assert!(text.contains("工作站 WS-A"));
+        assert!(text.contains("D:/ws-a/work"));
+        assert!(text.contains("Python 3.11"));
+        assert!(text.contains("工作站 WS-B"));
+        assert!(text.contains("D:/ws-b/work"));
+        assert!(text.contains("SSH 未连接，未检查"));
+        assert!(!text.contains("solver.py"));
+        assert!(!text.contains("udf.c"));
+        assert!(text.contains("fluent.exe"));
     }
 }
