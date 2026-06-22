@@ -176,6 +176,18 @@ pub fn render_settings_dialog(
             continue;
         }
 
+        if matches!(cat, SettingCategory::PostProcess) && !ss.config.workstations.is_empty() {
+            render_postprocess_category_lines(
+                &mut raw_lines,
+                &mut field_positions,
+                ss,
+                cat_idx,
+                content_area.width,
+                theme,
+            );
+            continue;
+        }
+
         for fi in 0..cat.field_count() {
             let field_y = raw_lines.len() as u16;
             field_positions.push(SettingsFieldHit {
@@ -402,12 +414,126 @@ pub fn render_settings_dialog(
     }
 }
 
+fn render_postprocess_category_lines(
+    raw_lines: &mut Vec<Line<'_>>,
+    field_positions: &mut Vec<SettingsFieldHit>,
+    ss: &SettingsState,
+    cat_idx: usize,
+    content_width: u16,
+    theme: &AppTheme,
+) {
+    let cat = SettingCategory::PostProcess;
+    let field_y = raw_lines.len() as u16;
+    field_positions.push(SettingsFieldHit {
+        category_index: cat_idx,
+        field_index: 0,
+        workstation_index: None,
+        y: field_y,
+        x_start: 0,
+        x_end: content_width,
+    });
+
+    let label_width: u16 = 20;
+    let field_content_width = content_width.saturating_sub(label_width).saturating_sub(2) as usize;
+    let is_focused = ss.focus.category_index == cat_idx
+        && ss.focus.field_index == 0
+        && ss.focus.workstation_index.is_none();
+    let is_current_field = is_focused && ss.focus.editing;
+    let row_bg = if is_focused {
+        theme.secondary
+    } else {
+        theme.bg
+    };
+    let label_style = if is_focused {
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+            .bg(row_bg)
+    } else {
+        Style::default().fg(theme.gray_4).bg(row_bg)
+    };
+    let value_style = if is_current_field {
+        Style::default().fg(theme.success).bg(row_bg)
+    } else if is_focused {
+        Style::default().fg(theme.fg).bg(theme.secondary)
+    } else {
+        Style::default().fg(theme.gray_3).bg(row_bg)
+    };
+
+    let mut spans: Vec<Span<'_>> = vec![
+        Span::styled("  ", Style::default().bg(row_bg)),
+        Span::styled(
+            pad_label_by_display_width(cat.display_label(0), label_width),
+            label_style,
+        ),
+    ];
+
+    if is_current_field {
+        spans.extend(build_edit_spans(
+            &ss.buffer.text,
+            ss.buffer.cursor,
+            ss.buffer.selection_anchor,
+            field_content_width,
+            value_style,
+            Style::default().fg(theme.bg).bg(theme.success),
+            Style::default()
+                .fg(theme.cursor_fg)
+                .bg(theme.success)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.success),
+        ));
+    } else {
+        spans.push(Span::styled(
+            truncate_for_display(&ss.get_field_value(cat, 0), field_content_width),
+            value_style,
+        ));
+    }
+    raw_lines.push(Line::from(spans));
+
+    render_workstation_category_field_range(
+        raw_lines,
+        field_positions,
+        ss,
+        cat_idx,
+        cat,
+        1,
+        cat.field_count(),
+        content_width,
+        theme,
+    );
+}
+
 fn render_workstation_category_lines(
     raw_lines: &mut Vec<Line<'_>>,
     field_positions: &mut Vec<SettingsFieldHit>,
     ss: &SettingsState,
     cat_idx: usize,
     cat: SettingCategory,
+    content_width: u16,
+    theme: &AppTheme,
+) {
+    render_workstation_category_field_range(
+        raw_lines,
+        field_positions,
+        ss,
+        cat_idx,
+        cat,
+        0,
+        cat.field_count(),
+        content_width,
+        theme,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workstation_category_field_range(
+    raw_lines: &mut Vec<Line<'_>>,
+    field_positions: &mut Vec<SettingsFieldHit>,
+    ss: &SettingsState,
+    cat_idx: usize,
+    cat: SettingCategory,
+    first_field: usize,
+    end_field: usize,
     content_width: u16,
     theme: &AppTheme,
 ) {
@@ -449,7 +575,7 @@ fn render_workstation_category_lines(
     }
     raw_lines.push(Line::from(header_spans));
 
-    for fi in 0..cat.field_count() {
+    for fi in first_field..end_field.min(cat.field_count()) {
         let field_y = raw_lines.len() as u16;
         let mut spans = vec![
             Span::raw("  "),
@@ -514,6 +640,7 @@ fn render_workstation_category_lines(
                     Style::default().fg(theme.success),
                 );
                 spans.extend(edit_spans);
+                spans.push(Span::styled(" ", value_style));
             } else {
                 let value = ss.get_workstation_field_value(ws_idx, cat, fi);
                 let display_value = if cat.is_password_field(fi) {
@@ -554,6 +681,10 @@ fn build_edit_spans(
     cursor_style: Style,
     cursor_bar_style: Style,
 ) -> Vec<Span<'static>> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+
     let chars: Vec<char> = buffer.chars().collect();
     assert!(
         cursor <= chars.len(),
@@ -596,19 +727,46 @@ fn build_edit_spans(
         spans.push(Span::styled("▎".to_string(), cursor_bar_style));
     }
 
-    // Truncate to max_width by measuring display width of spans
-    let mut total_w: usize = 0;
-    let mut keep: usize = 0;
-    for (idx, span) in spans.iter().enumerate() {
-        let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref() as &str);
+    let cursor_span_index = cursor.min(spans.len().saturating_sub(1));
+    visible_span_window(spans, cursor_span_index, max_width)
+}
+
+fn visible_span_window(
+    spans: Vec<Span<'static>>,
+    cursor_span_index: usize,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    if spans.is_empty() || max_width == 0 {
+        return Vec::new();
+    }
+
+    let mut start = 0;
+    while start < cursor_span_index
+        && spans_display_width(&spans[start..=cursor_span_index]) > max_width
+    {
+        start += 1;
+    }
+
+    let mut total_w = 0;
+    let mut end = start;
+    while end < spans.len() {
+        let w = span_display_width(&spans[end]);
         if total_w + w > max_width {
             break;
         }
         total_w += w;
-        keep = idx + 1;
+        end += 1;
     }
-    spans.truncate(keep);
-    spans
+
+    spans[start..end].to_vec()
+}
+
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(span_display_width).sum()
+}
+
+fn span_display_width(span: &Span<'_>) -> usize {
+    unicode_width::UnicodeWidthStr::width(span.content.as_ref() as &str)
 }
 
 #[cfg(test)]
@@ -628,6 +786,7 @@ mod tests {
                 id: "WS-B".to_string(),
                 host: "172.17.135.89".to_string(),
                 scdoc_dir: r"D:\ws-b\scdoc".to_string(),
+                conda_exe: r"C:\Users\ps\miniconda3\Scripts\conda.exe".to_string(),
                 ..WorkstationConfig::default()
             },
             WorkstationConfig {
@@ -718,5 +877,115 @@ mod tests {
         assert!(!editing_password_line.contains("secret-a"));
         assert!(!editing_password_line.contains("secret-c"));
         assert_eq!(editing_password_line.matches("************").count(), 2);
+    }
+
+    #[test]
+    fn focused_workstation_field_stays_on_single_row_without_detail_line() {
+        let mut state = state_with_three_workstations();
+        state.set_focus(2, 8, Some(1));
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            2,
+            SettingCategory::RemoteDirs,
+            80,
+            &theme,
+        );
+
+        assert_eq!(
+            raw_lines.len(),
+            1 + SettingCategory::RemoteDirs.field_count()
+        );
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !rendered.contains(r"WS-B / Conda可执行文件: C:\Users\ps\miniconda3\Scripts\conda.exe")
+        );
+    }
+
+    #[test]
+    fn editing_long_workstation_value_keeps_cursor_and_tail_visible() {
+        let mut state = state_with_three_workstations();
+        state.config.workstations[1].conda_exe =
+            r"C:\Users\ps\miniconda3\envs\autofluid\Scripts\conda.exe".to_string();
+        state.config.workstations[2].conda_exe = "NEXT-COLUMN".to_string();
+        state.set_focus(2, 8, Some(1));
+        state.begin_edit_current_field();
+        state.buffer.move_cursor_end();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            2,
+            SettingCategory::RemoteDirs,
+            80,
+            &theme,
+        );
+
+        let conda_line = raw_lines[1 + 8].to_string();
+
+        assert!(conda_line.contains(r"Scripts\conda.exe"));
+        assert!(conda_line.contains("▎"));
+        assert!(conda_line.contains("▎ NEXT-COLUMN"));
+    }
+
+    #[test]
+    fn postprocess_directory_rows_render_as_workstation_columns() {
+        let mut state = state_with_three_workstations();
+        state.config.postprocess.postprocess_timeout = 3600;
+        state.config.postprocess.output_dir = r"D:\global\post".to_string();
+        state.config.workstations[0].postprocess_output_dir = r"D:\ws-a\post".to_string();
+        state.config.workstations[1].postprocess_output_dir = r"E:\ws-b\post".to_string();
+        state.config.workstations[2].postprocess_output_dir = r"F:\ws-c\post".to_string();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_postprocess_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            8,
+            80,
+            &theme,
+        );
+
+        let timeout_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 8 && hit.field_index == 0)
+            .collect();
+        let output_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 8 && hit.field_index == 1)
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(timeout_hits.len(), 1);
+        assert_eq!(timeout_hits[0].workstation_index, None);
+        assert_eq!(output_hits.len(), 3);
+        assert_eq!(output_hits[0].workstation_index, Some(0));
+        assert_eq!(output_hits[1].workstation_index, Some(1));
+        assert_eq!(output_hits[2].workstation_index, Some(2));
+        assert!(rendered.contains(r"D:\ws-a\post"));
+        assert!(rendered.contains(r"E:\ws-b\post"));
+        assert!(rendered.contains(r"F:\ws-c\post"));
+        assert!(!rendered.contains(r"D:\global\post"));
     }
 }

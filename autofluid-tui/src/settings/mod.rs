@@ -69,6 +69,12 @@ pub struct WorkstationConfig {
     pub conda_exe: String,
     pub mpi_bin_dir: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_output_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_animation_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_metrics_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
 }
 
@@ -97,6 +103,9 @@ impl Default for WorkstationConfig {
             conda_env: remote.conda_env,
             conda_exe: remote.conda_exe,
             mpi_bin_dir: remote.mpi_bin_dir,
+            postprocess_output_dir: String::new(),
+            postprocess_animation_dir: String::new(),
+            postprocess_metrics_dir: String::new(),
             notes: String::new(),
         }
     }
@@ -126,6 +135,9 @@ impl WorkstationConfig {
             conda_env: remote.conda_env.clone(),
             conda_exe: remote.conda_exe.clone(),
             mpi_bin_dir: remote.mpi_bin_dir.clone(),
+            postprocess_output_dir: String::new(),
+            postprocess_animation_dir: String::new(),
+            postprocess_metrics_dir: String::new(),
             notes: String::new(),
         }
     }
@@ -607,6 +619,21 @@ impl SettingCategory {
     }
 }
 
+fn category_field_is_workstation_scoped(category: SettingCategory, idx: usize) -> bool {
+    matches!(
+        category,
+        SettingCategory::RemoteConnection | SettingCategory::RemoteDirs
+    ) || (matches!(category, SettingCategory::PostProcess) && matches!(idx, 1..=3))
+}
+
+fn non_empty_or(value: String, fallback: String) -> String {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
     pub category: SettingCategory,
@@ -735,10 +762,8 @@ impl SettingsState {
     }
 
     pub fn get_field_value(&self, category: SettingCategory, idx: usize) -> String {
-        if matches!(
-            category,
-            SettingCategory::RemoteConnection | SettingCategory::RemoteDirs
-        ) && self.focus.workstation_index.is_some()
+        if self.focus.workstation_index.is_some()
+            && category_field_is_workstation_scoped(category, idx)
         {
             return self.get_workstation_field_value(
                 self.focus.workstation_index_or_default(),
@@ -884,15 +909,28 @@ impl SettingsState {
                 9 => workstation.mpi_bin_dir,
                 _ => String::new(),
             },
+            SettingCategory::PostProcess => match idx {
+                1 => non_empty_or(
+                    workstation.postprocess_output_dir,
+                    self.config.postprocess.output_dir.clone(),
+                ),
+                2 => non_empty_or(
+                    workstation.postprocess_animation_dir,
+                    self.config.postprocess.animation_dir.clone(),
+                ),
+                3 => non_empty_or(
+                    workstation.postprocess_metrics_dir,
+                    self.config.postprocess.metrics_dir.clone(),
+                ),
+                _ => self.get_field_value(category, idx),
+            },
             _ => self.get_field_value(category, idx),
         }
     }
 
     pub fn set_field_value(&mut self, category: SettingCategory, idx: usize, value: &str) {
-        if matches!(
-            category,
-            SettingCategory::RemoteConnection | SettingCategory::RemoteDirs
-        ) && self.focus.workstation_index.is_some()
+        if self.focus.workstation_index.is_some()
+            && category_field_is_workstation_scoped(category, idx)
         {
             self.set_workstation_field_value(
                 self.focus.workstation_index_or_default(),
@@ -1143,6 +1181,12 @@ impl SettingsState {
                 8 => workstation.conda_exe = value.to_string(),
                 9 => workstation.mpi_bin_dir = value.to_string(),
                 _ => {}
+            },
+            SettingCategory::PostProcess => match idx {
+                1 => workstation.postprocess_output_dir = value.to_string(),
+                2 => workstation.postprocess_animation_dir = value.to_string(),
+                3 => workstation.postprocess_metrics_dir = value.to_string(),
+                _ => self.set_field_value(category, idx, value),
             },
             _ => self.set_field_value(category, idx, value),
         }
@@ -1516,6 +1560,123 @@ mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi
             state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 3),
             r"D:\ws-b\scdoc"
         );
+    }
+
+    #[test]
+    fn workstation_postprocess_directory_edits_do_not_cross_columns_or_global_defaults() {
+        let mut state = SettingsState::default_for_tests();
+        state.config.postprocess.output_dir = r"D:\global\post".to_string();
+        state.config.postprocess.animation_dir = r"D:\global\animation".to_string();
+        state.config.postprocess.metrics_dir = r"D:\global\metrics".to_string();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                postprocess_output_dir: r"D:\ws-a\post".to_string(),
+                postprocess_animation_dir: r"D:\ws-a\animation".to_string(),
+                postprocess_metrics_dir: r"D:\ws-a\metrics".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.254".to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 1, r"E:\ws-b\post");
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 2, r"E:\ws-b\animation");
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 3, r"E:\ws-b\metrics");
+
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 1),
+            r"E:\ws-b\post"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 2),
+            r"E:\ws-b\animation"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 3),
+            r"E:\ws-b\metrics"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(0, SettingCategory::PostProcess, 1),
+            r"E:\ws-b\post"
+        );
+        assert_eq!(state.config.postprocess.output_dir, r"D:\global\post");
+        assert_eq!(
+            state.config.postprocess.animation_dir,
+            r"D:\global\animation"
+        );
+        assert_eq!(state.config.postprocess.metrics_dir, r"D:\global\metrics");
+    }
+
+    #[test]
+    fn workstation_postprocess_directories_round_trip_through_toml() {
+        let toml_text = r#"
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+working_dir = 'D:\work-a'
+scripts_dir = 'D:\scripts-a'
+ref_files_dir = 'D:\refs-a'
+scdoc_dir = 'D:\scdoc-a'
+msh_dir = 'D:\msh-a'
+result_dir = 'D:\case-a'
+flag_dir = 'D:\flags-a'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+postprocess_output_dir = 'D:\post-a'
+postprocess_animation_dir = 'D:\animation-a'
+postprocess_metrics_dir = 'D:\metrics-a'
+
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+working_dir = 'D:\work-b'
+scripts_dir = 'D:\scripts-b'
+ref_files_dir = 'D:\refs-b'
+scdoc_dir = 'D:\scdoc-b'
+msh_dir = 'D:\msh-b'
+result_dir = 'D:\case-b'
+flag_dir = 'D:\flags-b'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+postprocess_output_dir = 'E:\post-b'
+postprocess_animation_dir = 'E:\animation-b'
+postprocess_metrics_dir = 'E:\metrics-b'
+"#;
+
+        let config: SettingsConfig =
+            toml::from_str(toml_text).expect("parse workstation postprocess dirs");
+
+        assert_eq!(config.workstations[0].postprocess_output_dir, r"D:\post-a");
+        assert_eq!(
+            config.workstations[1].postprocess_animation_dir,
+            r"E:\animation-b"
+        );
+        assert_eq!(
+            config.workstations[1].postprocess_metrics_dir,
+            r"E:\metrics-b"
+        );
+
+        let serialized =
+            toml::to_string_pretty(&config).expect("serialize workstation postprocess dirs");
+        assert!(serialized.contains("postprocess_output_dir"));
+        assert!(serialized.contains("postprocess_animation_dir"));
+        assert!(serialized.contains("postprocess_metrics_dir"));
     }
 
     #[test]
