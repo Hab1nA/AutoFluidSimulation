@@ -42,7 +42,6 @@ from engine.config import (
     ensure_directories, get_step_filename, get_workstation_ssh_health_interval,
     is_server_mode, validate_config,
 )
-from engine.config_assigner import ConfigAssigner
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.local_worker_adapter import LocalWorkerAdapter
 from engine.local_worker_registry import LocalWorkerRegistry
@@ -421,35 +420,13 @@ class PipelineDaemon:
             remove_pid_file(worker_pid_file("local_worker"))
 
     def _assign_config_workstations(self) -> None:
-        """Persist stable workstation assignments for current configs."""
+        """Compatibility hook; workstation assignment is now claim-time dynamic."""
         if self.state is None:
             raise RuntimeError("StateManager 未初始化，请先调用 start()")
 
-        workstation_ids = [str(ws.get("id")) for ws in WORKSTATIONS if ws.get("id")]
-        assigner = ConfigAssigner(workstation_ids, self.state.get_all_configs())
-        assigned_count = 0
-        reassigned_count = 0
-        valid_workstation_ids = set(workstation_ids)
-        for config_name in self.state.get_all_configs():
-            current_workstation_id = self.state.get_config_workstation(config_name)
-            if current_workstation_id in valid_workstation_ids:
-                continue
-            assigned_workstation_id = assigner.get_workstation(config_name)
-            self.state.set_config_workstation(
-                config_name,
-                assigned_workstation_id,
-            )
-            if current_workstation_id is None:
-                assigned_count += 1
-            else:
-                reassigned_count += 1
-        if assigned_count:
-            logger.info("[Config] 已持久化 %d 个构型的工作站分配", assigned_count)
-        if reassigned_count:
-            logger.warning(
-                "[Config] 已修正 %d 个无效/遗留工作站分配",
-                reassigned_count,
-            )
+        logger.debug(
+            "[Config] 工作站分配采用动态槽位模式：构型将在 Transfer 前按空闲 Meshing 槽位 claim"
+        )
 
     def _start_alert_watcher(self) -> None:
         """Start the server-side alert watcher as a daemon-owned child process."""

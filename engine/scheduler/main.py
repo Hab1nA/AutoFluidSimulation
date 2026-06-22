@@ -25,7 +25,7 @@ from typing import Any
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, get_step_filename, get_workstation_config, is_server_mode,
+    LOCAL_PATHS, WORKSTATIONS, get_step_filename, get_workstation_config, is_server_mode,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -37,6 +37,7 @@ from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
 from .meshing_monitor import MeshingMonitor
+from .workstation_slots import WorkstationSlotCoordinator
 from .utils import check_step_output_exists, PauseGuard
 from .work_queue import UniqueWorkQueue
 from .control import PipelineControl
@@ -95,6 +96,16 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
         )
+        workstation_ids = [
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        ] or [DEFAULT_WORKSTATION_ID]
+        self.workstation_slots = WorkstationSlotCoordinator(
+            self.state,
+            workstation_ids,
+        )
+        self.workstation_slots.seed_from_state()
         self.worker_pool = WorkerPoolManager(
             state_manager=self.state,
             task_runner=self.runner,
@@ -104,6 +115,7 @@ class PipelineScheduler:
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
             get_reset_generation=self._current_reset_generation,
+            workstation_slots=self.workstation_slots,
         )
         self.barrier_coordinator = BarrierCoordinator(
             state_manager=self.state,
@@ -122,6 +134,7 @@ class PipelineScheduler:
             stopped_event=self._stopped,
             get_reset_generation=self._current_reset_generation,
             on_meshing_completed=self._on_meshing_completed,
+            workstation_slots=self.workstation_slots,
         )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
@@ -1129,6 +1142,7 @@ class PipelineScheduler:
 
         # 全量重置（所有构型 + 所有步骤）需要额外清除引擎全局状态
         if config_name == "all" and step_name is None:
+            self.workstation_slots.clear()
             self.state.reset_all()
             self._barrier_passed.clear()
             self.barrier_coordinator.clear_all_workstation_barriers()
@@ -1140,6 +1154,8 @@ class PipelineScheduler:
                 _monitor_reset_method()
             self._sc_queue.clear()
         elif config_name == "all":
+            if need_barrier_clear:
+                self.workstation_slots.clear()
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
@@ -1155,6 +1171,8 @@ class PipelineScheduler:
             self._sc_queue.clear()
         else:
             reset_workstation_id = self._workstation_for_config(int(config_name))
+            if need_barrier_clear:
+                self.workstation_slots.release_config(int(config_name))
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()

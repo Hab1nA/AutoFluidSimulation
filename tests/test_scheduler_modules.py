@@ -19,7 +19,7 @@ import pytest
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
+    DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
 )
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
@@ -1768,6 +1768,85 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
+    def test_transfer_claims_idle_meshing_slot_before_upload(self):
+        """Transfer 上传前应按空闲 Meshing 槽位动态写入工作站。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B", "WS-C"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        for cn in (1, 2):
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
+        self.scheduler.workstation_slots.claim(1)
+
+        observed_workstations: list[str | None] = []
+
+        def complete_transfer(config_name: int, step_name: str, _func) -> bool:
+            assert config_name == 2
+            assert step_name == "transfer"
+            observed_workstations.append(self.state.get_config_workstation(config_name))
+            self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_transfer
+
+        self.scheduler.worker_pool._process_transfer_step(2)
+
+        assert observed_workstations == ["WS-B"]
+        assert self.state.get_config_workstation(2) == "WS-B"
+        assert self.scheduler.meshing_monitor.qsize() == 1
+
+    def test_transfer_waits_without_upload_when_all_meshing_slots_busy(self, monkeypatch):
+        """所有 Meshing 槽位忙时 Transfer 不应上传到任何工作站。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        waits: list[float] = []
+
+        def record_requeue_wait(duration, _paused, _stopped, check_interval=1.0) -> bool:
+            waits.append(duration)
+            assert check_interval == 0.2
+            return True
+
+        monkeypatch.setattr(
+            "engine.scheduler.worker_pool.pause_aware_sleep",
+            record_requeue_wait,
+        )
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B", "WS-C"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+            4: [13.0, 14.0, 15.0, 16.0],
+        })
+        for cn in (1, 2, 3, 4):
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
+        for cn in (1, 2, 3):
+            self.scheduler.workstation_slots.claim(cn)
+
+        upload_calls: list[int] = []
+
+        def fail_if_upload_called(config_name: int, step_name: str, _func) -> bool:
+            upload_calls.append(config_name)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = fail_if_upload_called
+
+        self.scheduler.worker_pool._process_transfer_step(4)
+
+        assert upload_calls == []
+        assert waits == [self.scheduler.worker_pool._transfer_requeue_delay]
+        assert self.state.get_config_workstation(4) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(4, "transfer") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
     def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):
         """clean 删除本地产物后，resume 不应继续信任 Completed 状态。"""
         monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
@@ -3062,7 +3141,7 @@ class TestPipelineDaemonCleanStep:
             for record in caplog.records
         )
 
-    def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
+    def test_assign_config_workstations_does_not_preassign_waiting_configs(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
 
@@ -3076,10 +3155,10 @@ class TestPipelineDaemonCleanStep:
 
         daemon._assign_config_workstations()
 
-        assert daemon.state.assignments == {1: "WS-A", 2: "WS-B", 3: "WS-A"}
-        assert daemon.state.set_calls == [(1, "WS-A"), (3, "WS-A")]
+        assert daemon.state.assignments == {2: "WS-B"}
+        assert daemon.state.set_calls == []
 
-    def test_assign_config_workstations_replaces_legacy_default(self, monkeypatch):
+    def test_assign_config_workstations_leaves_legacy_values_for_dynamic_claim(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
 
@@ -3097,16 +3176,11 @@ class TestPipelineDaemonCleanStep:
         daemon._assign_config_workstations()
 
         assert daemon.state.assignments == {
-            1: "WS-A",
+            1: "default",
             2: "WS-B",
-            3: "WS-C",
-            4: "WS-A",
+            3: "stale",
         }
-        assert daemon.state.set_calls == [
-            (1, "WS-A"),
-            (3, "WS-C"),
-            (4, "WS-A"),
-        ]
+        assert daemon.state.set_calls == []
 
     def test_clean_sw_requests_scheduler_file_monitor_reset(self):
         from engine.daemon import PipelineDaemon
@@ -4064,6 +4138,39 @@ class TestMeshingMonitor:
             self.stopped.set()
 
         assert sorted(entered) == [1, 2, 3]
+
+    def test_terminal_meshing_worker_releases_workstation_slot(self):
+        """Meshing 终结后应释放工作站槽位，允许后续 Transfer 上传。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.monitor._workstation_slots = slots
+        assert slots.claim(1) == "WS-A"
+        self.monitor.submit(1)
+        assert self.monitor._meshing_queue.get_nowait() == 1
+        self.monitor._process_single_meshing = lambda _config_name: False
+
+        self.monitor._process_worker(1, "WS-A")
+
+        assert slots.busy_workstations() == {}
+
+    def test_requeued_meshing_worker_keeps_workstation_slot(self):
+        """需要重试/未知状态的 Meshing 仍应占用原工作站槽位。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.monitor._workstation_slots = slots
+        assert slots.claim(1) == "WS-A"
+        self.monitor.submit(1)
+        assert self.monitor._meshing_queue.get_nowait() == 1
+        self.monitor._process_single_meshing = lambda _config_name: True
+
+        self.monitor._process_worker(1, "WS-A")
+
+        assert slots.busy_workstations() == {"WS-A": 1}
+        assert self.monitor.qsize() == 1
 
     def test_stale_meshing_completion_after_reset_does_not_dispatch_solver(self):
         """reset 期间完成的旧 Meshing 结果不应触发下游 Solver 分发。"""

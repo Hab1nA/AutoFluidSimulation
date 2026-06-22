@@ -30,6 +30,7 @@ from engine.scheduler.utils import (
     pause_aware_sleep, wait_unless_paused_or_stopped,
 )
 from engine.scheduler.work_queue import UniqueWorkQueue
+from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 
 logger = setup_logger(__name__)
 
@@ -49,6 +50,7 @@ class MeshingMonitor:
         stopped_event: threading.Event,
         get_reset_generation: Callable[[int, str], int] | None = None,
         on_meshing_completed: Callable[[int], None] | None = None,
+        workstation_slots: WorkstationSlotCoordinator | None = None,
     ):
         self.state = state_manager
         self._remote_executor = remote_executor
@@ -56,6 +58,7 @@ class MeshingMonitor:
         self._stopped = stopped_event
         self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
         self._on_meshing_completed = on_meshing_completed
+        self._workstation_slots = workstation_slots
 
         self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: threading.Thread | None = None
@@ -306,6 +309,11 @@ class MeshingMonitor:
                 )
                 self._meshing_queue.requeue(config_name)
             else:
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_workstation(
+                        workstation_id,
+                        config_name,
+                    )
                 self._meshing_queue.complete(config_name)
 
     # ------------------------------------------------------------------
