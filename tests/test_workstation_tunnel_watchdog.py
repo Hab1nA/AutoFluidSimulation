@@ -63,6 +63,23 @@ def test_reverse_tunnel_startup_noops_when_owner_is_gone() -> None:
     assert source.index(owner_guard) < source.index("$sshExe = Resolve-SshExe")
 
 
+def test_reverse_tunnel_default_supervisor_requires_owner_identity() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    owner_required_guard = (
+        'if (-not $Check -and -not $UninstallWatchdog -and '
+        '-not $NoWatchdog -and -not $Monitor -and -not (Test-TunnelOwnerConfigured))'
+    )
+
+    assert "function Test-TunnelOwnerConfigured" in source
+    assert owner_required_guard in source
+    assert source.index(owner_required_guard) < source.index('if ($InstallWatchdog)')
+    assert "reverse tunnel monitor owner is required" in source
+    assert "return $true" not in source[
+        source.index("function Test-TunnelOwnerAlive"):
+        source.index("function Stop-ReverseTunnelChild")
+    ]
+
+
 def test_reverse_tunnel_watchdog_launcher_carries_owner_and_budget_arguments() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
     launcher_start = source.index("function New-TunnelWatchdogLauncher")
@@ -95,6 +112,39 @@ def test_server_ipc_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit(
     assert "Write-RateLimitedTunnelLog" in monitor_source
     assert "Stop-ServerTunnelChild" in monitor_source
     assert "Write-Host \"Server IPC tunnel endpoint dropped; restarting.\"" not in monitor_source
+
+
+def test_server_ipc_tunnel_default_monitor_requires_owner_pid() -> None:
+    source = SERVER_IPC_SCRIPT_PATH.read_text(encoding="utf-8")
+    owner_guard_start = source.index("if (-not $Check -and -not $NoMonitor")
+    owner_guard_end = source.index("if ($Monitor)", owner_guard_start)
+    owner_guard = source[owner_guard_start:owner_guard_end]
+    monitor_launcher = source[
+        source.index("function Start-ServerTunnelMonitorProcess"):
+        source.index("function Stop-ServerTunnelListeningProcess")
+    ]
+
+    assert "$OwnerPid -le 0" in owner_guard
+    assert "server IPC tunnel monitor owner is required" in owner_guard
+    assert '"-Monitor"' in monitor_launcher
+    assert '"-NoMonitor"' not in monitor_launcher
+
+
+def test_server_ipc_tunnel_monitor_writes_supervisor_log_file() -> None:
+    source = SERVER_IPC_SCRIPT_PATH.read_text(encoding="utf-8")
+    log_fn = source[
+        source.index("function Write-RateLimitedTunnelLog"):
+        source.index("function Register-TunnelFailure")
+    ]
+    monitor_source = source[
+        source.index("function Start-ServerTunnelMonitor"):
+        source.index("function Start-ServerTunnelMonitorProcess")
+    ]
+
+    assert "server-ipc.supervisor.log" in source
+    assert "Add-Content -LiteralPath $SupervisorLogPath" in log_fn
+    assert "Write-Host $Message" not in log_fn
+    assert "Write-RateLimitedTunnelLog" in monitor_source
 
 
 def test_server_ipc_tunnel_monitor_does_not_spend_budget_on_remote_daemon_not_ready() -> None:
@@ -169,18 +219,30 @@ def test_reverse_tunnel_supervisor_quotes_monitor_arguments_with_spaces() -> Non
     supervisor_end = source.index("function Write-TunnelSupervisorPid")
     supervisor_source = source[supervisor_start:supervisor_end]
 
-    assert "function ConvertTo-EncodedPowerShellCommand" in source
-    assert "function ConvertTo-PowerShellStringLiteral" in source
-    assert "-EncodedCommand" in supervisor_source
-    assert "ConvertTo-EncodedPowerShellCommand -Command $monitorCommand" in supervisor_source
-    assert "-OwnerMarkerPath $ownerMarkerLiteral" in supervisor_source
-    assert '"-File"' not in supervisor_source
+    assert "function ConvertTo-WindowsCommandArgument" in source
+    assert '"-File"' in supervisor_source
+    assert '"-Monitor"' in supervisor_source
+    assert '"-OwnerMarkerPath"' in supervisor_source
+    assert "ConvertTo-WindowsCommandArgument -Value $_" in supervisor_source
+    assert "-EncodedCommand" not in supervisor_source
 
 def test_tunnel_watchdog_rebuilds_monitor_when_endpoint_is_reachable() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert "reverse SSH tunnel endpoint is reachable but no supervisor monitor was found" in source
     assert "Start-ReverseTunnelSupervisor -RemotePort $remotePort" in source
+
+
+def test_reverse_tunnel_monitor_lookup_matches_quoted_file_arguments() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    lookup_start = source.index("function Get-ExistingTunnelMonitorProcess")
+    lookup_end = source.index("function Stop-ExistingTunnelMonitorProcess")
+    lookup_source = source[lookup_start:lookup_end]
+
+    assert '"? -Monitor' not in lookup_source
+    assert '"?-Monitor"?' in lookup_source
+    assert '"?-TunnelKind"?' in lookup_source
+    assert '"?-MonitorRemotePort"?' in lookup_source
 
 
 def test_tunnel_watchdog_replaces_monitor_when_endpoint_is_down() -> None:

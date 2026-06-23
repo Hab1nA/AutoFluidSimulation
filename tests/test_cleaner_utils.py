@@ -1289,6 +1289,11 @@ class TestProcessUtils:
         monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 3333)
         monkeypatch.setattr(
             process_utils,
+            "worker_process_is_owned",
+            lambda kind, pid: kind == "tunnel_workstation" and pid == 3333,
+        )
+        monkeypatch.setattr(
+            process_utils,
             "run_taskkill",
             lambda pid, timeout=5: killed.append(pid) or True,
         )
@@ -1302,6 +1307,42 @@ class TestProcessUtils:
         assert killed == [3333]
         assert not stale_pid.exists()
         assert not live_pid.exists()
+
+    def test_cleanup_worker_pid_files_skips_live_processes_without_owner_evidence(
+        self, tmp_path, monkeypatch
+    ):
+        """PID 文件指向非 AutoFluid 进程时不能误杀。"""
+        from utils import process_utils
+
+        killed: list[int] = []
+        pid_file = tmp_path / "local_worker.pid"
+        pid_file.write_text("4444", encoding="utf-8")
+
+        monkeypatch.setattr(process_utils, "WORKER_PID_KINDS", ("local_worker",))
+        monkeypatch.setattr(
+            process_utils,
+            "worker_pid_file",
+            lambda kind: str(tmp_path / f"{kind}.pid"),
+        )
+        monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 4444)
+        monkeypatch.setattr(
+            process_utils,
+            "worker_process_is_owned",
+            lambda _kind, _pid: False,
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "run_taskkill",
+            lambda pid, timeout=5: killed.append(pid) or True,
+        )
+
+        result = process_utils.cleanup_worker_processes_from_pid_files()
+
+        assert result == {
+            "local_worker": {"pid": 4444, "status": "skipped_not_owned"}
+        }
+        assert killed == []
+        assert pid_file.exists()
 
 
 class TestCheckIpcReady:

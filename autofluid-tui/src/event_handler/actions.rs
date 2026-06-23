@@ -2,7 +2,10 @@ use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::app_state::SETTINGS_LOCKED_MESSAGE;
 use crate::state::{AppState, LogBuffer};
-use crate::{start_worker_lifecycle_task, EventContext, WorkerLifecycleAction};
+use crate::{
+    start_daemon_lifecycle_task, start_worker_lifecycle_task, DaemonLifecycleAction, EventContext,
+    WorkerLifecycleAction,
+};
 
 pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventContext) {
     match result {
@@ -26,8 +29,17 @@ pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventCont
             ctx.state.should_quit = true;
         }
         command::CommandResult::StopDaemon => {
-            ctx.daemon
-                .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_daemon_lifecycle_task(
+                ctx.daemon_task.as_deref_mut(),
+                DaemonLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::StopWorkers => {
             let host = ctx.ipc.host().to_string();

@@ -340,9 +340,11 @@ fn handle_startup_connect_failure(
     daemon: &mut daemon_mgr::DaemonManager,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
+    project_dir: &str,
     ipc_host: &str,
 ) {
     state.update_local_ipc_tunnel(ipc_host, false);
+    daemon.begin_server_ipc_tunnel_for_reconnect(project_dir, log_buffer);
     daemon.begin_ipc_reconnect_wait(state);
     log_buffer.push_info(
         "❌ 暂未连接到后台引擎，正在后台自动重连；请检查远端 daemon 和 IPC 隧道".to_string(),
@@ -364,6 +366,7 @@ fn handle_dashboard_poll_connection_state(
     daemon: &mut daemon_mgr::DaemonManager,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
+    project_dir: &str,
     ipc_host: &str,
     was_connected: bool,
     is_connected: bool,
@@ -371,6 +374,7 @@ fn handle_dashboard_poll_connection_state(
     state.connected = is_connected;
     state.update_local_ipc_tunnel(ipc_host, is_connected);
     if was_connected && !is_connected {
+        daemon.begin_server_ipc_tunnel_for_reconnect(project_dir, log_buffer);
         daemon.begin_ipc_reconnect_wait(state);
         log_buffer.push_info("⚠️ 连接中断，正在后台自动重连...".to_string());
     }
@@ -430,6 +434,7 @@ pub(crate) struct EventContext<'a> {
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
     check_task: Option<&'a mut Option<CheckTask>>,
+    daemon_task: Option<&'a mut Option<DaemonLifecycleTask>>,
     worker_task: Option<&'a mut Option<WorkerLifecycleTask>>,
     daemon: &'a mut daemon_mgr::DaemonManager,
     worker: &'a mut worker_mgr::WorkerManager,
@@ -441,6 +446,46 @@ pub(crate) struct EventContext<'a> {
 
 struct CheckTask {
     receiver: Receiver<Result<IpcResponse, String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DaemonLifecycleAction {
+    Stop,
+    Restart,
+}
+
+impl DaemonLifecycleAction {
+    fn running_message(self) -> &'static str {
+        match self {
+            Self::Stop => "🛑 Daemon 停止已转入后台，界面可继续操作...",
+            Self::Restart => "🔄 Daemon 重启已转入后台，界面可继续操作...",
+        }
+    }
+
+    fn duplicate_message(self) -> &'static str {
+        match self {
+            Self::Stop => "ℹ Daemon 生命周期任务正在运行，请等待当前停止完成",
+            Self::Restart => "ℹ Daemon 生命周期任务正在运行，请等待当前重启完成",
+        }
+    }
+
+    fn failure_message(self) -> &'static str {
+        match self {
+            Self::Stop => "❌ Daemon 后台停止失败，详情见上方日志",
+            Self::Restart => "❌ Daemon 后台重启失败，详情见上方日志",
+        }
+    }
+}
+
+struct DaemonLifecycleResult {
+    action: DaemonLifecycleAction,
+    success: bool,
+    logs: Vec<String>,
+}
+
+pub(crate) struct DaemonLifecycleTask {
+    receiver: Receiver<DaemonLifecycleResult>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -556,6 +601,140 @@ fn poll_check_task(
         }
     }
 }
+
+pub(crate) fn start_daemon_lifecycle_task(
+    daemon_task: Option<&mut Option<DaemonLifecycleTask>>,
+    action: DaemonLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+    state: &mut AppState,
+) {
+    let Some(daemon_task) = daemon_task else {
+        log_buffer.push_info("❌ Daemon 后台任务通道不可用".to_string());
+        state.needs_redraw = true;
+        return;
+    };
+    if daemon_task.is_some() {
+        log_buffer.push_info(action.duplicate_message().to_string());
+        state.needs_redraw = true;
+        return;
+    }
+
+    log_buffer.push_info(action.running_message().to_string());
+    *daemon_task = Some(spawn_daemon_lifecycle_task(
+        action,
+        project_dir.to_string(),
+        ipc_host.to_string(),
+        ipc_port,
+    ));
+    state.needs_redraw = true;
+}
+
+fn spawn_daemon_lifecycle_task(
+    action: DaemonLifecycleAction,
+    project_dir: String,
+    ipc_host: String,
+    ipc_port: u16,
+) -> DaemonLifecycleTask {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut log_buffer = LogBuffer::new();
+        let success =
+            run_daemon_lifecycle_action(action, &project_dir, &ipc_host, ipc_port, &mut log_buffer);
+        let logs = log_buffer.info_messages.iter().cloned().collect();
+        let _ = sender.send(DaemonLifecycleResult {
+            action,
+            success,
+            logs,
+        });
+    });
+    DaemonLifecycleTask {
+        receiver,
+        handle: Some(handle),
+    }
+}
+
+fn run_daemon_lifecycle_action(
+    action: DaemonLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        log_buffer.push_info("❌ Daemon 后台任务创建运行时失败".to_string());
+        return false;
+    };
+    let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+    let _ = rt.block_on(ipc.connect());
+    let mut state = AppState::new();
+    let mut daemon = daemon_mgr::DaemonManager::new();
+    match action {
+        DaemonLifecycleAction::Stop => {
+            daemon.stop_with_ipc(&mut ipc, &rt, &mut state, log_buffer, project_dir)
+        }
+        DaemonLifecycleAction::Restart => {
+            daemon.restart_with_ipc(&mut ipc, &rt, &mut state, log_buffer, project_dir)
+        }
+    }
+}
+
+fn finish_daemon_lifecycle_result(
+    result: DaemonLifecycleResult,
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    for message in result.logs {
+        log_buffer.push_info(message);
+    }
+    if !result.success {
+        log_buffer.push_info(result.action.failure_message().to_string());
+    }
+    match result.action {
+        DaemonLifecycleAction::Stop if result.success => state.mark_daemon_stopped(),
+        DaemonLifecycleAction::Restart if result.success => daemon.begin_ipc_reconnect_wait(state),
+        _ => {}
+    }
+    state.needs_redraw = true;
+}
+
+fn poll_daemon_lifecycle_task(
+    daemon_task: &mut Option<DaemonLifecycleTask>,
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(task) = daemon_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(result) => {
+            if let Some(mut task) = daemon_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            finish_daemon_lifecycle_result(result, daemon, state, log_buffer);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            if let Some(mut task) = daemon_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            log_buffer.push_info("❌ Daemon 后台任务异常结束".to_string());
+            state.needs_redraw = true;
+        }
+    }
+}
+
 pub(crate) fn start_worker_lifecycle_task(
     worker_task: Option<&mut Option<WorkerLifecycleTask>>,
     action: WorkerLifecycleAction,
@@ -807,6 +986,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut daemon = daemon_mgr::DaemonManager::new();
     let mut worker = worker_mgr::WorkerManager::new();
     let mut check_task: Option<CheckTask> = None;
+    let mut daemon_task: Option<DaemonLifecycleTask> = None;
     let mut worker_task: Option<WorkerLifecycleTask> = None;
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
@@ -824,7 +1004,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             handle_startup_connect_success(&mut state, &mut log_buffer, ipc.host());
         }
         Err(_) => {
-            handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, ipc.host());
+            handle_startup_connect_failure(
+                &mut daemon,
+                &mut state,
+                &mut log_buffer,
+                &project_dir,
+                ipc.host(),
+            );
         }
     }
 
@@ -840,6 +1026,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         log_buffer: &mut log_buffer,
         ipc: &mut ipc,
         check_task: Some(&mut check_task),
+        daemon_task: Some(&mut daemon_task),
         worker_task: Some(&mut worker_task),
         daemon: &mut daemon,
         worker: &mut worker,
@@ -857,6 +1044,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         ctx.state.tick();
         if let Some(check_task) = ctx.check_task.as_deref_mut() {
             poll_check_task(check_task, ctx.state, ctx.log_buffer);
+        }
+        if let Some(daemon_task) = ctx.daemon_task.as_deref_mut() {
+            poll_daemon_lifecycle_task(daemon_task, ctx.daemon, ctx.state, ctx.log_buffer);
         }
         if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
             poll_worker_lifecycle_task(worker_task, ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
@@ -885,6 +1075,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
 
         ctx.daemon
+            .poll_server_ipc_tunnel_reconnect(ctx.state, ctx.log_buffer);
+
+        ctx.daemon
             .poll_ipc_reconnect(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
@@ -897,6 +1090,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
                 ctx.daemon,
                 ctx.state,
                 ctx.log_buffer,
+                ctx.project_dir,
                 ctx.ipc.host(),
                 was_connected,
                 is_connected,
@@ -1002,17 +1196,30 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                 .start_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::RestartDaemon => {
-            ctx.daemon.restart_with_ipc(
-                ctx.ipc,
-                ctx.rt,
-                ctx.state,
-                ctx.log_buffer,
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_daemon_lifecycle_task(
+                ctx.daemon_task.as_deref_mut(),
+                DaemonLifecycleAction::Restart,
                 ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
             );
         }
         command::CommandResult::StopDaemon => {
-            ctx.daemon
-                .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_daemon_lifecycle_task(
+                ctx.daemon_task.as_deref_mut(),
+                DaemonLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::StartWorkers => {
             let host = ctx.ipc.host().to_string();
@@ -1111,6 +1318,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     rt: ctx.rt,
                     daemon: ctx.daemon,
                     worker: ctx.worker,
+                    daemon_task: ctx.daemon_task.as_deref_mut(),
                     worker_task: ctx.worker_task.as_deref_mut(),
                     project_dir: ctx.project_dir,
                     full_quit: ctx.full_quit,
@@ -1648,7 +1856,13 @@ mod tests {
         let mut state = AppState::new();
         let mut log_buffer = LogBuffer::new();
 
-        handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, "127.0.0.1");
+        handle_startup_connect_failure(
+            &mut daemon,
+            &mut state,
+            &mut log_buffer,
+            "",
+            "127.0.0.1",
+        );
 
         assert!(!state.connected);
         assert!(state.needs_redraw);
@@ -1672,6 +1886,7 @@ mod tests {
             &mut daemon,
             &mut state,
             &mut log_buffer,
+            "",
             "127.0.0.1",
             true,
             false,
@@ -1748,6 +1963,42 @@ mod tests {
             "worker restart must not run the blocking startup chain on the TUI event loop"
         );
     }
+
+    #[test]
+    fn daemon_lifecycle_commands_do_not_stop_or_restart_inline() {
+        let source = include_str!("lib.rs");
+        let restart_arm = source
+            .split("command::CommandResult::RestartDaemon => {")
+            .nth(1)
+            .expect("restart daemon arm should exist")
+            .split("command::CommandResult::StopDaemon => {")
+            .next()
+            .expect("restart daemon arm should end before stop daemon arm");
+        assert!(
+            restart_arm.contains("start_daemon_lifecycle_task"),
+            "daemon restart should hand off to a background lifecycle task"
+        );
+        assert!(
+            !restart_arm.contains("restart_with_ipc"),
+            "daemon restart must not run the blocking restart chain on the TUI event loop"
+        );
+
+        let stop_arm = source
+            .split("command::CommandResult::StopDaemon => {")
+            .nth(1)
+            .expect("stop daemon arm should exist")
+            .split("command::CommandResult::StartWorkers => {")
+            .next()
+            .expect("stop daemon arm should end before start workers arm");
+        assert!(
+            stop_arm.contains("start_daemon_lifecycle_task"),
+            "daemon stop should hand off to a background lifecycle task"
+        );
+        assert!(
+            !stop_arm.contains("stop_with_ipc"),
+            "daemon stop must not run the blocking stop chain on the TUI event loop"
+        );
+    }
     #[test]
     fn test_dashboard_poll_connection_loss_reconnects_to_finished_daemon() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -1814,6 +2065,7 @@ mod tests {
             &mut daemon,
             &mut state,
             &mut log_buffer,
+            "",
             ipc.host(),
             was_connected,
             after_dashboard,
@@ -1890,6 +2142,7 @@ mod tests {
             log_buffer: &mut log_buffer,
             ipc: &mut ipc,
             check_task: None,
+            daemon_task: None,
             worker_task: None,
             daemon: &mut daemon,
             worker: &mut worker,

@@ -179,6 +179,8 @@ impl WorkerManager {
             success = false;
         }
 
+        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
+
         for kind in [WorkerPidKind::LocalWorker, WorkerPidKind::TunnelLocalWorker] {
             if !Self::cleanup_pid_file_for_path(&self.project_dir, kind) {
                 log_buffer.push_info(format!("⚠️ {} PID 文件清理失败", kind.label()));
@@ -190,8 +192,6 @@ impl WorkerManager {
             success = false;
         }
 
-        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
-
         if success {
             log_buffer.push_info("✅ 所有 Worker 已停止".to_string());
         }
@@ -202,11 +202,11 @@ impl WorkerManager {
         let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
         let _ = self.stop_local_worker(log_buffer);
         let _ = self.stop_tunnel(log_buffer);
+        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
         for kind in [WorkerPidKind::LocalWorker, WorkerPidKind::TunnelLocalWorker] {
             let _ = Self::cleanup_pid_file_for_path(&self.project_dir, kind);
         }
         let _ = Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir);
-        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
     }
     /// 重启所有 worker：先停止再启动。
     #[allow(dead_code)]
@@ -391,7 +391,6 @@ impl WorkerManager {
         )
         .current_dir(project_dir);
         if tunnel_kind == "LocalWorker" {
-            cmd.arg("-NoWatchdog");
             if let Some(owner_pid) =
                 Self::read_pid_file_for(project_dir, WorkerPidKind::LocalWorker)
             {
@@ -649,24 +648,110 @@ impl WorkerManager {
 
     fn cleanup_pid_file_for_path(project_dir: &std::path::Path, kind: WorkerPidKind) -> bool {
         let pid_file = project_dir.join("data").join(kind.filename());
-        Self::cleanup_pid_file(&pid_file)
+        Self::cleanup_pid_file(&pid_file, project_dir, kind)
     }
 
-    fn cleanup_pid_file(pid_file: &std::path::Path) -> bool {
+    fn cleanup_pid_file(
+        pid_file: &std::path::Path,
+        project_dir: &std::path::Path,
+        kind: WorkerPidKind,
+    ) -> bool {
         let Ok(raw_pid) = std::fs::read_to_string(pid_file) else {
             return true;
         };
         let pid = raw_pid.trim().parse::<u32>().ok();
         let mut success = true;
         if let Some(pid) = pid {
-            let killed = kill_process_tree(pid);
-            success =
-                !is_pid_alive(pid) || (killed && wait_for_pid_dead(pid, Duration::from_secs(2)));
+            if is_pid_alive(pid) {
+                if !Self::worker_pid_is_owned(project_dir, kind, pid) {
+                    log::warn!(
+                        "跳过非 AutoFluid worker PID 文件清理: kind={}, pid={}, file={}",
+                        kind.label(),
+                        pid,
+                        pid_file.display()
+                    );
+                    return false;
+                }
+                let killed = kill_process_tree(pid);
+                success = killed && wait_for_pid_dead(pid, Duration::from_secs(2));
+            }
         }
         if success {
             let _ = std::fs::remove_file(pid_file);
         }
         success
+    }
+
+    fn worker_pid_is_owned(project_dir: &std::path::Path, kind: WorkerPidKind, pid: u32) -> bool {
+        let Some(command_line) = Self::process_command_line(pid) else {
+            return false;
+        };
+        let command_line = command_line.to_lowercase();
+        let project = project_dir.to_string_lossy().to_lowercase();
+        if !command_line.contains("autofluid") && !command_line.contains(project.as_str()) {
+            return false;
+        }
+
+        match kind {
+            WorkerPidKind::LocalWorker => {
+                (command_line.contains("main.py") && command_line.contains("--worker"))
+                    || command_line.contains("engine.local_worker")
+            }
+            WorkerPidKind::TunnelWorkstation => {
+                command_line.contains("start_workstation_reverse_tunnel.ps1")
+                    && (command_line.contains("workstation")
+                        || !command_line.contains("localworker"))
+            }
+            WorkerPidKind::TunnelLocalWorker => {
+                command_line.contains("start_workstation_reverse_tunnel.ps1")
+                    && command_line.contains("localworker")
+            }
+        }
+    }
+
+    fn process_command_line(pid: u32) -> Option<String> {
+        if pid == 0 {
+            return None;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let powershell = resolve_powershell_exe();
+            let output = Command::new(powershell)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
+                    ),
+                ])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if command_line.is_empty() {
+                None
+            } else {
+                Some(command_line)
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let output = Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "args="])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if command_line.is_empty() {
+                None
+            } else {
+                Some(command_line)
+            }
+        }
     }
 
     fn cleanup_workstation_tunnel_pid_files_for_path(project_dir: &std::path::Path) -> bool {
@@ -685,9 +770,9 @@ impl WorkerManager {
         }
         pid_files.sort();
         pid_files.dedup();
-        pid_files
-            .iter()
-            .all(|pid_file| Self::cleanup_pid_file(pid_file))
+        pid_files.iter().all(|pid_file| {
+            Self::cleanup_pid_file(pid_file, project_dir, WorkerPidKind::TunnelWorkstation)
+        })
     }
 
     fn uninstall_tunnel_watchdogs_for_path(
@@ -1150,9 +1235,9 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_pid_file_terminates_live_process_without_process_handle() {
+    fn cleanup_pid_file_skips_live_process_without_owner_evidence() {
         let project_dir = std::env::temp_dir().join(format!(
-            "autofluid-tui-worker-live-pid-{}",
+            "autofluid-tui-worker-foreign-pid-{}",
             crate::generate_request_id()
         ));
         std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
@@ -1181,17 +1266,18 @@ mod tests {
             WorkerPidKind::TunnelLocalWorker,
         );
 
-        assert!(result);
-        assert!(!pid_file.exists());
+        assert!(!result);
+        assert!(pid_file.exists());
+        assert!(
+            crate::utils::is_pid_alive(child.id()),
+            "cleanup must not kill a live PID without AutoFluid ownership evidence"
+        );
+        let _ = child.kill();
         let exited = wait_for_pid_dead(child.id(), Duration::from_secs(2));
         if !exited {
             let _ = child.kill();
             let _ = child.wait();
         }
-        assert!(
-            exited,
-            "cleanup should terminate the live PID from the file"
-        );
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
@@ -1598,7 +1684,7 @@ mod tests {
         assert!(workstation_tunnel_lines
             .iter()
             .all(|line| line.contains("-OwnerMarkerPath")));
-        assert!(local_worker_tunnel_line.contains("-NoWatchdog"));
+        assert!(!local_worker_tunnel_line.contains("-NoWatchdog"));
         assert!(local_worker_tunnel_line.contains("-OwnerPid"));
         let owner_marker = WorkerManager::worker_tunnel_owner_marker_for(&project_dir);
         assert!(

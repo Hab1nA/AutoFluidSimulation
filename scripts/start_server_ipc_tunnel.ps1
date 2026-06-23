@@ -129,11 +129,6 @@ function Start-ServerTunnel {
     }
     $stdoutLogPath = Join-Path $logDir "${LocalPort}.out.log"
     $stderrLogPath = Join-Path $logDir "${LocalPort}.err.log"
-    foreach ($logPath in @($stdoutLogPath, $stderrLogPath)) {
-        if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-            Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
-        }
-    }
 
     $argumentList = @(
         "-o", "BatchMode=yes",
@@ -182,6 +177,21 @@ function Test-TunnelOwnerAlive {
     return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
 }
 
+function Get-ServerTunnelLogDir {
+    $logDir = Join-Path $ProjectDir "logs/local/tunnels/server-ipc"
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        return $logDir
+    }
+    catch {
+        return [System.IO.Path]::GetTempPath()
+    }
+}
+
+function Get-ServerTunnelSupervisorLogPath {
+    return Join-Path (Get-ServerTunnelLogDir) "server-ipc.supervisor.log"
+}
+
 function Stop-ServerTunnelChild {
     param([object]$Process)
     if ($null -ne $Process -and -not $Process.HasExited) {
@@ -225,7 +235,9 @@ function Write-RateLimitedTunnelLog {
     $lastKey = [string]$LogState.LastKey
     $lastAt = $LogState.LastAt
     if ($Force -or $lastKey -ne $Key -or $null -eq $lastAt -or ($now - $lastAt).TotalSeconds -ge $LogRepeatSeconds) {
-        Write-Host $Message
+        $SupervisorLogPath = Get-ServerTunnelSupervisorLogPath
+        $line = "{0:yyyy-MM-dd HH:mm:ss.fff} {1}" -f $now, $Message
+        Add-Content -LiteralPath $SupervisorLogPath -Value $line -Encoding UTF8
         $LogState.LastKey = $Key
         $LogState.LastAt = $now
     }
@@ -399,7 +411,6 @@ function Start-ServerTunnelMonitorProcess {
         "-ExecutionPolicy", "Bypass",
         "-File", (Quote-ProcessArgument -Value $PSCommandPath),
         "-Monitor",
-        "-NoMonitor",
         "-OwnerPid", ([string]$OwnerPid),
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-MaxConsecutiveFailures", ([string]$MaxConsecutiveFailures),
@@ -497,6 +508,10 @@ if ($Check) {
     [void](Test-AutoFluidIpcProtocolEndpoint)
     Write-Host "Server IPC tunnel check passed."
     exit 0
+}
+
+if (-not $Check -and -not $NoMonitor -and -not $Monitor -and $OwnerPid -le 0) {
+    throw "AutoFluid server IPC tunnel monitor owner is required; pass -OwnerPid for owner-bound recovery."
 }
 
 if ($Monitor) {

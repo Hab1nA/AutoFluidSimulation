@@ -640,11 +640,12 @@ def test_local_worker_run_forever_retries_initial_register(monkeypatch) -> None:
     assert sleeps == [2.0, worker.config.poll_interval]
 
 
-def test_local_worker_register_retry_budget_stops_after_consecutive_failures(monkeypatch) -> None:
+def test_local_worker_register_retry_budget_cools_down_without_exiting(monkeypatch) -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
     calls: list[str] = []
     sleeps: list[float] = []
+    monotonic_values = iter([0.0, 1.0, 2.0, 123.0, 124.0])
     worker = LocalWorker(
         LocalWorkerConfig(
             "local-pc-01",
@@ -653,26 +654,32 @@ def test_local_worker_register_retry_budget_stops_after_consecutive_failures(mon
             register_retry_interval=2.0,
             register_max_consecutive_failures=3,
             register_max_recovery_seconds=120.0,
+            register_failure_cooldown_seconds=30.0,
         )
     )
 
     def fake_register() -> dict[str, object]:
         calls.append("register")
-        raise RuntimeError("daemon is not ready")
+        if len(calls) <= 3:
+            raise RuntimeError("daemon is not ready")
+        return {"status": "ok"}
+
+    def fake_run_once() -> str:
+        calls.append("run_once")
+        raise KeyboardInterrupt
 
     monkeypatch.setattr(worker, "register_once", fake_register)
+    monkeypatch.setattr(worker, "run_once", fake_run_once)
+    monkeypatch.setattr("engine.local_worker.time.monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr("engine.local_worker.time.sleep", lambda seconds: sleeps.append(seconds))
 
     try:
         worker.run_forever()
-    except RuntimeError as exc:
-        message = str(exc)
-    else:
-        raise AssertionError("run_forever should stop after the register retry budget is exhausted")
+    except KeyboardInterrupt:
+        pass
 
-    assert "注册重试预算耗尽" in message
-    assert calls == ["register", "register", "register"]
-    assert sleeps == [2.0, 2.0]
+    assert calls == ["register", "register", "register", "register", "run_once"]
+    assert sleeps == [2.0, 2.0, 30.0, worker.config.poll_interval]
 
 
 def test_local_worker_register_retry_warning_is_rate_limited(monkeypatch, caplog) -> None:
@@ -703,13 +710,23 @@ def test_local_worker_register_retry_warning_is_rate_limited(monkeypatch, caplog
     with caplog.at_level(logging.WARNING):
         try:
             worker.run_forever()
-        except RuntimeError:
+        except StopIteration:
             pass
 
-    retry_logs = [record for record in caplog.records if "daemon is not ready" in record.message]
-    exhausted_logs = [record for record in caplog.records if "注册重试预算耗尽" in record.message]
-    assert len(retry_logs) == 1
+    retry_logs = [
+        record
+        for record in caplog.records
+        if record.message == "daemon is not ready"
+    ]
+    exhausted_logs = [
+        record
+        for record in caplog.records
+        if record.message.startswith("LocalWorker 注册重试预算耗尽:")
+    ]
+    recovery_logs = [record for record in caplog.records if "注册恢复窗口失败" in record.message]
+    assert len(retry_logs) == 2
     assert len(exhausted_logs) == 1
+    assert len(recovery_logs) == 1
 
 def test_local_worker_run_forever_recovers_after_runtime_ipc_error(monkeypatch) -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig

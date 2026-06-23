@@ -133,6 +133,82 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
         return False
 
 
+def get_process_command_line(pid: int, timeout: int = 3) -> str | None:
+    """Return a process command line for ownership checks."""
+    if pid < MIN_VALID_PID:
+        return None
+
+    try:
+        if sys.platform == "win32":
+            powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+            if powershell is None:
+                return None
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Get-CimInstance Win32_Process -Filter "
+                        f"'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        else:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+    command_line = completed.stdout.strip()
+    return command_line or None
+
+
+def worker_process_is_owned(kind: str, pid: int) -> bool:
+    """Return True when a PID is recognizably owned by AutoFluid worker control."""
+    command_line = get_process_command_line(pid)
+    if command_line is None:
+        return False
+    lowered = command_line.lower()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).lower()
+    has_project_context = "autofluid" in lowered or project_root in lowered
+    if not has_project_context:
+        return False
+
+    if kind == "local_worker":
+        return (
+            ("main.py" in lowered and "--worker" in lowered)
+            or "engine.local_worker" in lowered
+        )
+    if kind == "tunnel_workstation":
+        return (
+            "start_workstation_reverse_tunnel.ps1" in lowered
+            and "workstation" in lowered
+        )
+    if kind == "tunnel_localworker":
+        return (
+            "start_workstation_reverse_tunnel.ps1" in lowered
+            and "localworker" in lowered
+        )
+    if kind == "server_ipc_tunnel":
+        return (
+            "start_server_ipc_tunnel.ps1" in lowered
+            or ("ssh" in lowered and "127.0.0.1:9527" in lowered)
+        )
+    return False
+
+
 def worker_pid_file(kind: str) -> str:
     """Return the stable PID file path for worker and SSH tunnel helpers."""
     if kind not in WORKER_PID_KINDS:
@@ -156,9 +232,13 @@ def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[
             continue
         status = "stale"
         if is_process_alive(pid):
-            status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+            if worker_process_is_owned(kind, pid):
+                status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+            else:
+                status = "skipped_not_owned"
         if status != "failed":
-            remove_pid_file(pid_file)
+            if status != "skipped_not_owned":
+                remove_pid_file(pid_file)
         results[kind] = {"pid": pid, "status": status}
     return results
 

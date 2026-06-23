@@ -24,6 +24,16 @@ $EnvScript = Join-Path $PSScriptRoot "autofluid_env.ps1"
 Import-AutoFluidEnv -ProjectDir $ProjectDir
 Assert-AutoFluidServerEndpoint
 
+function Test-TunnelOwnerConfigured {
+    if ($OwnerPid -gt 0) {
+        return $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OwnerMarkerPath)) {
+        return $true
+    }
+    return $false
+}
+
 function Test-TunnelOwnerAlive {
     if ($OwnerPid -gt 0) {
         return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
@@ -31,7 +41,7 @@ function Test-TunnelOwnerAlive {
     if (-not [string]::IsNullOrWhiteSpace($OwnerMarkerPath)) {
         return Test-Path -LiteralPath $OwnerMarkerPath
     }
-    return $true
+    return $false
 }
 
 function Stop-ReverseTunnelChild {
@@ -221,29 +231,11 @@ function ConvertTo-VbsStringLiteral {
 function ConvertTo-WindowsCommandArgument {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Value
-    )
-
-    return '"' + $Value.Replace('"', '\"') + '"'
-}
-
-function ConvertTo-PowerShellStringLiteral {
-    param(
-        [Parameter(Mandatory = $true)]
         [AllowEmptyString()]
         [string]$Value
     )
 
-    return "'" + $Value.Replace("'", "''") + "'"
-}
-
-function ConvertTo-EncodedPowerShellCommand {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Command
-    )
-
-    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
+    return '"' + $Value.Replace('"', '\"') + '"'
 }
 
 function Get-TunnelWatchdogLauncherPath {
@@ -599,13 +591,17 @@ function Get-ExistingTunnelMonitorProcess {
     )
 
     $scriptPattern = [regex]::Escape($PSCommandPath)
+    $monitorPattern = '(^|\s)"?-Monitor"?(\s|$)'
+    $kindPattern = '(^|\s)"?-TunnelKind"?\s+"?' + [regex]::Escape($TunnelKind) + '"?(\s|$)'
+    $missingKindPattern = '(^|\s)"?-TunnelKind"?(\s|$)'
+    $portPattern = '(^|\s)"?-MonitorRemotePort"?\s+"?' + $RemotePort + '"?(\s|$)'
     Get-TunnelWin32Processes |
         Where-Object {
             $_.ProcessId -ne $PID `
                 -and $_.CommandLine -match $scriptPattern `
-                -and $_.CommandLine -match '(^|\s)-Monitor(\s|$)' `
-                -and (($_.CommandLine -match "(^|\s)-TunnelKind\s+$TunnelKind(\s|$)") -or ($TunnelKind -eq "Workstation" -and $_.CommandLine -notmatch '(^|\s)-TunnelKind(\s|$)')) `
-                -and $_.CommandLine -match "(^|\s)-MonitorRemotePort\s+$RemotePort(\s|$)"
+                -and $_.CommandLine -match $monitorPattern `
+                -and (($_.CommandLine -match $kindPattern) -or ($TunnelKind -eq "Workstation" -and $_.CommandLine -notmatch $missingKindPattern)) `
+                -and $_.CommandLine -match $portPattern
         } |
         Select-Object -First 1
 }
@@ -657,27 +653,21 @@ function Start-ReverseTunnelSupervisor {
     }
 
     $powerShellExe = Resolve-PowerShellExe
-    $scriptLiteral = ConvertTo-PowerShellStringLiteral -Value $PSCommandPath
-    $kindLiteral = ConvertTo-PowerShellStringLiteral -Value $TunnelKind
-    $ownerMarkerLiteral = ConvertTo-PowerShellStringLiteral -Value $OwnerMarkerPath
-    $monitorCommand = @(
-        "& $scriptLiteral",
-        "-Monitor",
-        "-TunnelKind $kindLiteral",
-        "-MonitorRemotePort $RemotePort",
-        "-RestartDelaySeconds $RestartDelaySeconds",
-        "-OwnerPid $OwnerPid",
-        "-OwnerMarkerPath $ownerMarkerLiteral",
-        "-MaxConsecutiveFailures $MaxConsecutiveFailures",
-        "-MaxRecoverySeconds $MaxRecoverySeconds",
-        "-LogRepeatSeconds $LogRepeatSeconds"
-    ) -join " "
-    $encodedCommand = ConvertTo-EncodedPowerShellCommand -Command $monitorCommand
-    $argumentList = @(
+    $argumentParts = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-EncodedCommand", $encodedCommand
+        "-File", $PSCommandPath,
+        "-Monitor",
+        "-TunnelKind", $TunnelKind,
+        "-MonitorRemotePort", ([string]$RemotePort),
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
+        "-OwnerPid", ([string]$OwnerPid),
+        "-OwnerMarkerPath", $OwnerMarkerPath,
+        "-MaxConsecutiveFailures", ([string]$MaxConsecutiveFailures),
+        "-MaxRecoverySeconds", ([string]$MaxRecoverySeconds),
+        "-LogRepeatSeconds", ([string]$LogRepeatSeconds)
     )
+    $argumentList = ($argumentParts | ForEach-Object { ConvertTo-WindowsCommandArgument -Value $_ }) -join " "
 
     return Start-Process -FilePath $powerShellExe `
         -ArgumentList $argumentList `
@@ -763,6 +753,10 @@ $remotePort = Get-RemoteBindPort
 $targetHost = Get-TargetHost
 $targetPort = Get-TargetPort
 $tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Workstation" }
+
+if (-not $Check -and -not $UninstallWatchdog -and -not $NoWatchdog -and -not $Monitor -and -not (Test-TunnelOwnerConfigured)) {
+    throw "$tunnelLabel reverse tunnel monitor owner is required; pass -OwnerPid or -OwnerMarkerPath for owner-bound recovery."
+}
 
 if (-not $Check -and -not $UninstallWatchdog -and -not (Test-TunnelOwnerAlive)) {
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_TUNNEL_PID_FILE)) {

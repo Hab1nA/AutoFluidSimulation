@@ -54,6 +54,7 @@ class LocalWorkerConfig:
     register_retry_interval: float = 2.0
     register_max_consecutive_failures: int = 5
     register_max_recovery_seconds: float = 120.0
+    register_failure_cooldown_seconds: float = 30.0
     register_log_repeat_seconds: float = 60.0
     request_timeout: float = 10.0
 
@@ -180,7 +181,7 @@ class LocalWorker:
 
     def run_forever(self) -> None:
         """Register once, then keep polling tasks and heartbeating until interrupted."""
-        self._register_until_available()
+        self._recover_registration_until_available()
         self._last_heartbeat_at = time.monotonic()
         while True:
             time.sleep(self.config.poll_interval)
@@ -188,8 +189,22 @@ class LocalWorker:
                 self.run_once()
             except RuntimeError as exc:
                 logger.warning(str(exc))
-                self._register_until_available()
+                self._recover_registration_until_available()
                 self._last_heartbeat_at = time.monotonic()
+
+    def _recover_registration_until_available(self) -> None:
+        """Keep trying bounded registration windows until the daemon returns."""
+        while True:
+            try:
+                self._register_until_available()
+                return
+            except RuntimeError as exc:
+                logger.warning(
+                    "LocalWorker 注册恢复窗口失败，将在 %.1fs 后重试: %s",
+                    self.config.register_failure_cooldown_seconds,
+                    exc,
+                )
+                time.sleep(self.config.register_failure_cooldown_seconds)
 
     def _register_until_available(self) -> None:
         """Retry registration within a bounded recovery budget."""
