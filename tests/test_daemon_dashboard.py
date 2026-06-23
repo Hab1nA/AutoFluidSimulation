@@ -147,6 +147,18 @@ class _Runner:
         raise AssertionError("dashboard health must not create SSH connections")
 
 
+class _BarrierCoordinator:
+    def __init__(self, snapshot):
+        self._snapshot = snapshot
+
+    def workstation_barrier_snapshot(self):
+        return self._snapshot
+
+
+class _Scheduler:
+    def __init__(self, snapshot):
+        self.barrier_coordinator = _BarrierCoordinator(snapshot)
+
 class _RefreshRunner:
     def __init__(self, ssh_by_id):
         self._ssh_by_id = ssh_by_id
@@ -198,6 +210,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "engine_status": "running",
         "sw_macro_started": True,
         "barrier_passed": False,
+        "workstation_barriers": {},
         "pipeline_started": True,
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
@@ -284,6 +297,32 @@ def test_handle_get_dashboard_filters_default_config_workstation(monkeypatch):
     assert data["config_workstations"] == {"2": "WS-A"}
 
 
+def test_handle_get_dashboard_includes_workstation_barrier_snapshot(monkeypatch):
+    handler = _LogHandler()
+    monkeypatch.setattr(daemon_module, "get_broadcast_handler", lambda: handler)
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+    )
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon.scheduler = _Scheduler({"WS-A": True, "WS-B": False, "WS-C": False})
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = None
+    daemon._config_warnings = []
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({})
+
+    ok, data, _message = daemon.handle_get_dashboard({})
+
+    assert ok is True
+    assert data["engine"]["workstation_barriers"] == {
+        "WS-A": True,
+        "WS-B": False,
+        "WS-C": False,
+    }
+
 def test_handle_get_dashboard_includes_solver_progress(monkeypatch):
     progress = {
         "config_name": 5,
@@ -339,6 +378,7 @@ def test_handle_get_dashboard_after_pipeline_completed(monkeypatch):
         "engine_status": "stopped",
         "sw_macro_started": True,
         "barrier_passed": False,
+        "workstation_barriers": {},
         "pipeline_started": True,
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
@@ -439,6 +479,7 @@ def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):
         "engine_status": "stopped",
         "sw_macro_started": False,
         "barrier_passed": False,
+        "workstation_barriers": {},
         "pipeline_started": False,
         "daemon_started_at": 2_000.0,
         "daemon_started_at_display": "1970-01-01 00:33:20",

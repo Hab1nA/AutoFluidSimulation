@@ -1310,6 +1310,18 @@ class PipelineDaemon:
         stats["barrier_passed"] = self.state.is_global_barrier_met()
         return True, stats, ""
 
+    def _workstation_barrier_snapshot(self) -> dict[str, bool]:
+        """Return current workstation barrier states for dashboard consumers."""
+        scheduler = getattr(self, "scheduler", None)
+        barrier_coordinator = getattr(scheduler, "barrier_coordinator", None)
+        snapshot = getattr(barrier_coordinator, "workstation_barrier_snapshot", None)
+        if not callable(snapshot):
+            return {}
+        snapshot_data = snapshot()
+        if not isinstance(snapshot_data, Mapping):
+            return {}
+        return {str(key): bool(value) for key, value in snapshot_data.items()}
+
     def handle_get_engine_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取引擎状态。"""
         started_at = getattr(self, "_started_at_epoch", None)
@@ -1326,6 +1338,7 @@ class PipelineDaemon:
                 "engine_status": "stopped",
                 "sw_macro_started": False,
                 "barrier_passed": False,
+                "workstation_barriers": {},
                 "pipeline_started": self._pipeline_ever_started,
                 "daemon_started_at": started_at,
                 "daemon_started_at_display": started_at_display,
@@ -1338,6 +1351,7 @@ class PipelineDaemon:
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
             "barrier_passed": self.state.is_global_barrier_met(),
+            "workstation_barriers": self._workstation_barrier_snapshot(),
             "pipeline_started": self._pipeline_ever_started,
             "daemon_started_at": started_at,
             "daemon_started_at_display": started_at_display,

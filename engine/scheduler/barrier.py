@@ -130,6 +130,16 @@ class BarrierCoordinator:
                 ready.add(workstation_id)
         return ready
 
+    def workstation_barrier_snapshot(self) -> dict[str, bool]:
+        """Return pass state for configured real workstation barriers."""
+        if not self._multi_workstation_mode:
+            return {}
+        return {
+            workstation_id: workstation_id in self._workstation_barriers_passed
+            for workstation_id in sorted(self._configured_workstation_ids)
+            if workstation_id != DEFAULT_WORKSTATION_ID
+        }
+
     def clear_workstation_barrier(self, workstation_id: str) -> None:
         """Clear one workstation barrier cache after reset."""
         self._workstation_barriers_passed.discard(workstation_id)

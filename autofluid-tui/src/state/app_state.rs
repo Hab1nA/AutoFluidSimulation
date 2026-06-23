@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use ratatui::style::Style;
@@ -113,6 +113,7 @@ pub struct EngineInfo {
     pub engine_status: String,
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
+    pub workstation_barriers: BTreeMap<String, bool>,
     pub pipeline_started: bool,
     pub daemon_started_at: Option<f64>,
     pub daemon_started_at_display: Option<String>,
@@ -382,6 +383,18 @@ impl AppState {
                 .get("barrier_passed")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            self.engine_info.workstation_barriers.clear();
+            if let Some(workstation_barriers) =
+                obj.get("workstation_barriers").and_then(|v| v.as_object())
+            {
+                for (workstation_id, passed) in workstation_barriers {
+                    if let Some(passed) = passed.as_bool() {
+                        self.engine_info
+                            .workstation_barriers
+                            .insert(workstation_id.clone(), passed);
+                    }
+                }
+            }
             self.engine_info.pipeline_started = obj
                 .get("pipeline_started")
                 .and_then(|v| v.as_bool())
@@ -569,12 +582,26 @@ impl AppState {
             self.configs.len()
         )));
         parts.push(InfoBarPart::plain(" │ 屏障:"));
-        let barrier = if self.engine_info.barrier_passed {
-            "已通过"
+        if self.engine_info.workstation_barriers.is_empty() {
+            let barrier = if self.engine_info.barrier_passed {
+                "已通过"
+            } else {
+                "未通过"
+            };
+            parts.push(InfoBarPart::status(barrier));
         } else {
-            "未通过"
-        };
-        parts.push(InfoBarPart::status(barrier));
+            for (idx, (workstation_id, passed)) in
+                self.engine_info.workstation_barriers.iter().enumerate()
+            {
+                if idx > 0 {
+                    parts.push(InfoBarPart::plain(" | "));
+                }
+                parts.push(InfoBarPart::workstation_barrier(
+                    workstation_barrier_label(workstation_id),
+                    *passed,
+                ));
+            }
+        }
         parts
     }
 
@@ -686,6 +713,24 @@ impl InfoBarPart {
         };
         Self { text, color }
     }
+
+    fn workstation_barrier(text: impl Into<String>, passed: bool) -> Self {
+        Self {
+            text: text.into(),
+            color: Some(if passed {
+                InfoBarColor::Success
+            } else {
+                InfoBarColor::Error
+            }),
+        }
+    }
+}
+
+fn workstation_barrier_label(workstation_id: &str) -> String {
+    workstation_id
+        .strip_prefix("WS-")
+        .unwrap_or(workstation_id)
+        .to_string()
 }
 
 fn push_status_part(parts: &mut Vec<InfoBarPart>, label: &'static str) {
@@ -817,6 +862,53 @@ mod tests {
     }
 
     #[test]
+    fn info_bar_text_shows_workstation_barrier_letters() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-A".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-B".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-C".to_string(), false);
+
+        assert!(state.info_bar_text().contains("屏障:A | B | C"));
+    }
+
+    #[test]
+    fn info_bar_line_colors_workstation_barrier_letters() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-A".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-B".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-C".to_string(), true);
+
+        let line = state.info_bar_line();
+
+        assert_span_color(&line, "A", Some(state.theme.success));
+        assert_span_color(&line, "B", Some(state.theme.error));
+        assert_span_color(&line, "C", Some(state.theme.success));
+        assert_span_color(&line, " | ", Some(state.theme.gray_5));
+    }
+
+    #[test]
     fn info_bar_text_distinguishes_direct_ipc_endpoint() {
         let mut state = AppState::default();
         state.connected = true;
@@ -876,6 +968,36 @@ mod tests {
         assert_eq!(progress.total_iter, 1000);
         assert_eq!(progress.remaining_sec, 5025.0);
         assert_eq!(progress.updated_at, Some(1717584000.123));
+    }
+
+    #[test]
+    fn update_engine_info_parses_workstation_barriers() {
+        let mut state = AppState::default();
+        state.update_engine_info(&serde_json::json!({
+            "workstation_barriers": {
+                "WS-A": true,
+                "WS-B": false,
+                "WS-C": true,
+                "ignored": "yes"
+            }
+        }));
+
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-A"),
+            Some(&true)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-B"),
+            Some(&false)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-C"),
+            Some(&true)
+        );
+        assert!(!state
+            .engine_info
+            .workstation_barriers
+            .contains_key("ignored"));
     }
 
     #[test]

@@ -3656,6 +3656,26 @@ class TestBarrierCoordinator:
             on_solver_terminal=self.solver_terminal_outcomes.append,
         )
 
+    def _use_three_workstation_barrier(self) -> None:
+        """Rebuild the coordinator with the production-style three workstation set."""
+        self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+            {"id": "WS-C"},
+            {"id": DEFAULT_WORKSTATION_ID},
+        ]
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
+        )
+
     def test_barrier_passes_when_all_meshing_completed(self):
         """所有构型 Meshing Completed → 屏障通过。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
@@ -3906,6 +3926,17 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == []
         assert DEFAULT_WORKSTATION_ID not in self.coordinator._workstation_barriers_passed
+
+    def test_workstation_barrier_snapshot_includes_configured_real_workstations(self):
+        """工作站屏障快照应包含真实工作站并排除 default。"""
+        self._use_three_workstation_barrier()
+        self.coordinator._workstation_barriers_passed.add("WS-A")
+
+        assert self.coordinator.workstation_barrier_snapshot() == {
+            "WS-A": True,
+            "WS-B": False,
+            "WS-C": False,
+        }
 
     def test_all_postprocess_completed_reports_completed_terminal(self):
         """全部 PostProcess Completed 后应报告自然完成终态。"""
