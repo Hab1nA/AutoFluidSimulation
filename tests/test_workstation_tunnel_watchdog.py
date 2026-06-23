@@ -163,6 +163,19 @@ def test_tunnel_watchdog_has_default_pid_file_for_scheduled_task_runs() -> None:
     assert "AUTOFLUID_TUNNEL_PID_FILE" in source
 
 
+def test_reverse_tunnel_supervisor_quotes_monitor_arguments_with_spaces() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    supervisor_start = source.index("function Start-ReverseTunnelSupervisor")
+    supervisor_end = source.index("function Write-TunnelSupervisorPid")
+    supervisor_source = source[supervisor_start:supervisor_end]
+
+    assert "function ConvertTo-EncodedPowerShellCommand" in source
+    assert "function ConvertTo-PowerShellStringLiteral" in source
+    assert "-EncodedCommand" in supervisor_source
+    assert "ConvertTo-EncodedPowerShellCommand -Command $monitorCommand" in supervisor_source
+    assert "-OwnerMarkerPath $ownerMarkerLiteral" in supervisor_source
+    assert '"-File"' not in supervisor_source
+
 def test_tunnel_watchdog_rebuilds_monitor_when_endpoint_is_reachable() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 

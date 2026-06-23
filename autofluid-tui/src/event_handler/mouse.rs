@@ -17,6 +17,7 @@ use crate::ui::command_bar::BUTTON_DEFS;
 use crate::ui::layout::AppLayout;
 use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
 use crate::worker_mgr::WorkerManager;
+use crate::WorkerLifecycleTask;
 
 use crate::point_in_rect;
 
@@ -25,6 +26,7 @@ pub struct MouseRuntime<'a> {
     pub rt: &'a tokio::runtime::Runtime,
     pub daemon: &'a mut DaemonManager,
     pub worker: &'a mut WorkerManager,
+    pub worker_task: Option<&'a mut Option<WorkerLifecycleTask>>,
     pub project_dir: &'a str,
     pub full_quit: &'a mut bool,
     pub full_quit_stop_sent: &'a mut bool,
@@ -1173,6 +1175,7 @@ pub fn handle_dialog_button_click(
                         log_buffer,
                         ipc: runtime.ipc,
                         check_task: None,
+                        worker_task: runtime.worker_task.as_deref_mut(),
                         daemon: runtime.daemon,
                         worker: runtime.worker,
                         rt: runtime.rt,

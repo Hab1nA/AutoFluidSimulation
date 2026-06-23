@@ -430,6 +430,7 @@ pub(crate) struct EventContext<'a> {
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
     check_task: Option<&'a mut Option<CheckTask>>,
+    worker_task: Option<&'a mut Option<WorkerLifecycleTask>>,
     daemon: &'a mut daemon_mgr::DaemonManager,
     worker: &'a mut worker_mgr::WorkerManager,
     rt: &'a tokio::runtime::Runtime,
@@ -440,6 +441,54 @@ pub(crate) struct EventContext<'a> {
 
 struct CheckTask {
     receiver: Receiver<Result<IpcResponse, String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl WorkerLifecycleAction {
+    fn running_message(self) -> &'static str {
+        match self {
+            Self::Start => "🔧 Worker 启动已转入后台，界面可继续操作...",
+            Self::Stop => "🛑 Worker 停止已转入后台，界面可继续操作...",
+            Self::Restart => "🔄 Worker 重启已转入后台，界面可继续操作...",
+        }
+    }
+
+    fn duplicate_message(self) -> &'static str {
+        match self {
+            Self::Start => "ℹ Worker 生命周期任务正在运行，请等待当前启动完成",
+            Self::Stop => "ℹ Worker 生命周期任务正在运行，请等待当前停止完成",
+            Self::Restart => "ℹ Worker 生命周期任务正在运行，请等待当前重启完成",
+        }
+    }
+
+    fn failure_message(self) -> &'static str {
+        match self {
+            Self::Start => "❌ Worker 后台启动失败，详情见上方日志",
+            Self::Stop => "❌ Worker 后台停止失败，详情见上方日志",
+            Self::Restart => "❌ Worker 后台重启失败，详情见上方日志",
+        }
+    }
+
+    fn refresh_after_completion(self) -> bool {
+        matches!(self, Self::Start | Self::Stop | Self::Restart)
+    }
+}
+
+struct WorkerLifecycleResult {
+    action: WorkerLifecycleAction,
+    success: bool,
+    logs: Vec<String>,
+}
+
+pub(crate) struct WorkerLifecycleTask {
+    receiver: Receiver<WorkerLifecycleResult>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 pub(crate) fn apply_check_response(
@@ -507,6 +556,240 @@ fn poll_check_task(
         }
     }
 }
+pub(crate) fn start_worker_lifecycle_task(
+    worker_task: Option<&mut Option<WorkerLifecycleTask>>,
+    action: WorkerLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+    state: &mut AppState,
+) {
+    let Some(worker_task) = worker_task else {
+        log_buffer.push_info("❌ Worker 后台任务通道不可用".to_string());
+        state.needs_redraw = true;
+        return;
+    };
+    if worker_task.is_some() {
+        log_buffer.push_info(action.duplicate_message().to_string());
+        state.needs_redraw = true;
+        return;
+    }
+
+    log_buffer.push_info(action.running_message().to_string());
+    *worker_task = Some(spawn_worker_lifecycle_task(
+        action,
+        project_dir.to_string(),
+        ipc_host.to_string(),
+        ipc_port,
+    ));
+    state.needs_redraw = true;
+}
+
+fn spawn_worker_lifecycle_task(
+    action: WorkerLifecycleAction,
+    project_dir: String,
+    ipc_host: String,
+    ipc_port: u16,
+) -> WorkerLifecycleTask {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let success = run_worker_lifecycle_action(
+            action,
+            &project_dir,
+            &ipc_host,
+            ipc_port,
+            &mut worker,
+            &mut log_buffer,
+        );
+        let logs = log_buffer.info_messages.iter().cloned().collect();
+        let _ = sender.send(WorkerLifecycleResult {
+            action,
+            success,
+            logs,
+        });
+    });
+    WorkerLifecycleTask {
+        receiver,
+        handle: Some(handle),
+    }
+}
+
+fn run_worker_lifecycle_action(
+    action: WorkerLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    worker: &mut worker_mgr::WorkerManager,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    match action {
+        WorkerLifecycleAction::Start => {
+            start_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer)
+        }
+        WorkerLifecycleAction::Stop => {
+            stop_remote_workers_in_background(ipc_host, ipc_port, log_buffer);
+            worker.stop_workers_for_project(Some(project_dir), log_buffer)
+        }
+        WorkerLifecycleAction::Restart => {
+            stop_remote_workers_in_background(ipc_host, ipc_port, log_buffer);
+            let stopped = worker.stop_workers_for_project(Some(project_dir), log_buffer);
+            let started =
+                start_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer);
+            stopped && started
+        }
+    }
+}
+
+fn start_workers_in_background(
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    worker: &mut worker_mgr::WorkerManager,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+        prepare_remote_workers_in_background(ipc_host, ipc_port, buffer)
+    })
+}
+
+fn prepare_remote_workers_in_background(
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => {
+            let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+            match rt.block_on(ipc.connect()) {
+                Ok(()) => {
+                    let ok = worker_mgr::prepare_remote_workers(&mut ipc, &rt, log_buffer);
+                    rt.block_on(ipc.disconnect());
+                    ok
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ Worker 后台任务连接后台引擎失败: {}", e));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ Worker 后台任务创建运行时失败: {}", e));
+            false
+        }
+    }
+}
+
+fn stop_remote_workers_in_background(ipc_host: &str, ipc_port: u16, log_buffer: &mut LogBuffer) {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        log_buffer
+            .push_info("⚠️ Worker 后台任务创建运行时失败，跳过 daemon worker_stop".to_string());
+        return;
+    };
+    let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+    rt.block_on(async {
+        match ipc.connect().await {
+            Ok(()) => {
+                match ipc.worker_stop().await {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message))
+                    }
+                    Ok(resp) => log_buffer.push_info(format!("❌ {}", resp.message)),
+                    Err(e) => log_buffer.push_info(format!("❌ 通信失败: {}", e)),
+                }
+                ipc.disconnect().await;
+            }
+            Err(e) => {
+                log_buffer.push_info(format!(
+                    "⚠️ Worker 后台任务连接后台引擎失败，跳过 daemon worker_stop: {}",
+                    e
+                ));
+            }
+        }
+    });
+}
+
+fn finish_worker_lifecycle_result(
+    result: WorkerLifecycleResult,
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    for message in result.logs {
+        log_buffer.push_info(message);
+    }
+    if !result.success {
+        log_buffer.push_info(result.action.failure_message().to_string());
+    }
+    if result.action.refresh_after_completion() {
+        try_refresh_worker_health_once(rt, ipc, state, log_buffer);
+    }
+    state.needs_redraw = true;
+}
+
+fn poll_worker_lifecycle_task(
+    worker_task: &mut Option<WorkerLifecycleTask>,
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(task) = worker_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(result) => {
+            if let Some(mut task) = worker_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            finish_worker_lifecycle_result(result, rt, ipc, state, log_buffer);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            if let Some(mut task) = worker_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            log_buffer.push_info("❌ Worker 后台任务异常结束".to_string());
+            state.needs_redraw = true;
+        }
+    }
+}
+
+fn finish_pending_worker_lifecycle_task(
+    worker_task: &mut Option<WorkerLifecycleTask>,
+    rt: &tokio::runtime::Runtime,
+    ipc: &mut IpcClient,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(mut task) = worker_task.take() else {
+        return;
+    };
+    log_buffer.push_info("ℹ 等待正在运行的 Worker 生命周期任务收尾...".to_string());
+    if let Some(handle) = task.handle.take() {
+        let _ = handle.join();
+    }
+    match task.receiver.try_recv() {
+        Ok(result) => finish_worker_lifecycle_result(result, rt, ipc, state, log_buffer),
+        Err(_) => {
+            log_buffer.push_info("❌ Worker 后台任务未返回结果".to_string());
+            state.needs_redraw = true;
+        }
+    }
+}
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -524,6 +807,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut daemon = daemon_mgr::DaemonManager::new();
     let mut worker = worker_mgr::WorkerManager::new();
     let mut check_task: Option<CheckTask> = None;
+    let mut worker_task: Option<WorkerLifecycleTask> = None;
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
@@ -556,6 +840,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         log_buffer: &mut log_buffer,
         ipc: &mut ipc,
         check_task: Some(&mut check_task),
+        worker_task: Some(&mut worker_task),
         daemon: &mut daemon,
         worker: &mut worker,
         rt: &rt,
@@ -572,6 +857,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         ctx.state.tick();
         if let Some(check_task) = ctx.check_task.as_deref_mut() {
             poll_check_task(check_task, ctx.state, ctx.log_buffer);
+        }
+        if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
+            poll_worker_lifecycle_task(worker_task, ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
         }
 
         if let Some(cmd) = ctx.state.pending_command.take() {
@@ -626,6 +914,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     ctx.rt.block_on(ctx.ipc.disconnect());
 
     if *ctx.full_quit {
+        if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
+            finish_pending_worker_lifecycle_task(
+                worker_task,
+                ctx.rt,
+                ctx.ipc,
+                ctx.state,
+                ctx.log_buffer,
+            );
+        }
         ctx.worker
             .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
         let result = if *ctx.full_quit_stop_sent {
@@ -718,56 +1015,43 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                 .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::StartWorkers => {
-            let started =
-                ctx.worker
-                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
-                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
-                    });
-            if started {
-                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            }
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Start,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::StopWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::RestartWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
-            let started =
-                ctx.worker
-                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
-                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
-                    });
-            if started {
-                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            }
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Restart,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::None => {}
     }
@@ -827,6 +1111,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     rt: ctx.rt,
                     daemon: ctx.daemon,
                     worker: ctx.worker,
+                    worker_task: ctx.worker_task.as_deref_mut(),
                     project_dir: ctx.project_dir,
                     full_quit: ctx.full_quit,
                     full_quit_stop_sent: ctx.full_quit_stop_sent,
@@ -1402,6 +1687,68 @@ mod tests {
     }
 
     #[test]
+    fn start_worker_lifecycle_task_rejects_duplicate_operation() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut worker_task = Some(WorkerLifecycleTask {
+            receiver,
+            handle: None,
+        });
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        start_worker_lifecycle_task(
+            Some(&mut worker_task),
+            WorkerLifecycleAction::Start,
+            "C:\\tmp",
+            "127.0.0.1",
+            9527,
+            &mut log_buffer,
+            &mut state,
+        );
+
+        assert!(worker_task.is_some());
+        assert!(state.needs_redraw);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("生命周期任务正在运行")));
+    }
+    #[test]
+    fn worker_lifecycle_commands_do_not_start_workers_inline() {
+        let source = include_str!("lib.rs");
+        let start_arm = source
+            .split("command::CommandResult::StartWorkers => {")
+            .nth(1)
+            .expect("start workers arm should exist")
+            .split("command::CommandResult::StopWorkers => {")
+            .next()
+            .expect("start workers arm should end before stop workers arm");
+        assert!(
+            start_arm.contains("start_worker_lifecycle_task"),
+            "worker start should hand off to a background lifecycle task"
+        );
+        assert!(
+            !start_arm.contains("start_workers_with_prepare"),
+            "worker start must not run the blocking startup chain on the TUI event loop"
+        );
+
+        let restart_arm = source
+            .split("command::CommandResult::RestartWorkers => {")
+            .nth(1)
+            .expect("restart workers arm should exist")
+            .split("command::CommandResult::None => {}")
+            .next()
+            .expect("restart workers arm should end before none arm");
+        assert!(
+            restart_arm.contains("start_worker_lifecycle_task"),
+            "worker restart should hand off to a background lifecycle task"
+        );
+        assert!(
+            !restart_arm.contains("start_workers_with_prepare"),
+            "worker restart must not run the blocking startup chain on the TUI event loop"
+        );
+    }
+    #[test]
     fn test_dashboard_poll_connection_loss_reconnects_to_finished_daemon() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let port = listener.local_addr().expect("listener address").port();
@@ -1543,6 +1890,7 @@ mod tests {
             log_buffer: &mut log_buffer,
             ipc: &mut ipc,
             check_task: None,
+            worker_task: None,
             daemon: &mut daemon,
             worker: &mut worker,
             rt: &rt,

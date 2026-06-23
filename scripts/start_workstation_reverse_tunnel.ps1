@@ -227,6 +227,25 @@ function ConvertTo-WindowsCommandArgument {
     return '"' + $Value.Replace('"', '\"') + '"'
 }
 
+function ConvertTo-PowerShellStringLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function ConvertTo-EncodedPowerShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command
+    )
+
+    return [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command))
+}
+
 function Get-TunnelWatchdogLauncherPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -638,20 +657,26 @@ function Start-ReverseTunnelSupervisor {
     }
 
     $powerShellExe = Resolve-PowerShellExe
-    $scriptPath = '"' + $PSCommandPath.Replace('"', '\"') + '"'
+    $scriptLiteral = ConvertTo-PowerShellStringLiteral -Value $PSCommandPath
+    $kindLiteral = ConvertTo-PowerShellStringLiteral -Value $TunnelKind
+    $ownerMarkerLiteral = ConvertTo-PowerShellStringLiteral -Value $OwnerMarkerPath
+    $monitorCommand = @(
+        "& $scriptLiteral",
+        "-Monitor",
+        "-TunnelKind $kindLiteral",
+        "-MonitorRemotePort $RemotePort",
+        "-RestartDelaySeconds $RestartDelaySeconds",
+        "-OwnerPid $OwnerPid",
+        "-OwnerMarkerPath $ownerMarkerLiteral",
+        "-MaxConsecutiveFailures $MaxConsecutiveFailures",
+        "-MaxRecoverySeconds $MaxRecoverySeconds",
+        "-LogRepeatSeconds $LogRepeatSeconds"
+    ) -join " "
+    $encodedCommand = ConvertTo-EncodedPowerShellCommand -Command $monitorCommand
     $argumentList = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", $scriptPath,
-        "-Monitor",
-        "-TunnelKind", $TunnelKind,
-        "-MonitorRemotePort", $RemotePort,
-        "-RestartDelaySeconds", $RestartDelaySeconds,
-        "-OwnerPid", $OwnerPid,
-        "-OwnerMarkerPath", $OwnerMarkerPath,
-        "-MaxConsecutiveFailures", $MaxConsecutiveFailures,
-        "-MaxRecoverySeconds", $MaxRecoverySeconds,
-        "-LogRepeatSeconds", $LogRepeatSeconds
+        "-EncodedCommand", $encodedCommand
     )
 
     return Start-Process -FilePath $powerShellExe `

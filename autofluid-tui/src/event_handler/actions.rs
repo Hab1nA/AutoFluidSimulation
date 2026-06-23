@@ -2,8 +2,7 @@ use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::app_state::SETTINGS_LOCKED_MESSAGE;
 use crate::state::{AppState, LogBuffer};
-use crate::worker_mgr::prepare_remote_workers;
-use crate::EventContext;
+use crate::{start_worker_lifecycle_task, EventContext, WorkerLifecycleAction};
 
 pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventContext) {
     match result {
@@ -31,42 +30,30 @@ pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventCont
                 .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::StopWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::RestartWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
-            ctx.worker
-                .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
-                    prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
-                });
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Restart,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         _ => {}
     }
