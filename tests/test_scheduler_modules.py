@@ -3927,6 +3927,50 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == []
         assert DEFAULT_WORKSTATION_ID not in self.coordinator._workstation_barriers_passed
 
+    def test_upstream_failed_unassigned_config_does_not_block_ready_workstation_barrier(self):
+        """上游已失败的 default 构型不应阻塞已完成工作站的 Solver 放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ("sw", "sc", "transfer", "meshing"):
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sc", STATUS_ERROR, "SC 失败")
+        self.state.set_step_status(2, "transfer", STATUS_WAITING)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_transfer_failed_unassigned_config_does_not_block_ready_workstation_barrier(self):
+        """Transfer 已失败的 default 构型不应阻塞已完成工作站的 Solver 放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ("sw", "sc", "transfer", "meshing"):
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sc", STATUS_COMPLETED)
+        self.state.set_step_status(2, "transfer", STATUS_ERROR, "传输失败")
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
     def test_workstation_barrier_snapshot_includes_configured_real_workstations(self):
         """工作站屏障快照应包含真实工作站并排除 default。"""
         self._use_three_workstation_barrier()

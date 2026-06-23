@@ -17,7 +17,7 @@ const IPC_RECONNECT_TIMEOUT_SECS: u64 = 60;
 const IPC_RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const SERVER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(150);
-const SERVER_DAEMON_COMMAND_TIMEOUT: Duration = SERVER_DAEMON_START_TIMEOUT;
+const SERVER_DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
 
 pub struct DaemonManager {
@@ -660,7 +660,11 @@ impl DaemonManager {
         }
         let mut cmd = Command::new(&command.ssh_exe);
         cmd.args(&args);
-        let output = run_command_with_timeout(&mut cmd, SERVER_DAEMON_COMMAND_TIMEOUT)?;
+        let timeout = match action {
+            ServerDaemonAction::Start => SERVER_DAEMON_START_TIMEOUT,
+            ServerDaemonAction::Stop => SERVER_DAEMON_STOP_TIMEOUT,
+        };
+        let output = run_command_with_timeout(&mut cmd, timeout)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !stdout.is_empty() {
@@ -1444,8 +1448,16 @@ mod tests {
     #[test]
     fn server_daemon_command_timeout_covers_remote_readiness_probe() {
         assert!(
-            SERVER_DAEMON_COMMAND_TIMEOUT >= SERVER_DAEMON_START_TIMEOUT,
-            "SSH command timeout must not expire before the remote readiness probe"
+            SERVER_DAEMON_START_TIMEOUT >= Duration::from_secs(60),
+            "start SSH timeout must not expire before the remote readiness probe"
+        );
+    }
+
+    #[test]
+    fn server_daemon_stop_timeout_is_shorter_than_start_readiness_timeout() {
+        assert!(
+            SERVER_DAEMON_STOP_TIMEOUT < SERVER_DAEMON_START_TIMEOUT,
+            "server daemon stop should not reuse the long start readiness timeout"
         );
     }
 

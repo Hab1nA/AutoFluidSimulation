@@ -102,6 +102,9 @@ class BarrierCoordinator:
         """Whether a config could still be claimed by any real workstation."""
         if not self._multi_workstation_mode:
             return False
+        for upstream_step in ("sw", "sc", "transfer"):
+            if self.state.get_step_status(config_name, upstream_step) == STATUS_ERROR:
+                return False
         meshing_status = self.state.get_step_status(config_name, "meshing")
         if meshing_status in (STATUS_COMPLETED, STATUS_ERROR):
             return False

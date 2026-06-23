@@ -80,16 +80,8 @@ fn read_env_values() -> HashMap<String, String> {
         return HashMap::new();
     }
     match fs::read_to_string(&path) {
-        Ok(contents) => contents
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                let (key, value) = trimmed.split_once('=')?;
-                if key.is_empty() || key.starts_with('#') {
-                    return None;
-                }
-                Some((key.to_string(), value.to_string()))
-            })
+        Ok(contents) => crate::utils::parse_env_content(&contents)
+            .into_iter()
             .collect(),
         Err(_) => HashMap::new(),
     }
@@ -439,6 +431,42 @@ scdoc_dir = ''
         std::env::set_current_dir(previous_dir).expect("restore cwd");
 
         assert_eq!(config.workstations[0].password, "toml-a");
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn apply_env_passwords_uses_project_env_parser_semantics() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        std::fs::write(
+            project_dir.join(".env"),
+            "export AUTOFLUID_WS_A_SSH_PASSWORD='secret-a'\nAUTOFLUID_WS_B_SSH_PASSWORD=\"secret-b\"\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        apply_env_passwords(&mut config);
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+
+        assert_eq!(config.workstations[0].password, "secret-a");
+        assert_eq!(config.workstations[1].password, "secret-b");
 
         let _ = std::fs::remove_dir_all(project_dir);
     }

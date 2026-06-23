@@ -119,7 +119,7 @@ fn find_project_dir_from(start: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-fn parse_env_content(content: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_env_content(content: &str) -> Vec<(String, String)> {
     content.lines().filter_map(parse_env_assignment).collect()
 }
 
