@@ -271,6 +271,10 @@ class IPCServer:
                     break
         finally:
             try:
+                client_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 client_sock.close()
             except OSError:
                 pass

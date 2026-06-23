@@ -207,10 +207,10 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
     assert data["health"] == {
         "local_worker_online": False,
         "server_to_local_ssh": "unknown",
-        "server_to_workstation_ssh": "ok",
+        "server_to_workstation_ssh": "unknown",
         "workstation_ssh_details": {
-            "WS-A": "ok",
-            "WS-B": "disconnected",
+            "WS-A": "unknown",
+            "WS-B": "unknown",
         },
         "workstation_ssh_targets": {
             "WS-A": {
@@ -518,7 +518,7 @@ def test_dashboard_health_reports_server_to_local_disconnected_without_reachable
     assert health["server_to_local_ssh"] == "disconnected"
 
 
-def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
+def test_dashboard_health_keeps_cached_transport_status_unknown(monkeypatch):
     monkeypatch.setattr(
         daemon_module,
         "WORKSTATIONS",
@@ -538,8 +538,8 @@ def test_dashboard_health_reads_workstation_ssh_without_heartbeat(monkeypatch):
 
     health = daemon._build_health_snapshot()
 
-    assert health["server_to_workstation_ssh"] == "ok"
-    assert health["workstation_ssh_details"] == {"WS-A": "ok"}
+    assert health["server_to_workstation_ssh"] == "unknown"
+    assert health["workstation_ssh_details"] == {"WS-A": "unknown"}
     assert health["workstation_ssh_targets"] == {
         "WS-A": {
             "host": "127.0.0.1",
@@ -597,8 +597,8 @@ def test_ssh_health_check_once_refreshes_last_worker_checks(monkeypatch):
 
     result = daemon._run_workstation_ssh_health_check_once()
 
-    assert result["ssh_checks"] == {"WS-A": "ok"}
-    assert daemon._last_worker_ssh_checks == {"WS-A": "ok"}
+    assert result["ssh_checks"] == {"WS-A": "disconnected"}
+    assert daemon._last_worker_ssh_checks == {"WS-A": "disconnected"}
 
 
 

@@ -4,7 +4,7 @@ import os
 import shutil
 import tempfile
 
-from engine.config import IPC_CONFIG, STATUS_COMPLETED, STATUS_RUNNING
+from engine.config import DEFAULT_WORKSTATION_ID, IPC_CONFIG, STATUS_COMPLETED, STATUS_RUNNING
 from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 from engine.state_manager import StateManager
 
@@ -62,3 +62,12 @@ class TestWorkstationSlotCoordinator:
 
         assert slots.busy_workstations() == {"WS-A": 1, "WS-B": 2}
         assert slots.claim(3) == "WS-C"
+
+    def test_seed_from_state_ignores_default_in_multi_workstation_slots(self) -> None:
+        self.state.set_config_workstation(1, DEFAULT_WORKSTATION_ID)
+        self.state.set_step_status(1, "transfer", STATUS_RUNNING)
+
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B"])
+        slots.seed_from_state()
+
+        assert slots.busy_workstations() == {}

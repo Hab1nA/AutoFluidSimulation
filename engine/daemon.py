@@ -1172,17 +1172,14 @@ class PipelineDaemon:
                     else:
                         connected = bool(ssh.is_connected())
                 else:
-                    ssh = ssh_pool.get(ws_id)
-                    if ssh is None:
-                        results["ssh_checks"][ws_id] = str(
-                            previous_checks.get(ws_id, "unknown")
-                        )
-                        continue
-                    connection_is_active = getattr(ssh, "connection_is_active", None)
-                    if callable(connection_is_active):
-                        connected = bool(connection_is_active())
-                    else:
-                        connected = bool(ssh.is_connected())
+                    # Passive health must not promote cached Paramiko transport state
+                    # to "ok"; stale transports can outlive reverse tunnels.
+                    # Active paths such as worker_start and task execution remain
+                    # responsible for real heartbeats and reconnects.
+                    results["ssh_checks"][ws_id] = str(
+                        previous_checks.get(ws_id, "unknown")
+                    )
+                    continue
                 results["ssh_checks"][ws_id] = "ok" if connected else "disconnected"
                 if connected and previous_checks.get(ws_id) not in (None, "ok"):
                     logger.warning(
@@ -1382,29 +1379,11 @@ class PipelineDaemon:
         for workstation in workstation_configs:
             workstation_id = str(workstation.get("id", "default"))
             workstation_targets[workstation_id] = self._workstation_ssh_target(workstation)
-            # Prefer the active health-check result over transport state; stale
-            # Paramiko transports can outlive the reverse tunnel they depend on.
-            if workstation_id in last_worker_checks:
-                workstation_details[workstation_id] = str(last_worker_checks[workstation_id])
-                continue
-            ssh = ssh_pool.get(workstation_id)
-            if ssh is None:
-                workstation_details[workstation_id] = str(
-                    last_worker_checks.get(workstation_id, "unknown")
-                )
-                continue
-            try:
-                connection_is_active = getattr(ssh, "connection_is_active", None)
-                if callable(connection_is_active):
-                    connected = bool(connection_is_active())
-                else:
-                    connected = bool(ssh.is_connected())
-                workstation_details[workstation_id] = (
-                    "ok" if connected else "disconnected"
-                )
-            except Exception as exc:
-                workstation_details[workstation_id] = f"error: {exc}"
-
+            # Dashboard health is passive: report the latest active health check
+            # instead of trusting cached Paramiko transport state.
+            workstation_details[workstation_id] = str(
+                last_worker_checks.get(workstation_id, "unknown")
+            )
         detail_values = set(workstation_details.values())
         if any(value == "ok" for value in detail_values):
             server_to_workstation_ssh = "ok"

@@ -40,7 +40,7 @@ os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
-    ENGINE_CONFIG, IPC_CONFIG,
+    DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
 
@@ -372,6 +372,15 @@ class TestContext:
 
         self._orig_db_path = IPC_CONFIG["db_path"]
         IPC_CONFIG["db_path"] = self.db_path
+        import engine.scheduler.barrier as barrier_module
+        import engine.scheduler.main as scheduler_main_module
+        self._barrier_module = barrier_module
+        self._scheduler_main_module = scheduler_main_module
+        self._orig_barrier_workstations = barrier_module.WORKSTATIONS
+        self._orig_scheduler_workstations = scheduler_main_module.WORKSTATIONS
+        legacy_workstations = [{"id": DEFAULT_WORKSTATION_ID}]
+        barrier_module.WORKSTATIONS = legacy_workstations
+        scheduler_main_module.WORKSTATIONS = legacy_workstations
 
         # 确保 mock 环境已设置（pytest 直接运行时不会调用 main()）
         setup_mock_environment()
@@ -402,6 +411,8 @@ class TestContext:
             self.scheduler.stop()
         finally:
             IPC_CONFIG["db_path"] = self._orig_db_path
+            self._barrier_module.WORKSTATIONS = self._orig_barrier_workstations
+            self._scheduler_main_module.WORKSTATIONS = self._orig_scheduler_workstations
             teardown_mock_environment()
             if os.path.exists(self.tmpdir):
                 shutil.rmtree(self.tmpdir, ignore_errors=True)

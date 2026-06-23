@@ -12,7 +12,7 @@ from typing import Callable
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    STATUS_RETRYING, ENGINE_CONFIG,
+    STATUS_RETRYING, ENGINE_CONFIG, WORKSTATIONS,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -69,6 +69,15 @@ class BarrierCoordinator:
         self._solver_dispatch_lock = threading.Lock()
         self._solver_active_config: int | None = None
         self._workstation_barriers_passed: set[str] = set()
+        self._configured_workstation_ids = {
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        }
+        self._multi_workstation_mode = any(
+            workstation_id != DEFAULT_WORKSTATION_ID
+            for workstation_id in self._configured_workstation_ids
+        )
 
         logger.info("全局屏障协调器初始化完成")
 
@@ -89,10 +98,30 @@ class BarrierCoordinator:
             grouped.setdefault(workstation_id, []).append(config_name)
         return grouped
 
+    def _is_dynamic_assignment_pending(self, config_name: int) -> bool:
+        """Whether a config could still be claimed by any real workstation."""
+        if not self._multi_workstation_mode:
+            return False
+        meshing_status = self.state.get_step_status(config_name, "meshing")
+        if meshing_status in (STATUS_COMPLETED, STATUS_ERROR):
+            return False
+        return self._workstation_for_config(config_name) == DEFAULT_WORKSTATION_ID
+
+    def _all_assignable_configs_assigned(self) -> bool:
+        """Return True once no unclaimed config can later enter Meshing."""
+        return not any(
+            self._is_dynamic_assignment_pending(config_name)
+            for config_name in self.state.get_all_configs()
+        )
+
     def _ready_workstations_for_solver(self) -> set[str]:
         """Return workstations whose Meshing barrier has passed."""
+        if not self._all_assignable_configs_assigned():
+            return set()
         ready: set[str] = set()
         for workstation_id, config_names in self._configs_by_workstation().items():
+            if self._multi_workstation_mode and workstation_id == DEFAULT_WORKSTATION_ID:
+                continue
             if self.state.all_configs_completed_at_step(
                 "meshing",
                 workstation_id=workstation_id,

@@ -47,8 +47,8 @@ def test_server_ipc_tunnel_prefers_structured_log_dir_with_temp_fallback() -> No
 def test_server_ipc_tunnel_reuse_refreshes_pid_for_cleanup() -> None:
     content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
     reuse_block = content[
-        content.index("if (Test-AutoFluidIpcProtocolEndpoint)"):
-        content.index("$process = Start-ServerTunnel")
+        content.rindex("if (Test-AutoFluidIpcProtocolEndpoint)"):
+        content.rindex("$process = Start-ServerTunnel")
     ]
 
     assert "Update-ServerTunnelPidFile" in reuse_block
@@ -58,3 +58,38 @@ def test_server_ipc_tunnel_reuse_refreshes_pid_for_cleanup() -> None:
     assert "CommandLine -like \"*-L $expectedForward*\"" in content
     assert "CommandLine -like \"* $TunnelTarget*\"" in content
     assert "matchingPids[0]" not in content
+
+def test_server_ipc_tunnel_runs_monitor_and_records_monitor_pid() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$Monitor" in content
+    assert "function Start-ServerTunnelMonitor" in content
+    assert "Start-ServerTunnelMonitor" in content
+    assert "-Monitor" in content
+    assert "Update-ServerTunnelPidFile -TunnelPid $PID" in content
+    monitor_fn = content[content.index("function Start-ServerTunnelMonitorProcess"): content.index("function Get-ServerTunnelListeningPid")]
+    assert "Update-ServerTunnelPidFile -TunnelPid $process.Id" in monitor_fn
+    assert "if (-not $SkipPidFile)" not in monitor_fn
+    start_fn = content[content.index("function Start-ServerTunnel {"): content.index("function Update-ServerTunnelPidFile")]
+    assert "[switch]$SkipPidFile" in start_fn
+    assert "if (-not $SkipPidFile)" in start_fn
+    assert "-SkipPidFile" in content
+    assert "Server IPC tunnel endpoint dropped; restarting" in content
+
+def test_server_ipc_tunnel_reuse_path_still_starts_monitor_by_default() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+    reuse_start = content.rindex("if (Test-AutoFluidIpcProtocolEndpoint)")
+    default_monitor_start = content.index("if (-not $NoMonitor)", reuse_start)
+    one_shot_start = content.index("$process = Start-ServerTunnel", default_monitor_start)
+    reuse_block = content[reuse_start:default_monitor_start]
+    default_monitor_block = content[default_monitor_start:one_shot_start]
+
+    assert "if ($NoMonitor)" in reuse_block
+    assert "exit 0" in reuse_block
+    assert "if (-not $NoMonitor)" not in reuse_block
+    assert "Start-ServerTunnelMonitorProcess" in default_monitor_block
+    assert "Get-ServerTunnelMonitorPid" in default_monitor_block
+    assert default_monitor_block.index("Get-ServerTunnelMonitorPid") < default_monitor_block.index(
+        "Start-ServerTunnelMonitorProcess"
+    )
+    assert "exit 0" in default_monitor_block

@@ -1469,6 +1469,87 @@ class TestPipelineSchedulerStartRecovery:
         assert cleared_all is True
         assert cleared_workstations == []
 
+    def test_reset_meshing_reopens_assignment_domain_and_blocks_barrier(self, monkeypatch):
+        """reset Meshing 后未重新 claim 的构型应阻止工作站屏障再次抢跑。"""
+        import engine.scheduler.barrier as barrier_module
+        from engine.scheduler.barrier import BarrierCoordinator
+
+        monkeypatch.setattr(barrier_module, "WORKSTATIONS", [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+        ])
+        self.scheduler.barrier_coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.scheduler._paused,
+            stopped_event=self.scheduler._stopped,
+            barrier_passed_event=self.scheduler._barrier_passed,
+            retry_manager=self.scheduler.retry_manager,
+            on_solver_terminal=self.scheduler.finalize_pipeline,
+            get_reset_generation=self.scheduler._current_reset_generation,
+        )
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        real_dispatch = self.scheduler.barrier_coordinator.dispatch_solver_if_ready
+        assert real_dispatch() is True
+        self.scheduler.barrier_coordinator.join_solver_threads(timeout=5)
+        assert self.runner._solver_dispatched == [1]
+
+        self.runner._solver_dispatched.clear()
+        self.scheduler.reset_config(1, "meshing")
+
+        assert self.scheduler.workstation_slots.busy_workstations() == {}
+        assert self.state.is_global_barrier_met() is False
+        assert real_dispatch() is False
+        assert self.runner._solver_dispatched == []
+
+    def test_pause_resume_does_not_bypass_assignment_domain_guard(self, monkeypatch):
+        """pause/start 收口屏障时不应越过未 claim 构型的分配域 guard。"""
+        import engine.scheduler.barrier as barrier_module
+        from engine.scheduler.barrier import BarrierCoordinator
+
+        monkeypatch.setattr(barrier_module, "WORKSTATIONS", [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+        ])
+        self.scheduler.barrier_coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.scheduler._paused,
+            stopped_event=self.scheduler._stopped,
+            barrier_passed_event=self.scheduler._barrier_passed,
+            retry_manager=self.scheduler.retry_manager,
+            on_solver_terminal=self.scheduler.finalize_pipeline,
+            get_reset_generation=self.scheduler._current_reset_generation,
+        )
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        self.scheduler._paused.set()
+        self.scheduler._paused.clear()
+        self.scheduler._finalize_barrier_after_downstream_start()
+
+        assert self.runner._solver_dispatched == []
+        assert self.scheduler.barrier_coordinator._workstation_barriers_passed == set()
+
     def _record_remote_outputs(
         self,
         config_name: int,
@@ -2721,7 +2802,7 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
-    def test_server_mode_start_accepts_live_workstation_ssh_without_snapshot(self, monkeypatch):
+    def test_server_mode_start_rejects_cached_transport_without_active_snapshot(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
         from engine.local_worker_adapter import LocalWorkerAdapter
@@ -2763,12 +2844,12 @@ class TestPipelineDaemonCleanStep:
 
         ok, data, message = daemon.handle_start({})
 
-        assert ok is True
+        assert ok is False
         assert data is None
-        assert message == "流水线已启动"
-        assert daemon.state.set_status_calls == ["running"]
-        assert daemon.scheduler.start_calls == 1
-
+        assert "工作站 SSH 未就绪" in message
+        assert "worker start" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
     def test_worker_start_reloads_config_and_drops_stale_ssh(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module
@@ -3522,6 +3603,10 @@ class TestBarrierCoordinator:
         self.db_path = os.path.join(self.tmpdir, "test.db")
         self._orig_db_path = IPC_CONFIG["db_path"]
         IPC_CONFIG["db_path"] = self.db_path
+        import engine.scheduler.barrier as barrier_module
+        self._barrier_module = barrier_module
+        self._orig_barrier_workstations = barrier_module.WORKSTATIONS
+        barrier_module.WORKSTATIONS = [{"id": DEFAULT_WORKSTATION_ID}]
 
         self.state = StateManager(db_path=self.db_path)
         self.runner = _MockTaskRunner(self.state)
@@ -3547,9 +3632,25 @@ class TestBarrierCoordinator:
         #   在 teardown 删除 DB 后仍尝试访问 sqlite 文件。
         self.stopped.set()
         self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = self._orig_barrier_workstations
         IPC_CONFIG["db_path"] = self._orig_db_path
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _use_multi_workstation_barrier(self) -> None:
+        """Rebuild the coordinator with explicit multi-workstation test config."""
+        self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = [{"id": "WS-A"}, {"id": "WS-B"}]
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
+        )
 
     def test_barrier_passes_when_all_meshing_completed(self):
         """所有构型 Meshing Completed → 屏障通过。"""
@@ -3735,6 +3836,72 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(3, "solver") == STATUS_COMPLETED
         assert self.state.is_global_barrier_met() is False
         assert self.runner._sc_cleanup_called is False
+
+    def test_unassigned_configs_block_workstation_barrier_dispatch(self):
+        """仍有 default/Waiting 构型时，真实工作站屏障不应提前放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is False
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert self.coordinator._workstation_barriers_passed == set()
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+
+    def test_workstation_barrier_dispatches_after_assignment_domain_closes(self):
+        """全部构型已 claim 后，只放行 Meshing 完成的工作站。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-A")
+        for cn in (1, 2, 3):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+        self.state.set_step_status(3, "meshing", STATUS_COMPLETED)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 3]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_default_group_is_not_ready_workstation_in_multi_workstation_mode(self):
+        """多工作站模式下 default 组不应作为独立工作站屏障放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(2, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is False
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert DEFAULT_WORKSTATION_ID not in self.coordinator._workstation_barriers_passed
 
     def test_all_postprocess_completed_reports_completed_terminal(self):
         """全部 PostProcess Completed 后应报告自然完成终态。"""

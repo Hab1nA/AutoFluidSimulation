@@ -39,6 +39,8 @@ from utils.ssh_client import RemoteWorkstation
 
 logger = setup_logger(__name__)
 
+LOCAL_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECONDS = 5.0
+
 
 class TaskRunner:
     """
@@ -635,7 +637,10 @@ class TaskRunner:
         cleanup_stage = getattr(self._local_worker_adapter, "cleanup_stage", None)
         if not callable(cleanup_stage):
             return
-        ok = bool(cleanup_stage(step_name, phase))
+        kwargs: dict[str, float] = {}
+        if phase == "shutdown":
+            kwargs["timeout_seconds"] = LOCAL_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECONDS
+        ok = bool(cleanup_stage(step_name, phase, **kwargs))
         if not ok:
             error = str(getattr(self._local_worker_adapter, "last_error", ""))
             logger.warning(

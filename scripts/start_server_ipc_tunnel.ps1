@@ -1,5 +1,8 @@
 param(
-    [switch]$Check
+    [switch]$Check,
+    [switch]$Monitor,
+    [switch]$NoMonitor,
+    [int]$RestartDelaySeconds = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +61,20 @@ function Get-TunnelRemotePort {
     return $port
 }
 
+function Resolve-PowerShellExe {
+    $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if ($null -ne $currentProcess -and -not [string]::IsNullOrWhiteSpace($currentProcess.Path)) {
+        return $currentProcess.Path
+    }
+    foreach ($candidate in @("pwsh.exe", "powershell.exe")) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($null -ne $command) {
+            return $command.Source
+        }
+    }
+    throw "PowerShell executable was not found."
+}
+
 function Test-SshBatchMode {
     param(
         [Parameter(Mandatory = $true)]
@@ -85,7 +102,8 @@ function Start-ServerTunnel {
         [Parameter(Mandatory = $true)]
         [string]$RemoteHost,
         [Parameter(Mandatory = $true)]
-        [int]$RemotePort
+        [int]$RemotePort,
+        [switch]$SkipPidFile
     )
 
     $forwardSpec = "${LocalHost}:${LocalPort}:${RemoteHost}:${RemotePort}"
@@ -137,9 +155,42 @@ function Start-ServerTunnel {
         throw "Failed to start AutoFluid server IPC tunnel. $detail"
     }
 
-    Update-ServerTunnelPidFile -TunnelPid $process.Id
+    if (-not $SkipPidFile) {
+        Update-ServerTunnelPidFile -TunnelPid $process.Id
+    }
 
     return $process
+}
+
+function Get-ServerTunnelPidFilePath {
+    return Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
+}
+
+function Get-ServerTunnelMonitorPid {
+    $pidFile = Get-ServerTunnelPidFilePath
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+        return $null
+    }
+
+    $rawTunnelPid = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+    $parsedTunnelPid = 0
+    if (-not [int]::TryParse($rawTunnelPid, [ref]$parsedTunnelPid) -or $parsedTunnelPid -le 0) {
+        return $null
+    }
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $parsedTunnelPid" -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $null
+    }
+
+    $scriptPath = [string]$PSCommandPath
+    $commandLine = [string]$process.CommandLine
+    if (-not [string]::IsNullOrWhiteSpace($scriptPath) -and
+        $commandLine.Contains($scriptPath) -and
+        $commandLine.Contains("-Monitor")) {
+        return $parsedTunnelPid
+    }
+    return $null
 }
 
 function Update-ServerTunnelPidFile {
@@ -148,9 +199,72 @@ function Update-ServerTunnelPidFile {
         [int]$TunnelPid
     )
 
-    $pidFile = Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
+    $pidFile = Get-ServerTunnelPidFilePath
     New-Item -ItemType Directory -Path (Split-Path -Parent $pidFile) -Force | Out-Null
     Set-Content -LiteralPath $pidFile -Value ([string]$TunnelPid) -Encoding ASCII
+}
+
+function Start-ServerTunnelMonitor {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SshExe,
+        [Parameter(Mandatory = $true)]
+        [string]$TunnelTarget,
+        [Parameter(Mandatory = $true)]
+        [string]$LocalHost,
+        [Parameter(Mandatory = $true)]
+        [int]$LocalPort,
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteHost,
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort
+    )
+
+    Update-ServerTunnelPidFile -TunnelPid $PID
+    $process = $null
+    while ($true) {
+        if (Test-AutoFluidIpcProtocolEndpoint) {
+            Start-Sleep -Seconds 5
+            continue
+        }
+
+        Write-Host "Server IPC tunnel endpoint dropped; restarting."
+        if ($null -ne $process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        $process = Start-ServerTunnel `
+            -SshExe $SshExe `
+            -TunnelTarget $TunnelTarget `
+            -LocalHost $LocalHost `
+            -LocalPort $LocalPort `
+            -RemoteHost $RemoteHost `
+            -RemotePort $RemotePort `
+            -SkipPidFile
+        Start-Sleep -Seconds $RestartDelaySeconds
+    }
+}
+
+function Start-ServerTunnelMonitorProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellExe
+    )
+
+    $argumentList = @(
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $PSCommandPath,
+        "-Monitor",
+        "-NoMonitor",
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds)
+    )
+    $process = Start-Process -FilePath $PowerShellExe `
+        -ArgumentList $argumentList `
+        -WindowStyle Hidden `
+        -PassThru
+    Update-ServerTunnelPidFile -TunnelPid $process.Id
+    return $process
 }
 
 function Get-ServerTunnelListeningPid {
@@ -210,20 +324,46 @@ if ($Check) {
     exit 0
 }
 
-if (Test-AutoFluidIpcProtocolEndpoint) {
-    $existingPid = Get-ServerTunnelListeningPid `
+if ($Monitor) {
+    Start-ServerTunnelMonitor `
+        -SshExe $sshExe `
+        -TunnelTarget $tunnelTarget `
         -LocalHost $serverHost `
         -LocalPort $serverPort `
         -RemoteHost $remoteHost `
-        -RemotePort $remotePort `
-        -TunnelTarget $tunnelTarget
-    if ($null -ne $existingPid) {
-        Update-ServerTunnelPidFile -TunnelPid $existingPid
-    }
-    Write-Host "AutoFluid server IPC protocol endpoint is already reachable; reuse the existing tunnel."
+        -RemotePort $remotePort
     exit 0
 }
 
+if (Test-AutoFluidIpcProtocolEndpoint) {
+    if ($NoMonitor) {
+        $existingPid = Get-ServerTunnelListeningPid `
+            -LocalHost $serverHost `
+            -LocalPort $serverPort `
+            -RemoteHost $remoteHost `
+            -RemotePort $remotePort `
+            -TunnelTarget $tunnelTarget
+        if ($null -ne $existingPid) {
+            Update-ServerTunnelPidFile -TunnelPid $existingPid
+        }
+        Write-Host "AutoFluid server IPC protocol endpoint is already reachable; reuse the existing tunnel."
+        exit 0
+    }
+
+    Write-Host "AutoFluid server IPC protocol endpoint is already reachable; ensuring monitor is running."
+}
+
+if (-not $NoMonitor) {
+    $existingMonitorPid = Get-ServerTunnelMonitorPid
+    if ($null -ne $existingMonitorPid) {
+        Write-Host "AutoFluid server IPC tunnel monitor is already running (PID $existingMonitorPid)."
+        exit 0
+    }
+
+    $monitorProcess = Start-ServerTunnelMonitorProcess -PowerShellExe (Resolve-PowerShellExe)
+    Write-Host "Started AutoFluid server IPC tunnel monitor (PID $($monitorProcess.Id))."
+    exit 0
+}
 $process = Start-ServerTunnel `
     -SshExe $sshExe `
     -TunnelTarget $tunnelTarget `

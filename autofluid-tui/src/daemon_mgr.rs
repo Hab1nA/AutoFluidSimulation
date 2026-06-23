@@ -124,14 +124,14 @@ impl DaemonManager {
             return Ok(());
         }
 
-        // full_quit IPC 命令已在主循环中发送，daemon 的 shutdown() 正在执行。
-        // 仅等待进程自行退出，不做额外干预——与 Ctrl+C 行为一致。
+        // full_quit IPC 成功时优先等待 daemon 自行退出；IPC 已断开但 PID 仍存活时，
+        // 通过 PID 文件兜底终止，避免 TUI 退出后后台 daemon 残留。
         log::info!("等待后台引擎退出");
         let stopped = if let Some(mut child) = self.process.take() {
             Self::wait_for_exit(&mut child)
         } else if let Some(pid) = Self::read_pid_file(project_dir) {
-            log::info!("通过 PID 文件等待后台引擎退出: pid={}", pid);
-            Self::wait_for_pid_exit(project_dir)
+            log::info!("通过 PID 文件停止后台引擎: pid={}", pid);
+            Self::stop_pid_file_daemon(project_dir, pid)
         } else {
             log::info!("未发现需要等待的后台引擎进程");
             true
@@ -142,7 +142,8 @@ impl DaemonManager {
     pub fn finish_after_successful_ipc_stop(&mut self, project_dir: &str) -> Result<(), String> {
         if is_server_mode() {
             self.process = None;
-            log::info!("server 模式下已通过 IPC 请求停止远端 daemon，仅清理本地 IPC 隧道");
+            log::info!("server 模式下已通过 IPC 请求停止远端 daemon，继续执行 SSH 停止兜底");
+            self.stop_server_daemon()?;
             Self::cleanup_server_ipc_tunnel(project_dir)
         } else {
             self.stop(project_dir)
@@ -248,21 +249,34 @@ impl DaemonManager {
     /// 因此使用 `std::thread::sleep` 是安全的。
     fn wait_for_pid_exit(project_dir: &str) -> bool {
         let pid_file = Self::pid_file_path(project_dir);
-        Self::wait_for_pid_file_removed(&pid_file, DAEMON_SHUTDOWN_TIMEOUT_SECS)
-    }
-
-    fn wait_for_pid_file_removed(pid_file: &std::path::Path, timeout_secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        let Some(pid) = Self::read_pid_file(project_dir) else {
+            return true;
+        };
+        let deadline = Instant::now() + Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS);
         while Instant::now() < deadline {
-            // PID 文件被删除说明 daemon shutdown 已完成
             if !pid_file.exists() {
                 log::info!("后台引擎已完成退出清理");
                 return true;
             }
+            if !is_pid_alive(pid) {
+                log::info!("后台引擎 PID 已退出: pid={pid}");
+                return true;
+            }
             std::thread::sleep(Duration::from_millis(200));
         }
-        log::warn!("等待后台引擎 PID 文件清理超时 ({timeout_secs}s)");
+        log::warn!("等待后台引擎 PID 退出超时 ({DAEMON_SHUTDOWN_TIMEOUT_SECS}s)");
         false
+    }
+
+    fn stop_pid_file_daemon(project_dir: &str, pid: u32) -> bool {
+        if !is_pid_alive(pid) || !Self::pid_file_path(project_dir).exists() {
+            return Self::wait_for_pid_exit(project_dir);
+        }
+        let killed = kill_process_tree(pid);
+        if !killed {
+            log::warn!("通过 PID 文件终止后台引擎失败: pid={pid}");
+        }
+        !is_pid_alive(pid) || Self::wait_for_pid_dead(pid, DAEMON_SHUTDOWN_TIMEOUT_SECS)
     }
 
     fn wait_for_pid_dead(pid: u32, timeout_secs: u64) -> bool {
@@ -450,12 +464,10 @@ impl DaemonManager {
                 }
             }
         }
-        let mut stop_sent_over_ipc = false;
         if ipc.is_connected() {
             log::info!("发送后台引擎停止请求");
             match rt.block_on(ipc.full_quit()) {
                 Ok(resp) if resp.is_ok() => {
-                    stop_sent_over_ipc = true;
                     log_buffer.push_info(format!("✅ {}", resp.message));
                 }
                 Ok(resp) => {
@@ -466,32 +478,6 @@ impl DaemonManager {
                 }
             }
             rt.block_on(ipc.disconnect());
-        }
-
-        if server_mode {
-            let stop_result = if stop_sent_over_ipc {
-                self.finish_after_successful_ipc_stop(project_dir)
-            } else {
-                self.stop(project_dir)
-            };
-            match stop_result {
-                Ok(()) => {
-                    let message = if stop_sent_over_ipc {
-                        "✅ 已通过 IPC 请求服务器 daemon 停止"
-                    } else {
-                        "✅ 已向服务器发送 daemon 停止命令"
-                    };
-                    log_buffer.push_info(message.to_string());
-                }
-                Err(e) => {
-                    log_buffer.push_info(format!("❌ 停止服务器 daemon 失败: {}", e));
-                    state.connected = ipc.is_connected();
-                    return false;
-                }
-            }
-            state.mark_daemon_stopped();
-            log_buffer.push_info("✅ 服务器后台引擎已停止或正在停止".to_string());
-            return true;
         }
 
         match self.stop(project_dir) {
@@ -1145,6 +1131,47 @@ mod tests {
         let _ = fs::remove_dir_all(project_dir);
     }
 
+    #[test]
+    fn wait_for_pid_exit_treats_dead_pid_as_stopped() {
+        let project_dir = unique_temp_project_dir();
+        let pid_file = project_dir.join("data").join("daemon.pid");
+        fs::write(&pid_file, "999999").expect("write stale pid file");
+
+        assert!(DaemonManager::wait_for_pid_exit(
+            project_dir.to_str().expect("utf8 temp path")
+        ));
+        assert!(pid_file.exists(), "caller owns PID-file cleanup after wait");
+
+        let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn local_stop_without_ipc_terminates_live_pid_file_daemon() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let project_dir = unique_temp_project_dir();
+        let pid_file = project_dir.join("data").join("daemon.pid");
+        let mut child = spawn_live_pid_process(&project_dir);
+        fs::write(&pid_file, child.id().to_string()).expect("write daemon pid");
+
+        let mut daemon = DaemonManager::new();
+        daemon
+            .stop(project_dir.to_str().expect("utf8 temp path"))
+            .expect("local stop should terminate PID-file daemon");
+
+        let exited = wait_for_child_exit(&mut child, 2);
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            exited,
+            "local stop fallback should terminate live daemon PID"
+        );
+        assert!(!pid_file.exists(), "stopped daemon PID file removed");
+
+        let _ = fs::remove_dir_all(project_dir);
+    }
     #[test]
     fn local_daemon_python_prefers_project_venv() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
@@ -1810,6 +1837,33 @@ mod tests {
         let _ = fs::remove_dir_all(project_dir);
     }
 
+    #[test]
+    fn finish_after_successful_ipc_stop_still_runs_server_stop_fallback() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
+        let project_dir = unique_temp_project_dir();
+        let marker = project_dir.join("finish-after-ipc-stop-marker.txt");
+        let ssh_exe = fake_marker_exe(&project_dir, "fake_ssh", &marker, "stop");
+        std::env::set_var("AUTOFLUID_SSH_EXE", &ssh_exe);
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET", "ocar-prod");
+        std::env::set_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD", "echo stop");
+
+        let mut daemon = DaemonManager::new();
+        daemon
+            .finish_after_successful_ipc_stop(project_dir.to_str().expect("utf8 temp path"))
+            .expect("server finish-after-ipc stop should use SSH fallback");
+
+        assert!(
+            marker.exists(),
+            "IPC success path must still issue server stop"
+        );
+
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_STOP_CMD");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_SSH_TARGET");
+        std::env::remove_var("AUTOFLUID_SSH_EXE");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
     fn wait_for_child_exit(child: &mut Child, timeout_secs: u64) -> bool {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         while Instant::now() < deadline {
