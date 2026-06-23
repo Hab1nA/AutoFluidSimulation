@@ -6,7 +6,12 @@ param(
     [switch]$NoWatchdog,
     [ValidateSet("Workstation", "LocalWorker")]
     [string]$TunnelKind = "Workstation",
+    [int]$OwnerPid = 0,
+    [string]$OwnerMarkerPath = "",
     [int]$RestartDelaySeconds = 5,
+    [int]$MaxConsecutiveFailures = 5,
+    [int]$MaxRecoverySeconds = 120,
+    [int]$LogRepeatSeconds = 60,
     [int]$MonitorRemotePort = 0
 )
 
@@ -19,6 +24,83 @@ $EnvScript = Join-Path $PSScriptRoot "autofluid_env.ps1"
 Import-AutoFluidEnv -ProjectDir $ProjectDir
 Assert-AutoFluidServerEndpoint
 
+function Test-TunnelOwnerAlive {
+    if ($OwnerPid -gt 0) {
+        return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OwnerMarkerPath)) {
+        return Test-Path -LiteralPath $OwnerMarkerPath
+    }
+    return $true
+}
+
+function Stop-ReverseTunnelChild {
+    param([object]$Process)
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-RateLimitedTunnelLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [hashtable]$LogState,
+        [switch]$Force
+    )
+
+    $now = Get-Date
+    $lastKey = [string]$LogState.LastKey
+    $lastAt = $LogState.LastAt
+    if ($Force -or $lastKey -ne $Key -or $null -eq $lastAt -or ($now - $lastAt).TotalSeconds -ge $LogRepeatSeconds) {
+        Write-TunnelSupervisorLog -LogPath $LogPath -Message $Message
+        $LogState.LastKey = $Key
+        $LogState.LastAt = $now
+    }
+}
+
+function Register-TunnelFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Reason,
+        [Parameter(Mandatory = $true)]
+        [string]$LogPath,
+        [hashtable]$FailureState,
+        [hashtable]$LogState
+    )
+
+    $now = Get-Date
+    if ($null -eq $FailureState.FirstFailureAt) {
+        $FailureState.FirstFailureAt = $now
+    }
+    $FailureState.ConsecutiveFailures = [int]$FailureState.ConsecutiveFailures + 1
+    $elapsed = ($now - $FailureState.FirstFailureAt).TotalSeconds
+    if ($FailureState.ConsecutiveFailures -ge $MaxConsecutiveFailures -or $elapsed -ge $MaxRecoverySeconds) {
+        Write-RateLimitedTunnelLog `
+            -LogPath $LogPath `
+            -Message "$TunnelKind reverse tunnel recovery budget exhausted after $($FailureState.ConsecutiveFailures) failures over $([math]::Round($elapsed, 1))s: $Reason" `
+            -Key "budget-exhausted" `
+            -LogState $LogState `
+            -Force
+        return $false
+    }
+    Write-RateLimitedTunnelLog `
+        -LogPath $LogPath `
+        -Message "$TunnelKind reverse tunnel is not reachable ($Reason); retrying in ${RestartDelaySeconds}s." `
+        -Key $Reason `
+        -LogState $LogState
+    return $true
+}
+
+function Reset-TunnelFailureBudget {
+    param([hashtable]$FailureState)
+    $FailureState.ConsecutiveFailures = 0
+    $FailureState.FirstFailureAt = $null
+}
 function Resolve-SshExe {
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SSH_EXE)) {
         return $env:AUTOFLUID_SSH_EXE
@@ -178,7 +260,12 @@ function New-TunnelWatchdogLauncher {
         "-File", $scriptPath,
         "-TunnelKind", $TunnelKind,
         "-NoWatchdog",
-        "-RestartDelaySeconds", ([string]$RestartDelaySeconds)
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
+        "-OwnerPid", ([string]$OwnerPid),
+        "-OwnerMarkerPath", $OwnerMarkerPath,
+        "-MaxConsecutiveFailures", ([string]$MaxConsecutiveFailures),
+        "-MaxRecoverySeconds", ([string]$MaxRecoverySeconds),
+        "-LogRepeatSeconds", ([string]$LogRepeatSeconds)
     )
     $command = ($commandParts | ForEach-Object { ConvertTo-WindowsCommandArgument -Value $_ }) -join " "
     $launcherContent = @(
@@ -411,19 +498,32 @@ function Start-ReverseTunnelMonitor {
 
     $logs = Get-TunnelLogPaths -RemotePort $RemotePort
     Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Supervisor starting for ${RemoteHost}:${RemotePort} -> ${TargetHost}:${TargetPort} via ${TunnelTarget}."
+    $failureState = @{ ConsecutiveFailures = 0; FirstFailureAt = $null }
+    $logState = @{ LastKey = ""; LastAt = $null }
+    $sshProcess = $null
 
     while ($true) {
+        if (-not (Test-TunnelOwnerAlive)) {
+            Stop-ReverseTunnelChild -Process $sshProcess
+            Write-RateLimitedTunnelLog -LogPath $logs.Supervisor -Message "$TunnelKind reverse tunnel owner is gone; monitor exiting." -Key "owner-gone" -LogState $logState -Force
+            exit 0
+        }
+
         if (Test-RemoteTunnelEndpoint `
                 -SshExe $SshExe `
                 -TunnelTarget $TunnelTarget `
                 -RemoteHost $RemoteHost `
                 -RemotePort $RemotePort) {
+            Reset-TunnelFailureBudget -FailureState $failureState
             Start-Sleep -Seconds 5
             continue
         }
 
         if (-not (Test-TcpEndpoint -HostName $TargetHost -Port $TargetPort)) {
-            Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Target endpoint is unreachable: ${TargetHost}:${TargetPort}; retrying in ${RestartDelaySeconds}s."
+            if (-not (Register-TunnelFailure -Reason "target-unreachable" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
+                Stop-ReverseTunnelChild -Process $sshProcess
+                exit 0
+            }
             Start-Sleep -Seconds $RestartDelaySeconds
             continue
         }
@@ -435,7 +535,7 @@ function Start-ReverseTunnelMonitor {
             -TargetHost $TargetHost `
             -TargetPort $TargetPort
 
-        Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "Starting ssh reverse tunnel: $SshExe $($argumentList -join ' ')"
+        Write-RateLimitedTunnelLog -LogPath $logs.Supervisor -Message "Starting ssh reverse tunnel: $SshExe $($argumentList -join ' ')" -Key "starting" -LogState $logState
         $sshProcess = Start-Process -FilePath $SshExe `
             -ArgumentList $argumentList `
             -WindowStyle Hidden `
@@ -444,15 +544,22 @@ function Start-ReverseTunnelMonitor {
             -PassThru
 
         while (-not $sshProcess.HasExited) {
+            if (-not (Test-TunnelOwnerAlive)) {
+                Stop-ReverseTunnelChild -Process $sshProcess
+                Write-RateLimitedTunnelLog -LogPath $logs.Supervisor -Message "$TunnelKind reverse tunnel owner is gone; monitor exiting." -Key "owner-gone" -LogState $logState -Force
+                exit 0
+            }
             Start-Sleep -Seconds 5
         }
 
         $exitCode = $sshProcess.ExitCode
-        Write-TunnelSupervisorLog -LogPath $logs.Supervisor -Message "ssh reverse tunnel exited with code ${exitCode}; restarting in ${RestartDelaySeconds}s."
+        if (-not (Register-TunnelFailure -Reason "ssh-exited-$exitCode" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
+            Stop-ReverseTunnelChild -Process $sshProcess
+            exit 0
+        }
         Start-Sleep -Seconds $RestartDelaySeconds
     }
 }
-
 function Get-ExistingTunnelMonitorProcess {
     param(
         [Parameter(Mandatory = $true)]
@@ -526,7 +633,12 @@ function Start-ReverseTunnelSupervisor {
         "-Monitor",
         "-TunnelKind", $TunnelKind,
         "-MonitorRemotePort", $RemotePort,
-        "-RestartDelaySeconds", $RestartDelaySeconds
+        "-RestartDelaySeconds", $RestartDelaySeconds,
+        "-OwnerPid", $OwnerPid,
+        "-OwnerMarkerPath", $OwnerMarkerPath,
+        "-MaxConsecutiveFailures", $MaxConsecutiveFailures,
+        "-MaxRecoverySeconds", $MaxRecoverySeconds,
+        "-LogRepeatSeconds", $LogRepeatSeconds
     )
 
     return Start-Process -FilePath $powerShellExe `

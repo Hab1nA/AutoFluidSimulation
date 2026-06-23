@@ -120,7 +120,7 @@ impl DaemonManager {
             self.process = None;
             log::info!("server 模式下通过 SSH 兜底停止远端 daemon");
             self.stop_server_daemon()?;
-            Self::cleanup_server_ipc_tunnel(project_dir)?;
+            Self::stop_server_ipc_tunnel(project_dir)?;
             return Ok(());
         }
 
@@ -144,7 +144,7 @@ impl DaemonManager {
             self.process = None;
             log::info!("server 模式下已通过 IPC 请求停止远端 daemon，继续执行 SSH 停止兜底");
             self.stop_server_daemon()?;
-            Self::cleanup_server_ipc_tunnel(project_dir)
+            Self::stop_server_ipc_tunnel(project_dir)
         } else {
             self.stop(project_dir)
         }
@@ -167,7 +167,7 @@ impl DaemonManager {
             .join("server_ipc_tunnel.pid")
     }
 
-    fn cleanup_server_ipc_tunnel(project_dir: &str) -> Result<(), String> {
+    pub fn stop_server_ipc_tunnel(project_dir: &str) -> Result<(), String> {
         let pid_file = Self::server_ipc_tunnel_pid_file(project_dir);
         let raw_pid = match fs::read_to_string(&pid_file) {
             Ok(content) => content,
@@ -713,6 +713,8 @@ impl DaemonManager {
             "Bypass".to_string(),
             "-File".to_string(),
             script.to_string_lossy().to_string(),
+            "-OwnerPid".to_string(),
+            std::process::id().to_string(),
         ];
 
         let mut last_error = String::new();
@@ -1474,6 +1476,25 @@ mod tests {
     }
 
     #[test]
+    fn server_ipc_tunnel_script_receives_client_owner_pid() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = unique_temp_project_dir();
+        write_fake_server_ipc_tunnel_script(&project_dir);
+        let marker = project_dir.join("server-ipc-args.log");
+        let powershell_exe = fake_argument_marker_exe(&project_dir, "fake_pwsh_args", &marker);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+
+        DaemonManager::run_server_ipc_tunnel_script(project_dir.to_str().expect("utf8 temp path"))
+            .expect("server ipc tunnel script should run");
+
+        let args = fs::read_to_string(&marker).expect("read marker");
+        assert!(args.contains("-OwnerPid"));
+        assert!(args.contains(&std::process::id().to_string()));
+
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        let _ = fs::remove_dir_all(project_dir);
+    }
+    #[test]
     fn launch_starts_server_ipc_tunnel_before_server_daemon() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         std::env::set_var("AUTOFLUID_SERVER_MODE", "server");
@@ -2008,6 +2029,44 @@ mod tests {
         .expect("write tunnel script");
     }
 
+    fn fake_argument_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake argument marker cmd");
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(format!("{name}.sh"));
+            fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake argument marker shell");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&path)
+                .expect("fake argument marker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("chmod fake argument marker");
+            path
+        }
+    }
     fn fake_marker_exe(
         project_dir: &std::path::Path,
         name: &str,

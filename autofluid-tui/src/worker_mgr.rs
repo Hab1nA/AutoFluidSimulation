@@ -110,29 +110,37 @@ impl WorkerManager {
     {
         log::info!("开始启动 Worker 进程");
         self.project_dir = PathBuf::from(project_dir);
+        if let Err(e) = Self::create_worker_tunnel_owner_marker_for(&self.project_dir) {
+            log_buffer.push_info(format!("❌ Worker 会话 owner marker 创建失败: {}", e));
+            return false;
+        }
 
         // 1. 启动所有工作站 SSH 反向隧道
         if !self.start_workstation_tunnels(project_dir, log_buffer) {
             log_buffer.push_info("❌ 工作站 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
             return false;
         }
 
-        // 2. 启动服务器到本机的 SSH 反向隧道
-        if !self.start_tunnel(project_dir, log_buffer, "LocalWorker") {
-            log_buffer.push_info("❌ 本机 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
-            return false;
-        }
-
-        // 3. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
+        // 2. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
         if !prepare_remote_workers(log_buffer) {
             log_buffer
                 .push_info("❌ daemon 端 Worker 准备失败，已停止本地 Worker 启动".to_string());
+            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
             return false;
         }
 
-        // 4. 启动本地 LocalWorker 进程
+        // 3. 启动本地 LocalWorker 进程
         if !self.start_local_worker(project_dir, log_buffer) {
             log_buffer.push_info("❌ 本地 Worker 启动失败".to_string());
+            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+            return false;
+        }
+
+        // 4. 启动服务器到本机的 SSH 反向隧道；此时 LocalWorker PID 已可作为 owner。
+        if !self.start_tunnel(project_dir, log_buffer, "LocalWorker") {
+            log_buffer.push_info("❌ 本机 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
             return false;
         }
 
@@ -156,6 +164,10 @@ impl WorkerManager {
         }
         log::info!("开始停止 Worker 进程");
         let mut success = true;
+        if let Err(e) = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir) {
+            log_buffer.push_info(format!("⚠️ Worker 会话 owner marker 清理失败: {}", e));
+            success = false;
+        }
 
         // 1. 终止本地 LocalWorker 进程
         if !self.stop_local_worker(log_buffer) {
@@ -370,6 +382,11 @@ impl WorkerManager {
         .current_dir(project_dir);
         if tunnel_kind == "LocalWorker" {
             cmd.arg("-NoWatchdog");
+            if let Some(owner_pid) =
+                Self::read_pid_file_for(project_dir, WorkerPidKind::LocalWorker)
+            {
+                cmd.arg("-OwnerPid").arg(owner_pid.to_string());
+            }
         }
 
         #[cfg(target_os = "windows")]
@@ -465,6 +482,10 @@ impl WorkerManager {
             workstation_tunnel_pid_file(project_dir, spec.remote_port),
         )
         .current_dir(project_dir);
+        cmd.arg("-OwnerMarkerPath")
+            .arg(Self::worker_tunnel_owner_marker_for_path(&PathBuf::from(
+                project_dir,
+            )));
 
         #[cfg(target_os = "windows")]
         {
@@ -581,6 +602,39 @@ impl WorkerManager {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(pid_file, pid.to_string())
+    }
+
+    fn read_pid_file_for(project_dir: &str, kind: WorkerPidKind) -> Option<u32> {
+        std::fs::read_to_string(Self::pid_file_for(project_dir, kind))
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+    }
+
+    #[cfg(test)]
+    fn worker_tunnel_owner_marker_for(project_dir: &std::path::Path) -> PathBuf {
+        Self::worker_tunnel_owner_marker_for_path(project_dir)
+    }
+
+    fn worker_tunnel_owner_marker_for_path(project_dir: &std::path::Path) -> PathBuf {
+        project_dir.join("data").join("worker_tunnel_owner.marker")
+    }
+
+    fn create_worker_tunnel_owner_marker_for(project_dir: &std::path::Path) -> std::io::Result<()> {
+        let marker = Self::worker_tunnel_owner_marker_for_path(project_dir);
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(marker, std::process::id().to_string())
+    }
+
+    fn remove_worker_tunnel_owner_marker_for(project_dir: &std::path::Path) -> std::io::Result<()> {
+        let marker = Self::worker_tunnel_owner_marker_for_path(project_dir);
+        match std::fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     fn cleanup_pid_file_for_path(project_dir: &std::path::Path, kind: WorkerPidKind) -> bool {
@@ -1276,6 +1330,45 @@ mod tests {
     }
 
     #[test]
+    fn start_workers_removes_owner_marker_when_prepare_fails() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-owner-fail-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_workstation_reverse_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            three_workstation_toml(),
+        )
+        .expect("write config");
+        let marker_log = project_dir.join("worker-owner-fail.log");
+        let powershell_exe =
+            fake_argument_marker_exe(&project_dir, "fake_pwsh_owner_fail", &marker_log);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let owner_marker = WorkerManager::worker_tunnel_owner_marker_for(&project_dir);
+
+        let result = wm.start_workers_with_prepare(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            |_| false,
+        );
+
+        assert!(!result);
+        assert!(!owner_marker.exists());
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+    #[test]
     fn worker_ssh_check_log_includes_effective_target() {
         let mut log_buffer = LogBuffer::new();
         let data = serde_json::json!({
@@ -1424,7 +1517,16 @@ mod tests {
         assert!(workstation_tunnel_lines
             .iter()
             .all(|line| !line.contains("-NoWatchdog")));
+        assert!(workstation_tunnel_lines
+            .iter()
+            .all(|line| line.contains("-OwnerMarkerPath")));
         assert!(local_worker_tunnel_line.contains("-NoWatchdog"));
+        assert!(local_worker_tunnel_line.contains("-OwnerPid"));
+        let owner_marker = WorkerManager::worker_tunnel_owner_marker_for(&project_dir);
+        assert!(
+            owner_marker.exists(),
+            "worker start should create owner marker"
+        );
         let daemon_idx = lines
             .iter()
             .position(|line| *line == "daemon")
@@ -1433,7 +1535,12 @@ mod tests {
             .iter()
             .position(|line| *line == "worker 127.0.0.1 2223 reverse_tunnel")
             .expect("worker marker");
+        let local_tunnel_idx = lines
+            .iter()
+            .position(|line| line.contains("-TunnelKind LocalWorker"))
+            .expect("local worker tunnel marker");
         assert!(daemon_idx < worker_idx);
+        assert!(worker_idx < local_tunnel_idx);
         assert!(
             log_buffer
                 .info_messages
@@ -1443,6 +1550,10 @@ mod tests {
         );
 
         let _ = wm.stop_workers(&mut log_buffer);
+        assert!(
+            !owner_marker.exists(),
+            "worker stop should remove the worker-session tunnel owner marker"
+        );
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         std::env::remove_var("PYTHON");
         std::env::remove_var("AUTOFLUID_WORKER_REACHABLE_HOST");

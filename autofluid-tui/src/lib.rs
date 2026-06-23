@@ -636,6 +636,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         if let Err(e) = result {
             log::warn!("完全退出清理后台引擎失败: {}", e);
         }
+    } else if let Err(e) = daemon_mgr::DaemonManager::stop_server_ipc_tunnel(ctx.project_dir) {
+        log::warn!("普通退出清理服务器 IPC 隧道失败: {}", e);
     }
 
     Ok(())

@@ -2,7 +2,11 @@ param(
     [switch]$Check,
     [switch]$Monitor,
     [switch]$NoMonitor,
-    [int]$RestartDelaySeconds = 5
+    [int]$OwnerPid = 0,
+    [int]$RestartDelaySeconds = 5,
+    [int]$MaxConsecutiveFailures = 5,
+    [int]$MaxRecoverySeconds = 120,
+    [int]$LogRepeatSeconds = 60
 )
 
 $ErrorActionPreference = "Stop"
@@ -162,6 +166,74 @@ function Start-ServerTunnel {
     return $process
 }
 
+function Test-TunnelOwnerAlive {
+    if ($OwnerPid -le 0) {
+        return $true
+    }
+    return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
+}
+
+function Stop-ServerTunnelChild {
+    param([object]$Process)
+    if ($null -ne $Process -and -not $Process.HasExited) {
+        Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Write-RateLimitedTunnelLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [hashtable]$LogState,
+        [switch]$Force
+    )
+
+    $now = Get-Date
+    $lastKey = [string]$LogState.LastKey
+    $lastAt = $LogState.LastAt
+    if ($Force -or $lastKey -ne $Key -or $null -eq $lastAt -or ($now - $lastAt).TotalSeconds -ge $LogRepeatSeconds) {
+        Write-Host $Message
+        $LogState.LastKey = $Key
+        $LogState.LastAt = $now
+    }
+}
+
+function Register-TunnelFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Reason,
+        [hashtable]$FailureState,
+        [hashtable]$LogState
+    )
+
+    $now = Get-Date
+    if ($null -eq $FailureState.FirstFailureAt) {
+        $FailureState.FirstFailureAt = $now
+    }
+    $FailureState.ConsecutiveFailures = [int]$FailureState.ConsecutiveFailures + 1
+    $elapsed = ($now - $FailureState.FirstFailureAt).TotalSeconds
+    if ($FailureState.ConsecutiveFailures -ge $MaxConsecutiveFailures -or $elapsed -ge $MaxRecoverySeconds) {
+        Write-RateLimitedTunnelLog `
+            -Message "Server IPC tunnel recovery budget exhausted after $($FailureState.ConsecutiveFailures) failures over $([math]::Round($elapsed, 1))s: $Reason" `
+            -Key "budget-exhausted" `
+            -LogState $LogState `
+            -Force
+        return $false
+    }
+    Write-RateLimitedTunnelLog `
+        -Message "Server IPC tunnel endpoint is not reachable ($Reason); retrying in ${RestartDelaySeconds}s." `
+        -Key $Reason `
+        -LogState $LogState
+    return $true
+}
+
+function Reset-TunnelFailureBudget {
+    param([hashtable]$FailureState)
+    $FailureState.ConsecutiveFailures = 0
+    $FailureState.FirstFailureAt = $null
+}
 function Get-ServerTunnelPidFilePath {
     return Join-Path $ProjectDir "data/server_ipc_tunnel.pid"
 }
@@ -222,28 +294,50 @@ function Start-ServerTunnelMonitor {
 
     Update-ServerTunnelPidFile -TunnelPid $PID
     $process = $null
+    $failureState = @{ ConsecutiveFailures = 0; FirstFailureAt = $null }
+    $logState = @{ LastKey = ""; LastAt = $null }
     while ($true) {
+        if (-not (Test-TunnelOwnerAlive)) {
+            Stop-ServerTunnelChild -Process $process
+            Write-RateLimitedTunnelLog -Message "Server IPC tunnel owner is gone; monitor exiting." -Key "owner-gone" -LogState $logState -Force
+            exit 0
+        }
+
         if (Test-AutoFluidIpcProtocolEndpoint) {
+            Reset-TunnelFailureBudget -FailureState $failureState
             Start-Sleep -Seconds 5
             continue
         }
 
-        Write-Host "Server IPC tunnel endpoint dropped; restarting."
-        if ($null -ne $process -and -not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        Stop-ServerTunnelChild -Process $process
+        try {
+            $process = Start-ServerTunnel `
+                -SshExe $SshExe `
+                -TunnelTarget $TunnelTarget `
+                -LocalHost $LocalHost `
+                -LocalPort $LocalPort `
+                -RemoteHost $RemoteHost `
+                -RemotePort $RemotePort `
+                -SkipPidFile
         }
-        $process = Start-ServerTunnel `
-            -SshExe $SshExe `
-            -TunnelTarget $TunnelTarget `
-            -LocalHost $LocalHost `
-            -LocalPort $LocalPort `
-            -RemoteHost $RemoteHost `
-            -RemotePort $RemotePort `
-            -SkipPidFile
+        catch {
+            if (-not (Register-TunnelFailure -Reason "ssh-start-failed" -FailureState $failureState -LogState $logState)) {
+                Stop-ServerTunnelChild -Process $process
+                exit 0
+            }
+            Start-Sleep -Seconds $RestartDelaySeconds
+            continue
+        }
+
         Start-Sleep -Seconds $RestartDelaySeconds
+        if (-not (Test-AutoFluidIpcProtocolEndpoint)) {
+            if (-not (Register-TunnelFailure -Reason "endpoint-unreachable" -FailureState $failureState -LogState $logState)) {
+                Stop-ServerTunnelChild -Process $process
+                exit 0
+            }
+        }
     }
 }
-
 function Start-ServerTunnelMonitorProcess {
     param(
         [Parameter(Mandatory = $true)]
@@ -257,7 +351,11 @@ function Start-ServerTunnelMonitorProcess {
         "-File", $PSCommandPath,
         "-Monitor",
         "-NoMonitor",
-        "-RestartDelaySeconds", ([string]$RestartDelaySeconds)
+        "-OwnerPid", ([string]$OwnerPid),
+        "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
+        "-MaxConsecutiveFailures", ([string]$MaxConsecutiveFailures),
+        "-MaxRecoverySeconds", ([string]$MaxRecoverySeconds),
+        "-LogRepeatSeconds", ([string]$LogRepeatSeconds)
     )
     $process = Start-Process -FilePath $PowerShellExe `
         -ArgumentList $argumentList `

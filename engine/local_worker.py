@@ -52,6 +52,9 @@ class LocalWorkerConfig:
     heartbeat_interval: float = 30.0
     poll_interval: float = 2.0
     register_retry_interval: float = 2.0
+    register_max_consecutive_failures: int = 5
+    register_max_recovery_seconds: float = 120.0
+    register_log_repeat_seconds: float = 60.0
     request_timeout: float = 10.0
 
 
@@ -189,15 +192,38 @@ class LocalWorker:
                 self._last_heartbeat_at = time.monotonic()
 
     def _register_until_available(self) -> None:
-        """Keep the worker alive while the remote daemon is still starting."""
+        """Retry registration within a bounded recovery budget."""
+        consecutive_failures = 0
+        first_failure_at: float | None = None
+        last_log_at: float | None = None
         while True:
             try:
                 self.register_once()
                 return
             except RuntimeError as exc:
-                logger.warning(str(exc))
+                now = time.monotonic()
+                if first_failure_at is None:
+                    first_failure_at = now
+                consecutive_failures += 1
+                elapsed = now - first_failure_at
+                exhausted = (
+                    consecutive_failures >= self.config.register_max_consecutive_failures
+                    or elapsed >= self.config.register_max_recovery_seconds
+                )
+                if exhausted:
+                    message = (
+                        "LocalWorker 注册重试预算耗尽: "
+                        f"consecutive_failures={consecutive_failures}, elapsed={elapsed:.1f}s"
+                    )
+                    logger.warning(message)
+                    raise RuntimeError(message) from exc
+                if (
+                    last_log_at is None
+                    or now - last_log_at >= self.config.register_log_repeat_seconds
+                ):
+                    logger.warning(str(exc))
+                    last_log_at = now
                 time.sleep(self.config.register_retry_interval)
-
     def run_once(self, now: float | None = None) -> str:
         """Advance the LocalWorker scheduler by one non-blocking tick."""
         current = time.monotonic() if now is None else now

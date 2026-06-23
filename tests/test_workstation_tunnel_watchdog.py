@@ -6,11 +6,19 @@ from utils import process_utils
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "start_workstation_reverse_tunnel.ps1"
+SERVER_IPC_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "start_server_ipc_tunnel.ps1"
+)
 
 
 def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
+    assert "[int]$OwnerPid = 0" in source
+    assert "[string]$OwnerMarkerPath = \"\"" in source
+    assert "[int]$MaxConsecutiveFailures = 5" in source
+    assert "[int]$MaxRecoverySeconds = 120" in source
+    assert "[int]$LogRepeatSeconds = 60" in source
     assert "[switch]$InstallWatchdog" in source
     assert "[switch]$UninstallWatchdog" in source
     assert "[switch]$NoWatchdog" in source
@@ -23,6 +31,57 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "-NoWatchdog" in source
     assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
 
+
+
+def test_reverse_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_start = source.index("function Start-ReverseTunnelMonitor")
+    monitor_end = source.index("function Get-ExistingTunnelMonitorProcess")
+    monitor_source = source[monitor_start:monitor_end]
+
+    assert "function Test-TunnelOwnerAlive" in source
+    assert "function Register-TunnelFailure" in source
+    assert "function Write-RateLimitedTunnelLog" in source
+    assert "function Stop-ReverseTunnelChild" in source
+    assert "Test-TunnelOwnerAlive" in monitor_source
+    assert "Register-TunnelFailure" in monitor_source
+    assert "Write-RateLimitedTunnelLog" in monitor_source
+    assert "Stop-ReverseTunnelChild" in monitor_source
+    assert "Target endpoint is unreachable" not in monitor_source
+
+
+def test_reverse_tunnel_watchdog_launcher_carries_owner_and_budget_arguments() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    launcher_start = source.index("function New-TunnelWatchdogLauncher")
+    launcher_end = source.index("function Remove-TunnelWatchdogLauncher")
+    launcher_source = source[launcher_start:launcher_end]
+
+    assert "-OwnerPid" in launcher_source
+    assert "-OwnerMarkerPath" in launcher_source
+    assert "-MaxConsecutiveFailures" in launcher_source
+    assert "-MaxRecoverySeconds" in launcher_source
+    assert "-LogRepeatSeconds" in launcher_source
+
+
+def test_server_ipc_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit() -> None:
+    source = SERVER_IPC_SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_start = source.index("function Start-ServerTunnelMonitor")
+    monitor_end = source.index("function Start-ServerTunnelMonitorProcess")
+    monitor_source = source[monitor_start:monitor_end]
+
+    assert "[int]$OwnerPid = 0" in source
+    assert "[int]$MaxConsecutiveFailures = 5" in source
+    assert "[int]$MaxRecoverySeconds = 120" in source
+    assert "[int]$LogRepeatSeconds = 60" in source
+    assert "function Test-TunnelOwnerAlive" in source
+    assert "function Register-TunnelFailure" in source
+    assert "function Write-RateLimitedTunnelLog" in source
+    assert "function Stop-ServerTunnelChild" in source
+    assert "Test-TunnelOwnerAlive" in monitor_source
+    assert "Register-TunnelFailure" in monitor_source
+    assert "Write-RateLimitedTunnelLog" in monitor_source
+    assert "Stop-ServerTunnelChild" in monitor_source
+    assert "Write-Host \"Server IPC tunnel endpoint dropped; restarting.\"" not in monitor_source
 
 def test_tunnel_watchdog_is_installed_by_default_startup() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
