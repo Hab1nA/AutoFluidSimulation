@@ -212,7 +212,7 @@ AutoFluidSimulation/
 │   ├── check_remote_env.ps1 # 远程工作站环境检查（通过 SSH）
 │   ├── setup_remote_workstation.ps1 # 远程工作站一键部署
 │   ├── verify_remote_setup.ps1     # 远程环境快速验证
-│   ├── start_autofluid_preflight.ps1 # 预检 + 启动 Daemon
+│   ├── start_autofluid_preflight.ps1 # 启动前预检
 │   ├── start_client_window.ps1     # TUI 客户端启动窗口
 │   ├── start_daemon_window.ps1     # Daemon 启动窗口
 │   ├── start_local_worker_window.ps1 # 本地 Worker 启动窗口

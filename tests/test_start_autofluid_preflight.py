@@ -22,6 +22,44 @@ def test_preflight_default_server_daemon_command_waits_for_ipc_readiness() -> No
     assert "tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out" in function_body
 
 
+def test_preflight_does_not_touch_worker_owned_reverse_tunnels_by_default() -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+
+    execution_block = content[content.index("if (-not (Test-Path -LiteralPath $PythonExe"):]
+
+    assert "& $TunnelScript -Check" in execution_block
+    assert "& $WorkstationTunnelScript" not in execution_block
+    assert "worker start" in execution_block
+    assert "& $TunnelScript`n" not in execution_block
+
+
+def test_preflight_remote_daemon_start_is_explicit_opt_in() -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+    execution_block = content[content.index("if (-not (Test-Path -LiteralPath $PythonExe"):]
+
+    assert "[switch]$StartDaemon" in content
+    assert "if ($StartDaemon)" in execution_block
+    assert execution_block.index("if ($StartDaemon)") < execution_block.index("Start-AutoFluidServerDaemon")
+    assert "if (-not $tcpReady)" not in execution_block
+
+def test_preflight_has_no_dead_local_ipc_wait_loop() -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+
+    assert "Wait-AutoFluidIpcProtocolEndpoint" not in content
+
+
+def test_preflight_user_facing_docs_describe_check_not_start() -> None:
+    main_source = Path("main.py").read_text(encoding="utf-8")
+    readme = Path("README.md").read_text(encoding="utf-8")
+    daemon_window = Path("scripts/start_daemon_window.ps1").read_text(encoding="utf-8")
+
+    assert "start_autofluid_preflight.ps1  # Windows 预检并启动" not in main_source
+    assert "start_autofluid_preflight.ps1 # 预检 + 启动 Daemon" not in readme
+    assert "to launch LocalWorker and Client" not in daemon_window
+    assert "Windows 启动前预检" in main_source
+    assert "启动前预检" in readme
+
+
 def test_server_ipc_tunnel_reuse_requires_protocol_probe() -> None:
     content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
 
@@ -74,7 +112,17 @@ def test_server_ipc_tunnel_runs_monitor_and_records_monitor_pid() -> None:
     assert "[switch]$SkipPidFile" in start_fn
     assert "if (-not $SkipPidFile)" in start_fn
     assert "-SkipPidFile" in content
-    assert "Server IPC tunnel endpoint dropped; restarting" in content
+    assert "listener-not-ready" in content
+
+def test_server_ipc_tunnel_monitor_process_quotes_script_path() -> None:
+    content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
+    monitor_fn = content[
+        content.index("function Start-ServerTunnelMonitorProcess"):
+        content.index("function Get-ServerTunnelListeningPid")
+    ]
+
+    assert "function Quote-ProcessArgument" in content
+    assert "Quote-ProcessArgument -Value $PSCommandPath" in monitor_fn
 
 def test_server_ipc_tunnel_reuse_path_still_starts_monitor_by_default() -> None:
     content = Path("scripts/start_server_ipc_tunnel.ps1").read_text(encoding="utf-8")
@@ -92,4 +140,5 @@ def test_server_ipc_tunnel_reuse_path_still_starts_monitor_by_default() -> None:
     assert default_monitor_block.index("Get-ServerTunnelMonitorPid") < default_monitor_block.index(
         "Start-ServerTunnelMonitorProcess"
     )
+    assert "Stop-ServerTunnelListeningProcess" in default_monitor_block
     assert "exit 0" in default_monitor_block

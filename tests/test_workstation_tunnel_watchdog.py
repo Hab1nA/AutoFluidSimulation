@@ -48,6 +48,19 @@ def test_reverse_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit() -
     assert "Write-RateLimitedTunnelLog" in monitor_source
     assert "Stop-ReverseTunnelChild" in monitor_source
     assert "Target endpoint is unreachable" not in monitor_source
+    assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in monitor_source
+
+
+def test_reverse_tunnel_startup_noops_when_owner_is_gone() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    owner_guard = (
+        'if (-not $Check -and -not $UninstallWatchdog -and '
+        '-not (Test-TunnelOwnerAlive))'
+    )
+
+    assert owner_guard in source
+    assert source.index(owner_guard) < source.index('if ($InstallWatchdog)')
+    assert source.index(owner_guard) < source.index("$sshExe = Resolve-SshExe")
 
 
 def test_reverse_tunnel_watchdog_launcher_carries_owner_and_budget_arguments() -> None:
@@ -82,6 +95,20 @@ def test_server_ipc_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit(
     assert "Write-RateLimitedTunnelLog" in monitor_source
     assert "Stop-ServerTunnelChild" in monitor_source
     assert "Write-Host \"Server IPC tunnel endpoint dropped; restarting.\"" not in monitor_source
+
+
+def test_server_ipc_tunnel_monitor_does_not_spend_budget_on_remote_daemon_not_ready() -> None:
+    source = SERVER_IPC_SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_start = source.index("function Start-ServerTunnelMonitor")
+    monitor_end = source.index("function Start-ServerTunnelMonitorProcess")
+    monitor_source = source[monitor_start:monitor_end]
+
+    assert "function Test-ServerTunnelChildHealthy" in source
+    assert "function Test-ServerTunnelListener" in source
+    assert "remote-daemon-not-ready" in monitor_source
+    assert "endpoint-unreachable" not in monitor_source
+    assert "Register-TunnelFailure -Reason \"remote-daemon-not-ready\"" not in monitor_source
+    assert "Register-TunnelFailure -Reason \"listener-not-ready\"" in monitor_source
 
 def test_tunnel_watchdog_is_installed_by_default_startup() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
@@ -158,6 +185,18 @@ def test_tunnel_watchdog_uninstall_stops_orphan_reverse_ssh_processes() -> None:
     assert '$remoteForwardPattern = "(^|\\s)-R\\s+\\S+:${RemotePort}:"' in source
     assert "Stopped AutoFluid $tunnelLabel reverse SSH tunnel monitor" in source
 
+
+def test_tunnel_watchdog_process_enumeration_tolerates_cim_access_denied() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    helper_start = source.index("function Get-TunnelWin32Processes")
+    helper_end = source.index("function Start-ReverseTunnelMonitor")
+    helper_source = source[helper_start:helper_end]
+
+    assert "-ErrorAction Stop" in helper_source
+    assert "catch" in helper_source
+    assert "Get-CimInstance Win32_Process |" not in source
+    assert "Get-TunnelWin32Processes |" in source
 
 def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_both_tunnel_kinds(
     monkeypatch,

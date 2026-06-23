@@ -65,6 +65,15 @@ function Get-TunnelRemotePort {
     return $port
 }
 
+function Quote-ProcessArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
 function Resolve-PowerShellExe {
     $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
     if ($null -ne $currentProcess -and -not [string]::IsNullOrWhiteSpace($currentProcess.Path)) {
@@ -178,6 +187,28 @@ function Stop-ServerTunnelChild {
     if ($null -ne $Process -and -not $Process.HasExited) {
         Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Test-ServerTunnelChildHealthy {
+    param([object]$Process)
+    return $null -ne $Process -and -not $Process.HasExited
+}
+
+function Test-ServerTunnelListener {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LocalHost,
+        [Parameter(Mandatory = $true)]
+        [int]$LocalPort
+    )
+
+    $connections = Get-NetTCPConnection -LocalPort $LocalPort -State Listen -ErrorAction SilentlyContinue
+    foreach ($connection in $connections) {
+        if ($connection.LocalAddress -eq $LocalHost -or $connection.LocalAddress -eq "0.0.0.0" -or $connection.LocalAddress -eq "::") {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Write-RateLimitedTunnelLog {
@@ -309,6 +340,24 @@ function Start-ServerTunnelMonitor {
             continue
         }
 
+        if (Test-ServerTunnelChildHealthy -Process $process) {
+            if (Test-ServerTunnelListener -LocalHost $LocalHost -LocalPort $LocalPort) {
+                Write-RateLimitedTunnelLog `
+                    -Message "Server IPC tunnel is listening; remote daemon is not ready yet." `
+                    -Key "remote-daemon-not-ready" `
+                    -LogState $logState
+                Start-Sleep -Seconds $RestartDelaySeconds
+                continue
+            }
+
+            Stop-ServerTunnelChild -Process $process
+            if (-not (Register-TunnelFailure -Reason "listener-not-ready" -FailureState $failureState -LogState $logState)) {
+                exit 0
+            }
+            Start-Sleep -Seconds $RestartDelaySeconds
+            continue
+        }
+
         Stop-ServerTunnelChild -Process $process
         try {
             $process = Start-ServerTunnel `
@@ -330,9 +379,9 @@ function Start-ServerTunnelMonitor {
         }
 
         Start-Sleep -Seconds $RestartDelaySeconds
-        if (-not (Test-AutoFluidIpcProtocolEndpoint)) {
-            if (-not (Register-TunnelFailure -Reason "endpoint-unreachable" -FailureState $failureState -LogState $logState)) {
-                Stop-ServerTunnelChild -Process $process
+        if (-not (Test-ServerTunnelListener -LocalHost $LocalHost -LocalPort $LocalPort)) {
+            Stop-ServerTunnelChild -Process $process
+            if (-not (Register-TunnelFailure -Reason "listener-not-ready" -FailureState $failureState -LogState $logState)) {
                 exit 0
             }
         }
@@ -348,7 +397,7 @@ function Start-ServerTunnelMonitorProcess {
         "-NoLogo",
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", $PSCommandPath,
+        "-File", (Quote-ProcessArgument -Value $PSCommandPath),
         "-Monitor",
         "-NoMonitor",
         "-OwnerPid", ([string]$OwnerPid),
@@ -363,6 +412,34 @@ function Start-ServerTunnelMonitorProcess {
         -PassThru
     Update-ServerTunnelPidFile -TunnelPid $process.Id
     return $process
+}
+
+function Stop-ServerTunnelListeningProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LocalHost,
+        [Parameter(Mandatory = $true)]
+        [int]$LocalPort,
+        [Parameter(Mandatory = $true)]
+        [string]$RemoteHost,
+        [Parameter(Mandatory = $true)]
+        [int]$RemotePort,
+        [Parameter(Mandatory = $true)]
+        [string]$TunnelTarget
+    )
+
+    $existingPid = Get-ServerTunnelListeningPid `
+        -LocalHost $LocalHost `
+        -LocalPort $LocalPort `
+        -RemoteHost $RemoteHost `
+        -RemotePort $RemotePort `
+        -TunnelTarget $TunnelTarget
+    if ($null -eq $existingPid) {
+        return
+    }
+
+    Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
+    Write-Host "Stopped existing unmanaged server IPC tunnel listener (PID $existingPid)."
 }
 
 function Get-ServerTunnelListeningPid {
@@ -458,6 +535,12 @@ if (-not $NoMonitor) {
         exit 0
     }
 
+    Stop-ServerTunnelListeningProcess `
+        -LocalHost $serverHost `
+        -LocalPort $serverPort `
+        -RemoteHost $remoteHost `
+        -RemotePort $remotePort `
+        -TunnelTarget $tunnelTarget
     $monitorProcess = Start-ServerTunnelMonitorProcess -PowerShellExe (Resolve-PowerShellExe)
     Write-Host "Started AutoFluid server IPC tunnel monitor (PID $($monitorProcess.Id))."
     exit 0

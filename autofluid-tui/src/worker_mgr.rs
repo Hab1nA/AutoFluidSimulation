@@ -118,7 +118,7 @@ impl WorkerManager {
         // 1. 启动所有工作站 SSH 反向隧道
         if !self.start_workstation_tunnels(project_dir, log_buffer) {
             log_buffer.push_info("❌ 工作站 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
-            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+            self.rollback_failed_worker_start(log_buffer);
             return false;
         }
 
@@ -126,21 +126,21 @@ impl WorkerManager {
         if !prepare_remote_workers(log_buffer) {
             log_buffer
                 .push_info("❌ daemon 端 Worker 准备失败，已停止本地 Worker 启动".to_string());
-            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+            self.rollback_failed_worker_start(log_buffer);
             return false;
         }
 
         // 3. 启动本地 LocalWorker 进程
         if !self.start_local_worker(project_dir, log_buffer) {
             log_buffer.push_info("❌ 本地 Worker 启动失败".to_string());
-            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+            self.rollback_failed_worker_start(log_buffer);
             return false;
         }
 
         // 4. 启动服务器到本机的 SSH 反向隧道；此时 LocalWorker PID 已可作为 owner。
         if !self.start_tunnel(project_dir, log_buffer, "LocalWorker") {
             log_buffer.push_info("❌ 本机 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
-            let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+            self.rollback_failed_worker_start(log_buffer);
             return false;
         }
 
@@ -198,6 +198,16 @@ impl WorkerManager {
         success
     }
 
+    fn rollback_failed_worker_start(&mut self, log_buffer: &mut LogBuffer) {
+        let _ = Self::remove_worker_tunnel_owner_marker_for(&self.project_dir);
+        let _ = self.stop_local_worker(log_buffer);
+        let _ = self.stop_tunnel(log_buffer);
+        for kind in [WorkerPidKind::LocalWorker, WorkerPidKind::TunnelLocalWorker] {
+            let _ = Self::cleanup_pid_file_for_path(&self.project_dir, kind);
+        }
+        let _ = Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir);
+        Self::uninstall_tunnel_watchdogs_for_path(&self.project_dir, log_buffer);
+    }
     /// 重启所有 worker：先停止再启动。
     #[allow(dead_code)]
     pub fn restart_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
@@ -1002,12 +1012,13 @@ fn env_or_default(name: &str, default: &str) -> String {
 
 impl Drop for WorkerManager {
     fn drop(&mut self) {
-        // 随 TUI 启动的 LocalWorker 需要跨客户端重连继续运行；显式 worker stop 会清理。
-        if !self.worker_started_detached {
-            if let Some(ref mut proc) = self.worker_process {
-                let _ = proc.kill();
-                let _ = proc.wait();
-            }
+        // 随 TUI 启动的 LocalWorker/隧道需要跨客户端重连继续运行；显式 worker stop 会清理。
+        if self.worker_started_detached {
+            return;
+        }
+        if let Some(ref mut proc) = self.worker_process {
+            let _ = proc.kill();
+            let _ = proc.wait();
         }
         if let Some(ref mut proc) = self.workstation_tunnel_process {
             let _ = proc.kill();
@@ -1330,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workers_removes_owner_marker_when_prepare_fails() {
+    fn start_workers_rolls_back_tunnels_when_prepare_fails() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-owner-fail-{}",
@@ -1365,6 +1376,15 @@ mod tests {
 
         assert!(!result);
         assert!(!owner_marker.exists());
+        let calls = std::fs::read_to_string(&marker_log).expect("read marker log");
+        assert!(
+            calls.contains("-TunnelKind Workstation -UninstallWatchdog"),
+            "failed worker start should uninstall workstation watchdogs: {calls}"
+        );
+        assert!(
+            calls.contains("-TunnelKind LocalWorker -UninstallWatchdog"),
+            "failed worker start should clean local-worker tunnel watchdog state: {calls}"
+        );
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         let _ = std::fs::remove_dir_all(project_dir);
     }
@@ -1410,6 +1430,64 @@ mod tests {
         assert!(!function_body.contains("std::thread::sleep"));
     }
 
+    #[test]
+    fn drop_preserves_tui_started_tunnel_handles_when_worker_is_detached() {
+        #[cfg(target_os = "windows")]
+        let workstation_tunnel = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live workstation tunnel process");
+
+        #[cfg(target_os = "windows")]
+        let local_worker_tunnel = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live local-worker tunnel process");
+
+        #[cfg(not(target_os = "windows"))]
+        let workstation_tunnel = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live workstation tunnel process");
+
+        #[cfg(not(target_os = "windows"))]
+        let local_worker_tunnel = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live local-worker tunnel process");
+
+        let workstation_pid = workstation_tunnel.id();
+        let local_worker_pid = local_worker_tunnel.id();
+        let mut manager = WorkerManager::new();
+        manager.worker_started_detached = true;
+        manager.workstation_tunnel_process = Some(workstation_tunnel);
+        manager.local_worker_tunnel_process = Some(local_worker_tunnel);
+
+        drop(manager);
+
+        assert!(crate::utils::is_pid_alive(workstation_pid));
+        assert!(crate::utils::is_pid_alive(local_worker_pid));
+        let workstation_killed = crate::utils::kill_process_tree(workstation_pid);
+        let local_worker_killed = crate::utils::kill_process_tree(local_worker_pid);
+        assert!(
+            !crate::utils::is_pid_alive(workstation_pid)
+                || (workstation_killed
+                    && crate::utils::wait_for_pid_dead(workstation_pid, Duration::from_secs(2)))
+        );
+        assert!(
+            !crate::utils::is_pid_alive(local_worker_pid)
+                || (local_worker_killed
+                    && crate::utils::wait_for_pid_dead(local_worker_pid, Duration::from_secs(2)))
+        );
+    }
     #[test]
     fn drop_preserves_tui_started_local_worker() {
         #[cfg(target_os = "windows")]

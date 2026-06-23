@@ -480,6 +480,14 @@ function Get-ReverseTunnelArguments {
     )
 }
 
+function Get-TunnelWin32Processes {
+    try {
+        return @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    }
+    catch {
+        return @()
+    }
+}
 function Start-ReverseTunnelMonitor {
     param(
         [Parameter(Mandatory = $true)]
@@ -509,6 +517,16 @@ function Start-ReverseTunnelMonitor {
             exit 0
         }
 
+        if ($null -ne $sshProcess -and $sshProcess.HasExited) {
+            $exitCode = $sshProcess.ExitCode
+            $sshProcess = $null
+            if (-not (Register-TunnelFailure -Reason "ssh-exited-$exitCode" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
+                exit 0
+            }
+            Start-Sleep -Seconds $RestartDelaySeconds
+            continue
+        }
+
         if (Test-RemoteTunnelEndpoint `
                 -SshExe $SshExe `
                 -TunnelTarget $TunnelTarget `
@@ -522,6 +540,16 @@ function Start-ReverseTunnelMonitor {
         if (-not (Test-TcpEndpoint -HostName $TargetHost -Port $TargetPort)) {
             if (-not (Register-TunnelFailure -Reason "target-unreachable" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
                 Stop-ReverseTunnelChild -Process $sshProcess
+                exit 0
+            }
+            Start-Sleep -Seconds $RestartDelaySeconds
+            continue
+        }
+
+        if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
+            Stop-ReverseTunnelChild -Process $sshProcess
+            $sshProcess = $null
+            if (-not (Register-TunnelFailure -Reason "remote-probe-failed" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
                 exit 0
             }
             Start-Sleep -Seconds $RestartDelaySeconds
@@ -542,21 +570,6 @@ function Start-ReverseTunnelMonitor {
             -RedirectStandardOutput $logs.Stdout `
             -RedirectStandardError $logs.Stderr `
             -PassThru
-
-        while (-not $sshProcess.HasExited) {
-            if (-not (Test-TunnelOwnerAlive)) {
-                Stop-ReverseTunnelChild -Process $sshProcess
-                Write-RateLimitedTunnelLog -LogPath $logs.Supervisor -Message "$TunnelKind reverse tunnel owner is gone; monitor exiting." -Key "owner-gone" -LogState $logState -Force
-                exit 0
-            }
-            Start-Sleep -Seconds 5
-        }
-
-        $exitCode = $sshProcess.ExitCode
-        if (-not (Register-TunnelFailure -Reason "ssh-exited-$exitCode" -LogPath $logs.Supervisor -FailureState $failureState -LogState $logState)) {
-            Stop-ReverseTunnelChild -Process $sshProcess
-            exit 0
-        }
         Start-Sleep -Seconds $RestartDelaySeconds
     }
 }
@@ -567,7 +580,7 @@ function Get-ExistingTunnelMonitorProcess {
     )
 
     $scriptPattern = [regex]::Escape($PSCommandPath)
-    Get-CimInstance Win32_Process |
+    Get-TunnelWin32Processes |
         Where-Object {
             $_.ProcessId -ne $PID `
                 -and $_.CommandLine -match $scriptPattern `
@@ -601,7 +614,7 @@ function Stop-ReverseTunnelSshProcesses {
 
     $remoteForwardPattern = "(^|\s)-R\s+\S+:${RemotePort}:"
     $stoppedCount = 0
-    Get-CimInstance Win32_Process |
+    Get-TunnelWin32Processes |
         Where-Object {
             $_.Name -eq "ssh.exe" `
                 -and $_.CommandLine -match $remoteForwardPattern
@@ -725,6 +738,13 @@ $remotePort = Get-RemoteBindPort
 $targetHost = Get-TargetHost
 $targetPort = Get-TargetPort
 $tunnelLabel = if ($TunnelKind -eq "LocalWorker") { "LocalWorker" } else { "Workstation" }
+
+if (-not $Check -and -not $UninstallWatchdog -and -not (Test-TunnelOwnerAlive)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_TUNNEL_PID_FILE)) {
+        throw "$tunnelLabel reverse tunnel owner is not alive; refusing to start supervisor."
+    }
+    exit 0
+}
 
 if ($UninstallWatchdog) {
     $taskName = Uninstall-TunnelWatchdogTask -RemotePort $remotePort

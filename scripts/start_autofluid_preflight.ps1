@@ -1,5 +1,6 @@
 param(
-    [switch]$Check
+    [switch]$Check,
+    [switch]$StartDaemon
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,7 +9,6 @@ $ProjectDir = Split-Path -Parent $PSScriptRoot
 $PythonExe = Join-Path $ProjectDir ".venv\Scripts\python.exe"
 $EnvScript = Join-Path $PSScriptRoot "autofluid_env.ps1"
 $TunnelScript = Join-Path $PSScriptRoot "start_server_ipc_tunnel.ps1"
-$WorkstationTunnelScript = Join-Path $PSScriptRoot "start_workstation_reverse_tunnel.ps1"
 
 . $EnvScript
 Import-AutoFluidEnv -ProjectDir $ProjectDir
@@ -96,52 +96,24 @@ function Start-AutoFluidServerDaemon {
     }
 }
 
-function Wait-AutoFluidIpcProtocolEndpoint {
-    param(
-        [int]$TimeoutSeconds = 20
-    )
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        if (Test-AutoFluidIpcProtocolEndpoint -TimeoutMs 1500) {
-            return $true
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    return $false
-}
-
 if (-not (Test-Path -LiteralPath $PythonExe -PathType Leaf)) {
     throw "Project virtual environment Python was not found: $PythonExe"
 }
 
+& $PythonExe --version
+& $TunnelScript -Check
+Write-Host "Worker-owned reverse tunnels are checked during worker start."
+Write-AutoFluidEndpointSummary
+
 if ($Check) {
-    & $PythonExe --version
-    & $TunnelScript -Check
-    & $WorkstationTunnelScript -Check
+    Write-Host "AutoFluid startup preflight check passed."
+    exit 0
 }
 
-Write-AutoFluidEndpointSummary
-if (-not $Check) {
-    & $TunnelScript
-    & $WorkstationTunnelScript
+if ($StartDaemon) {
+    Start-AutoFluidServerDaemon
+    Write-Host "AutoFluid startup preflight passed."
+    exit 0
 }
-$tcpReady = Test-AutoFluidEndpoint
-if (-not $tcpReady) {
-    Write-Warning "AutoFluid daemon TCP endpoint is not reachable yet. Attempting to start the server daemon."
-    if (-not $Check) {
-        Start-AutoFluidServerDaemon
-        if (-not (Wait-AutoFluidIpcProtocolEndpoint)) {
-            throw "AutoFluid daemon IPC protocol is still not reachable after starting the server daemon."
-        }
-    }
-}
-elseif (-not (Test-AutoFluidIpcProtocolEndpoint)) {
-    Write-Warning "AutoFluid daemon IPC protocol probe failed. Attempting to start the server daemon."
-    if (-not $Check) {
-        Start-AutoFluidServerDaemon
-        if (-not (Wait-AutoFluidIpcProtocolEndpoint)) {
-            throw "AutoFluid daemon IPC protocol is still not reachable after starting the server daemon."
-        }
-    }
-}
+
 Write-Host "AutoFluid startup preflight passed."

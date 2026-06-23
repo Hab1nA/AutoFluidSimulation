@@ -79,7 +79,9 @@ def test_tunnel_supervisor_uses_short_keepalive_and_probe_interval() -> None:
     assert "Start-Sleep -Seconds 30" not in source
     assert "Start-Sleep -Seconds 5" in source
     assert "Start-Process -FilePath $SshExe" in source
-    assert "while (-not $sshProcess.HasExited)" in source
+    assert "while (-not $sshProcess.HasExited)" not in source
+    assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
+    assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
 
 
 def test_tunnel_script_persists_supervisor_pid_for_cleanup() -> None:
