@@ -1429,6 +1429,8 @@ class TestPipelineSchedulerStartRecovery:
 
         assert cleared_workstations == ["WS-A"]
         assert cleared_all is False
+        assert self.state.get_config_workstation(1) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
 
     def test_reset_solver_clears_terminal_report_gate(self):
         """reset 触及 Solver 后应允许下一轮自然终态再次上报。"""
@@ -1509,6 +1511,8 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler.reset_config(1, "meshing")
 
         assert self.scheduler.workstation_slots.busy_workstations() == {}
+        assert self.state.get_config_workstation(1) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
         assert self.state.is_global_barrier_met() is False
         assert real_dispatch() is False
         assert self.runner._solver_dispatched == []

@@ -551,6 +551,19 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "solver") == STATUS_WAITING
             assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
 
+    def test_reset_from_meshing_clears_workstation_assignment(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.set_config_workstation(1, "WS-A")
+            sm.set_step_status(1, "transfer", STATUS_COMPLETED)
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+
+            sm.reset_config_steps(1, from_step="meshing")
+
+            assert sm.get_config_workstation(1) == "default"
+            assert sm.get_step_status(1, "transfer") == STATUS_WAITING
+            assert sm.get_step_status(1, "meshing") == STATUS_WAITING
+
     def test_reset_from_solver_resets_postprocess(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})

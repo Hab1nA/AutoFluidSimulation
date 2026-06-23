@@ -747,7 +747,8 @@ class StateManager:
 
     def _reset_single_config(self, config_name: int, from_step: str | None = None):
         """重置单个构型的步骤状态（内部方法）。"""
-        start_idx = STEP_INDEX.get(from_step, 0) if from_step else 0
+        effective_from_step = "transfer" if from_step == "meshing" else from_step
+        start_idx = STEP_INDEX.get(effective_from_step, 0) if effective_from_step else 0
         steps_to_reset = STEP_NAMES[start_idx:]
 
         with self._lock:
@@ -763,6 +764,15 @@ class StateManager:
                         SET status = ?, retry_count = 0, error_message = '', updated_at = strftime('%s','now')
                         WHERE config_name = ? AND step_name = ?
                     """, (STATUS_WAITING, config_name, step_name))
+                if from_step is None or STEP_INDEX.get(from_step, 0) <= STEP_INDEX["meshing"]:
+                    conn.execute(
+                        """
+                        UPDATE steps
+                        SET workstation_id = ?, slot_id = NULL, updated_at = strftime('%s','now')
+                        WHERE config_name = ?
+                        """,
+                        (DEFAULT_WORKSTATION_ID, config_name),
+                    )
                 # 如果重置了 SW，需谨慎处理 sw_macro_started 标志：
                 # 仅当数据库中不再有任何 SW=Completed 的构型时才清除该标志。
                 # 这样可以避免部分重置（仅重置单个构型）时意外允许全部重跑 SW。
