@@ -526,7 +526,7 @@ class RemoteExecutor:
                     json.dump(state, f, ensure_ascii=False, indent=2)
                 logger.debug(f"[Sync] 已保存同步状态: {state}")
             except OSError as e:
-                logger.warning(f"[Sync] 保存同步状态失败: {e}")
+                logger.error(f"[Sync] 保存同步状态失败: {e}")
 
     def _cleanup_remote_files(
         self,

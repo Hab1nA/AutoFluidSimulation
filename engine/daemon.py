@@ -587,11 +587,11 @@ class PipelineDaemon:
                 if latest_status == "paused":
                     logger.info("检测到暂停状态已同步，start 命令保持暂停，不执行恢复")
                     return True, None, "流水线已暂停，使用 start 可在状态稳定后恢复"
-                logger.warning("检测到引擎状态为 running 但调度器暂停标志已置位，执行恢复")
+                logger.info("检测到引擎状态为 running 但调度器暂停标志已置位，执行恢复")
                 self.scheduler.resume()
                 return True, None, "流水线已恢复运行（修正不一致状态）"
             if not self.scheduler.pipeline_alive:
-                logger.warning("检测到引擎状态为 running 但调度器线程已退出，重新启动流水线")
+                logger.info("检测到引擎状态为 running 但调度器线程已退出，重新启动流水线")
                 self.state.set_engine_status("running")
                 self._pipeline_ever_started = True
                 scheduler_thread = threading.Thread(
@@ -1158,7 +1158,7 @@ class PipelineDaemon:
             except TypeError:
                 self.runner.disconnect_ssh()
             except Exception as e:
-                logger.warning("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)
+                logger.debug("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)
 
         results.update(self._refresh_workstation_ssh_checks())
         results["registry_ready"] = False

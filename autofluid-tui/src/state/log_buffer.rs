@@ -240,9 +240,9 @@ impl LogBuffer {
 
 fn log_info_message(message: &str) {
     match info_message_level(message) {
-        log::Level::Error => log::error!("高级信息: {message}"),
-        log::Level::Warn => log::warn!("高级信息: {message}"),
-        _ => log::info!("高级信息: {message}"),
+        log::Level::Error => log::error!("{message}"),
+        log::Level::Warn => log::warn!("{message}"),
+        _ => log::info!("{message}"),
     }
 }
 
@@ -343,7 +343,14 @@ mod tests {
             info_message_level("⚠️ 启动 SSH 隧道失败: timeout"),
             log::Level::Warn
         );
+        assert_eq!(
+            info_message_level("⚠ 工作站 SSH 隧道启动失败"),
+            log::Level::Warn
+        );
         assert_eq!(info_message_level("⏸️ 流水线已暂停"), log::Level::Warn);
+        assert_eq!(info_message_level("❌ 后台引擎启动失败"), log::Level::Error);
         assert_eq!(info_message_level("后台引擎启动失败"), log::Level::Error);
+        assert_eq!(info_message_level("收到超时警告"), log::Level::Warn);
+        assert_eq!(info_message_level("✅ 后台引擎已启动"), log::Level::Info);
     }
 }

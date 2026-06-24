@@ -614,9 +614,9 @@ def ensure_directories() -> None:
         try:
             os.makedirs(path, exist_ok=True)
         except PermissionError as e:
-            logger.warning("权限不足，无法创建目录: %s: %s", path, e)
+            logger.error("权限不足，无法创建目录: %s: %s", path, e)
         except OSError as e:
-            logger.warning("无法创建目录 %s: %s", path, e)
+            logger.error("无法创建目录 %s: %s", path, e)
 
 
 def _apply_env_overrides():

@@ -2215,10 +2215,11 @@ mod tests {
 
     #[test]
     fn stop_server_ipc_tunnel_skips_live_pid_without_owner_evidence() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = unique_temp_project_dir();
         let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
         fs::create_dir_all(pid_file.parent().expect("pid parent")).expect("create data dir");
-        let mut child = spawn_live_pid_process(&project_dir);
+        let mut child = spawn_foreign_live_pid_process();
         fs::write(&pid_file, child.id().to_string()).expect("write pid");
 
         let result =
@@ -2479,6 +2480,27 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn live pid process")
+        }
+    }
+
+    fn spawn_foreign_live_pid_process() -> Child {
+        #[cfg(windows)]
+        {
+            Command::new("cmd")
+                .args(["/C", "ping 127.0.0.1 -n 30 >nul"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn foreign live pid process")
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn foreign live pid process")
         }
     }
 
