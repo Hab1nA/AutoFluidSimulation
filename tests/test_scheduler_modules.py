@@ -3868,6 +3868,50 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
         assert self.state.get_step_status(2, "solver") == STATUS_WAITING
 
+    def test_monitor_loop_uses_batch_status_counts_for_large_config_set(self, monkeypatch):
+        """大批量构型屏障监控不应每轮逐构型查询 SW/Meshing 状态。"""
+        configs = {
+            config_name: [1.0, 2.0, 3.0, 4.0]
+            for config_name in range(1, 121)
+        }
+        self.state.load_configs(configs)
+        for config_name in configs:
+            self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
+
+        class CountingState:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.get_step_status_calls = 0
+                self.get_step_status_counts_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self.wrapped, name)
+
+            def get_step_status(self, config_name, step_name):
+                self.get_step_status_calls += 1
+                return self.wrapped.get_step_status(config_name, step_name)
+
+            def get_step_status_counts(self, step_name):
+                self.get_step_status_counts_calls += 1
+                return self.wrapped.get_step_status_counts(step_name)
+
+        counting_state = CountingState(self.state)
+        self.coordinator.state = counting_state
+
+        def stop_after_one_sleep(_seconds, _paused, stopped):
+            stopped.set()
+            return False
+
+        monkeypatch.setattr(
+            "engine.scheduler.barrier.pause_aware_sleep",
+            stop_after_one_sleep,
+        )
+
+        self.coordinator.monitor_loop()
+
+        assert counting_state.get_step_status_counts_calls >= 2
+        assert counting_state.get_step_status_calls < 20
+
     def test_meshing_error_on_one_workstation_does_not_block_ready_workstation_solver(self):
         """某工作站 Meshing 失败时，不应阻断其他已通过工作站的 Solver。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
@@ -4562,6 +4606,28 @@ class TestMeshingMonitor:
         assert status == STATUS_COMPLETED, (
             f"队列中的构型应已被处理为 Completed，实际状态: {status}"
         )
+
+    def test_monitor_loop_backs_off_when_workstation_slot_busy(self, monkeypatch):
+        """工作站槽位繁忙时应退避，避免百构型队列 0.2 秒自旋。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.monitor.submit(1)
+        sleeps: list[float] = []
+
+        def fake_pause_aware_sleep(seconds, paused, stopped):
+            sleeps.append(seconds)
+            stopped.set()
+            return False
+
+        monkeypatch.setattr(
+            "engine.scheduler.meshing_monitor.pause_aware_sleep",
+            fake_pause_aware_sleep,
+        )
+        monkeypatch.setattr(self.monitor, "_try_start_worker", lambda *_args: False)
+
+        self.monitor._monitor_loop()
+
+        assert sleeps
+        assert max(sleeps) >= 1.0
 
     def test_monitor_processes_different_workstations_concurrently(self):
         """不同工作站各有一个 Meshing 槽位，应能同时处理。"""

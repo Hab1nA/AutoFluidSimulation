@@ -199,6 +199,19 @@ def test_persistent_loop_checks_process_before_quit_command() -> None:
     assert process_check < quit_check
 
 
+def test_persistent_bridge_quit_has_deadline() -> None:
+    source = _source()
+
+    assert "PersistentQuitTimeoutSeconds" in source
+    assert "quitRequestedAt" in source
+    assert re.search(
+        r"quitRequestedAt\.Value\)\.TotalSeconds\s*>=\s*PersistentQuitTimeoutSeconds",
+        source,
+    )
+    assert 'TryKillWorkingProcess(workingProcess, "persistent quit timeout")' in source
+    assert "exitCode = (int)ExitCode.Timeout;" in source
+
+
 def test_bridge_source_has_defensive_file_and_json_helpers() -> None:
     source = _source()
 

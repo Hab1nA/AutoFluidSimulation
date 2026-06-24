@@ -1,31 +1,20 @@
-use crate::event_handler::command;
 use crate::ipc::client::IpcClient;
 use crate::state::app_state::SETTINGS_LOCKED_MESSAGE;
 use crate::state::{AppState, LogBuffer};
+
+#[cfg(test)]
+use crate::event_handler::command;
+#[cfg(test)]
 use crate::{
     start_daemon_lifecycle_task, start_worker_lifecycle_task, DaemonLifecycleAction, EventContext,
     WorkerLifecycleAction,
 };
 
+#[cfg(test)]
 pub fn handle_confirm_result(result: command::CommandResult, ctx: &mut EventContext) {
     match result {
         command::CommandResult::FullQuit => {
             *ctx.full_quit = true;
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.full_quit()) {
-                    Ok(resp) if resp.is_ok() => {
-                        *ctx.full_quit_stop_sent = true;
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer
-                            .push_info(format!("❌ 停止后台引擎通信失败: {}", e));
-                    }
-                }
-            }
             ctx.state.should_quit = true;
         }
         command::CommandResult::StopDaemon => {

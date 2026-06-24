@@ -24,11 +24,14 @@ import threading
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from utils.log_paths import get_log_root, session_log_dir
 
 _session_type: str | None = None
 _session_timestamp: str | None = None
 _session_log_dir: str | None = None
+_DEFAULT_LOG_MAX_BYTES = 20 * 1024 * 1024
+_DEFAULT_LOG_BACKUP_COUNT = 10
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +240,24 @@ def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
         log_parent = os.path.dirname(os.path.abspath(log_file))
         os.makedirs(log_parent, exist_ok=True)
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = _create_file_handler(log_file)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
     return logger
+
+
+def _create_file_handler(log_file: str) -> RotatingFileHandler:
+    """Create a bounded file handler for long-running processes."""
+    max_bytes = int(os.environ.get("AUTOFLUID_LOG_MAX_BYTES", str(_DEFAULT_LOG_MAX_BYTES)))
+    backup_count = int(os.environ.get("AUTOFLUID_LOG_BACKUP_COUNT", str(_DEFAULT_LOG_BACKUP_COUNT)))
+    return RotatingFileHandler(
+        log_file,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+    )
 
 
 def _flush_deferred_loggers() -> None:
@@ -253,7 +268,7 @@ def _flush_deferred_loggers() -> None:
 
     for logger, buf_handler, formatter in deferred:
         log_file = os.path.join(_session_log_dir, f"{logger.name}.log")  # type: ignore[arg-type]
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler = _create_file_handler(log_file)
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
 

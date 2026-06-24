@@ -273,6 +273,16 @@ def test_alert_watcher_posts_warning_once_per_cooldown(monkeypatch):
     ]
 
 
+def test_prune_expired_alert_fingerprints():
+    from tools.autofluid_cli import _prune_expired_fingerprints
+
+    seen_until = {"old": 10.0, "new": 30.0, "now": 20.0}
+
+    _prune_expired_fingerprints(seen_until, current_time=20.0)
+
+    assert seen_until == {"new": 30.0}
+
+
 def test_ipc_client_reads_env_and_auth(monkeypatch):
     sent = []
 

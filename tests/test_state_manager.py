@@ -838,6 +838,26 @@ class TestGetConfigsAtStep:
             all_at_sw = sm.get_configs_at_step("sw")
             assert sorted(all_at_sw) == [1, 2]
 
+
+class TestStepStatusCounts:
+    """验证批量步骤状态统计。"""
+
+    def test_get_step_status_counts_returns_single_step_distribution(self):
+        with _TmpDB() as sm:
+            sm.load_configs({
+                1: [1.0, 2.0, 3.0, 4.0],
+                2: [5.0, 6.0, 7.0, 8.0],
+                3: [9.0, 10.0, 11.0, 12.0],
+            })
+            sm.set_step_status(1, "meshing", STATUS_COMPLETED)
+            sm.set_step_status(2, "meshing", STATUS_ERROR)
+
+            counts = sm.get_step_status_counts("meshing")
+
+            assert counts[STATUS_COMPLETED] == 1
+            assert counts[STATUS_ERROR] == 1
+            assert counts[STATUS_WAITING] == 1
+
     def test_empty_result(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})

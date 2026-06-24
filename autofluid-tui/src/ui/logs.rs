@@ -10,7 +10,6 @@ use crate::ui::scrollbar;
 
 #[derive(Debug, Clone)]
 pub struct DetailPanelParams<'a> {
-    pub log_buffer: &'a LogBuffer,
     pub level_filter: &'a Option<String>,
     pub source_filter: &'a Option<String>,
     pub scroll_offset: u16,
@@ -107,10 +106,11 @@ fn compute_layout(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_info_panel(
+pub fn render_info_panel_with_lines(
     frame: &mut Frame,
     area: Rect,
-    log_buffer: &LogBuffer,
+    lines: Vec<Line<'static>>,
+    max_content_width: usize,
     scroll_offset: u16,
     focus_zone: FocusZone,
     hscroll: u16,
@@ -134,7 +134,6 @@ pub fn render_info_panel(
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let (lines, max_content_width) = compute_info_lines_no_wrap(log_buffer, theme);
     let total = lines.len();
     let (content_height, content_width, has_vscroll, has_hscroll) =
         compute_layout(inner, total, max_content_width);
@@ -211,9 +210,14 @@ pub fn get_raw_message_at_visual_line(
     }
 }
 
-pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelParams) {
+pub fn render_detail_panel_with_lines(
+    frame: &mut Frame,
+    area: Rect,
+    params: &DetailPanelParams,
+    lines: Vec<Line<'static>>,
+    max_content_width: usize,
+) {
     let DetailPanelParams {
-        log_buffer,
         ref level_filter,
         ref source_filter,
         ref scroll_offset,
@@ -223,6 +227,7 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
         ref clicked_detail_row,
         ref hscroll,
         theme,
+        ..
     } = params;
 
     let border_style = if *focus_zone == FocusZone::DetailLog {
@@ -252,8 +257,6 @@ pub fn render_detail_panel(frame: &mut Frame, area: Rect, params: &DetailPanelPa
     let inner = block.inner(area);
     frame.render_widget(&block, area);
 
-    let (lines, max_content_width) =
-        compute_detail_lines_no_wrap(log_buffer, level_filter, source_filter);
     let total = lines.len();
     let (content_height, content_width, has_vscroll, has_hscroll) =
         compute_layout(inner, total, max_content_width);

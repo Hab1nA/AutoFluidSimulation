@@ -33,6 +33,8 @@ from engine.scheduler.work_queue import UniqueWorkQueue
 from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 
 logger = setup_logger(__name__)
+_BUSY_SLOT_REQUEUE_SLEEP_SECONDS = 1.0
+_BUSY_SLOT_REQUEUE_SLEEP_MAX_SECONDS = 5.0
 
 
 class MeshingMonitor:
@@ -206,6 +208,7 @@ class MeshingMonitor:
                 exc_info=True,
             )
 
+        busy_requeue_count = 0
         while not self._stopped.is_set():
             # 检查暂停
             if self._paused.is_set():
@@ -231,9 +234,15 @@ class MeshingMonitor:
                     config_name,
                 )
                 self._meshing_queue.requeue(config_name)
-                if not pause_aware_sleep(0.2, self._paused, self._stopped):
+                busy_requeue_count += 1
+                sleep_seconds = min(
+                    _BUSY_SLOT_REQUEUE_SLEEP_MAX_SECONDS,
+                    _BUSY_SLOT_REQUEUE_SLEEP_SECONDS * busy_requeue_count,
+                )
+                if not pause_aware_sleep(sleep_seconds, self._paused, self._stopped):
                     break
             else:
+                busy_requeue_count = 0
                 logger.info(
                     f"[MeshingMonitor] 启动构型{config_name} Meshing worker: "
                     f"workstation={workstation_id}, queue_depth={queue_depth}"

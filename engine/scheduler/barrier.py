@@ -117,6 +117,12 @@ class BarrierCoordinator:
             for config_name in self.state.get_all_configs()
         )
 
+    @staticmethod
+    def _counts_all_terminal(counts: dict[str, int], total: int) -> bool:
+        """Whether every known config for a step is Completed or Error."""
+        terminal = counts.get(STATUS_COMPLETED, 0) + counts.get(STATUS_ERROR, 0)
+        return total > 0 and terminal >= total
+
     def _ready_workstations_for_solver(self) -> set[str]:
         """Return workstations whose Meshing barrier has passed."""
         if not self._all_assignable_configs_assigned():
@@ -246,18 +252,13 @@ class BarrierCoordinator:
                 continue
 
             all_configs = self.state.get_all_configs()
+            total_configs = len(all_configs)
 
             # ---- 前置检查：SW 阶段是否已全部终结且有错误 ----
             # 若 SW 宏执行完毕但所有构型的 STEP 均缺失，后续流程无法推进。
-            sw_all_terminal = True
-            sw_has_completed = False
-            for cn in all_configs:
-                s = self.state.get_step_status(cn, "sw")
-                if s not in (STATUS_COMPLETED, STATUS_ERROR):
-                    sw_all_terminal = False
-                    break
-                if s == STATUS_COMPLETED:
-                    sw_has_completed = True
+            sw_counts = self.state.get_step_status_counts("sw")
+            sw_all_terminal = self._counts_all_terminal(sw_counts, total_configs)
+            sw_has_completed = sw_counts.get(STATUS_COMPLETED, 0) > 0
             if sw_all_terminal and not sw_has_completed:
                 logger.error("=" * 60)
                 logger.error(">>> 流水线中止！所有构型的 SW 步骤均已失败 <<<")
@@ -273,22 +274,12 @@ class BarrierCoordinator:
                 break
 
             # 检查是否所有 Meshing 均已终结（Completed 或 Error）
-            all_configs = self.state.get_all_configs()
-            all_terminal = True
-            has_error = False
-            for cn in all_configs:
-                s = self.state.get_step_status(cn, "meshing")
-                if s not in (STATUS_COMPLETED, STATUS_ERROR):
-                    all_terminal = False
-                    break
-                if s == STATUS_ERROR:
-                    has_error = True
+            meshing_counts = self.state.get_step_status_counts("meshing")
+            all_terminal = self._counts_all_terminal(meshing_counts, total_configs)
+            has_error = meshing_counts.get(STATUS_ERROR, 0) > 0
 
             if all_terminal and has_error:
-                if any(
-                    self.state.get_step_status(cn, "meshing") == STATUS_COMPLETED
-                    for cn in all_configs
-                ):
+                if meshing_counts.get(STATUS_COMPLETED, 0) > 0:
                     logger.warning("=" * 60)
                     logger.warning(">>> 部分工作站 Meshing 失败，已通过工作站继续进入 Solver <<<")
                     logger.warning("=" * 60)

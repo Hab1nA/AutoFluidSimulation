@@ -196,6 +196,77 @@ def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
     assert daemon._alert_watcher_process is None
 
 
+def test_child_health_restarts_exited_alert_watcher(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._alert_watcher_process = _DeadProcess()
+    daemon._local_worker_process = None
+    daemon._last_child_health_check = 0.0
+    daemon._child_health_check_interval_seconds = 0.0
+    daemon._alert_watcher_last_start_attempt = 0.0
+    daemon._local_worker_last_start_attempt = 0.0
+    calls = []
+
+    monkeypatch.setattr("engine.daemon.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(daemon, "_start_alert_watcher", lambda: calls.append("alert"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == ["alert"]
+    assert daemon._alert_watcher_process is None
+
+
+def test_child_health_restarts_exited_local_worker(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = _DeadProcess()
+    daemon._last_child_health_check = 0.0
+    daemon._child_health_check_interval_seconds = 0.0
+    daemon._alert_watcher_last_start_attempt = 0.0
+    daemon._local_worker_last_start_attempt = 0.0
+    calls = []
+
+    monkeypatch.setattr("engine.daemon.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(daemon, "_ensure_local_worker_autostarted", lambda: calls.append("worker"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == ["worker"]
+    assert daemon._local_worker_process is None
+
+
+def test_child_health_does_not_restart_children_after_stop_requested(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon()
+    daemon._stop_event.set()
+    daemon._alert_watcher_process = _DeadProcess()
+    daemon._local_worker_process = _DeadProcess()
+    calls = []
+
+    monkeypatch.setattr(daemon, "_start_alert_watcher", lambda: calls.append("alert"))
+    monkeypatch.setattr(daemon, "_ensure_local_worker_autostarted", lambda: calls.append("worker"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == []
+
+
 def test_signal_handler_only_requests_main_loop_shutdown(monkeypatch) -> None:
     from engine.daemon import PipelineDaemon
 

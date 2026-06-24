@@ -66,6 +66,7 @@ namespace AutoFluidSimulation.Bridge
         private const int PersistentReadyPollIntervalMs = 2000;
         private const int PersistentLoopPollIntervalMs = 1000;
         private const int PersistentMonitorHeartbeatSeconds = 30;
+        private const int PersistentQuitTimeoutSeconds = 30;
         private const int ProcessAppearPollIntervalMs = 1000;
         private const int ProcessCheckRetryDelayMs = 2000;
         private const int WaitForInputIdleTimeoutMs = 15000;
@@ -900,6 +901,7 @@ namespace AutoFluidSimulation.Bridge
             // 命令循环：监听进程退出和 quit 文件命令
             int exitCode = (int)ExitCode.Success;
             bool quitRequested = false;
+            DateTime? quitRequestedAt = null;
             DateTime lastMonitorUpdate = DateTime.UtcNow;
             // ★ 进程检测连续失败计数器：防止因瞬态异常（如进程句柄暂不可用）
             //    误判 SpaceClaim 退出。累计 5 次连续失败才确认退出。
@@ -994,12 +996,26 @@ namespace AutoFluidSimulation.Bridge
                     if (!quitRequested && IsQuitCommandPending(cmdFile))
                     {
                         quitRequested = true;
+                        quitRequestedAt = DateTime.UtcNow;
                         Console.WriteLine("[BRIDGE] 收到 quit 命令，等待 SpaceClaim 脚本退出...");
                         WritePersistentMonitorFile(
                             opts,
                             GetProcessIdOrDefault(workingProcess),
                             "quit_requested");
                         lastMonitorUpdate = DateTime.UtcNow;
+                    }
+
+                    if (quitRequestedAt.HasValue
+                        && (DateTime.UtcNow - quitRequestedAt.Value).TotalSeconds >= PersistentQuitTimeoutSeconds)
+                    {
+                        Console.Error.WriteLine("[BRIDGE_ERROR] quit 请求超时，强制终止 SpaceClaim");
+                        TryKillWorkingProcess(workingProcess, "persistent quit timeout");
+                        WritePersistentMonitorFile(
+                            opts,
+                            GetProcessIdOrDefault(workingProcess),
+                            "quit_timeout");
+                        exitCode = (int)ExitCode.Timeout;
+                        break;
                     }
 
                     Thread.Sleep(PersistentLoopPollIntervalMs);

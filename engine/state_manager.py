@@ -373,6 +373,20 @@ class StateManager:
             result: str = row["status"] if row else STATUS_WAITING
             return result
 
+    def get_step_status_counts(self, step_name: str) -> dict[str, int]:
+        """Return status distribution for one step using one aggregate query."""
+        with self._get_connection(readonly=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM steps
+                WHERE step_name = ?
+                GROUP BY status
+                """,
+                (step_name,),
+            ).fetchall()
+        return {str(row["status"]): int(row["cnt"]) for row in rows}
+
     def set_step_status(self, config_name: int, step_name: str, status: str,
                         error_message: str = ""):
         """

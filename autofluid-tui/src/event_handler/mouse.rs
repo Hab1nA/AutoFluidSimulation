@@ -4,7 +4,6 @@
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 
-use crate::daemon_mgr::DaemonManager;
 use crate::event_handler::{actions, HORIZONTAL_SCROLL_STEP, SCROLL_LINE_STEP, SCROLL_WHEEL_STEP};
 use crate::ipc::client::IpcClient;
 use crate::settings::SettingsState;
@@ -16,21 +15,14 @@ use crate::ui::command_bar;
 use crate::ui::command_bar::BUTTON_DEFS;
 use crate::ui::layout::AppLayout;
 use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
-use crate::worker_mgr::WorkerManager;
-use crate::{DaemonLifecycleTask, WorkerLifecycleTask};
+use crate::CommandTask;
 
 use crate::point_in_rect;
 
 pub struct MouseRuntime<'a> {
     pub ipc: &'a mut IpcClient,
     pub rt: &'a tokio::runtime::Runtime,
-    pub daemon: &'a mut DaemonManager,
-    pub worker: &'a mut WorkerManager,
-    pub daemon_task: Option<&'a mut Option<DaemonLifecycleTask>>,
-    pub worker_task: Option<&'a mut Option<WorkerLifecycleTask>>,
-    pub project_dir: &'a str,
-    pub full_quit: &'a mut bool,
-    pub full_quit_stop_sent: &'a mut bool,
+    pub command_task: Option<&'a mut Option<CommandTask>>,
 }
 
 // ====================================================================
@@ -1163,29 +1155,16 @@ pub fn handle_dialog_button_click(
         UiMode::ConfirmDialog => match btn_idx {
             0 => {
                 if let Some(callback) = state.confirm_callback.take() {
-                    let result =
-                        runtime
-                            .rt
-                            .block_on(crate::event_handler::command::execute_confirm_action(
-                                &callback,
-                                &mut *runtime.ipc,
-                                log_buffer,
-                            ));
-                    let mut ctx = crate::EventContext {
+                    let host = runtime.ipc.host().to_string();
+                    let port = runtime.ipc.port();
+                    crate::start_confirm_action_task(
+                        runtime.command_task.as_deref_mut(),
+                        callback,
+                        &host,
+                        port,
                         state,
                         log_buffer,
-                        ipc: runtime.ipc,
-                        check_task: None,
-                        daemon_task: runtime.daemon_task.as_deref_mut(),
-                        worker_task: runtime.worker_task.as_deref_mut(),
-                        daemon: runtime.daemon,
-                        worker: runtime.worker,
-                        rt: runtime.rt,
-                        project_dir: runtime.project_dir,
-                        full_quit: runtime.full_quit,
-                        full_quit_stop_sent: runtime.full_quit_stop_sent,
-                    };
-                    actions::handle_confirm_result(result, &mut ctx);
+                    );
                 }
                 state.ui_mode = UiMode::Normal;
                 state.confirm_message = None;

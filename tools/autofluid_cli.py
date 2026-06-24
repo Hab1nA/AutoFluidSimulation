@@ -38,6 +38,8 @@ WORKER_TIMEOUT_SECONDS = 60.0
 DEFAULT_ALERT_LIMIT = 50
 DEFAULT_ALERT_INTERVAL_SECONDS = 5.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 600.0
+ALERT_FINGERPRINT_PRUNE_INTERVAL = 20
+ALERT_FINGERPRINT_PRUNE_THRESHOLD = 1000
 REMOTE_CLEAN_STEPS = {"transfer", "meshing", "solver", "solverdata", "postprocess", "cache"}
 REMOTE_RESET_STEPS = {"transfer", "meshing", "solver", "solverdata", "postprocess"}
 LOCALWORKER_OWNED_STEPS = {"all", "sw", "sc"}
@@ -250,6 +252,20 @@ def _alert_payload(entry: dict[str, Any], fingerprint: str) -> dict[str, Any]:
     }
 
 
+def _prune_expired_fingerprints(
+    seen_until: dict[str, float],
+    current_time: float,
+) -> None:
+    """Remove expired alert cooldown fingerprints in-place."""
+    expired = [
+        fingerprint
+        for fingerprint, expires_at in seen_until.items()
+        if expires_at <= current_time
+    ]
+    for fingerprint in expired:
+        seen_until.pop(fingerprint, None)
+
+
 def _watch_alerts(
     args: argparse.Namespace,
     client: IpcClient,
@@ -320,6 +336,11 @@ def _watch_alerts(
                 seen_until[fingerprint] = current_time + args.cooldown
 
         loops += 1
+        if (
+            loops % ALERT_FINGERPRINT_PRUNE_INTERVAL == 0
+            or len(seen_until) > ALERT_FINGERPRINT_PRUNE_THRESHOLD
+        ):
+            _prune_expired_fingerprints(seen_until, now())
         if iterations is not None and loops >= iterations:
             break
         sleep(args.interval)

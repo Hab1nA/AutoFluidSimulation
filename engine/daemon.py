@@ -72,6 +72,8 @@ _DAEMON_PID_FILE = os.path.join(_PID_DIR, "daemon.pid")
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS = 30.0
 _ALERT_WATCHER_STOP_TIMEOUT_SECONDS = 5.0
+_ALERT_WATCHER_RESTART_COOLDOWN_SECONDS = 30.0
+_CHILD_HEALTH_CHECK_INTERVAL_SECONDS = 10.0
 
 
 def _json_size_bytes(payload: Any) -> int:
@@ -194,6 +196,9 @@ class PipelineDaemon:
         self._local_worker_process: subprocess.Popen | None = None
         self._local_worker_last_start_attempt = 0.0
         self._alert_watcher_process: subprocess.Popen | None = None
+        self._alert_watcher_last_start_attempt = 0.0
+        self._last_child_health_check = 0.0
+        self._child_health_check_interval_seconds = _CHILD_HEALTH_CHECK_INTERVAL_SECONDS
         self._started_at_epoch: float | None = None
         self._last_worker_ssh_checks: dict[str, str] = {}
         self._ssh_health_thread: threading.Thread | None = None
@@ -333,7 +338,7 @@ class PipelineDaemon:
             # 必须带 timeout：无超时的 wait() 底层是 C 级 Lock.acquire()，
             # 不执行 Python 字节码，导致 KeyboardInterrupt 无法在 Windows 上被抛出。
             while not self._stop_event.wait(timeout=1.0):
-                pass
+                self._check_child_process_health()
         except KeyboardInterrupt:
             logger.info("收到 Ctrl+C，守护进程正在退出...")
         finally:
@@ -441,6 +446,12 @@ class PipelineDaemon:
         if existing_process is not None and existing_process.poll() is None:
             return
 
+        now = time.monotonic()
+        last_attempt = float(getattr(self, "_alert_watcher_last_start_attempt", 0.0))
+        if now - last_attempt < _ALERT_WATCHER_RESTART_COOLDOWN_SECONDS:
+            return
+        self._alert_watcher_last_start_attempt = now
+
         env = os.environ.copy()
         env["AUTOFLUID_IPC_HOST"] = str(IPC_CONFIG["host"])
         env["AUTOFLUID_IPC_PORT"] = str(IPC_CONFIG["port"])
@@ -476,6 +487,40 @@ class PipelineDaemon:
 
         self._alert_watcher_process = process
         logger.info("[AlertWatcher] 已启动: pid=%s, log=%s", process.pid, log_path)
+
+    def _check_child_process_health(self) -> None:
+        """Periodically restart daemon-owned children that have exited."""
+        now = time.monotonic()
+        last_check = float(getattr(self, "_last_child_health_check", 0.0))
+        interval = float(
+            getattr(
+                self,
+                "_child_health_check_interval_seconds",
+                _CHILD_HEALTH_CHECK_INTERVAL_SECONDS,
+            )
+        )
+        if now - last_check < interval:
+            return
+        self._last_child_health_check = now
+        self._check_child_process_health_once()
+
+    def _check_child_process_health_once(self) -> None:
+        """Restart daemon-owned child processes after unexpected exit."""
+        stop_event = getattr(self, "_stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return
+
+        alert_process = getattr(self, "_alert_watcher_process", None)
+        if alert_process is not None and alert_process.poll() is not None:
+            logger.warning("[AlertWatcher] 子进程已退出，准备按退避策略重启")
+            self._alert_watcher_process = None
+            self._start_alert_watcher()
+
+        worker_process = getattr(self, "_local_worker_process", None)
+        if worker_process is not None and worker_process.poll() is not None:
+            logger.warning("[LocalWorker] 自动唤起的子进程已退出，准备按退避策略重启")
+            self._local_worker_process = None
+            self._ensure_local_worker_autostarted()
 
     def _stop_alert_watcher(self) -> None:
         """Stop the daemon-owned alert watcher child process if it is still alive."""
