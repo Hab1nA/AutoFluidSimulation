@@ -15,6 +15,7 @@ import sys
 import tempfile
 import shutil
 import logging
+from pathlib import Path
 import pytest
 from engine.state_manager import StateManager
 from engine.config import (
@@ -1360,6 +1361,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
             self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
             self.state.set_step_status(cn, "transfer", STATUS_COMPLETED)
+            self._record_remote_outputs(cn, transfer=True)
             self.state.set_step_status(cn, "meshing", STATUS_WAITING)
 
         with caplog.at_level(logging.INFO):
@@ -1558,10 +1560,15 @@ class TestPipelineSchedulerStartRecovery:
         self,
         config_name: int,
         *,
+        transfer: bool = False,
         meshing: bool = False,
         solver: bool = False,
         postprocess: bool = False,
     ) -> None:
+        if transfer:
+            self.runner._ssh.remote_file_sizes[
+                f"D:/xkz_1020/scdoc/model_gen4_{config_name}.scdoc"
+            ] = 1024
         if meshing:
             self.runner._ssh.remote_file_sizes[
                 f"D:/xkz_1020/msh/model_gen4_{config_name}.msh.h5"
@@ -1586,6 +1593,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1620,14 +1628,18 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "sc") == STATUS_WAITING
         assert self.scheduler._sc_queue.qsize() == 1
 
-    def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
+    def test_resume_scan_uses_assigned_workstation_for_remote_task(self, monkeypatch):
         """断点恢复查询远程任务时应使用构型分配的工作站。"""
+        import engine.scheduler.main as scheduler_main
+
+        monkeypatch.setattr(scheduler_main, "WORKSTATIONS", [{"id": "WS-A"}])
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_config_workstation(1, "WS-A")
         for step in ["sw", "sc", "transfer"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1642,7 +1654,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1657,7 +1669,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1680,7 +1692,7 @@ class TestPipelineSchedulerStartRecovery:
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
-        self._record_remote_outputs(1, meshing=True, solver=True, postprocess=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True, solver=True, postprocess=True)
         self.runner._ssh.connected = False
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
@@ -1958,6 +1970,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "lost"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1970,6 +1983,7 @@ class TestPipelineSchedulerStartRecovery:
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1977,13 +1991,33 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
         assert self.scheduler.meshing_monitor.qsize() == 1
 
+    def test_completed_remote_transfer_with_missing_scdoc_is_reset_on_resume(self):
+        """Transfer Completed 不能只信任状态库，远程 SCDOC 缺失时应重新传输。"""
+        step_dir = Path(LOCAL_PATHS["step_dir"])
+        scdoc_dir = Path(LOCAL_PATHS["scdoc_dir"])
+        step_dir.mkdir(parents=True, exist_ok=True)
+        scdoc_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / "model_gen4.SLDPRT_1.step").write_bytes(b"step")
+        (scdoc_dir / "model_gen4_1.scdoc").write_bytes(b"scdoc")
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        self._record_remote_outputs(1, meshing=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
     def test_completed_remote_solver_with_missing_results_is_reset_on_resume(self):
         """Solver Completed 缺少 cas/dat 结果时应回到 Waiting 等屏障重新调度。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing", "solver"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
 
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1997,7 +2031,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "completed"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -2029,7 +2063,7 @@ class TestPipelineSchedulerStartRecovery:
             started_at=time.time(),
         )
         self.scheduler._check_step_output_exists = lambda *_args: True
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -2050,7 +2084,7 @@ class TestPipelineSchedulerStartRecovery:
             error_flag_file="D:/flags/solver_done_1.txt.error",
             started_at=time.time(),
         )
-        self._record_remote_outputs(1, meshing=True, solver=True, postprocess=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True, solver=True, postprocess=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -2387,6 +2421,18 @@ class _CleanStepRunner:
         return self.remote_executor
 
 
+class _CleanStepSlots:
+    def __init__(self):
+        self.released_configs = []
+        self.clear_count = 0
+
+    def release_config(self, config_name):
+        self.released_configs.append(config_name)
+
+    def clear(self):
+        self.clear_count += 1
+
+
 class _CleanStepScheduler:
     def __init__(self):
         self.file_monitor_reset_count = 0
@@ -2395,6 +2441,7 @@ class _CleanStepScheduler:
         self.resume_calls = 0
         self.is_paused = False
         self.pipeline_alive = False
+        self.workstation_slots = _CleanStepSlots()
 
     def request_file_monitor_reset(self):
         self.file_monitor_reset_count += 1
@@ -2419,6 +2466,7 @@ class _DaemonState:
         self.remote_tasks = remote_tasks or []
         self.statuses = statuses or {}
         self.set_status_calls = []
+        self.delete_all_remote_tasks_calls = []
 
     def get_engine_status(self):
         return self.engine_status
@@ -2438,6 +2486,16 @@ class _DaemonState:
 
     def get_step_status(self, config_name, step_name):
         return self.statuses.get(config_name, {}).get(step_name, STATUS_WAITING)
+
+    def delete_all_remote_tasks(self, workstation_id=None):
+        self.delete_all_remote_tasks_calls.append(workstation_id)
+        if workstation_id is None:
+            self.remote_tasks.clear()
+            return
+        self.remote_tasks = [
+            task for task in self.remote_tasks
+            if task.get("workstation_id", "default") != workstation_id
+        ]
 
 
 class _AssignmentState:
@@ -2611,6 +2669,38 @@ class TestPipelineDaemonCleanStep:
         assert "重新启动" in message
         assert daemon.scheduler.start_calls == 1
         assert daemon.state.get_engine_status() == "running"
+
+    def test_start_running_rereads_state_before_resuming_paused_flag(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+
+        class _PauseRacingState(_DaemonState):
+            def __init__(self):
+                super().__init__(engine_status="running")
+                self._reads = 0
+
+            def get_engine_status(self):
+                self._reads += 1
+                if self._reads == 1:
+                    self.engine_status = "paused"
+                    return "running"
+                return self.engine_status
+
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _PauseRacingState()
+        daemon.scheduler = _CleanStepScheduler()
+        daemon.scheduler.is_paused = True
+        daemon.scheduler.pipeline_alive = True
+        daemon._pipeline_ever_started = True
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert data is None
+        assert "已暂停" in message
+        assert daemon.scheduler.resume_calls == 0
+        assert daemon.scheduler.start_calls == 0
+        assert daemon.state.get_engine_status() == "paused"
 
     def test_worker_register_and_heartbeat_handlers_update_registry(self):
         from engine.daemon import PipelineDaemon
@@ -3049,6 +3139,11 @@ class TestPipelineDaemonCleanStep:
         from engine.local_worker_registry import LocalWorkerRegistry
 
         daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[
+                {"config_name": 1, "step_name": "meshing", "workstation_id": "WS-A"}
+            ],
+        )
         daemon.runner = None
         daemon.local_worker_registry = LocalWorkerRegistry()
         daemon._last_worker_ssh_checks = {"default": "ok"}
@@ -3059,6 +3154,9 @@ class TestPipelineDaemonCleanStep:
         assert message == "所有 Worker 已停止"
         assert data["registry_cleared"] is True
         assert daemon._last_worker_ssh_checks == {}
+        assert data["remote_tasks_cleared"] is True
+        assert daemon.state.get_all_remote_tasks() == []
+        assert daemon.state.delete_all_remote_tasks_calls == [None]
 
     def test_worker_start_keeps_partial_success_visible(self, monkeypatch):
         from engine import config as config_module
@@ -3618,6 +3716,91 @@ class TestPipelineDaemonCleanStep:
 
         assert ok is True
         assert daemon.runner.remote_executor.query_calls == [(1, "meshing", "WS-A")]
+
+    def test_clean_remote_single_config_releases_workstation_slot_after_success(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": 1,
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已清理 meshing 步骤的文件" in message
+        assert daemon.runner.clean_calls == [("meshing", 1)]
+        assert daemon.scheduler.workstation_slots.released_configs == [1]
+        assert daemon.scheduler.workstation_slots.clear_count == 0
+
+    def test_clean_remote_all_configs_clears_workstation_slots_after_success(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": "all",
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert daemon.runner.clean_calls == [("meshing", "all")]
+        assert daemon.scheduler.workstation_slots.released_configs == []
+        assert daemon.scheduler.workstation_slots.clear_count == 1
+
+    def test_background_remote_clean_failure_does_not_release_workstation_slots(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_clean = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "meshing",
+                "config_name": "all",
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert daemon.scheduler.workstation_slots.released_configs == []
+        assert daemon.scheduler.workstation_slots.clear_count == 0
 
 
 class TestPipelineDaemonResetStep:

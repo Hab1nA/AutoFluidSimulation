@@ -70,3 +70,9 @@ class PipelineControl:
         with self._transition_lock:
             allowed = not self._paused.is_set() and not self._stopped.is_set()
         yield allowed
+
+    @contextmanager
+    def finalize_external_start(self) -> Iterator[bool]:
+        """Hold the transition lock while committing fast start/resume finalization."""
+        with self._transition_lock:
+            yield not self._paused.is_set() and not self._stopped.is_set()

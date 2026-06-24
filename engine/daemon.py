@@ -583,6 +583,10 @@ class PipelineDaemon:
             # 二次确认：检查调度器的暂停标志是否被意外置位
             # （防止 start_pipeline 末尾覆盖 engine_status 导致的不一致）
             if self.scheduler.is_paused:
+                latest_status = self.state.get_engine_status()
+                if latest_status == "paused":
+                    logger.info("检测到暂停状态已同步，start 命令保持暂停，不执行恢复")
+                    return True, None, "流水线已暂停，使用 start 可在状态稳定后恢复"
                 logger.warning("检测到引擎状态为 running 但调度器暂停标志已置位，执行恢复")
                 self.scheduler.resume()
                 return True, None, "流水线已恢复运行（修正不一致状态）"
@@ -1301,6 +1305,7 @@ class PipelineDaemon:
         results: dict[str, Any] = {
             "ssh_disconnected": [],
             "registry_cleared": False,
+            "remote_tasks_cleared": False,
         }
         self._stop_workstation_ssh_health_monitor()
 
@@ -1316,6 +1321,11 @@ class PipelineDaemon:
         self.local_worker_registry.clear_online_workers()
         self.local_worker_registry.clear_pending_tasks()
         results["registry_cleared"] = True
+        state = getattr(self, "state", None)
+        delete_all_remote_tasks = getattr(state, "delete_all_remote_tasks", None)
+        if callable(delete_all_remote_tasks):
+            delete_all_remote_tasks()
+            results["remote_tasks_cleared"] = True
         self._last_worker_ssh_checks = {}
         try:
             results["watchdog_cleanup"] = cleanup_tunnel_watchdog_tasks(_PROJECT_ROOT)
@@ -1672,6 +1682,7 @@ class PipelineDaemon:
             def _do_clean_step():
                 try:
                     self.runner.clean_step_files(step_name, config_name)
+                    self._release_cleaned_workstation_slots(step_name, config_name)
                     logger.info(
                         f"[Cleaner] 后台清理完成: step={step_name}, "
                         f"config={config_name or 'all'}"
@@ -1684,12 +1695,13 @@ class PipelineDaemon:
                     )
 
             threading.Thread(target=_do_clean_step, daemon=True,
-                           name=f"Clean-{step_name}-Bg").start()
+                name=f"Clean-{step_name}-Bg").start()
             msg = f"已启动后台清理 {step_name} 步骤的文件"
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
         else:
             self.runner.clean_step_files(step_name, config_name)
+            self._release_cleaned_workstation_slots(step_name, config_name)
             msg = f"已清理 {step_name} 步骤的文件"
             if config_name is not None and config_name != "all":
                 msg += f" (构型{config_name})"
@@ -1701,6 +1713,27 @@ class PipelineDaemon:
                 self.scheduler.request_file_monitor_reset()
 
         return True, None, msg
+
+    def _release_cleaned_workstation_slots(
+        self,
+        step_name: str | None,
+        config_name: int | str | None,
+    ) -> None:
+        """Release workstation slots whose remote execution files were cleaned."""
+        if step_name not in {"all", "transfer", "meshing", "solver", "postprocess"}:
+            return
+        scheduler = getattr(self, "scheduler", None)
+        workstation_slots = getattr(scheduler, "workstation_slots", None)
+        if workstation_slots is None:
+            return
+        if config_name is None or config_name == "all":
+            clear = getattr(workstation_slots, "clear", None)
+            if callable(clear):
+                clear()
+            return
+        release_config = getattr(workstation_slots, "release_config", None)
+        if callable(release_config):
+            release_config(config_name)
 
     def _validate_mutation_safe(
         self,

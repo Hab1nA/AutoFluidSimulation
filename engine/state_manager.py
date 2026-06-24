@@ -652,6 +652,18 @@ class StateManager:
                     [(config_name, step_name) for step_name in steps_to_delete],
                 )
 
+    def delete_all_remote_tasks(self, workstation_id: str | None = None) -> None:
+        """删除所有或指定工作站的远程任务元数据。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                if workstation_id is None:
+                    conn.execute("DELETE FROM remote_tasks")
+                else:
+                    conn.execute(
+                        "DELETE FROM remote_tasks WHERE workstation_id = ?",
+                        (workstation_id,),
+                    )
+
     def set_config_workstation(
         self,
         config_name: int,

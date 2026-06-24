@@ -90,6 +90,40 @@ def test_external_start_rejects_stopped_pipeline() -> None:
         assert allowed is False
 
 
+def test_finalize_external_start_holds_transition_until_fast_finalize_completes() -> None:
+    """收口阶段必须与 pause 串行，避免 pause 后又写回 running。"""
+    control = PipelineControl()
+    finalize_started = threading.Event()
+    allow_finalize_to_finish = threading.Event()
+    pause_finished = threading.Event()
+
+    def finalize() -> None:
+        with control.finalize_external_start() as allowed:
+            assert allowed is True
+            finalize_started.set()
+            allow_finalize_to_finish.wait(timeout=2)
+
+    def pause() -> None:
+        control.pause()
+        pause_finished.set()
+
+    finalize_thread = threading.Thread(target=finalize)
+    finalize_thread.start()
+    assert finalize_started.wait(timeout=1)
+
+    pause_thread = threading.Thread(target=pause)
+    pause_thread.start()
+    assert pause_finished.wait(timeout=0.05) is False
+
+    allow_finalize_to_finish.set()
+    finalize_thread.join(timeout=1)
+    pause_thread.join(timeout=1)
+
+    assert pause_finished.is_set() is True
+    with control.external_start() as allowed:
+        assert allowed is False
+
+
 def test_sw_export_does_not_initialize_com_while_paused() -> None:
     """SW 单构型入口应在任何 COM 副作用前拒绝暂停状态。"""
     from executor.sw_executor import SWExecutor

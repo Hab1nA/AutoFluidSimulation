@@ -295,7 +295,7 @@ class PipelineScheduler:
         # ---- 步骤 4: 写回运行态并收口屏障 ----
         # 与 pause() 共用控制锁，避免 pause() 返回后后台启动线程再写回 running
         # 或继续触发 Solver 分发。
-        with self._control.external_start() as can_finalize:
+        with self._control.finalize_external_start() as can_finalize:
             if not can_finalize:
                 logger.info("流水线组件已就绪，但暂停/停止标志已置位，跳过后续启动")
                 if self._paused.is_set():
@@ -497,11 +497,11 @@ class PipelineScheduler:
         （Completed/Error），避免 pause→resume 时步骤被重复入队。
         """
         logger.info("收到暂停指令")
-        self._control.pause()
-        # 不再调用 set_all_running_to_paused()，让正在运行的步骤自然完成
-        self.state.set_engine_status("paused")
-        if self._file_monitor is not None:
-            self._file_monitor.pause()
+        with self._control.pause_transition():
+            # 不再调用 set_all_running_to_paused()，让正在运行的步骤自然完成
+            self.state.set_engine_status("paused")
+            if self._file_monitor is not None:
+                self._file_monitor.pause()
         logger.info("流水线已暂停，正在运行的步骤将继续执行直到完成")
 
     @property
@@ -559,7 +559,7 @@ class PipelineScheduler:
 
                 if status == STATUS_COMPLETED:
                     if (
-                        step in {"sw", "sc", "meshing", "solver", "postprocess"}
+                        step in {"sw", "sc", "transfer", "meshing", "solver", "postprocess"}
                         and self._completed_step_output_exists(
                             cn, step, step_dir, scdoc_dir
                         ) is False
@@ -796,6 +796,8 @@ class PipelineScheduler:
             if is_server_mode():
                 return True
             return self._check_step_output_exists(cn, step, step_dir, scdoc_dir)
+        if step == "transfer":
+            return self._remote_files_exist(cn, ("transfer",))
         if step == "meshing":
             return self._remote_files_exist(cn, ("meshing",))
         if step == "solver":
@@ -807,7 +809,10 @@ class PipelineScheduler:
     def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool | None:
         """Return True/False for confirmed remote output state, or None if SSH is indeterminate."""
         workstation_id = self._workstation_for_config(cn)
-        remote_config = self._remote_config_for_workstation(workstation_id)
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+        except Exception:
+            return None
         ssh = None
         try:
             ssh = self.runner.get_ssh(workstation_id)
@@ -828,10 +833,16 @@ class PipelineScheduler:
                 if not postprocess_exists:
                     return False
                 continue
-            filename = get_step_filename(output_step, cn)
+            filename_step = "sc" if output_step == "transfer" else output_step
+            filename = get_step_filename(filename_step, cn)
             if not filename:
                 return False
-            directory_key = "msh_dir" if output_step == "meshing" else "result_dir"
+            if output_step == "transfer":
+                directory_key = "scdoc_dir"
+            elif output_step == "meshing":
+                directory_key = "msh_dir"
+            else:
+                directory_key = "result_dir"
             remote_dir = str(remote_config[directory_key]).replace("\\", "/")
             remote_path = f"{remote_dir}/{filename}"
             try:
@@ -999,7 +1010,7 @@ class PipelineScheduler:
         #   （resume_and_reset 会清空 _processed_files 导致重复入队）。
         # 与 pause() 共用控制锁，避免新的 pause() 到达后 resume() 继续唤醒
         # 或分发 Solver。
-        with self._control.external_start() as can_finalize:
+        with self._control.finalize_external_start() as can_finalize:
             if not can_finalize:
                 logger.info("resume 组件启动后收到 pause/stop 指令，跳过后续启动")
                 if self._paused.is_set():

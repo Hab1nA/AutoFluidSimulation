@@ -225,6 +225,37 @@ class TestRemoteTasks:
             assert sm.get_remote_task(1, "meshing", workstation_id="WS-A") is None
             assert sm.get_remote_task(1, "meshing", workstation_id="WS-B") is not None
 
+    def test_delete_all_remote_tasks_can_clear_all_or_one_workstation(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+            sm.save_remote_task(
+                workstation_id="WS-A",
+                config_name=1,
+                step_name="meshing",
+                task_name="AutoFluid_a",
+                flag_file="D:/flags/a.txt",
+                error_flag_file="D:/flags/a.txt.error",
+                started_at=10.0,
+            )
+            sm.save_remote_task(
+                workstation_id="WS-B",
+                config_name=1,
+                step_name="solver",
+                task_name="AutoFluid_b",
+                flag_file="D:/flags/b.txt",
+                error_flag_file="D:/flags/b.txt.error",
+                started_at=20.0,
+            )
+
+            sm.delete_all_remote_tasks(workstation_id="WS-A")
+
+            assert sm.get_remote_task(1, "meshing", workstation_id="WS-A") is None
+            assert sm.get_remote_task(1, "solver", workstation_id="WS-B") is not None
+
+            sm.delete_all_remote_tasks()
+
+            assert sm.get_all_remote_tasks() == []
+
     def test_reset_config_steps_deletes_downstream_remote_tasks(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
