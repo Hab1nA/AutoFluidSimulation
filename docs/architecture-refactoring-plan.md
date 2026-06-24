@@ -147,7 +147,7 @@ SW → SC → Transfer → Meshing → Solver
 | Command Handler | `autofluid-tui/src/event_handler/command.rs` | ~636 | 命令解析与执行 |
 | KeyHandler | `autofluid-tui/src/event_handler/key_handler.rs` | ~547 | 键盘快捷键处理 |
 | MouseHandler | `autofluid-tui/src/event_handler/mouse.rs` | ~1397 | 鼠标交互（悬停、点击、拖拽、滚轮） |
-| Settings | `autofluid-tui/src/settings/mod.rs` | ~1121 | 9 分类 48 字段设置管理 |
+| Settings | `autofluid-tui/src/settings/mod.rs` | ~1121 | 10 分类 56 字段设置管理 |
 | SettingsUI | `autofluid-tui/src/settings/settings_ui.rs` | ~453 | 设置页面渲染 |
 | SettingsIO | `autofluid-tui/src/settings/config_io.rs` | ~135 | TOML 配置读写 |
 | SettingsValidation | `autofluid-tui/src/settings/validation.rs` | ~486 | 字段校验 |

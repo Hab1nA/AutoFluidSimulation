@@ -102,7 +102,7 @@ def test_service_tunnel_and_export_dirs_are_scoped(tmp_path, monkeypatch):
     assert export_log_dir() == os.path.join(str(tmp_path / "logs"), "local", "exports")
 ```
 
-- [ ] **Step 2: Run RED test**
+- [x] **Step 2: Run RED test**
 
 Run:
 
@@ -112,7 +112,7 @@ Run:
 
 Expected: FAIL because `utils.log_paths` does not exist.
 
-- [ ] **Step 3: Implement `utils/log_paths.py`**
+- [x] **Step 3: Implement `utils/log_paths.py`**
 
 Create `utils/log_paths.py`:
 
@@ -160,11 +160,11 @@ def export_log_dir() -> str:
     return os.path.join(get_log_root(), "local", "exports")
 ```
 
-- [ ] **Step 4: Route `utils/logger.py` through helper**
+- [x] **Step 4: Route `utils/logger.py` through helper**
 
 Update `_resolve_base_log_dir()` to call `get_log_root()`. Update `init_session()` and `build_session_log_dir()` to call `session_log_dir()`.
 
-- [ ] **Step 5: Run GREEN test**
+- [x] **Step 5: Run GREEN test**
 
 Run:
 
@@ -250,7 +250,7 @@ Pop-Location
 
 Expected: FAIL on new path expectations.
 
-- [ ] **Step 3: Implement Rust path changes**
+- [x] **Step 3: Implement Rust path changes**
 
 Update `find_latest_client_session_dir()` to check:
 

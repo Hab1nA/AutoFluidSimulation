@@ -1,9 +1,9 @@
 # Log Directory Structure Design
 
-> **状态：实施中**<br>
-> 最后更新：2026-06-18<br>
-> 第一阶段已开始落地 machine-scope 分层布局。远程工作站任务产物仍保留在
-> `flag_dir`，后续如需迁移应按远程任务契约单独设计。
+> **状态：部分已实现**<br>
+> 最后更新：2026-06-24<br>
+> `utils/log_paths.py` 已创建并集成；Rust TUI 已适配新布局发现逻辑；
+> PowerShell 隧道脚本和服务路径迁移仍在进行中。
 
 ## Background
 
