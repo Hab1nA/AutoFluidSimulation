@@ -510,6 +510,25 @@ class TestSetMeshingRunningIfIdle:
             assert sm.set_meshing_running_if_idle(1, workstation_id="WS-A") is True
             assert sm.set_meshing_running_if_idle(2, workstation_id="WS-B") is True
 
+    def test_same_workstation_retrying_meshing_keeps_slot_busy(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_step_status(1, "meshing", STATUS_RETRYING)
+            sm.set_config_workstation(1, "WS-A")
+
+            assert sm.set_meshing_running_if_idle(2, workstation_id="WS-A") is False
+            assert sm.get_step_status(2, "meshing") == STATUS_WAITING
+
+    def test_different_workstation_retrying_meshing_does_not_block_slot(self):
+        with _TmpDB() as sm:
+            sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            sm.set_step_status(1, "meshing", STATUS_RETRYING)
+            sm.set_config_workstation(1, "WS-A")
+
+            assert sm.set_meshing_running_if_idle(2, workstation_id="WS-B") is True
+            assert sm.get_step_status(2, "meshing") == STATUS_RUNNING
+
+
     def test_same_workstation_rejects_second_meshing(self):
         with _TmpDB() as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})

@@ -107,7 +107,9 @@ class RemoteExecutor:
         self._stopped_event: threading.Event | None = None
         # 跟踪远程后台任务名称（用于超时后终止）
         self._remote_tasks: dict[object, str] = {}
+        self._remote_tasks_lock = threading.RLock()
         self._sync_cache_lock = threading.Lock()
+        self._last_sync_paths_lock = threading.RLock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
         self._last_successful_sync_signatures: dict[str, tuple[object, ...]] = {}
         self.last_meshing_error = ""
@@ -273,7 +275,9 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> None:
         """Remember a remote scheduled task in memory."""
-        self._remote_tasks[self._remote_task_key(config_name, step_name, workstation_id)] = task_name
+        key = self._remote_task_key(config_name, step_name, workstation_id)
+        with self._remote_tasks_lock:
+            self._remote_tasks[key] = task_name
 
     def _pop_remote_task(
         self,
@@ -282,12 +286,13 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> str | None:
         """Remove one remembered remote scheduled task, accepting legacy int keys."""
-        task_name = self._remote_tasks.pop(
-            self._remote_task_key(config_name, step_name, workstation_id),
-            None,
-        )
-        if task_name is None and workstation_id == DEFAULT_WORKSTATION_ID:
-            task_name = self._remote_tasks.pop(config_name, None)
+        with self._remote_tasks_lock:
+            task_name = self._remote_tasks.pop(
+                self._remote_task_key(config_name, step_name, workstation_id),
+                None,
+            )
+            if task_name is None and workstation_id == DEFAULT_WORKSTATION_ID:
+                task_name = self._remote_tasks.pop(config_name, None)
         return task_name
 
     def _persist_remote_task(
@@ -316,15 +321,16 @@ class RemoteExecutor:
 
     def restore_remote_tasks_from_db(self) -> None:
         """Daemon 重启后从数据库恢复工作站/构型/步骤 → 计划任务名映射。"""
-        self._remote_tasks.clear()
-        for task in self.state.get_all_remote_tasks():
-            workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
-            config_name = int(str(task["config_name"]))
-            step_name = str(task["step_name"])
-            task_name = str(task["task_name"])
-            self._remote_tasks[
-                self._remote_task_key(config_name, step_name, workstation_id)
-            ] = task_name
+        with self._remote_tasks_lock:
+            self._remote_tasks.clear()
+            for task in self.state.get_all_remote_tasks():
+                workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
+                config_name = int(str(task["config_name"]))
+                step_name = str(task["step_name"])
+                task_name = str(task["task_name"])
+                self._remote_tasks[
+                    self._remote_task_key(config_name, step_name, workstation_id)
+                ] = task_name
 
     def forget_remote_task(
         self,
@@ -477,23 +483,24 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> dict[str, str]:
         """Return last synced paths for one workstation."""
-        data = self._load_last_sync_paths()
-        nested = data.get("workstations")
-        if isinstance(nested, dict):
-            workstation_paths = nested.get(workstation_id)
-            if isinstance(workstation_paths, dict):
+        with self._last_sync_paths_lock:
+            data = self._load_last_sync_paths()
+            nested = data.get("workstations")
+            if isinstance(nested, dict):
+                workstation_paths = nested.get(workstation_id)
+                if isinstance(workstation_paths, dict):
+                    return {
+                        str(key): str(value)
+                        for key, value in workstation_paths.items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    }
+            if workstation_id == DEFAULT_WORKSTATION_ID:
                 return {
                     str(key): str(value)
-                    for key, value in workstation_paths.items()
-                    if isinstance(key, str) and isinstance(value, str)
+                    for key, value in data.items()
+                    if key in {"scripts_dir", "ref_files_dir"} and isinstance(value, str)
                 }
-        if workstation_id == DEFAULT_WORKSTATION_ID:
-            return {
-                str(key): str(value)
-                for key, value in data.items()
-                if key in {"scripts_dir", "ref_files_dir"} and isinstance(value, str)
-            }
-        return {}
+            return {}
 
     def _save_last_sync_paths(
         self,
@@ -506,20 +513,21 @@ class RemoteExecutor:
             "scripts_dir": str(config["scripts_dir"]),
             "ref_files_dir": str(config["ref_files_dir"]),
         }
-        state = self._load_last_sync_paths()
-        nested = state.get("workstations")
-        if not isinstance(nested, dict):
-            nested = {}
-        nested[workstation_id] = paths
-        state["workstations"] = nested
-        if workstation_id == DEFAULT_WORKSTATION_ID:
-            state.update(paths)
-        try:
-            with open(self._sync_state_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-            logger.debug(f"[Sync] 已保存同步状态: {state}")
-        except OSError as e:
-            logger.warning(f"[Sync] 保存同步状态失败: {e}")
+        with self._last_sync_paths_lock:
+            state = self._load_last_sync_paths()
+            nested = state.get("workstations")
+            if not isinstance(nested, dict):
+                nested = {}
+            nested[workstation_id] = paths
+            state["workstations"] = nested
+            if workstation_id == DEFAULT_WORKSTATION_ID:
+                state.update(paths)
+            try:
+                with open(self._sync_state_path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                logger.debug(f"[Sync] 已保存同步状态: {state}")
+            except OSError as e:
+                logger.warning(f"[Sync] 保存同步状态失败: {e}")
 
     def _cleanup_remote_files(
         self,
@@ -1582,9 +1590,10 @@ class RemoteExecutor:
             logger.error(f"[PostProcess] 远程后处理 flag 构建失败: {e}")
             return False
 
-        solver_task_name = self._remote_tasks.get(
-            self._remote_task_key(config_name, "solver", workstation_id),
-        )
+        with self._remote_tasks_lock:
+            solver_task_name = self._remote_tasks.get(
+                self._remote_task_key(config_name, "solver", workstation_id),
+            )
         if solver_task_name is None:
             solver_task = self._get_remote_task_from_state(
                 config_name,

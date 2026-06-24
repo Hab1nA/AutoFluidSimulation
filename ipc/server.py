@@ -65,8 +65,8 @@ class IPCServer:
             host: 监听地址
             port: 监听端口
         """
-        self.host = host or IPC_CONFIG["host"]
-        self.port = port or IPC_CONFIG["port"]
+        self.host = IPC_CONFIG["host"] if host is None else host
+        self.port = IPC_CONFIG["port"] if port is None else port
         self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
         self._auth_token = auth_token if auth_token is not None else IPC_CONFIG.get("auth_token", "")
         self._socket: socket.socket | None = None
@@ -74,6 +74,8 @@ class IPCServer:
         self._server_thread: threading.Thread | None = None
         self._active_connections: int = 0
         self._conn_lock = threading.Lock()
+        self._client_threads: set[threading.Thread] = set()
+        self._client_sockets: set[socket.socket] = set()
 
         # 命令处理器注册表
         self._handlers: dict[str, Callable] = {}
@@ -171,8 +173,25 @@ class IPCServer:
             except OSError:
                 pass
             self._socket = None
+        with self._conn_lock:
+            client_sockets = list(self._client_sockets)
+        for client_sock in client_sockets:
+            try:
+                client_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                client_sock.close()
+            except OSError:
+                pass
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=3)
+        with self._conn_lock:
+            client_threads = list(self._client_threads)
+        current = threading.current_thread()
+        for client_thread in client_threads:
+            if client_thread is not current and client_thread.is_alive():
+                client_thread.join(timeout=3)
         logger.info("[IPC] IPC 服务器已停止")
 
     # ------------------------------------------------------------------
@@ -216,6 +235,9 @@ class IPCServer:
                     daemon=True,
                     name=f"IPC-Client-{addr[1]}"
                 )
+                with self._conn_lock:
+                    self._client_sockets.add(client_sock)
+                    self._client_threads.add(client_thread)
                 client_thread.start()
             except socket.timeout:
                 continue  # 超时后检查 _running 标志
@@ -280,6 +302,8 @@ class IPCServer:
                 pass
             with self._conn_lock:
                 self._active_connections = max(0, self._active_connections - 1)
+                self._client_sockets.discard(client_sock)
+                self._client_threads.discard(threading.current_thread())
             if has_sent_valid_message:
                 logger.debug(f"[IPC] IPC 客户端断开: {addr}", extra={"broadcast": False})
             else:

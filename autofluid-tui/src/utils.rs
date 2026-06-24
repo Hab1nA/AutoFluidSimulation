@@ -1,5 +1,7 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// 将字符索引转换为字节索引（UTF-8 安全）。
@@ -179,6 +181,30 @@ fn sync_endpoint_env() {
     }
 }
 
+fn spawn_output_reader<R>(mut reader: R) -> JoinHandle<Result<Vec<u8>, std::io::Error>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+fn collect_output_reader(
+    handle: Option<JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    match handle {
+        Some(handle) => match handle.join() {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(e)) => Err(format!("读取命令{}失败: {}", label, e)),
+            Err(_) => Err(format!("读取命令{}线程异常", label)),
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
 pub fn run_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -187,24 +213,34 @@ pub fn run_command_with_timeout(
     let mut child = command
         .spawn()
         .map_err(|e| format!("启动命令失败: {}", e))?;
+    let mut stdout_reader = child.stdout.take().map(spawn_output_reader);
+    let mut stderr_reader = child.stderr.take().map(spawn_output_reader);
     let deadline = Instant::now() + timeout;
 
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|e| format!("读取命令输出失败: {}", e));
+            Ok(Some(status)) => {
+                let stdout = collect_output_reader(stdout_reader.take(), "stdout")?;
+                let stderr = collect_output_reader(stderr_reader.take(), "stderr")?;
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
+                let _ = collect_output_reader(stdout_reader.take(), "stdout");
+                let _ = collect_output_reader(stderr_reader.take(), "stderr");
                 return Err(format!("命令执行超时 ({}s)", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => {
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
+                let _ = collect_output_reader(stdout_reader.take(), "stdout");
+                let _ = collect_output_reader(stderr_reader.take(), "stderr");
                 return Err(format!("检查命令状态失败: {}", e));
             }
         }
@@ -305,6 +341,40 @@ pub fn kill_process_tree(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_command_with_timeout_drains_large_stdout() {
+        let mut command = large_stdout_command();
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(5))
+            .expect("large stdout command should finish without pipe deadlock");
+
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() > 128 * 1024,
+            "expected large stdout, got {} bytes",
+            output.stdout.len()
+        );
+    }
+
+    #[cfg(windows)]
+    fn large_stdout_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            "for /L %i in (1,1,5000) do @echo 0123456789012345678901234567890123456789",
+        ]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    fn large_stdout_command() -> Command {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "yes 0123456789012345678901234567890123456789 | head -c 200000",
+        ]);
+        command
+    }
 
     #[test]
     fn parse_env_content_reads_server_ipc_settings() {

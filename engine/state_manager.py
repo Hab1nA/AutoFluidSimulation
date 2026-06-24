@@ -693,15 +693,15 @@ class StateManager:
                 if workstation_id is None:
                     row = conn.execute(
                         "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status = ?",
-                        (STATUS_RUNNING,),
+                        "WHERE step_name = 'meshing' AND status IN (?, ?)",
+                        (STATUS_RUNNING, STATUS_RETRYING),
                     ).fetchone()
                 else:
                     row = conn.execute(
                         "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status = ? "
+                        "WHERE step_name = 'meshing' AND status IN (?, ?) "
                         "AND workstation_id = ?",
-                        (STATUS_RUNNING, workstation_id),
+                        (STATUS_RUNNING, STATUS_RETRYING, workstation_id),
                     ).fetchone()
                 if (row["cnt"] or 0) > 0:
                     logger.debug(

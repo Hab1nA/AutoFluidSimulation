@@ -1856,13 +1856,7 @@ mod tests {
         let mut state = AppState::new();
         let mut log_buffer = LogBuffer::new();
 
-        handle_startup_connect_failure(
-            &mut daemon,
-            &mut state,
-            &mut log_buffer,
-            "",
-            "127.0.0.1",
-        );
+        handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, "", "127.0.0.1");
 
         assert!(!state.connected);
         assert!(state.needs_redraw);

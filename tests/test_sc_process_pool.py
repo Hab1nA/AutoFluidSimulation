@@ -266,6 +266,49 @@ class TestMaxSlots:
         assert slot.bridge_log_path is not None
         assert os.path.dirname(slot.bridge_log_path) == expected_log_dir
 
+    def test_launch_persistent_process_uses_configured_spaceclaim_exe(
+        self, tmp_path, monkeypatch
+    ):
+        """常驻 Bridge 应使用与一次性 Bridge 相同的 SpaceClaim exe 配置。"""
+        data_dir = str(tmp_path / "data")
+        bridge_exe = tmp_path / "SpaceClaimBridge.exe"
+        configured_sc_exe = tmp_path / "SpaceClaim.exe"
+        bridge_exe.write_text("fake bridge", encoding="utf-8")
+        configured_sc_exe.write_text("fake spaceclaim", encoding="utf-8")
+
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "sc_bridge", str(bridge_exe))
+        monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(configured_sc_exe))
+        monkeypatch.setitem(LOCAL_PATHS, "sc_script", str(tmp_path / "spaceclaim_transit.py"))
+        monkeypatch.setattr(
+            "engine.sc_process_pool.get_session_log_dir",
+            lambda: str(tmp_path / "session_logs"),
+        )
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, stdout=None, stderr=None, creationflags=0, env=None):
+                captured["cmd"] = cmd
+                captured["env"] = env or {}
+                self.pid = 4242
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr("engine.sc_process_pool.subprocess.Popen", _FakePopen)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=3, cmd_dir=pool._persistent_cmd_dir)
+
+        assert pool._launch_persistent_process(slot)
+        assert "--sc-exe" in captured["cmd"]
+        sc_exe_index = captured["cmd"].index("--sc-exe") + 1
+        assert captured["cmd"][sc_exe_index] == str(configured_sc_exe)
+        assert captured["env"]["AUTOFLUID_SC_EXE"] == str(configured_sc_exe)
+
     def test_bridge_log_dir_falls_back_to_spaceclaim_service_dir(
         self, tmp_path, monkeypatch
     ):

@@ -98,6 +98,59 @@ def test_bridge_treats_pre_gui_exit_with_scdoc_as_success() -> None:
     assert "SpaceClaim exited before GUI ready but SCDOC exists" in source
 
 
+def test_bridge_only_accepts_fresh_nonempty_scdoc_outputs() -> None:
+    source = _source()
+
+    assert "private static bool IsFreshScdocFile" in source
+    assert "LastWriteTimeUtc" in source
+    assert "launchBaseline" in source
+    assert "fi.Length <= 0" in source
+
+    execute_start = source.index("private static int Execute")
+    execute_end = source.index("private static void PrepareSpaceClaimEnvironment", execute_start)
+    execute_block = source[execute_start:execute_end]
+
+    assert "if (IsFreshScdocFile(scdocFile, launchBaseline))" in execute_block
+    assert "if (File.Exists(scdocFile))" not in execute_block
+    gui_failure_start = execute_block.index("catch (InvalidOperationException ex)")
+    gui_failure_block = execute_block[gui_failure_start:]
+    assert "TryReturnSuccessIfScdocExists(" in gui_failure_block
+    assert "launchBaseline" in gui_failure_block
+
+
+def test_bridge_kills_oneshot_spaceclaim_on_failure_before_dispose() -> None:
+    source = _source()
+    execute_start = source.index("private static int Execute")
+    execute_end = source.index("private static void PrepareSpaceClaimEnvironment", execute_start)
+    execute_block = source[execute_start:execute_end]
+
+    assert "private static void TryKillWorkingProcess" in source
+    assert 'TryKillWorkingProcess(workingProcess, "one-shot timed out")' in execute_block
+    assert (
+        'TryKillWorkingProcess(workingProcess, "SpaceClaim exited without fresh SCDOC")'
+        in execute_block
+    )
+    assert (
+        'TryKillWorkingProcess(workingProcess, "SpaceClaim GUI ready detection failed")'
+        in execute_block
+    )
+    assert execute_block.index(
+        'TryKillWorkingProcess(workingProcess, "one-shot timed out")'
+    ) < execute_block.index("return (int)ExitCode.Timeout;")
+    assert "process.Kill();" in source
+
+
+def test_resolve_started_spaceclaim_disposes_unusable_started_handle() -> None:
+    source = _source()
+    resolve_start = source.index("private static Process? ResolveStartedSpaceClaimProcess")
+    resolve_end = source.index("private static string GetStepFilePath", resolve_start)
+    resolve_block = source[resolve_start:resolve_end]
+
+    assert "startedProcess.Dispose();" in resolve_block
+    assert resolve_block.index("startedProcess.Dispose();") < resolve_block.index(
+        "return WaitForProcessAppear"
+    )
+
 def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
     source = _source()
 

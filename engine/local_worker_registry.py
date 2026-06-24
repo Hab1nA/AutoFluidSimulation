@@ -113,6 +113,19 @@ class LocalWorkerRegistry:
             # _task_condition 的 notify 唤醒可能在等待 worker 的线程
             self._task_condition.notify_all()
 
+    def prune_offline_workers(self) -> int:
+        """Remove workers whose heartbeat has expired and return removed count."""
+        with self._lock:
+            stale_worker_ids = [
+                worker_id
+                for worker_id, worker in self._workers.items()
+                if not self._is_online(worker)
+            ]
+            for worker_id in stale_worker_ids:
+                self._workers.pop(worker_id, None)
+            if stale_worker_ids:
+                self._task_condition.notify_all()
+            return len(stale_worker_ids)
     def clear_pending_tasks(self) -> int:
         """Cancel all pending tasks and return the count of cancelled tasks."""
         with self._task_condition:
@@ -244,6 +257,8 @@ class LocalWorkerRegistry:
     ) -> dict[str, Any]:
         with self._task_condition:
             task = self._tasks[task_id]
+            if task.get("status") in {"completed", "error"}:
+                return self._task_snapshot(task)
             if task.get("worker_id") not in {None, worker_id}:
                 raise ValueError(f"任务 {task_id} 已由其他 LocalWorker 领取")
             task["worker_id"] = worker_id

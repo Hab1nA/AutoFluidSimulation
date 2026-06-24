@@ -1,4 +1,7 @@
 import logging
+import socket
+import threading
+import time
 
 from ipc.protocol import (
     CMD_GET_DASHBOARD,
@@ -176,3 +179,40 @@ def test_register_default_handlers_includes_dashboard_query():
 
 
 
+
+def test_stop_closes_active_client_handlers() -> None:
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+    client = None
+    try:
+        srv.start()
+        assert srv._socket is not None
+        port = srv._socket.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with srv._conn_lock:
+                active = srv._active_connections
+            if active == 1:
+                break
+            time.sleep(0.01)
+        assert active == 1
+
+        srv.stop()
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with srv._conn_lock:
+                active = srv._active_connections
+            if active == 0:
+                break
+            time.sleep(0.01)
+        assert active == 0
+        assert not any(
+            thread.name.startswith("IPC-Client-") and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+    finally:
+        if client is not None:
+            client.close()
+        srv.stop()

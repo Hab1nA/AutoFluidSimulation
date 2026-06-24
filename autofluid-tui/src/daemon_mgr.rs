@@ -176,6 +176,12 @@ impl DaemonManager {
             .join("server_ipc_tunnel.pid")
     }
 
+    fn server_ipc_tunnel_owner_file(project_dir: &str) -> PathBuf {
+        PathBuf::from(project_dir)
+            .join("data")
+            .join("server_ipc_tunnel.owner")
+    }
+
     pub fn stop_server_ipc_tunnel(project_dir: &str) -> Result<(), String> {
         let pid_file = Self::server_ipc_tunnel_pid_file(project_dir);
         let raw_pid = match fs::read_to_string(&pid_file) {
@@ -201,8 +207,11 @@ impl DaemonManager {
             )
         })?;
 
+        let owner_file = Self::server_ipc_tunnel_owner_file(project_dir);
+
         if pid == 0 {
             let _ = fs::remove_file(&pid_file);
+            let _ = fs::remove_file(&owner_file);
             return Ok(());
         }
 
@@ -219,6 +228,7 @@ impl DaemonManager {
             true
         };
         if stopped {
+            let _ = fs::remove_file(&owner_file);
             match fs::remove_file(&pid_file) {
                 Ok(()) => {
                     log::info!("已清理服务器 IPC 隧道 PID 文件: {}", pid_file.display());
@@ -239,6 +249,13 @@ impl DaemonManager {
     }
 
     fn server_ipc_tunnel_pid_is_owned(project_dir: &str, pid: u32) -> bool {
+        if fs::read_to_string(Self::server_ipc_tunnel_owner_file(project_dir))
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+            == Some(pid)
+        {
+            return true;
+        }
         let Some(command_line) = Self::process_command_line(pid) else {
             return false;
         };
@@ -858,6 +875,27 @@ impl DaemonManager {
         }
     }
 
+    fn write_server_ipc_tunnel_owner_marker(project_dir: &str) {
+        let pid_file = Self::server_ipc_tunnel_pid_file(project_dir);
+        let owner_file = Self::server_ipc_tunnel_owner_file(project_dir);
+        let Some(pid) = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|content| content.trim().parse::<u32>().ok())
+        else {
+            return;
+        };
+        if let Some(parent) = owner_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = fs::write(&owner_file, pid.to_string()) {
+            log::warn!(
+                "服务器 IPC 隧道 owner marker 写入失败: {}, error={}",
+                owner_file.display(),
+                e
+            );
+        }
+    }
+
     fn run_server_ipc_tunnel_script(project_dir: &str) -> Result<(), String> {
         let script = PathBuf::from(project_dir)
             .join("scripts")
@@ -902,6 +940,7 @@ impl DaemonManager {
                         powershell,
                         script.display()
                     );
+                    Self::write_server_ipc_tunnel_owner_marker(project_dir);
                     return Ok(());
                 }
                 Ok((status, stdout, stderr)) => {
@@ -951,9 +990,14 @@ fn run_tunnel_script_command_with_timeout(
     command
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("启动命令失败: {}", e))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = fs::remove_file(&stdout_path);
+            let _ = fs::remove_file(&stderr_path);
+            return Err(format!("启动命令失败: {}", e));
+        }
+    };
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -1512,6 +1556,45 @@ mod tests {
             "tunnel script runner must not wait for a background child that inherited output handles"
         );
         let _ = fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn tunnel_script_runner_removes_temp_files_when_spawn_fails() {
+        let before = tunnel_temp_file_count();
+        let missing_exe = std::env::temp_dir().join(format!(
+            "autofluid-tui-missing-command-{}",
+            crate::generate_request_id()
+        ));
+        let mut cmd = Command::new(missing_exe);
+
+        let result = run_tunnel_script_command_with_timeout(&mut cmd, Duration::from_secs(1));
+
+        assert!(result.is_err());
+        assert_eq!(
+            tunnel_temp_file_count(),
+            before,
+            "spawn failure must not leave tunnel stdout/stderr temp files"
+        );
+    }
+
+    fn tunnel_temp_file_count() -> usize {
+        fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .map(|name| {
+                                name.starts_with("autofluid-tui-tunnel-")
+                                    && (name.ends_with(".out") || name.ends_with(".err"))
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     #[test]
@@ -2350,18 +2433,18 @@ mod tests {
         {
             fs::write(&script, "Start-Sleep -Seconds 30\r\n")
                 .expect("write fake server ipc tunnel script");
-            Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    script.to_str().expect("script path utf8"),
-                ])
+            let command = format!("Start-Sleep -Seconds 30 # {}", script.to_string_lossy());
+            let child = Command::new("powershell.exe")
+                .args(["-NoProfile", "-Command", command.as_str()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .expect("spawn fake server ipc tunnel process")
+                .expect("spawn fake server ipc tunnel process");
+            let owner_file = project_dir.join("data").join("server_ipc_tunnel.owner");
+            fs::create_dir_all(owner_file.parent().expect("owner parent"))
+                .expect("create owner parent");
+            fs::write(owner_file, child.id().to_string()).expect("write owner marker");
+            child
         }
         #[cfg(not(windows))]
         {

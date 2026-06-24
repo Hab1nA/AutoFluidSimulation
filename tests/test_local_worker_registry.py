@@ -182,3 +182,36 @@ def test_has_active_step_task_treats_batch_task_as_matching_any_config() -> None
     registry.fail_task(str(task["task_id"]), "local-pc-01", "cancelled")
 
     assert registry.has_active_step_task("sw", 1) is False
+
+def test_terminal_task_result_is_not_overwritten_by_late_report() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"sc": True})
+    queued = registry.enqueue_task("sc", {"config_name": 3})
+    polled = registry.poll_task("local-pc-01")
+    assert polled is not None
+
+    completed = registry.complete_task(str(queued["task_id"]), "local-pc-01", {"ok": True})
+    late = registry.fail_task(str(queued["task_id"]), "local-pc-01", "late failure")
+
+    assert completed["status"] == "completed"
+    assert late["status"] == "completed"
+    assert late["result"] == {"ok": True}
+    assert "late failure" not in str(late)
+
+
+def test_prune_offline_workers_removes_stale_entries() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=30.0, clock=lambda: now)
+    registry.register("live-pc", {})
+    registry.register("stale-pc", {})
+    now = 120.0
+    registry.heartbeat("live-pc")
+    now = 150.0
+
+    assert registry.prune_offline_workers() == 1
+    assert registry.get_worker("stale-pc") is None
+    assert registry.get_worker("live-pc") is not None

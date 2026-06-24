@@ -118,6 +118,7 @@ pub struct EngineInfo {
     pub daemon_started_at: Option<f64>,
     pub daemon_started_at_display: Option<String>,
     pub daemon_uptime_seconds: Option<u64>,
+    pub config_load_error: Option<String>,
     pub solver_progress: Option<SolverProgress>,
 }
 
@@ -407,6 +408,12 @@ impl AppState {
                 .map(str::to_string);
             self.engine_info.daemon_uptime_seconds =
                 obj.get("daemon_uptime_seconds").and_then(|v| v.as_u64());
+            self.engine_info.config_load_error = obj
+                .get("config_load_error")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             self.engine_info.solver_progress =
                 obj.get("solver_progress").and_then(parse_solver_progress);
         }
@@ -577,6 +584,10 @@ impl AppState {
 
         let engine_status = engine_status_display(&self.engine_info.engine_status);
         parts.push(InfoBarPart::status(engine_status));
+        if self.engine_info.config_load_error.is_some() {
+            parts.push(InfoBarPart::plain(" │ 配置:"));
+            parts.push(InfoBarPart::status("错误"));
+        }
         parts.push(InfoBarPart::plain(format!(
             " │ 构型:{}",
             self.configs.len()
@@ -862,6 +873,16 @@ mod tests {
     }
 
     #[test]
+    fn info_bar_text_shows_config_load_error() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "stopped".to_string();
+        state.engine_info.config_load_error = Some("Excel 读取失败: missing.xlsx".to_string());
+
+        assert!(state.info_bar_text().contains("配置:错误"));
+    }
+
+    #[test]
     fn info_bar_text_shows_workstation_barrier_letters() {
         let mut state = AppState::default();
         state.connected = true;
@@ -940,6 +961,22 @@ mod tests {
         assert_eq!(format_remaining_time(5_025.0), "01:23:45");
         assert_eq!(format_remaining_time(-1.0), "00:00:00");
         assert_eq!(format_remaining_time(f64::NAN), "00:00:00");
+    }
+
+    #[test]
+    fn update_engine_info_parses_config_load_error() {
+        let mut state = AppState::default();
+        let data = serde_json::json!({
+            "engine_status": "stopped",
+            "config_load_error": "Excel 读取失败: missing.xlsx"
+        });
+
+        state.update_engine_info(&data);
+
+        assert_eq!(
+            state.engine_info.config_load_error.as_deref(),
+            Some("Excel 读取失败: missing.xlsx")
+        );
     }
 
     #[test]

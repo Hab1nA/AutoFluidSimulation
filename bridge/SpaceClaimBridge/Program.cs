@@ -351,7 +351,7 @@ namespace AutoFluidSimulation.Bridge
 
                 while (DateTime.UtcNow < deadline)
                 {
-                    if (File.Exists(scdocFile))
+                    if (IsFreshScdocFile(scdocFile, launchBaseline))
                     {
                         var fi = new FileInfo(scdocFile);
                         Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi.Length} bytes)");
@@ -377,13 +377,14 @@ namespace AutoFluidSimulation.Bridge
                     {
                         Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出, 最终检查...");
                         Thread.Sleep(ProcessExitGraceDelayMs);
-                        if (File.Exists(scdocFile))
+                        if (IsFreshScdocFile(scdocFile, launchBaseline))
                         {
                             var fi2 = new FileInfo(scdocFile);
                             Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi2.Length} bytes)");
                             return (int)ExitCode.Success;
                         }
-                        Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成 SCDOC 文件");
+                        TryKillWorkingProcess(workingProcess, "SpaceClaim exited without fresh SCDOC");
+                        Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成新的 SCDOC 文件");
                         return (int)ExitCode.OutputValidationFailed;
                     }
 
@@ -391,17 +392,20 @@ namespace AutoFluidSimulation.Bridge
                 }
 
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
+                TryKillWorkingProcess(workingProcess, "one-shot timed out");
                 return (int)ExitCode.Timeout;
             }
             catch (InvalidOperationException ex)
             {
                 int? earlySuccess = TryReturnSuccessIfScdocExists(
                     opts,
+                    launchBaseline,
                     "SpaceClaim exited before GUI ready but SCDOC exists");
                 if (earlySuccess.HasValue)
                 {
                     return earlySuccess.Value;
                 }
+                TryKillWorkingProcess(workingProcess, "SpaceClaim GUI ready detection failed");
                 Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
                 return (int)ExitCode.LaunchFailed;
             }
@@ -685,15 +689,41 @@ namespace AutoFluidSimulation.Bridge
         }
 
         /// <summary>
-        /// 检查 SCDOC 文件是否已存在，存在时返回 Success 退出码。
+        /// 检查 SCDOC 文件是否由当前启动周期生成且非空。
+        /// </summary>
+        /// <param name="scdocFile">SCDOC 文件路径</param>
+        /// <param name="launchBaseline">当前启动时间基线</param>
+        /// <returns>文件存在、非空且晚于启动基线时返回 true</returns>
+        private static bool IsFreshScdocFile(string scdocFile, DateTime launchBaseline)
+        {
+            if (!File.Exists(scdocFile))
+            {
+                return false;
+            }
+
+            var fi = new FileInfo(scdocFile);
+            if (fi.Length <= 0)
+            {
+                return false;
+            }
+
+            return fi.LastWriteTimeUtc >= launchBaseline;
+        }
+
+        /// <summary>
+        /// 检查当前启动周期内生成的 SCDOC 文件，存在时返回 Success 退出码。
         /// </summary>
         /// <param name="opts">Bridge 选项</param>
+        /// <param name="launchBaseline">当前启动时间基线</param>
         /// <param name="reason">用于日志输出的检查原因</param>
-        /// <returns>SCDOC 存在返回 Success 退出码，否则返回 null</returns>
-        private static int? TryReturnSuccessIfScdocExists(BridgeOptions opts, string reason)
+        /// <returns>新 SCDOC 存在返回 Success 退出码，否则返回 null</returns>
+        private static int? TryReturnSuccessIfScdocExists(
+            BridgeOptions opts,
+            DateTime launchBaseline,
+            string reason)
         {
             string scdocFile = GetScdocFilePath(opts);
-            if (!File.Exists(scdocFile))
+            if (!IsFreshScdocFile(scdocFile, launchBaseline))
             {
                 return null;
             }
@@ -703,6 +733,35 @@ namespace AutoFluidSimulation.Bridge
             return (int)ExitCode.Success;
         }
 
+        /// <summary>
+        /// 尝试终止本次 Bridge 启动的 SpaceClaim 进程。
+        /// </summary>
+        /// <param name="process">SpaceClaim 进程对象</param>
+        /// <param name="reason">终止原因</param>
+        private static void TryKillWorkingProcess(Process? process, string reason)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                process.Refresh();
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                Console.WriteLine($"[BRIDGE_WARN] 正在终止 SpaceClaim 进程 (PID={process.Id}): {reason}");
+                process.Kill();
+                process.WaitForExit(5000);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BRIDGE_WARN] 终止 SpaceClaim 进程失败: {ex.Message}");
+            }
+        }
         // ==============================================================
         // 常驻模式：启动 SpaceClaim 后通过文件协议循环处理命令
         // ==============================================================
@@ -985,6 +1044,8 @@ namespace AutoFluidSimulation.Bridge
                     Console.WriteLine(
                         $"[BRIDGE_WARN] 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
                 }
+
+                startedProcess.Dispose();
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");

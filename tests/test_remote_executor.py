@@ -23,6 +23,45 @@ def _default_non_server_mode(monkeypatch):
     monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
 
 
+class _GuardLock:
+    def __init__(self) -> None:
+        self.held = False
+        self.entries = 0
+
+    def __enter__(self):
+        self.held = True
+        self.entries += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.held = False
+        return False
+
+
+class _GuardedRemoteTasks(dict):
+    def __init__(self, guard: _GuardLock) -> None:
+        super().__init__()
+        self.guard = guard
+
+    def _require_lock(self) -> None:
+        assert self.guard.held, "remote task mapping accessed without lock"
+
+    def __setitem__(self, key, value):
+        self._require_lock()
+        return super().__setitem__(key, value)
+
+    def pop(self, key, default=None):
+        self._require_lock()
+        return super().pop(key, default)
+
+    def clear(self):
+        self._require_lock()
+        return super().clear()
+
+    def get(self, key, default=None):
+        self._require_lock()
+        return super().get(key, default)
+
 class _StateRecorder:
     def __init__(self) -> None:
         self.status_updates: list[tuple[int, str, str, str]] = []
@@ -914,6 +953,60 @@ def test_persist_remote_task_keeps_workstation_dimension():
     assert state.remote_tasks[("WS-A", 5, "meshing")]["task_name"] == "AutoFluid_ws_a"
     assert state.remote_tasks[("WS-A", 5, "meshing")]["workstation_id"] == "WS-A"
 
+
+def test_remote_task_memory_mapping_is_accessed_under_lock():
+    executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+    guard = _GuardLock()
+    executor._remote_tasks_lock = guard
+    executor._remote_tasks = _GuardedRemoteTasks(guard)
+
+    executor._remember_remote_task(7, "solver", "AutoFluid_solver", "WS-A")
+    assert guard.entries >= 1
+
+    assert executor._pop_remote_task(7, "solver", "WS-A") == "AutoFluid_solver"
+
+
+def test_restore_remote_tasks_from_db_rebuilds_memory_mapping_under_lock():
+    state = _StateRecorder()
+    state.remote_tasks[(9, "solver")] = {
+        "config_name": 9,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver",
+        "flag_file": "D:/flags/solver_done_9.txt",
+        "error_flag_file": "D:/flags/solver_done_9.txt.error",
+        "started_at": 100.0,
+    }
+    executor = RemoteExecutor(state, lambda: None, threading.RLock())
+    guard = _GuardLock()
+    executor._remote_tasks_lock = guard
+    executor._remote_tasks = _GuardedRemoteTasks(guard)
+
+    executor.restore_remote_tasks_from_db()
+
+    assert executor._remote_tasks == {
+        (DEFAULT_WORKSTATION_ID, 9, "solver"): "AutoFluid_solver",
+    }
+    assert guard.entries >= 1
+
+
+def test_last_sync_paths_are_loaded_under_lock(tmp_path, monkeypatch):
+    monkeypatch.setitem(LOCAL_PATHS, "data_dir", str(tmp_path))
+    executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
+    guard = _GuardLock()
+    executor._last_sync_paths_lock = guard
+
+    def _load_last_sync_paths():
+        assert guard.held, "last sync state loaded without lock"
+        return {}
+
+    executor._load_last_sync_paths = _load_last_sync_paths
+
+    assert executor._last_sync_paths_for_workstation("WS-A") == {}
+    executor._save_last_sync_paths(
+        {"scripts_dir": "D:/scripts", "ref_files_dir": "D:/refs"},
+        "WS-A",
+    )
+    assert guard.entries >= 2
 
 def test_restore_remote_tasks_from_db_rebuilds_memory_mapping():
     state = _StateRecorder()

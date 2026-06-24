@@ -215,6 +215,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
         "daemon_uptime_seconds": 65,
+        "config_load_error": None,
         "solver_progress": None,
     }
     assert data["health"] == {
@@ -383,6 +384,7 @@ def test_handle_get_dashboard_after_pipeline_completed(monkeypatch):
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
         "daemon_uptime_seconds": 90,
+        "config_load_error": None,
         "solver_progress": None,
     }
     assert data["logs"]["latest_id"] == 12
@@ -446,6 +448,24 @@ def test_dashboard_trims_many_large_log_entries_quickly(monkeypatch):
     assert data["logs"]["entries"]
     assert data["logs"]["entries"][-1]["id"] == 200
 
+
+def test_engine_status_includes_config_load_error_after_state_initialized(monkeypatch):
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.state = _State()
+    daemon._pipeline_ever_started = True
+    daemon._started_at_epoch = 2_000.0
+    daemon._config_load_error = "Excel 读取失败: missing.xlsx"
+    monkeypatch.setattr(daemon, "_workstation_barrier_snapshot", lambda: {})
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 2_030.0)
+    monkeypatch.setattr(daemon_module.time, "strftime", lambda _fmt, _value: "now")
+    monkeypatch.setattr(daemon_module.time, "localtime", lambda value: value)
+
+    ok, data, message = daemon.handle_get_engine_status(None)
+
+    assert ok is True
+    assert message == ""
+    assert data["engine_status"] == "running"
+    assert data["config_load_error"] == "Excel 读取失败: missing.xlsx"
 
 def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):
     handler = _LogHandler()

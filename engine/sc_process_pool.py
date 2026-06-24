@@ -459,6 +459,7 @@ class SCProcessPool:
             "--script", self._sc_script,
             "--cmddir", self._persistent_cmd_dir,
             "--slotid", str(slot.slot_id),
+            "--sc-exe", LOCAL_PATHS["sc_exe"],
         ]
 
         slot.status = "starting"
@@ -468,6 +469,7 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_PERSISTENT"] = "1"
         sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
         sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
+        sc_env["AUTOFLUID_SC_EXE"] = str(LOCAL_PATHS["sc_exe"])
         bridge_log_dir = self._build_bridge_log_dir()
         sc_env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
 
