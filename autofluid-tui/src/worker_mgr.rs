@@ -229,9 +229,22 @@ impl WorkerManager {
             || Self::is_process_running(&mut self.local_worker_tunnel_process)
     }
 
+    /// Return true when a managed process handle exists and has exited unexpectedly.
+    pub fn has_exited_managed_process(&mut self) -> bool {
+        Self::process_exited(&mut self.worker_process)
+            || Self::process_exited(&mut self.workstation_tunnel_process)
+            || Self::process_exited(&mut self.local_worker_tunnel_process)
+    }
+
     // ------------------------------------------------------------------
     // 内部方法
     // ------------------------------------------------------------------
+
+    fn process_exited(proc: &mut Option<Child>) -> bool {
+        proc.as_mut()
+            .and_then(|p| p.try_wait().ok().flatten())
+            .is_some()
+    }
 
     fn start_workstation_tunnels(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
         let specs = workstation_tunnel_specs_for_project(project_dir);
@@ -565,11 +578,21 @@ impl WorkerManager {
 
     /// 通用进程终止辅助方法。
     ///
-    /// 先检查进程是否已退出，若仍在运行则发送 kill 信号并立即释放管理状态。
+    /// 先检查进程是否已退出，若仍在运行则终止进程树并释放管理状态。
     fn stop_child_process(proc_slot: &mut Option<Child>, name: &str) -> StopResult {
+        Self::stop_child_process_with(proc_slot, name, kill_process_tree, wait_for_pid_dead)
+    }
+
+    fn stop_child_process_with(
+        proc_slot: &mut Option<Child>,
+        name: &str,
+        kill_tree: impl Fn(u32) -> bool,
+        wait_dead: impl Fn(u32, Duration) -> bool,
+    ) -> StopResult {
         let Some(ref mut proc) = proc_slot else {
             return StopResult::NoProcess;
         };
+        let pid = proc.id();
         match proc.try_wait() {
             Ok(Some(status)) => {
                 log::info!("{} 已自行退出: {}", name, status);
@@ -578,18 +601,23 @@ impl WorkerManager {
             }
             Ok(None) => {
                 log::info!("正在终止 {}...", name);
-                if let Err(e) = proc.kill() {
-                    log::warn!("终止 {} 失败: {}", name, e);
+                if !kill_tree(pid) {
+                    log::warn!("终止 {} 进程树失败: pid={}", name, pid);
                     *proc_slot = None;
-                    return StopResult::Error(e.to_string());
+                    return StopResult::Error(format!("进程树终止失败: pid={pid}"));
                 }
-                match proc.try_wait() {
-                    Ok(Some(status)) => log::info!("{} 已终止: {}", name, status),
-                    Ok(None) => log::info!("{} 已发送终止信号", name),
-                    Err(e) => log::warn!("检查 {} 退出状态失败: {}", name, e),
+                if wait_dead(pid, Duration::from_secs(2)) {
+                    match proc.try_wait() {
+                        Ok(Some(status)) => log::info!("{} 已终止: {}", name, status),
+                        Ok(None) => log::info!("{} 进程树已终止: pid={}", name, pid),
+                        Err(e) => log::warn!("检查 {} 退出状态失败: {}", name, e),
+                    }
+                    *proc_slot = None;
+                    StopResult::Terminated
+                } else {
+                    log::warn!("{} 进程树终止后仍存活: pid={}", name, pid);
+                    StopResult::Error(format!("进程树终止后仍存活: pid={pid}"))
                 }
-                *proc_slot = None;
-                StopResult::Terminated
             }
             Err(e) => {
                 log::warn!("检查 {} 状态失败: {}", name, e);
@@ -1101,18 +1129,9 @@ impl Drop for WorkerManager {
         if self.worker_started_detached {
             return;
         }
-        if let Some(ref mut proc) = self.worker_process {
-            let _ = proc.kill();
-            let _ = proc.wait();
-        }
-        if let Some(ref mut proc) = self.workstation_tunnel_process {
-            let _ = proc.kill();
-            let _ = proc.wait();
-        }
-        if let Some(ref mut proc) = self.local_worker_tunnel_process {
-            let _ = proc.kill();
-            let _ = proc.wait();
-        }
+        let _ = Self::stop_child_process(&mut self.worker_process, "本地 Worker");
+        let _ = Self::stop_child_process(&mut self.workstation_tunnel_process, "工作站 SSH 隧道");
+        let _ = Self::stop_child_process(&mut self.local_worker_tunnel_process, "本机 SSH 隧道");
     }
 }
 
@@ -1504,16 +1523,72 @@ mod tests {
     fn stop_child_process_has_no_blocking_wait_loop() {
         let source = include_str!("worker_mgr.rs");
         let fn_start = source
-            .find("fn stop_child_process(")
-            .expect("stop_child_process should exist");
+            .find("fn stop_child_process_with(")
+            .expect("stop_child_process_with should exist");
         let rest = &source[fn_start..];
         let fn_end = rest
             .find("\n    fn pid_file_for")
             .expect("next helper should mark function end");
         let function_body = &rest[..fn_end];
 
-        assert!(!function_body.contains("while "));
-        assert!(!function_body.contains("std::thread::sleep"));
+        assert!(function_body.contains("kill_tree(pid)"));
+        assert!(function_body.contains("wait_dead(pid, Duration::from_secs(2))"));
+        assert!(!function_body.contains("proc.kill()"));
+    }
+
+    #[test]
+    fn stop_child_process_reports_error_when_process_tree_stays_alive() {
+        #[cfg(target_os = "windows")]
+        let child = Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live process");
+
+        #[cfg(not(target_os = "windows"))]
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live process");
+
+        let pid = child.id();
+        let mut proc_slot = Some(child);
+        let result = WorkerManager::stop_child_process_with(
+            &mut proc_slot,
+            "测试进程",
+            |_| true,
+            |_, _| false,
+        );
+
+        match result {
+            StopResult::Error(message) => assert!(message.contains("仍存活")),
+            _ => panic!("expected stop failure when wait_for_pid_dead is false"),
+        }
+        assert!(proc_slot.is_some());
+
+        let killed = crate::utils::kill_process_tree(pid);
+        assert!(
+            !crate::utils::is_pid_alive(pid)
+                || (killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2)))
+        );
+    }
+
+    #[test]
+    fn drop_uses_process_tree_cleanup_for_non_detached_processes() {
+        let source = include_str!("worker_mgr.rs");
+        let drop_start = source
+            .find("impl Drop for WorkerManager")
+            .expect("drop impl should exist");
+        let drop_body = source[drop_start..]
+            .split("#[cfg(test)]")
+            .next()
+            .expect("drop impl should appear before tests");
+
+        assert!(drop_body.contains("stop_child_process"));
+        assert!(!drop_body.contains("proc.kill()"));
     }
 
     #[test]

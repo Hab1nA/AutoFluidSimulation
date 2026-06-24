@@ -2362,6 +2362,8 @@ class _CleanStepRunner:
         self.clean_calls = []
         self.clean_all_cache_count = 0
         self.remote_executor = _DaemonRemoteExecutor(remote_status)
+        self.raise_on_clean = False
+        self.raise_on_cache = False
         self.system_check_result = {
             "local_checks": {},
             "remote_checks": {},
@@ -2369,9 +2371,13 @@ class _CleanStepRunner:
         }
 
     def clean_step_files(self, step_name, config_name):
+        if self.raise_on_clean:
+            raise RuntimeError("remote clean failed")
         self.clean_calls.append((step_name, config_name))
 
     def clean_all_cache(self):
+        if self.raise_on_cache:
+            raise RuntimeError("cache clean failed")
         self.clean_all_cache_count += 1
 
     def run_system_check(self):
@@ -3336,6 +3342,106 @@ class TestPipelineDaemonCleanStep:
         assert "clean all cache" in message
         assert daemon.runner.clean_all_cache_count == 0
 
+    def test_clean_rejects_invalid_config_name_before_runner_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": "abc",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.runner.clean_calls == []
+
+    def test_clean_rejects_bool_config_name_before_runner_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": True,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.runner.clean_calls == []
+
+    def test_background_cache_clean_failure_is_logged(self, monkeypatch, caplog):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_cache = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "cache",
+                "config_name": None,
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理远程缓存文件" in message
+        assert any(
+            "[Cleaner] 后台清理失败: step=cache, config=all, error=cache clean failed"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_background_step_clean_failure_is_logged(self, monkeypatch, caplog):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_clean = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "meshing",
+                "config_name": "all",
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert any(
+            "[Cleaner] 后台清理失败: step=meshing, config=all, error=remote clean failed"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_check_returns_runner_schema(self):
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
@@ -3593,6 +3699,57 @@ class TestPipelineDaemonResetStep:
         assert data is None
         assert "已重置构型1的solver 及后续步骤" in message
         assert daemon.scheduler.reset_calls == [(1, "solver")]
+
+    def test_reset_rejects_invalid_config_name_before_scheduler_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": "abc",
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_rejects_bool_config_name_before_scheduler_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": True,
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_accepts_numeric_config_name_string(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": "1",
+            "step_name": "sw",
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已重置构型1的sw 及后续步骤" in message
+        assert daemon.scheduler.reset_calls == [(1, "sw")]
 
 
 # ====================================================================

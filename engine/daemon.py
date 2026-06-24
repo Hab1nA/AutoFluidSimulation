@@ -1526,6 +1526,12 @@ class PipelineDaemon:
 
         if config_name is None:
             return False, None, "请指定构型名称 (config_name)"
+        valid_config_name, config_name, config_error = self._normalize_config_name_for_mutation(
+            config_name,
+            allow_none=False,
+        )
+        if not valid_config_name:
+            return False, None, config_error
 
         # 校验 step_name（空字符串视为无效）
         if step_name is not None and step_name != "all" and step_name not in STEP_NAMES:
@@ -1566,6 +1572,12 @@ class PipelineDaemon:
         """
         step_name = params.get("step_name")
         config_name = params.get("config_name")
+        valid_config_name, config_name, config_error = self._normalize_config_name_for_mutation(
+            config_name,
+            allow_none=True,
+        )
+        if not valid_config_name:
+            return False, None, config_error
 
         guard_ok, guard_msg = self._validate_mutation_safe(
             action_name="清理",
@@ -1585,9 +1597,12 @@ class PipelineDaemon:
             def _do_clean_cache():
                 try:
                     self.runner.clean_all_cache()
-                    logger.info("clean all cache 后台任务完成")
+                    logger.info("[Cleaner] 后台清理完成: step=cache, config=all")
                 except Exception as e:
-                    logger.error(f"clean all cache 后台任务异常: {e}", exc_info=True)
+                    logger.error(
+                        f"[Cleaner] 后台清理失败: step=cache, config=all, error={e}",
+                        exc_info=True,
+                    )
 
             threading.Thread(
                 target=_do_clean_cache,
@@ -1612,9 +1627,16 @@ class PipelineDaemon:
             def _do_clean_step():
                 try:
                     self.runner.clean_step_files(step_name, config_name)
-                    logger.info(f"clean {step_name} (config={config_name}) 后台任务完成")
+                    logger.info(
+                        f"[Cleaner] 后台清理完成: step={step_name}, "
+                        f"config={config_name or 'all'}"
+                    )
                 except Exception as e:
-                    logger.error(f"clean {step_name} (config={config_name}) 后台任务异常: {e}", exc_info=True)
+                    logger.error(
+                        f"[Cleaner] 后台清理失败: step={step_name}, "
+                        f"config={config_name or 'all'}, error={e}",
+                        exc_info=True,
+                    )
 
             threading.Thread(target=_do_clean_step, daemon=True,
                            name=f"Clean-{step_name}-Bg").start()
@@ -1674,6 +1696,41 @@ class PipelineDaemon:
             f"构型{cfg}的 {step} 远程任务状态为 {status}，"
             f"{action_name}前请先确认任务结束或停止后台任务",
         )
+
+    @staticmethod
+    def _normalize_config_name_for_mutation(
+        config_name: int | str | None,
+        *,
+        allow_none: bool,
+    ) -> tuple[bool, int | str | None, str]:
+        """Normalize IPC reset/clean config selectors before mutation."""
+        if config_name is None:
+            if allow_none:
+                return True, None, ""
+            return False, None, "请指定构型名称 (config_name)"
+        if isinstance(config_name, bool) or not isinstance(config_name, int | str):
+            return (
+                False,
+                config_name,
+                f"无效构型名称: {config_name}，必须是整数或 all",
+            )
+        if config_name == "all":
+            return True, "all", ""
+        try:
+            normalized = int(config_name)
+        except (TypeError, ValueError):
+            return (
+                False,
+                config_name,
+                f"无效构型名称: {config_name}，必须是整数或 all",
+            )
+        if normalized <= 0:
+            return (
+                False,
+                config_name,
+                f"无效构型名称: {config_name}，必须是正整数或 all",
+            )
+        return True, normalized, ""
 
     def _find_blocking_running_step(
         self,

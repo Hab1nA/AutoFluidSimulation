@@ -40,6 +40,7 @@ pub use utils::format_local_time;
 
 const MIN_TERMINAL_WIDTH: u16 = 80;
 const MIN_TERMINAL_HEIGHT: u16 = 16;
+const WORKER_HEALTH_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 
 fn format_log_record(
     buf: &mut env_logger::fmt::Formatter,
@@ -392,6 +393,34 @@ fn try_refresh_worker_health_once(
     log_buffer: &mut LogBuffer,
 ) {
     refresh_dashboard_once(rt, ipc, state, log_buffer);
+}
+
+fn poll_worker_health_watchdog(
+    worker: &mut worker_mgr::WorkerManager,
+    state: &AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let managed_process_down = worker.has_exited_managed_process();
+    let worker_offline = state.health_info.local_worker_online == Some(false);
+    let local_tunnel_down = matches!(
+        state.health_info.server_to_local_ssh.as_deref(),
+        Some("disconnected") | Some("error")
+    );
+    let workstation_tunnel_down = matches!(
+        state.health_info.server_to_workstation_ssh.as_deref(),
+        Some("disconnected") | Some("error")
+    );
+    if !(managed_process_down || worker_offline || local_tunnel_down || workstation_tunnel_down) {
+        return;
+    }
+    let warning = "⚠️ Worker 或 SSH 隧道异常，请确认工作站状态；需要恢复时执行 worker restart";
+    if !log_buffer
+        .info_messages
+        .iter()
+        .any(|message| message == warning)
+    {
+        log_buffer.push_info(warning.to_string());
+    }
 }
 
 #[cfg(test)]
@@ -1020,6 +1049,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = initial_ipc_poll_timestamp();
     let mut last_clock_refresh = Instant::now();
+    let mut last_worker_health_watchdog = Instant::now();
 
     let mut ctx = EventContext {
         state: &mut state,
@@ -1079,6 +1109,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
         ctx.daemon
             .poll_ipc_reconnect(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
+
+        if last_worker_health_watchdog.elapsed() >= WORKER_HEALTH_WATCHDOG_INTERVAL {
+            poll_worker_health_watchdog(ctx.worker, ctx.state, ctx.log_buffer);
+            last_worker_health_watchdog = Instant::now();
+        }
 
         // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
@@ -1922,6 +1957,57 @@ mod tests {
             .iter()
             .any(|message| message.contains("生命周期任务正在运行")));
     }
+
+    #[test]
+    fn worker_health_watchdog_warns_without_requesting_restart() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = Some(false);
+        state.health_info.server_to_local_ssh = Some("disconnected".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("worker restart")));
+        assert!(state.pending_command.is_none());
+    }
+
+    #[test]
+    fn worker_health_watchdog_deduplicates_repeated_warning() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = Some(false);
+        state.health_info.server_to_local_ssh = Some("disconnected".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        let warning_count = log_buffer
+            .info_messages
+            .iter()
+            .filter(|message| message.contains("Worker 或 SSH 隧道异常"))
+            .count();
+        assert_eq!(warning_count, 1);
+    }
+
+    #[test]
+    fn worker_health_watchdog_does_not_warn_on_unknown_health() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = None;
+        state.health_info.server_to_local_ssh = Some("unknown".to_string());
+        state.health_info.server_to_workstation_ssh = Some("unknown".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        assert!(log_buffer.info_messages.is_empty());
+    }
+
     #[test]
     fn worker_lifecycle_commands_do_not_start_workers_inline() {
         let source = include_str!("lib.rs");

@@ -97,6 +97,33 @@ def test_connect_allows_key_auth_when_password_is_empty(monkeypatch):
     }]
 
 
+def test_connect_returns_false_and_clears_connection_on_socket_timeout(monkeypatch):
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **_kwargs: object) -> None:
+            raise socket.timeout("connect timed out")
+
+        def close(self) -> None:
+            pass
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    assert host.connect() is False
+    assert host._ssh is None
+    assert host._sftp is None
+
+
 def test_connect_uses_configured_key_file(monkeypatch):
     calls: list[dict[str, object]] = []
 
@@ -929,3 +956,124 @@ def test_check_system_reports_configured_paths_when_reconnect_fails():
         "exists": None,
     } in result["remote_programs"]
     assert result["scripts_status"] == {"status": "skipped", "message": "SSH 未连接，未检查"}
+
+
+def test_is_connected_disconnects_when_heartbeat_times_out():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return True
+
+        @staticmethod
+        def send_ignore() -> None:
+            raise socket.timeout("heartbeat timed out")
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_is_connected_disconnects_when_transport_inactive():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return False
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_is_connected_disconnects_when_heartbeat_raises_unknown_exception():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return True
+
+        @staticmethod
+        def send_ignore() -> None:
+            raise RuntimeError("transport heartbeat failed")
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_exec_command_disconnects_on_socket_timeout():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _SSH:
+        @staticmethod
+        def exec_command(command: str, timeout: int = 30):
+            raise socket.timeout("command timed out")
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        out, err, code = host.exec_command("hostname", timeout=1)
+
+    assert (out, err, code) == ("", "命令执行超时", -1)
+    assert host._ssh is None
+
+
+def test_exec_command_disconnects_on_unknown_exception():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _SSH:
+        @staticmethod
+        def exec_command(command: str, timeout: int = 30):
+            raise RuntimeError("transport corrupted")
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        out, err, code = host.exec_command("hostname", timeout=1)
+
+    assert out == ""
+    assert err == "transport corrupted"
+    assert code == -1
+    assert host._ssh is None

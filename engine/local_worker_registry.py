@@ -7,6 +7,9 @@ import threading
 from typing import Any
 
 
+WORKER_OFFLINE_ERROR = "LocalWorker 离线，任务已中止"
+
+
 class LocalWorkerRegistry:
     """In-memory registry for LocalWorker liveness."""
 
@@ -60,6 +63,8 @@ class LocalWorkerRegistry:
                 },
             )
             worker["last_seen_at"] = now
+            self._prune_offline_workers_locked()
+            self._prune_finished_tasks_locked()
             return self._with_online(worker)
 
     def get_worker(self, worker_id: str) -> dict[str, Any] | None:
@@ -116,16 +121,17 @@ class LocalWorkerRegistry:
     def prune_offline_workers(self) -> int:
         """Remove workers whose heartbeat has expired and return removed count."""
         with self._lock:
-            stale_worker_ids = [
-                worker_id
-                for worker_id, worker in self._workers.items()
-                if not self._is_online(worker)
-            ]
-            for worker_id in stale_worker_ids:
-                self._workers.pop(worker_id, None)
-            if stale_worker_ids:
-                self._task_condition.notify_all()
-            return len(stale_worker_ids)
+            return self._prune_offline_workers_locked()
+
+    def prune_finished_tasks(
+        self,
+        max_age_seconds: float = 3600.0,
+        max_tasks: int = 500,
+    ) -> int:
+        """Remove old terminal tasks while preserving pending/running tasks."""
+        with self._lock:
+            return self._prune_finished_tasks_locked(max_age_seconds, max_tasks)
+
     def clear_pending_tasks(self) -> int:
         """Cancel all pending tasks and return the count of cancelled tasks."""
         with self._task_condition:
@@ -222,6 +228,9 @@ class LocalWorkerRegistry:
                 task = self._tasks[task_id]
                 if task["status"] in {"completed", "error"}:
                     return self._task_snapshot(task)
+                if self._mark_task_error_if_worker_offline_locked(task):
+                    self._task_condition.notify_all()
+                    return self._task_snapshot(task)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     task["status"] = "error"
@@ -239,6 +248,66 @@ class LocalWorkerRegistry:
     def _is_online(self, worker: dict[str, Any]) -> bool:
         last_seen_at = float(worker["last_seen_at"])
         return self._clock() - last_seen_at <= self._timeout_seconds
+
+    def _prune_offline_workers_locked(self) -> int:
+        stale_worker_ids = [
+            worker_id
+            for worker_id, worker in self._workers.items()
+            if not self._is_online(worker)
+        ]
+        if not stale_worker_ids:
+            return 0
+        stale_worker_set = set(stale_worker_ids)
+        for task in self._tasks.values():
+            if task.get("worker_id") in stale_worker_set:
+                self._mark_task_error_if_worker_offline_locked(task)
+        for worker_id in stale_worker_ids:
+            self._workers.pop(worker_id, None)
+        self._task_condition.notify_all()
+        return len(stale_worker_ids)
+
+    def _prune_finished_tasks_locked(
+        self,
+        max_age_seconds: float = 3600.0,
+        max_tasks: int = 500,
+    ) -> int:
+        now = self._clock()
+        terminal_tasks = [
+            task
+            for task in self._tasks.values()
+            if task.get("status") in {"completed", "error"}
+        ]
+        task_ids_to_remove = {
+            str(task["task_id"])
+            for task in terminal_tasks
+            if now - float(task.get("finished_at", now)) > max_age_seconds
+        }
+        if max_tasks >= 0 and len(terminal_tasks) - len(task_ids_to_remove) > max_tasks:
+            remaining_terminal = [
+                task for task in terminal_tasks if str(task["task_id"]) not in task_ids_to_remove
+            ]
+            remaining_terminal.sort(key=lambda task: float(task.get("finished_at", 0.0)))
+            overflow = len(remaining_terminal) - max_tasks
+            task_ids_to_remove.update(
+                str(task["task_id"]) for task in remaining_terminal[:overflow]
+            )
+        for task_id in task_ids_to_remove:
+            self._tasks.pop(task_id, None)
+        return len(task_ids_to_remove)
+
+    def _mark_task_error_if_worker_offline_locked(self, task: dict[str, Any]) -> bool:
+        if task.get("status") != "running":
+            return False
+        worker_id = task.get("worker_id")
+        if not worker_id:
+            return False
+        worker = self._workers.get(str(worker_id))
+        if worker is not None and self._is_online(worker):
+            return False
+        task["status"] = "error"
+        task["error"] = WORKER_OFFLINE_ERROR
+        task["finished_at"] = self._clock()
+        return True
 
     def _with_online(self, worker: dict[str, Any]) -> dict[str, Any]:
         snapshot = dict(worker)

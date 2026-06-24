@@ -110,12 +110,12 @@ class RemoteWorkstation:
             self._sftp = self._ssh.open_sftp()
             logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
-        except (paramiko.SSHException, OSError, EOFError) as e:
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.error(f"[SSH] SSH 连接失败: {e}")
             if transport is not None:
                 try:
                     transport.close()
-                except (OSError, EOFError) as close_error:
+                except (OSError, EOFError, socket.timeout) as close_error:
                     logger.warning(f"[SSH] Transport 关闭异常: {close_error}")
             self._ssh = None
             self._sftp = None
@@ -145,15 +145,17 @@ class RemoteWorkstation:
             return False
         transport = self._ssh.get_transport()
         if transport is None or not transport.is_active():
+            self.disconnect()
             return False
         try:
             transport.send_ignore()
             return True
-        except (OSError, EOFError):
+        except (OSError, EOFError, socket.timeout, Exception):
+            self.disconnect()
             return False
 
     def connection_is_active(self) -> bool:
-        """Return cached transport activity without sending a network heartbeat."""
+        """Return cached transport state without proving network reachability."""
         if self._ssh is None:
             return False
         transport = self._ssh.get_transport()
@@ -552,6 +554,7 @@ class RemoteWorkstation:
             return ("", str(e), -1)
         except socket.timeout:
             logger.error("[SSH] 远程命令执行超时")
+            self.disconnect()
             return ("", "命令执行超时", -1)
         except OSError as e:
             logger.error(f"[SSH] 远程命令执行失败: {e}")
@@ -563,6 +566,7 @@ class RemoteWorkstation:
             return ("", str(e), -1)
         except Exception as e:
             logger.error(f"[SSH] 远程命令执行未知异常: {e}")
+            self.disconnect()
             return ("", str(e), -1)
 
     @staticmethod

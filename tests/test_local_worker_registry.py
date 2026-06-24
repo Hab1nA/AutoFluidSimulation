@@ -215,3 +215,66 @@ def test_prune_offline_workers_removes_stale_entries() -> None:
     assert registry.prune_offline_workers() == 1
     assert registry.get_worker("stale-pc") is None
     assert registry.get_worker("live-pc") is not None
+
+
+def test_wait_for_task_fails_running_task_when_worker_goes_offline() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=30.0, clock=lambda: now)
+    registry.register("local-pc-01", {"sw": True})
+    queued = registry.enqueue_task("sw", {"config_name": 1})
+    task = registry.poll_task("local-pc-01")
+    assert task is not None
+    assert task["status"] == "running"
+
+    now = 131.0
+    finished = registry.wait_for_task(
+        str(queued["task_id"]),
+        timeout_seconds=60.0,
+        poll_interval=0.01,
+    )
+
+    assert finished["status"] == "error"
+    assert finished["error"] == "LocalWorker 离线，任务已中止"
+
+
+def test_prune_offline_workers_marks_running_tasks_failed() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=30.0, clock=lambda: now)
+    registry.register("local-pc-01", {"sw": True})
+    queued = registry.enqueue_task("sw", {"config_name": 1})
+    assert registry.poll_task("local-pc-01") is not None
+
+    now = 131.0
+    assert registry.prune_offline_workers() == 1
+
+    task = registry.get_task(str(queued["task_id"]))
+    assert task is not None
+    assert task["status"] == "error"
+    assert task["error"] == "LocalWorker 离线，任务已中止"
+
+
+def test_prune_finished_tasks_keeps_pending_and_running_tasks() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: now)
+    registry.register("local-pc-01", {"sw": True})
+    completed = registry.enqueue_task("sw", {"config_name": 1})
+    running = registry.enqueue_task("sc", {"config_name": 2})
+    pending = registry.enqueue_task("clean_local_files", {"step_name": "sw"})
+    task = registry.poll_task("local-pc-01")
+    assert task is not None
+    registry.complete_task(str(task["task_id"]), "local-pc-01", {"ok": True})
+    assert registry.poll_task("local-pc-01") is not None
+
+    now = 200.0
+    removed = registry.prune_finished_tasks(max_age_seconds=30.0)
+
+    assert removed == 1
+    assert registry.get_task(str(completed["task_id"])) is None
+    assert registry.get_task(str(running["task_id"])) is not None
+    assert registry.get_task(str(pending["task_id"])) is not None

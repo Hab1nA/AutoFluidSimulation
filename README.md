@@ -655,6 +655,8 @@ python main.py --all           # 同时启动
 | `status`                      | 显示引擎状态和各步骤统计摘要             | `status`                             |
 | `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（弹出确认对话框）       | `reset 5 sw`、`reset all all`      |
 | `clean <构型\|all> <步骤\|all>` | 清理步骤产生的中间文件（弹出确认对话框） | `clean 5 all`、`clean all meshing` |
+| `clean <步骤>`                 | 清理所有构型指定步骤的中间文件（弹出确认对话框） | `clean meshing`、`clean postprocess` |
+| `clean all cache`              | 清理远程工作站临时缓存文件（弹出确认对话框） | `clean all cache`                  |
 | `settings`                    | 打开可视化设置页面                       | `settings`                           |
 
 #### Daemon 生命周期
