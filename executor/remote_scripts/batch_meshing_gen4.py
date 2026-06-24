@@ -59,8 +59,8 @@ def parse_args() -> argparse.Namespace:
 
     # Fluent 参数
     parser.add_argument('--processor-count', type=int,
-                        default=8,
-                        help='处理器核心数 (默认: 8)')
+                        required=True,
+                        help='处理器核心数')
 
     return parser.parse_args()
 

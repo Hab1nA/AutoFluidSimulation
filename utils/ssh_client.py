@@ -25,6 +25,7 @@ try:
     import paramiko
 except ImportError:  # pragma: no cover
     paramiko = None
+from engine.config import OPERATION_TIMEOUTS
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -100,7 +101,7 @@ class RemoteWorkstation:
                 username=self.username,
                 password=password,
                 key_filename=key_filename,
-                timeout=10,
+                timeout=OPERATION_TIMEOUTS.get("ssh_connection", 10),
                 look_for_keys=use_key_auth,
                 allow_agent=use_key_auth,
             )

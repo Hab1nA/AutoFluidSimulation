@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
+use crate::settings::{config_io, SettingsConfig};
 use crate::state::{AppState, LogBuffer};
 use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout};
 
@@ -19,7 +20,7 @@ const IPC_RECONNECT_SLOW_INTERVAL: Duration = Duration::from_secs(5);
 const IPC_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
 const SERVER_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(150);
 const SERVER_DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "$HOME/AutoFluidSimulation";
+const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "/root/AutoFluidSimulation";
 
 pub struct DaemonManager {
     process: Option<Child>,
@@ -980,7 +981,14 @@ fn run_tunnel_script_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
 ) -> Result<(ExitStatus, String, String), String> {
-    let request_id = crate::generate_request_id();
+    run_tunnel_script_command_with_timeout_and_id(command, timeout, &crate::generate_request_id())
+}
+
+fn run_tunnel_script_command_with_timeout_and_id(
+    command: &mut Command,
+    timeout: Duration,
+    request_id: &str,
+) -> Result<(ExitStatus, String, String), String> {
     let stdout_path = std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.out"));
     let stderr_path = std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.err"));
     let stdout_file = File::create(&stdout_path)
@@ -1208,7 +1216,8 @@ fn local_daemon_python(project_dir: &str) -> String {
 }
 
 fn default_server_start_command() -> String {
-    let project_dir = default_server_project_dir();
+    let config = config_io::load_config().ok();
+    let project_dir = default_server_project_dir_from(config.as_ref());
     let service_name = daemon_service_name();
     let service = shell_single_quote(&service_name);
     let service_unit = shell_single_quote(&daemon_service_unit_name(&service_name));
@@ -1216,6 +1225,7 @@ fn default_server_start_command() -> String {
         "AUTOFLUID_SERVER_DAEMON_IPC_PORT",
         "AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT",
     ])
+    .or_else(|| config.as_ref().map(toml_ipc_port))
     .unwrap_or_else(|| "9527".to_string());
     format!(
         "cd {project_dir} && mkdir -p logs/server/services/daemon-bootstrap && \
@@ -1252,7 +1262,8 @@ fn default_server_start_command() -> String {
 }
 
 fn default_server_stop_command() -> String {
-    let project_dir = default_server_project_dir();
+    let config = config_io::load_config().ok();
+    let project_dir = default_server_project_dir_from(config.as_ref());
     let service_name = daemon_service_name();
     let service = shell_single_quote(&service_name);
     let service_unit = shell_single_quote(&daemon_service_unit_name(&service_name));
@@ -1279,10 +1290,24 @@ fn daemon_service_unit_name(service_name: &str) -> String {
 }
 
 fn default_server_project_dir() -> String {
+    let config = config_io::load_config().ok();
+    default_server_project_dir_from(config.as_ref())
+}
+
+fn default_server_project_dir_from(config: Option<&SettingsConfig>) -> String {
     env_non_empty("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
         .or_else(|| env_non_empty("AUTOFLUID_SERVER_PROJECT_DIR"))
+        .or_else(|| config.and_then(toml_server_project_dir))
         .map(|path| shell_single_quote(&path))
         .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string())
+}
+
+fn toml_ipc_port(config: &SettingsConfig) -> String {
+    config.ipc_config.port.to_string()
+}
+
+fn toml_server_project_dir(config: &SettingsConfig) -> Option<String> {
+    Some(config.server.project_dir.clone()).filter(|path| !path.trim().is_empty())
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -1302,6 +1327,7 @@ mod tests {
             crate::generate_request_id()
         ));
         fs::create_dir_all(dir.join("data")).expect("create temp project data dir");
+        fs::write(dir.join("start_daemon.py"), "").expect("write project marker");
         dir
     }
 
@@ -1560,41 +1586,26 @@ mod tests {
 
     #[test]
     fn tunnel_script_runner_removes_temp_files_when_spawn_fails() {
-        let before = tunnel_temp_file_count();
-        let missing_exe = std::env::temp_dir().join(format!(
-            "autofluid-tui-missing-command-{}",
-            crate::generate_request_id()
-        ));
+        let request_id = crate::generate_request_id();
+        let missing_exe =
+            std::env::temp_dir().join(format!("autofluid-tui-missing-command-{request_id}"));
+        let stdout_path =
+            std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.out"));
+        let stderr_path =
+            std::env::temp_dir().join(format!("autofluid-tui-tunnel-{request_id}.err"));
         let mut cmd = Command::new(missing_exe);
 
-        let result = run_tunnel_script_command_with_timeout(&mut cmd, Duration::from_secs(1));
+        let result = run_tunnel_script_command_with_timeout_and_id(
+            &mut cmd,
+            Duration::from_secs(1),
+            &request_id,
+        );
 
         assert!(result.is_err());
-        assert_eq!(
-            tunnel_temp_file_count(),
-            before,
+        assert!(
+            !stdout_path.exists() && !stderr_path.exists(),
             "spawn failure must not leave tunnel stdout/stderr temp files"
         );
-    }
-
-    fn tunnel_temp_file_count() -> usize {
-        fs::read_dir(std::env::temp_dir())
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| {
-                        entry
-                            .file_name()
-                            .to_str()
-                            .map(|name| {
-                                name.starts_with("autofluid-tui-tunnel-")
-                                    && (name.ends_with(".out") || name.ends_with(".err"))
-                            })
-                            .unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
     }
 
     #[test]
@@ -1674,6 +1685,52 @@ mod tests {
 
         std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
         std::env::remove_var("AUTOFLUID_IPC_PORT");
+    }
+
+    #[test]
+    fn default_server_start_command_uses_toml_ipc_port_when_env_is_absent() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = unique_temp_project_dir();
+        fs::write(
+            project_dir.join("autofluid_config.toml"),
+            "[ipc_config]\nport = 19627\n",
+        )
+        .expect("write config");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_IPC_PORT");
+        std::env::remove_var("AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT");
+        std::env::remove_var("AUTOFLUID_IPC_PORT");
+        std::env::remove_var("AUTOFLUID_DAEMON_SERVICE");
+
+        let command = default_server_start_command();
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        let _ = fs::remove_dir_all(project_dir);
+        assert!(command.contains("socket.create_connection(('127.0.0.1', 19627)"));
+    }
+
+    #[test]
+    fn default_server_project_dir_uses_toml_server_project_dir_when_env_is_absent() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = unique_temp_project_dir();
+        fs::write(
+            project_dir.join("autofluid_config.toml"),
+            "[server]\nproject_dir = '/srv/autofluid custom'\n",
+        )
+        .expect("write config");
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+        std::env::remove_var("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR");
+        std::env::remove_var("AUTOFLUID_SERVER_PROJECT_DIR");
+
+        let remote_project_dir = default_server_project_dir();
+
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+        let _ = fs::remove_dir_all(project_dir);
+        assert_eq!(remote_project_dir, "'/srv/autofluid custom'");
     }
 
     #[test]

@@ -250,8 +250,17 @@ def setup_logger(name: str, log_file: str | None = None) -> logging.Logger:
 
 def _create_file_handler(log_file: str) -> RotatingFileHandler:
     """Create a bounded file handler for long-running processes."""
-    max_bytes = int(os.environ.get("AUTOFLUID_LOG_MAX_BYTES", str(_DEFAULT_LOG_MAX_BYTES)))
-    backup_count = int(os.environ.get("AUTOFLUID_LOG_BACKUP_COUNT", str(_DEFAULT_LOG_BACKUP_COUNT)))
+    max_bytes_default = _DEFAULT_LOG_MAX_BYTES
+    backup_count_default = _DEFAULT_LOG_BACKUP_COUNT
+    try:
+        from engine.config import ENGINE_CONFIG
+
+        max_bytes_default = int(ENGINE_CONFIG.get("log_max_bytes", max_bytes_default))
+        backup_count_default = int(ENGINE_CONFIG.get("log_backup_count", backup_count_default))
+    except Exception:
+        pass
+    max_bytes = int(os.environ.get("AUTOFLUID_LOG_MAX_BYTES", str(max_bytes_default)))
+    backup_count = int(os.environ.get("AUTOFLUID_LOG_BACKUP_COUNT", str(backup_count_default)))
     return RotatingFileHandler(
         log_file,
         maxBytes=max_bytes,

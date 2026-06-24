@@ -255,3 +255,24 @@ def test_invalid_processor_count_is_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="--processor-count"):
         module.main()
+
+
+def test_processor_count_is_required_by_cli(monkeypatch):
+    module = _load_batch_meshing_module(monkeypatch, lambda **kwargs: None)
+    argv = [
+        "batch_meshing_gen4.py",
+        "--config-id", "1",
+        "--mpi-bin-dir", r"C:\mpi",
+        "--fluent-path", r"C:\fluent.exe",
+        "--workflow-path", "mesh.wft",
+        "--journal-path", "mesh.jou",
+        "--scdoc-dir", r"D:\scdoc",
+        "--scdoc-name", "model.scdoc",
+        "--output-dir", r"D:\msh",
+        "--working-dir", r"D:\work",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2

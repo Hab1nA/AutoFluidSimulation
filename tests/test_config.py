@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+import json
 
 
 # ====================================================================
@@ -80,6 +82,64 @@ class TestLocalPathsCompleteness:
             assert isinstance(val, str) and val, (
                 f"LOCAL_PATHS['{key}'] 应为非空字符串，实际: {val!r}"
             )
+
+
+# ====================================================================
+# fallback 默认值与 TOML 对齐
+# ====================================================================
+
+class TestFallbackDefaultsMatchToml:
+    """验证 TOML 缺失时的代码 fallback 与仓库默认 TOML 保持一致。"""
+
+    @staticmethod
+    def _load_config_snapshot_without_startup_toml() -> dict[str, object]:
+        code = r'''
+import json
+import os
+original_exists = os.path.exists
+os.path.exists = lambda path: False if str(path).endswith("autofluid_config.toml") else original_exists(path)
+import engine.config as cfg
+print(json.dumps({
+    "local_paths": {
+        "sw_model": cfg.LOCAL_PATHS["sw_model"],
+        "excel": cfg.LOCAL_PATHS["excel"],
+        "step_dir": cfg.LOCAL_PATHS["step_dir"],
+        "scdoc_dir": cfg.LOCAL_PATHS["scdoc_dir"],
+    },
+    "remote_config": {
+        "scripts_dir": cfg.REMOTE_CONFIG["scripts_dir"],
+    },
+    "operation_timeouts": {
+        "sc_gui_stable_delay": cfg.OPERATION_TIMEOUTS["sc_gui_stable_delay"],
+    },
+    "engine_config": {
+        "meshing_timeout": cfg.ENGINE_CONFIG["meshing_timeout"],
+        "solver_timeout": cfg.ENGINE_CONFIG["solver_timeout"],
+    },
+}, ensure_ascii=False))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_local_and_remote_path_fallbacks_match_repository_toml(self):
+        snapshot = self._load_config_snapshot_without_startup_toml()
+        repo_root = Path(__file__).resolve().parents[1]
+        assert snapshot["local_paths"]["sw_model"] == str(repo_root / "data" / "model.SLDPRT")
+        assert snapshot["local_paths"]["excel"] == str(repo_root / "data" / "model.xlsx")
+        assert snapshot["local_paths"]["step_dir"] == str(repo_root / "data" / "step")
+        assert snapshot["local_paths"]["scdoc_dir"] == str(repo_root / "data" / "scdoc")
+        assert snapshot["remote_config"]["scripts_dir"] == r"D:\xkz_1020\scripts"
+
+    def test_timeout_fallbacks_match_repository_toml(self):
+        snapshot = self._load_config_snapshot_without_startup_toml()
+        assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
+        assert snapshot["engine_config"]["meshing_timeout"] == 1800
+        assert snapshot["engine_config"]["solver_timeout"] == 14400
 
 
 # ====================================================================
@@ -1153,7 +1213,7 @@ class TestConfigDictCompleteness:
         "watchdog_interval", "sw_macro_timeout", "max_retries",
         "sc_timeout", "transfer_timeout", "meshing_timeout",
         "meshing_processor_count", "solver_timeout", "solver_processor_count",
-        "solver_iteration_count",
+        "solver_iteration_count", "log_max_bytes", "log_backup_count",
     }
 
     def test_remote_config_keys(self):

@@ -417,6 +417,21 @@ class TestBuildPostprocessCommand:
             assert "--metrics-cstar-reference 1900.0" in command
             assert '"D:\\post\\animation"' in command
 
+    def test_postprocess_path_config_prefers_engine_animation_over_legacy_animation_dir(self, monkeypatch):
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+
+        paths = RemoteExecutor._postprocess_path_config(
+            {
+                "result_dir": r"D:\case",
+                "working_dir": r"D:\working",
+                "animation_dir": r"D:\legacy\animation",
+            }
+        )
+
+        assert paths["animation_dir"] == r"D:\post\animation"
+
     def test_workstation_postprocess_paths_override_global_defaults(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
         monkeypatch.setitem(REMOTE_CONFIG, "conda_exe", r"C:\conda.exe")
@@ -469,11 +484,13 @@ class TestBuildPostprocessCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\Auto Fluid\animation%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\Auto Fluid\animation%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\Auto Fluid\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
         monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 64)
         monkeypatch.setitem(ENGINE_CONFIG, "solver_iteration_count", 500)
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\Auto Fluid\animation%ROOT%")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         command, _ = executor._build_solver_command(3)

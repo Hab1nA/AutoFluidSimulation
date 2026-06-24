@@ -22,8 +22,6 @@ FLUID_ZONE = "s------6.5076"
 OUTLET_ZONE = "outlet"
 INLET_OXIDIZER = "inlet_oxidizer"
 INLET_FUEL = "inlet_fuel"
-DEFAULT_EXIT_TO_THROAT_AREA_RATIO = 7.427276607
-DEFAULT_CSTAR_REFERENCE = 1830.4
 REPORT_VALUE_RE = re.compile(r"^\s*(?:Net|\S+)\s+([-+0-9.Ee]+)\s*$")
 EXPRESSION_ROW_RE = re.compile(r"^\s*(\S+)\s+([-+0-9.Ee]+)\s+(?:\[.*\])?\s*$")
 REPORT_UNIT_RE = re.compile(r"\[([^\]]+)\]")
@@ -43,14 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--compute-script", type=Path, default=Path(__file__).with_name("compute_metrics_gen4.py"))
     parser.add_argument("--fluent-path", type=Path, required=True)
-    parser.add_argument("--processor-count", type=int, default=2)
+    parser.add_argument("--processor-count", type=int, required=True)
     parser.add_argument("--ambient-pressure", type=float, default=0.0)
     parser.add_argument("--pressure-reference", type=float, default=101325.0)
     parser.add_argument("--tcomb", type=float, default=1000.0)
     parser.add_argument("--chamber-x-max", type=float, default=None)
     parser.add_argument("--thrust-axis", choices=("x", "y", "z"), default="x")
-    parser.add_argument("--exit-to-throat-area-ratio", type=float, default=DEFAULT_EXIT_TO_THROAT_AREA_RATIO)
-    parser.add_argument("--cstar-reference", type=float, default=DEFAULT_CSTAR_REFERENCE)
+    parser.add_argument("--exit-to-throat-area-ratio", type=float, required=True)
+    parser.add_argument("--cstar-reference", type=float, required=True)
     parser.add_argument("--config-name", type=str, default=None)
     parser.add_argument("--config-id", type=int, default=None)
     return parser.parse_args()

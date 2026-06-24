@@ -70,11 +70,11 @@ def parse_args() -> argparse.Namespace:
 
     # Fluent 参数
     parser.add_argument('--processor-count', type=int,
-                        default=128,
-                        help='处理器核心数 (默认: 128)')
+                        required=True,
+                        help='处理器核心数')
     parser.add_argument('--iterate-count', type=int,
-                        default=1000,
-                        help='迭代次数 (默认: 1000)')
+                        required=True,
+                        help='迭代次数')
     parser.add_argument('--progress-file', type=str, default=None,
                         help='可选：写入 Solver 剩余时间进度的 JSON 文件路径')
     parser.add_argument('--solver-flag-file', type=str, required=True,
@@ -101,9 +101,9 @@ def parse_args() -> argparse.Namespace:
                         help='混合比统计温度阈值 K')
     parser.add_argument('--metrics-thrust-axis', choices=('x', 'y', 'z'), default='x',
                         help='推力轴向')
-    parser.add_argument('--metrics-exit-to-throat-area-ratio', type=float, default=7.427276607,
+    parser.add_argument('--metrics-exit-to-throat-area-ratio', type=float, required=True,
                         help='出口面积与喉部面积比 Ae/At')
-    parser.add_argument('--metrics-cstar-reference', type=float, default=1830.4,
+    parser.add_argument('--metrics-cstar-reference', type=float, required=True,
                         help='CEA 或试验基准特征速度 m/s')
 
     return parser.parse_args()

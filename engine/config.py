@@ -180,6 +180,8 @@ class EngineConfig(TypedDict):
     sc_persistent_ready_timeout: int
     sc_oneshot_fallback_enabled: bool
     sc_scdoc_stable_seconds: float
+    log_max_bytes: int
+    log_backup_count: int
 
 
 # ============================================================================
@@ -194,17 +196,38 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SolidWorks 初始模型文件
     "sw_model": _env_override(
         "AUTOFLUID_SW_MODEL",
-        _toml_or_default("local_paths", "sw_model", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT"),
+        _toml_or_default(
+            "local_paths",
+            "sw_model",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "model.SLDPRT",
+            ),
+        ),
     ),
     # 外部 Excel 参数表（唯一数据源）
     "excel": _env_override(
         "AUTOFLUID_SW_EXCEL",
-        _toml_or_default("local_paths", "excel", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx"),
+        _toml_or_default(
+            "local_paths",
+            "excel",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "model.xlsx",
+            ),
+        ),
     ),
     # STEP 文件输出目录（直接 COM 调用导出 STEP 到此）
     "step_dir": _env_override(
         "AUTOFLUID_STEP_DIR",
-        _toml_or_default("local_paths", "step_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step"),
+        _toml_or_default(
+            "local_paths",
+            "step_dir",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "step",
+            ),
+        ),
     ),
     # SpaceClaim 可执行文件
     "sc_exe": _env_override(
@@ -227,7 +250,14 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
-        _toml_or_default("local_paths", "scdoc_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc"),
+        _toml_or_default(
+            "local_paths",
+            "scdoc_dir",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "scdoc",
+            ),
+        ),
     ),
     # 日志目录（固定位于项目 logs/ 目录下）
     "log_dir": os.path.join(
@@ -255,7 +285,7 @@ REMOTE_CONFIG: RemoteConfig = {
     # 仿真工作目录
     "working_dir": _toml_or_default("remote_config", "working_dir", r"D:\xkz_1020\workingdir"),
     # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
-    "scripts_dir": _toml_or_default("remote_config", "scripts_dir", r"D:\xkz_1020"),
+    "scripts_dir": _toml_or_default("remote_config", "scripts_dir", r"D:\xkz_1020\scripts"),
     # 仿真引用文件目录（pdf/fla/chemkin 文件）
     "ref_files_dir": _toml_or_default("remote_config", "ref_files_dir", r"D:\xkz_1020\fluent_chemkin_files"),
     # 远程 SCDOC 接收目录
@@ -473,7 +503,7 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     # 进程出现后等待主窗口可交互的最大秒数
     "sc_gui_ready_timeout": _toml_or_default("spaceclaim", "sc_gui_ready_timeout", 30),
     # 主窗口就绪后额外等待后台加载稳定的秒数
-    "sc_gui_stable_delay": _toml_or_default("spaceclaim", "sc_gui_stable_delay", 15),
+    "sc_gui_stable_delay": _toml_or_default("spaceclaim", "sc_gui_stable_delay", 5),
 }
 
 # ============================================================================
@@ -506,11 +536,11 @@ ENGINE_CONFIG: EngineConfig = {
     # 文件传输超时（秒）
     "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）
-    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 600),
+    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 1800),
     # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
     "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）
-    "solver_timeout": _toml_or_default("solver", "solver_timeout", 7200),
+    "solver_timeout": _toml_or_default("solver", "solver_timeout", 14400),
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
     "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
@@ -547,10 +577,13 @@ ENGINE_CONFIG: EngineConfig = {
     "max_retries": _toml_or_default("global_settings", "max_retries", 3),
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": _toml_or_default("global_settings", "state_refresh_interval", 0.5),
+    # 日志轮转配置。环境变量 AUTOFLUID_LOG_MAX_BYTES / AUTOFLUID_LOG_BACKUP_COUNT 仍可覆盖。
+    "log_max_bytes": _toml_or_default("global_settings", "log_max_bytes", 20 * 1024 * 1024),
+    "log_backup_count": _toml_or_default("global_settings", "log_backup_count", 10),
     # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
-    "sc_persistent_ready_timeout": 180,
+    "sc_persistent_ready_timeout": _toml_or_default("spaceclaim", "sc_persistent_ready_timeout", 180),
     # SC SCDOC 文件大小稳定判定窗口（秒）—— SaveAs 完成的判定依据
-    "sc_scdoc_stable_seconds": 3.0,
+    "sc_scdoc_stable_seconds": _toml_or_default("spaceclaim", "sc_scdoc_stable_seconds", 3.0),
 }
 
 
@@ -937,4 +970,3 @@ def validate_config() -> list[str]:
         warnings.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
 
     return warnings
-

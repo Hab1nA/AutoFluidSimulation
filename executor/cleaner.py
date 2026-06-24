@@ -24,14 +24,13 @@ if TYPE_CHECKING:
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID, IPC_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, WORKSTATIONS,
-    STEP_NAMES, STEP_FILE_PATTERNS, ENGINE_CONFIG, get_workstation_config, is_server_mode,
+    STEP_NAMES, STEP_FILE_PATTERNS, get_workstation_config, is_server_mode,
 )
+from executor.postprocess_paths import resolve_postprocess_paths
 from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
 
 
 def _is_private_ip(host: str) -> bool:
@@ -62,30 +61,10 @@ def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int
 def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -> list[str]:
     """Return per-config postprocess result and runtime files to delete."""
     flag_dir = str(config.get("flag_dir", "")).replace("\\", "/").rstrip("/")
-    output_dir = str(
-        config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
-    engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
-    config_postprocess_animation_dir = config.get("postprocess_animation_dir")
-    if (
-        config_postprocess_animation_dir
-        and config_postprocess_animation_dir != engine_animation_dir
-    ):
-        animation_source = config_postprocess_animation_dir
-    elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir", ""):
-        animation_source = config.get("animation_dir", "")
-    else:
-        animation_source = config.get("animation_dir", "") or engine_animation_dir
-    animation_dir = str(animation_source).replace("\\", "/").rstrip("/")
-    metrics_dir = str(
-        config.get("postprocess_metrics_dir")
-        or ENGINE_CONFIG.get("postprocess_metrics_dir")
-        or config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    postprocess_paths = resolve_postprocess_paths(config)
+    output_dir = postprocess_paths["output_dir"]
+    animation_dir = postprocess_paths["animation_dir"]
+    metrics_dir = postprocess_paths["metrics_dir"]
     paths: list[str] = []
     if flag_dir:
         paths.extend([
@@ -120,13 +99,7 @@ def _postprocess_metrics_config_dir(
     config: Mapping[str, object],
     config_name: int,
 ) -> str | None:
-    metrics_dir = str(
-        config.get("postprocess_metrics_dir")
-        or ENGINE_CONFIG.get("postprocess_metrics_dir")
-        or config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    metrics_dir = resolve_postprocess_paths(config)["metrics_dir"]
     if not metrics_dir:
         return None
     return f"{metrics_dir}/model_gen4_{config_name}"
@@ -136,11 +109,7 @@ def _postprocess_output_config_dir(
     config: Mapping[str, object],
     config_name: int,
 ) -> str | None:
-    output_dir = str(
-        config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    output_dir = resolve_postprocess_paths(config)["output_dir"]
     if not output_dir:
         return None
     return f"{output_dir}/model_gen4_{config_name}"

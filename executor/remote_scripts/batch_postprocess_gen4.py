@@ -59,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-pressure-reference", type=float, default=101325.0, help="Fluent 表压转绝压参考 Pa")
     parser.add_argument("--metrics-tcomb", type=float, default=1000.0, help="混合比统计温度阈值 K")
     parser.add_argument("--metrics-thrust-axis", choices=("x", "y", "z"), default="x", help="推力轴向")
-    parser.add_argument("--metrics-exit-to-throat-area-ratio", type=float, default=7.427276607, help="出口面积与喉部面积比 Ae/At")
-    parser.add_argument("--metrics-cstar-reference", type=float, default=1830.4, help="CEA 或试验基准特征速度 m/s")
+    parser.add_argument("--metrics-exit-to-throat-area-ratio", type=float, required=True, help="出口面积与喉部面积比 Ae/At")
+    parser.add_argument("--metrics-cstar-reference", type=float, required=True, help="CEA 或试验基准特征速度 m/s")
     return parser.parse_args()
 
 

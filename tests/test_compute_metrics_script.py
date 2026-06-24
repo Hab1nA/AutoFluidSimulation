@@ -3,7 +3,10 @@ from __future__ import annotations
 import csv
 import importlib.util
 import math
+import sys
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT_PATH = (
@@ -51,6 +54,21 @@ def _load_postprocess_module(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_postprocess_metric_reference_values_are_required_by_cli(monkeypatch) -> None:
+    module = _load_postprocess_module(monkeypatch)
+    argv = [
+        "postprocess_metrics_gen4.py",
+        "--case-data", r"D:\case\model.cas.h5",
+        "--output-dir", r"D:\metrics",
+        "--fluent-path", r"C:\fluent.exe",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

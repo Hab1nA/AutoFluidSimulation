@@ -21,6 +21,7 @@ pub struct LocalPaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RemoteConfig {
     pub host: String,
     pub port: u16,
@@ -176,6 +177,7 @@ impl Default for RemoteConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StepFilePatterns {
     #[serde(rename = "sw")]
     pub sw: String,
@@ -205,6 +207,7 @@ impl Default for StepFilePatterns {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SolidWorksConfig {
     pub sw_macro_timeout: u64,
     pub sw_close_doc_on_finish: bool,
@@ -226,6 +229,7 @@ impl Default for SolidWorksConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpaceClaimConfig {
     pub sc_timeout: u64,
     pub sc_poll_interval: f64,
@@ -235,6 +239,8 @@ pub struct SpaceClaimConfig {
     pub sc_max_slots: u64,
     pub sc_persistent_enabled: bool,
     pub sc_oneshot_fallback_enabled: bool,
+    pub sc_persistent_ready_timeout: u64,
+    pub sc_scdoc_stable_seconds: f64,
 }
 
 impl Default for SpaceClaimConfig {
@@ -248,11 +254,14 @@ impl Default for SpaceClaimConfig {
             sc_max_slots: 1,
             sc_persistent_enabled: true,
             sc_oneshot_fallback_enabled: true,
+            sc_persistent_ready_timeout: 180,
+            sc_scdoc_stable_seconds: 3.0,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MeshingConfig {
     pub meshing_timeout: u64,
     pub meshing_processor_count: u32,
@@ -261,13 +270,14 @@ pub struct MeshingConfig {
 impl Default for MeshingConfig {
     fn default() -> Self {
         Self {
-            meshing_timeout: 600,
+            meshing_timeout: 1800,
             meshing_processor_count: 8,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SolverConfig {
     pub solver_timeout: u64,
     pub solver_processor_count: u32,
@@ -277,7 +287,7 @@ pub struct SolverConfig {
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
-            solver_timeout: 7200,
+            solver_timeout: 14400,
             solver_processor_count: 128,
             solver_iteration_count: 1000,
         }
@@ -285,6 +295,7 @@ impl Default for SolverConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PostProcessConfig {
     pub postprocess_timeout: u64,
     pub output_dir: String,
@@ -308,6 +319,7 @@ impl Default for PostProcessConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GlobalSettings {
     pub watchdog_interval: f64,
     pub transfer_timeout: u64,
@@ -316,6 +328,8 @@ pub struct GlobalSettings {
     pub ssh_connection: u64,
     pub dir_recursion_limit: u32,
     pub ssh_upload_max_retries: u32,
+    pub log_max_bytes: u64,
+    pub log_backup_count: u32,
 }
 
 impl Default for GlobalSettings {
@@ -328,6 +342,46 @@ impl Default for GlobalSettings {
             ssh_connection: 10,
             dir_recursion_limit: 32,
             ssh_upload_max_retries: 3,
+            log_max_bytes: 20 * 1024 * 1024,
+            log_backup_count: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IpcConfig {
+    // Keep Python IPC config round-trippable. The Rust client still takes its
+    // live endpoint from launcher environment variables.
+    pub host: String,
+    pub port: u16,
+    pub timeout: f64,
+    pub max_connections: u32,
+    pub auth_token: String,
+}
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 9527,
+            timeout: 5.0,
+            max_connections: 10,
+            auth_token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub project_dir: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            project_dir: "/root/AutoFluidSimulation".to_string(),
         }
     }
 }
@@ -354,6 +408,10 @@ pub struct SettingsConfig {
     pub postprocess: PostProcessConfig,
     #[serde(default)]
     pub global_settings: GlobalSettings,
+    #[serde(default)]
+    pub ipc_config: IpcConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 impl SettingsConfig {
@@ -420,11 +478,11 @@ impl SettingCategory {
             SettingCategory::RemoteDirs => 11,
             SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 5,
-            SettingCategory::SpaceClaim => 8,
+            SettingCategory::SpaceClaim => 10,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
             SettingCategory::PostProcess => 4,
-            SettingCategory::GlobalSettings => 7,
+            SettingCategory::GlobalSettings => 9,
         }
     }
 
@@ -486,6 +544,8 @@ impl SettingCategory {
                 5 => "sc_max_slots",
                 6 => "sc_persistent_enabled",
                 7 => "sc_oneshot_fallback_enabled",
+                8 => "sc_persistent_ready_timeout",
+                9 => "sc_scdoc_stable_seconds",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -514,6 +574,8 @@ impl SettingCategory {
                 4 => "max_retries",
                 5 => "ssh_upload_max_retries",
                 6 => "dir_recursion_limit",
+                7 => "log_max_bytes",
+                8 => "log_backup_count",
                 _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
@@ -577,6 +639,8 @@ impl SettingCategory {
                 5 => "常驻槽位数",
                 6 => "启用常驻Bridge",
                 7 => "失败回退一次性Bridge",
+                8 => "常驻就绪超时(秒)",
+                9 => "SCDOC稳定等待(秒)",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -605,6 +669,8 @@ impl SettingCategory {
                 4 => "最大重试",
                 5 => "SSH上传最大重试",
                 6 => "目录递归深度限制",
+                7 => "日志大小上限",
+                8 => "日志备份数量",
                 _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
@@ -862,6 +928,8 @@ impl SettingsState {
                 5 => field_val!(self.config.spaceclaim, sc_max_slots),
                 6 => field_val!(self.config.spaceclaim, sc_persistent_enabled),
                 7 => field_val!(self.config.spaceclaim, sc_oneshot_fallback_enabled),
+                8 => field_val!(self.config.spaceclaim, sc_persistent_ready_timeout),
+                9 => field_val!(self.config.spaceclaim, sc_scdoc_stable_seconds),
                 _ => String::new(),
             },
             SettingCategory::Meshing => match idx {
@@ -890,6 +958,8 @@ impl SettingsState {
                 4 => field_val!(self.config.global_settings, max_retries),
                 5 => field_val!(self.config.global_settings, ssh_upload_max_retries),
                 6 => field_val!(self.config.global_settings, dir_recursion_limit),
+                7 => field_val!(self.config.global_settings, log_max_bytes),
+                8 => field_val!(self.config.global_settings, log_backup_count),
                 _ => String::new(),
             },
         }
@@ -1072,6 +1142,16 @@ impl SettingsState {
                     self.config.spaceclaim.sc_oneshot_fallback_enabled =
                         value == "true" || value == "是"
                 }
+                8 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_persistent_ready_timeout = v;
+                    }
+                }
+                9 => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.config.spaceclaim.sc_scdoc_stable_seconds = v;
+                    }
+                }
                 _ => {}
             },
             SettingCategory::Meshing => match idx {
@@ -1150,6 +1230,16 @@ impl SettingsState {
                 6 => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.global_settings.dir_recursion_limit = v;
+                    }
+                }
+                7 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.log_max_bytes = v;
+                    }
+                }
+                8 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.log_backup_count = v;
                     }
                 }
                 _ => {}
@@ -2025,7 +2115,7 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
 
     #[test]
     fn spaceclaim_settings_expose_persistent_bridge_fields() {
-        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 10);
 
         let field_names = (0..SettingCategory::SpaceClaim.field_count())
             .map(|idx| SettingCategory::SpaceClaim.field_name(idx))
@@ -2042,6 +2132,8 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
                 "sc_max_slots",
                 "sc_persistent_enabled",
                 "sc_oneshot_fallback_enabled",
+                "sc_persistent_ready_timeout",
+                "sc_scdoc_stable_seconds",
             ]
         );
 
@@ -2053,6 +2145,8 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
         state.set_field_value(SettingCategory::SpaceClaim, 5, "2");
         state.set_field_value(SettingCategory::SpaceClaim, 6, "false");
         state.set_field_value(SettingCategory::SpaceClaim, 7, "false");
+        state.set_field_value(SettingCategory::SpaceClaim, 8, "240");
+        state.set_field_value(SettingCategory::SpaceClaim, 9, "4.5");
 
         assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 5), "2");
         assert_eq!(
@@ -2063,6 +2157,98 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
             state.get_field_value(SettingCategory::SpaceClaim, 7),
             "false"
         );
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 8), "240");
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 9), "4.5");
+    }
+
+    #[test]
+    fn default_runtime_timeouts_match_repository_toml() {
+        let spaceclaim = SpaceClaimConfig::default();
+        let meshing = MeshingConfig::default();
+        let solver = SolverConfig::default();
+
+        assert_eq!(spaceclaim.sc_gui_stable_delay, 5);
+        assert_eq!(spaceclaim.sc_persistent_ready_timeout, 180);
+        assert_eq!(spaceclaim.sc_scdoc_stable_seconds, 3.0);
+        assert_eq!(meshing.meshing_timeout, 1800);
+        assert_eq!(solver.solver_timeout, 14400);
+    }
+
+    #[test]
+    fn spaceclaim_config_deserializes_legacy_toml_without_new_fields() {
+        let toml_text = r#"
+[spaceclaim]
+sc_timeout = 300
+sc_poll_interval = 2.0
+sc_process_appear_timeout = 120
+sc_gui_ready_timeout = 30
+sc_gui_stable_delay = 5
+sc_max_slots = 1
+sc_persistent_enabled = true
+sc_oneshot_fallback_enabled = true
+"#;
+
+        let config: SettingsConfig = toml::from_str(toml_text).expect("parse legacy spaceclaim");
+
+        assert_eq!(config.spaceclaim.sc_persistent_ready_timeout, 180);
+        assert_eq!(config.spaceclaim.sc_scdoc_stable_seconds, 3.0);
+    }
+
+    #[test]
+    fn partial_runtime_sections_fill_missing_fields_from_defaults() {
+        let toml_text = r#"
+[solidworks]
+sw_macro_timeout = 120
+
+[meshing]
+meshing_processor_count = 16
+
+[solver]
+solver_processor_count = 64
+
+[postprocess]
+output_dir = 'D:\post\output'
+
+[global_settings]
+ssh_connection = 15
+log_max_bytes = 4096
+log_backup_count = 4
+
+[ipc_config]
+port = 19627
+
+[server]
+project_dir = "/srv/autofluid"
+"#;
+
+        let config: SettingsConfig =
+            toml::from_str(toml_text).expect("parse partial runtime sections");
+
+        assert_eq!(config.solidworks.sw_macro_timeout, 120);
+        assert!(config.solidworks.sw_close_doc_on_finish);
+        assert_eq!(config.solidworks.sw_startup, 60);
+        assert_eq!(config.meshing.meshing_timeout, 1800);
+        assert_eq!(config.meshing.meshing_processor_count, 16);
+        assert_eq!(config.solver.solver_timeout, 14400);
+        assert_eq!(config.solver.solver_processor_count, 64);
+        assert_eq!(config.solver.solver_iteration_count, 1000);
+        assert_eq!(config.postprocess.output_dir, r"D:\post\output");
+        assert_eq!(config.postprocess.postprocess_timeout, 3600);
+        assert_eq!(config.postprocess.cstar_reference, 1830.4);
+        assert_eq!(config.global_settings.ssh_connection, 15);
+        assert_eq!(config.global_settings.watchdog_interval, 1.0);
+        assert_eq!(config.global_settings.ssh_upload_max_retries, 3);
+        assert_eq!(config.global_settings.log_max_bytes, 4096);
+        assert_eq!(config.global_settings.log_backup_count, 4);
+        assert_eq!(config.ipc_config.port, 19627);
+        assert_eq!(config.ipc_config.host, "127.0.0.1");
+        assert_eq!(config.server.project_dir, "/srv/autofluid");
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(serialized.contains("[ipc_config]"));
+        assert!(serialized.contains("port = 19627"));
+        assert!(serialized.contains("[server]"));
+        assert!(serialized.contains("project_dir = \"/srv/autofluid\""));
     }
 
     #[test]
@@ -2099,11 +2285,11 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
         assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
-        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 10);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
         assert_eq!(SettingCategory::PostProcess.field_count(), 4);
-        assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
+        assert_eq!(SettingCategory::GlobalSettings.field_count(), 9);
     }
 
     #[test]

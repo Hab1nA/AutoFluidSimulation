@@ -200,3 +200,25 @@ def test_postprocess_metrics_receives_configured_fluent_path(tmp_path, monkeypat
     assert commands
     assert "--fluent-path" in commands[0]
     assert commands[0][commands[0].index("--fluent-path") + 1] == args.fluent_path
+
+
+def test_metrics_reference_values_are_required_by_cli(monkeypatch):
+    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: None)
+    argv = [
+        "batch_postprocess_gen4.py",
+        "--config-id", "1",
+        "--case-dir", r"D:\case",
+        "--post-journal-path", "post.jou",
+        "--postprocess-output-dir", r"D:\post",
+        "--flag-file", r"D:\flags\post.txt",
+        "--anim-dir", r"D:\animation",
+        "--working-dir", r"D:\work",
+        "--working-dir-t", r"D:\work\animation-t",
+        "--working-dir-v", r"D:\work\animation-v",
+        "--metrics-output-dir", r"D:\metrics",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2

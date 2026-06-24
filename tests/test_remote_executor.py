@@ -1249,6 +1249,7 @@ def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
             "msh_dir": r"E:\ws-a msh",
             "result_dir": r"E:\ws-a result",
             "animation_dir": r"E:\ws-a animation",
+            "postprocess_animation_dir": r"E:\ws-a animation",
             "working_dir": r"E:\ws-a work",
             "flag_dir": r"E:\ws-a flags",
         },

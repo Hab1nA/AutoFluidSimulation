@@ -29,11 +29,10 @@ from engine.config import (
     get_workstation_config, is_server_mode,
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
+from executor.postprocess_paths import resolve_postprocess_paths
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
 
 
 def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
@@ -1195,40 +1194,15 @@ class RemoteExecutor:
         allow_config_override: bool = True,
     ) -> dict[str, str]:
         """Resolve workstation-local postprocess export directories."""
-        output_dir = str(
-            (config.get("postprocess_output_dir") if allow_config_override else None)
-            or ENGINE_CONFIG.get("postprocess_output_dir")
-            or config.get("result_dir")
-            or config.get("working_dir")
-            or ""
-        )
-        engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
-        config_postprocess_animation_dir = (
-            config.get("postprocess_animation_dir") if allow_config_override else None
-        )
-        if (
-            config_postprocess_animation_dir
-            and config_postprocess_animation_dir != engine_animation_dir
-        ):
-            animation_source = config_postprocess_animation_dir
-        elif allow_config_override and config.get("animation_dir"):
-            animation_source = config.get("animation_dir")
-        elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir"):
-            animation_source = config.get("animation_dir")
-        else:
-            animation_source = engine_animation_dir or config.get("animation_dir") or ""
-        animation_dir = str(
-            animation_source
-        )
-        metrics_dir = str(
-            (config.get("postprocess_metrics_dir") if allow_config_override else None)
-            or ENGINE_CONFIG.get("postprocess_metrics_dir")
-            or (f"{output_dir}/metrics" if output_dir else "")
+        paths = resolve_postprocess_paths(
+            config,
+            allow_config_override=allow_config_override,
+            metrics_fallback_to_output_subdir=True,
         )
         return {
-            "output_dir": output_dir,
-            "animation_dir": animation_dir,
-            "metrics_dir": metrics_dir,
+            "output_dir": paths["output_dir"].replace("/", "\\"),
+            "animation_dir": paths["animation_dir"].replace("/", "\\"),
+            "metrics_dir": paths["metrics_dir"].replace("/", "\\"),
         }
 
     @staticmethod

@@ -51,6 +51,7 @@ class IPCServer:
     """
 
     MAX_BUFFER_BYTES = 5 * 1024 * 1024
+    RECV_CHUNK_BYTES = 64 * 1024
 
     def __init__(
         self,
@@ -254,14 +255,17 @@ class IPCServer:
         记录是否有过有效消息交互——从未发送有效消息的连接视为探测连接，
         断开时不写入 INFO 日志，避免端口探测工具造成日志噪音。
         """
-        client_sock.settimeout(30.0)
         buffer = b""
         has_sent_valid_message = False  # 是否曾处理过有效 IPC 消息
 
         try:
+            try:
+                client_sock.settimeout(30.0)
+            except OSError:
+                return
             while self._running:
                 try:
-                    data = client_sock.recv(4096)
+                    data = client_sock.recv(self.RECV_CHUNK_BYTES)
                     if not data:
                         break  # 客户端断开
                     buffer += data

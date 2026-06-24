@@ -48,6 +48,52 @@ class _LockProbe:
         return False
 
 
+def test_postprocess_cleanup_uses_engine_animation_dir_when_it_differs_from_legacy_animation_dir(monkeypatch):
+    """清理路径应使用 ENGINE_CONFIG 后处理动画目录，而不是重复硬编码旧默认值。"""
+    from engine.config import ENGINE_CONFIG
+    from executor.cleaner import _postprocess_cleanup_paths
+
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+
+    paths = _postprocess_cleanup_paths(
+        {
+            "flag_dir": r"D:\flags",
+            "result_dir": r"D:\case",
+            "animation_dir": r"D:\legacy\animation",
+        },
+        7,
+    )
+
+    assert "D:/post/animation/t_gen4_7.mp4" in paths
+    assert "D:/post/animation/v_gen4_7.mp4" in paths
+    assert "D:/legacy/animation/t_gen4_7.mp4" not in paths
+
+
+def test_postprocess_cleanup_uses_workstation_postprocess_animation_override(monkeypatch):
+    """工作站显式 postprocess_animation_dir 应优先于全局 ENGINE_CONFIG。"""
+    from engine.config import ENGINE_CONFIG
+    from executor.cleaner import _postprocess_cleanup_paths
+
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+
+    paths = _postprocess_cleanup_paths(
+        {
+            "flag_dir": r"D:\flags",
+            "result_dir": r"D:\case",
+            "animation_dir": r"D:\legacy\animation",
+            "postprocess_animation_dir": r"E:\ws\animation",
+        },
+        7,
+    )
+
+    assert "E:/ws/animation/t_gen4_7.mp4" in paths
+    assert "D:/post/animation/t_gen4_7.mp4" not in paths
+
+
 class TestFileCleanerSystemCheck:
     """验证 FileCleaner.run_system_check 本地路径检查。"""
 
@@ -992,6 +1038,7 @@ class TestFileCleanerCleanStepFiles:
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\case")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\remote\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\remote\metrics")
 
         class _ConnectedSSH:
@@ -1053,6 +1100,7 @@ class TestFileCleanerCleanStepFiles:
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\case")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\remote\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\remote\metrics")
 
         class _ConnectedSSH:

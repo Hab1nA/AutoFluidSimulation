@@ -174,6 +174,32 @@ def test_invalid_iterate_count_is_rejected_before_fluent_launch(tmp_path, monkey
         module.main()
 
 
+def test_solver_core_counts_are_required_by_cli(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    argv = [
+        "batch_solver_gen4.py",
+        "--config-id", "1",
+        "--mpi-bin-dir", r"C:\mpi",
+        "--fluent-path", r"C:\fluent.exe",
+        "--journal-path", "solver.jou",
+        "--msh-dir", r"D:\msh",
+        "--output-dir", r"D:\case",
+        "--anim-dir", r"D:\animation",
+        "--working-dir", r"D:\work",
+        "--working-dir-t", r"D:\work\animation-t",
+        "--working-dir-v", r"D:\work\animation-v",
+        "--solver-flag-file", r"D:\flags\solver.txt",
+        "--post-journal-path", "post.jou",
+        "--postprocess-flag-file", r"D:\flags\post.txt",
+        "--metrics-output-dir", r"D:\metrics",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2
+
+
 def test_mpi_pin_list_matches_configured_processor_count(tmp_path, monkeypatch):
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
     mpi_bin_dir = tmp_path / "mpi" / "bin"

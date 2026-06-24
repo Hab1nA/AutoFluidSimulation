@@ -115,6 +115,8 @@ sc_gui_stable_delay = 5
 sc_max_slots = 1
 sc_persistent_enabled = true
 sc_oneshot_fallback_enabled = true
+sc_persistent_ready_timeout = 180
+sc_scdoc_stable_seconds = 3.0
 
 [meshing]
 meshing_timeout = 1800
@@ -141,3 +143,15 @@ state_refresh_interval = 0.5
 ssh_connection = 10
 dir_recursion_limit = 32
 ssh_upload_max_retries = 3
+log_max_bytes = 20971520
+log_backup_count = 10
+
+[ipc_config]
+host = "127.0.0.1"
+port = 9527
+timeout = 5.0
+max_connections = 10
+auth_token = ""
+
+[server]
+project_dir = "/root/AutoFluidSimulation"

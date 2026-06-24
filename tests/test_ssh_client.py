@@ -53,6 +53,42 @@ def test_connect_uses_password_auth_when_password_is_configured(monkeypatch):
     }]
 
 
+def test_connect_uses_configured_ssh_connection_timeout(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+    monkeypatch.setitem(ssh_client_module.OPERATION_TIMEOUTS, "ssh_connection", 30)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "secret")
+
+    assert host.connect() is True
+    assert calls[0]["timeout"] == 30
+
+
 def test_connect_allows_key_auth_when_password_is_empty(monkeypatch):
     calls: list[dict[str, object]] = []
 
