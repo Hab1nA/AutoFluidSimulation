@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use crate::ipc::client::IpcClient;
 use crate::settings::{config_io, SettingsConfig};
 use crate::state::{AppState, LogBuffer};
-use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout};
+use crate::utils::{
+    is_pid_alive, kill_process_tree, process_command_line, run_command_with_timeout,
+};
 
 /// 等待 daemon 进程自行退出的超时时间（秒）。
 /// daemon 收到 full_quit 后执行 shutdown() 清理 SC 进程池等资源，完成后自然退出。
@@ -224,7 +226,7 @@ impl DaemonManager {
 
         let stopped = if is_pid_alive(pid) {
             let killed = kill_process_tree(pid);
-            killed && Self::wait_for_pid_dead(pid, 2)
+            killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2))
         } else {
             true
         };
@@ -257,7 +259,7 @@ impl DaemonManager {
         {
             return true;
         }
-        let Some(command_line) = Self::process_command_line(pid) else {
+        let Some(command_line) = process_command_line(pid) else {
             return false;
         };
         let command_line = command_line.to_lowercase();
@@ -270,52 +272,6 @@ impl DaemonManager {
         command_line.contains("ssh")
             && command_line.contains("-l")
             && (command_line.contains(":9527:") || command_line.contains("127.0.0.1:9527"))
-    }
-
-    fn process_command_line(pid: u32) -> Option<String> {
-        if pid == 0 {
-            return None;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            for powershell in powershell_candidates() {
-                let Ok(output) = Command::new(&powershell)
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        &format!(
-                            "Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
-                        ),
-                    ])
-                    .output()
-                else {
-                    continue;
-                };
-                if output.status.success() {
-                    let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !command_line.is_empty() {
-                        return Some(command_line);
-                    }
-                }
-            }
-            None
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let output = Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "args="])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if command_line.is_empty() {
-                None
-            } else {
-                Some(command_line)
-            }
-        }
     }
 
     /// 等待子进程自行退出。
@@ -375,18 +331,11 @@ impl DaemonManager {
         if !killed {
             log::warn!("通过 PID 文件终止后台引擎失败: pid={pid}");
         }
-        !is_pid_alive(pid) || Self::wait_for_pid_dead(pid, DAEMON_SHUTDOWN_TIMEOUT_SECS)
-    }
-
-    fn wait_for_pid_dead(pid: u32, timeout_secs: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        while Instant::now() < deadline {
-            if !is_pid_alive(pid) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
         !is_pid_alive(pid)
+            || crate::utils::wait_for_pid_dead(
+                pid,
+                Duration::from_secs(DAEMON_SHUTDOWN_TIMEOUT_SECS),
+            )
     }
 
     // ------------------------------------------------------------------
@@ -917,7 +866,7 @@ impl DaemonManager {
         ];
 
         let mut last_error = String::new();
-        for powershell in powershell_candidates() {
+        for powershell in crate::utils::powershell_candidates() {
             let mut cmd = Command::new(&powershell);
             cmd.args(&args).current_dir(project_dir);
             match run_tunnel_script_command_with_timeout(&mut cmd, Duration::from_secs(60)) {
@@ -1192,13 +1141,6 @@ fn env_non_empty(key: &str) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
-}
-
-fn powershell_candidates() -> Vec<String> {
-    if let Some(value) = env_non_empty("AUTOFLUID_POWERSHELL_EXE") {
-        return vec![value];
-    }
-    vec!["pwsh.exe".to_string(), "powershell.exe".to_string()]
 }
 
 fn local_daemon_python(project_dir: &str) -> String {

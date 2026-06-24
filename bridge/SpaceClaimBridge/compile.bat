@@ -2,7 +2,8 @@
 REM ============================================================================
 REM SpaceClaimBridge compile script
 REM
-REM Builds the main project with the SpaceClaim API reference.
+REM Builds the main project. Program.cs does not require a compile-time
+REM SpaceClaim API reference; SpaceClaim is still required at runtime.
 REM Requires .NET Framework 4.8 SDK or Developer Pack.
 REM ============================================================================
 setlocal enabledelayedexpansion
@@ -22,11 +23,6 @@ if errorlevel 1 (
 echo [INFO] MSBuild: !MSBUILD!
 echo.
 
-REM Check whether the SpaceClaim API DLL exists
-set "SC_API_DLL=C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.Api.V23.dll"
-if not exist "!SC_API_DLL!" echo [WARN] SpaceClaim API DLL not found: !SC_API_DLL!
-if not exist "!SC_API_DLL!" echo [WARN] Use compile_noref.bat for no-reference verification
-
 REM Compile
 echo [BUILD] Compiling...
 "!MSBUILD!" SpaceClaimBridge.csproj -restore /p:Configuration=Release /v:minimal
@@ -34,9 +30,8 @@ echo [BUILD] Compiling...
 if errorlevel 1 (
     echo [ERROR] Compile failed!
     echo Possible causes:
-    echo   1. SpaceClaim.Api.V23.dll not found, try compile_noref.bat
-    echo   2. .NET Framework 4.8 targeting pack is not installed
-    echo   3. Project file syntax error
+    echo   1. .NET Framework 4.8 targeting pack is not installed
+    echo   2. Project file syntax error
     popd
     exit /b 1
 )

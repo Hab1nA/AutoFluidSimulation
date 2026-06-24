@@ -88,13 +88,13 @@ class StateManager:
             if not readonly:
                 try:
                     conn.rollback()
-                except Exception as e:
+                except sqlite3.Error as e:
                     logger.error("数据库回滚异常: %s", e)
             raise
         finally:
             try:
                 conn.close()
-            except Exception as e:
+            except sqlite3.Error as e:
                 logger.error("数据库连接关闭异常: %s", e)
 
     @staticmethod
@@ -716,40 +716,37 @@ class StateManager:
         """
         with self._lock:
             with self._get_connection() as conn:
-                if workstation_id is None:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status IN (?, ?)",
-                        (STATUS_RUNNING, STATUS_RETRYING),
-                    ).fetchone()
-                else:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status IN (?, ?) "
-                        "AND workstation_id = ?",
-                        (STATUS_RUNNING, STATUS_RETRYING, workstation_id),
-                    ).fetchone()
+                # De-dup SELECT: unified query with optional workstation filter
+                params: list[object] = [STATUS_RUNNING, STATUS_RETRYING]
+                ws_filter = ""
+                if workstation_id is not None:
+                    ws_filter = " AND workstation_id = ?"
+                    params.append(workstation_id)
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM steps "
+                    "WHERE step_name = 'meshing' AND status IN (?, ?)"
+                    + ws_filter,
+                    params,
+                ).fetchone()
                 if (row["cnt"] or 0) > 0:
                     logger.debug(
                         f"set_meshing_running_if_idle({config_name}): "
                         f"已有其他构型在执行网格划分，拒绝"
                     )
                     return False
-                if workstation_id is None:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, error_message = '', "
-                        "updated_at = strftime('%s','now') "
-                        "WHERE config_name = ? AND step_name = ?",
-                        (STATUS_RUNNING, config_name, "meshing"),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, error_message = '', "
-                        "workstation_id = ?, "
-                        "updated_at = strftime('%s','now') "
-                        "WHERE config_name = ? AND step_name = ?",
-                        (STATUS_RUNNING, workstation_id, config_name, "meshing"),
-                    )
+                # De-dup UPDATE: unified statement with optional workstation_id
+                update_params: list[object] = [STATUS_RUNNING, config_name, "meshing"]
+                ws_set = ""
+                if workstation_id is not None:
+                    ws_set = " workstation_id = ?,"
+                    update_params.insert(1, workstation_id)
+                conn.execute(
+                    "UPDATE steps SET status = ?, error_message = '',"
+                    + ws_set
+                    + " updated_at = strftime('%s','now') "
+                    "WHERE config_name = ? AND step_name = ?",
+                    update_params,
+                )
                 logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
                 return True
 

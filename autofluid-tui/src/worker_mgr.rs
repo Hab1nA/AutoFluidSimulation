@@ -10,7 +10,10 @@ use std::time::Duration;
 use crate::ipc::client::IpcClient;
 use crate::settings::{SettingsConfig, WorkstationConfig};
 use crate::state::LogBuffer;
-use crate::utils::{is_pid_alive, kill_process_tree, run_command_with_timeout, wait_for_pid_dead};
+use crate::utils::{
+    is_pid_alive, kill_process_tree, process_command_line, resolve_powershell_exe,
+    run_command_with_timeout, wait_for_pid_dead, workstation_env_token,
+};
 
 /// 进程终止结果
 enum StopResult {
@@ -92,12 +95,6 @@ impl WorkerManager {
             .is_some_and(|p| p.try_wait().ok().flatten().is_none())
     }
 
-    /// 启动所有 worker：建立 SSH 隧道 + 启动本地 LocalWorker。
-    #[allow(dead_code)]
-    pub fn start_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
-        self.start_workers_with_prepare(project_dir, log_buffer, |_| true)
-    }
-
     /// 启动所有 worker：建立 SSH 隧道 + 执行 daemon 端准备 + 启动本地 LocalWorker。
     pub fn start_workers_with_prepare<F>(
         &mut self,
@@ -146,11 +143,6 @@ impl WorkerManager {
 
         log_buffer.push_info("✅ Worker 启动流程完成".to_string());
         true
-    }
-
-    /// 停止所有 worker：终止本地 Worker 进程 + 关闭 SSH 隧道。
-    pub fn stop_workers(&mut self, log_buffer: &mut LogBuffer) -> bool {
-        self.stop_workers_for_project(None, log_buffer)
     }
 
     /// 停止所有 worker，并用项目目录中的 PID 文件清理跨会话残留进程。
@@ -208,25 +200,9 @@ impl WorkerManager {
         }
         let _ = Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir);
     }
-    /// 重启所有 worker：先停止再启动。
-    #[allow(dead_code)]
-    pub fn restart_workers(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
-        log::info!("开始重启 Worker 进程");
-        self.stop_workers(log_buffer);
-        std::thread::sleep(Duration::from_secs(1));
-        self.start_workers(project_dir, log_buffer)
-    }
-
     /// 本地 LocalWorker 是否正在运行。
     pub fn is_worker_running(&mut self) -> bool {
         Self::is_process_running(&mut self.worker_process)
-    }
-
-    /// SSH 隧道是否正在运行。
-    #[allow(dead_code)]
-    pub fn is_tunnel_running(&mut self) -> bool {
-        Self::is_process_running(&mut self.workstation_tunnel_process)
-            || Self::is_process_running(&mut self.local_worker_tunnel_process)
     }
 
     /// Return true when a managed process handle exists and has exited unexpectedly.
@@ -711,7 +687,7 @@ impl WorkerManager {
     }
 
     fn worker_pid_is_owned(project_dir: &std::path::Path, kind: WorkerPidKind, pid: u32) -> bool {
-        let Some(command_line) = Self::process_command_line(pid) else {
+        let Some(command_line) = process_command_line(pid) else {
             return false;
         };
         let command_line = command_line.to_lowercase();
@@ -733,51 +709,6 @@ impl WorkerManager {
             WorkerPidKind::TunnelLocalWorker => {
                 command_line.contains("start_workstation_reverse_tunnel.ps1")
                     && command_line.contains("localworker")
-            }
-        }
-    }
-
-    fn process_command_line(pid: u32) -> Option<String> {
-        if pid == 0 {
-            return None;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let powershell = resolve_powershell_exe();
-            let output = Command::new(powershell)
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    &format!(
-                        "Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
-                    ),
-                ])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if command_line.is_empty() {
-                None
-            } else {
-                Some(command_line)
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let output = Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "args="])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if command_line.is_empty() {
-                None
-            } else {
-                Some(command_line)
             }
         }
     }
@@ -953,28 +884,6 @@ fn default_workstation_from_remote_config(config: &SettingsConfig) -> Workstatio
     }
 }
 
-fn workstation_env_token(workstation_id: &str) -> String {
-    let mut token = String::new();
-    let mut last_was_separator = false;
-    for ch in workstation_id.chars() {
-        if ch.is_ascii_alphanumeric() {
-            token.push(ch.to_ascii_uppercase());
-            last_was_separator = false;
-        } else if !last_was_separator && !token.is_empty() {
-            token.push('_');
-            last_was_separator = true;
-        }
-    }
-    while token.ends_with('_') {
-        token.pop();
-    }
-    if token.is_empty() {
-        "DEFAULT".to_string()
-    } else {
-        token
-    }
-}
-
 fn default_workstation_tunnel_port(index: usize) -> u16 {
     if index == 0 {
         2222
@@ -1109,13 +1018,6 @@ fn format_worker_ssh_target(value: &serde_json::Value) -> Option<String> {
     Some(format!("target={host}:{port} mode={mode}"))
 }
 
-fn resolve_powershell_exe() -> String {
-    std::env::var("AUTOFLUID_POWERSHELL_EXE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "powershell".to_string())
-}
-
 fn env_or_default(name: &str, default: &str) -> String {
     std::env::var(name)
         .ok()
@@ -1202,7 +1104,6 @@ mod tests {
     fn worker_manager_initial_state_has_no_processes() {
         let mut wm = WorkerManager::new();
         assert!(!wm.is_worker_running());
-        assert!(!wm.is_tunnel_running());
     }
 
     #[test]
@@ -1788,7 +1689,7 @@ mod tests {
             "local worker should start even when stdio is silenced"
         );
 
-        let _ = wm.stop_workers(&mut log_buffer);
+        let _ = wm.stop_workers_for_project(None, &mut log_buffer);
         assert!(
             !owner_marker.exists(),
             "worker stop should remove the worker-session tunnel owner marker"

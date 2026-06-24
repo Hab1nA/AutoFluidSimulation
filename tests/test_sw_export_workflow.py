@@ -541,20 +541,6 @@ class TestFileMonitor(unittest.TestCase):
 
         monitor.stop()
 
-    def test_get_pending_configs(self):
-        from engine.file_monitor import StepFileMonitor
-
-        monitor = StepFileMonitor(step_dir=self.tmpdir)
-
-        for i in range(3):
-            fp = os.path.join(self.tmpdir, f"model_gen4.SLDPRT_{i}.step")
-            with open(fp, "wb") as f:
-                f.write(b"data")
-
-        pending = monitor.get_pending_configs()
-        config_names = {cn for cn, _ in pending}
-        self.assertEqual(config_names, {0, 1, 2})
-
 
 # ============================================================================
 # 测试类 6: 已链接设计表契约

@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import time
 import threading
-from collections.abc import Callable
 from typing import Any
 
 from engine.config import get_step_filename, STATUS_PAUSED
@@ -108,57 +107,6 @@ class PauseGuard:
             f"标记为 Paused 而非 Completed"
         )
         return True
-
-    # ------------------------------------------------------------------
-    # 带暂停补偿的轮询等待
-    # ------------------------------------------------------------------
-
-    def poll_with_pause_compensation(
-        self,
-        timeout: float,
-        poll_func: Callable[[], bool],
-        poll_interval: float = 10.0,
-    ) -> tuple[bool, float]:
-        """带暂停时间补偿的轮询等待。
-
-        将超时计时器在暂停期间冻结，防止恢复运行后立即触发超时。
-        统一 remote_executor.py 中 meshing/solver 的轮询+补偿逻辑。
-
-        Args:
-            timeout: 超时时长（秒，不含暂停时间）
-            poll_func: 轮询回调，返回 True 表示条件满足
-            poll_interval: 轮询间隔（秒）
-
-        Returns:
-            (条件是否满足, 实际经过的非暂停时间) 元组
-        """
-        elapsed = 0.0
-        start_time = time.time()
-
-        while elapsed < timeout:
-            # ---- 暂停响应（带时间补偿） ----
-            if self._paused.is_set():
-                pause_start = time.time()
-                if not wait_unless_paused_or_stopped(self._paused, self._stopped):
-                    return False, elapsed
-                # 将暂停持续时间从已用时间中扣除
-                pause_duration = time.time() - pause_start
-                start_time += pause_duration
-
-            if self._stopped.is_set():
-                return False, elapsed
-
-            # ---- 执行轮询 ----
-            try:
-                if poll_func():
-                    return True, elapsed
-            except Exception:
-                pass  # 轮询异常不中断，由下一轮重试
-
-            time.sleep(poll_interval)
-            elapsed = time.time() - start_time
-
-        return False, elapsed
 
 
 def wait_unless_paused_or_stopped(

@@ -589,6 +589,16 @@ class TestLoadTomlConfig:
         result = load_toml_config(str(toml_file))
         assert result == {}
 
+    def test_invalid_toml_logs_warning(self, tmp_path, caplog):
+        """Invalid TOML should log a warning instead of silently swallowing."""
+        import logging
+        from engine.config import load_toml_config
+        toml_file = tmp_path / "bad.toml"
+        toml_file.write_text("this is not valid toml [[[[", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            load_toml_config(str(toml_file))
+        assert any("TOML" in r.message or "toml" in r.message.lower() for r in caplog.records)
+
 
 # ====================================================================
 # _expand_env_vars 测试

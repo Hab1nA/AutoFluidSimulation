@@ -87,35 +87,13 @@ fn read_env_values() -> HashMap<String, String> {
     }
 }
 
-fn workstation_env_token(workstation_id: &str) -> String {
-    let mut token = String::new();
-    let mut last_was_separator = false;
-    for ch in workstation_id.chars() {
-        if ch.is_ascii_alphanumeric() {
-            token.push(ch.to_ascii_uppercase());
-            last_was_separator = false;
-        } else if !last_was_separator && !token.is_empty() {
-            token.push('_');
-            last_was_separator = true;
-        }
-    }
-    while token.ends_with('_') {
-        token.pop();
-    }
-    if token.is_empty() {
-        "DEFAULT".to_string()
-    } else {
-        token
-    }
-}
-
 fn workstation_password_env_key(workstation: &WorkstationConfig) -> String {
-    let token = workstation_env_token(&workstation.id);
+    let token = crate::utils::workstation_env_token(&workstation.id);
     format!("AUTOFLUID_{token}_SSH_PASSWORD")
 }
 
 fn legacy_workstation_password_env_key(workstation: &WorkstationConfig) -> String {
-    let token = workstation_env_token(&workstation.id);
+    let token = crate::utils::workstation_env_token(&workstation.id);
     format!("AUTOFLUID_{token}_PASSWORD")
 }
 
@@ -223,27 +201,6 @@ mod tests {
             "autofluid-tui-config-{}",
             crate::generate_request_id()
         ))
-    }
-
-    #[test]
-    fn workstation_env_token_normalizes_edge_cases() {
-        let cases = [
-            ("", "DEFAULT"),
-            ("  ", "DEFAULT"),
-            ("___", "DEFAULT"),
-            ("WS-A", "WS_A"),
-            ("WS--A", "WS_A"),
-            ("-WS-A", "WS_A"),
-            ("WS_A_", "WS_A"),
-            ("my__ws", "MY_WS"),
-            ("WS 01", "WS_01"),
-            ("ws.a", "WS_A"),
-            ("alpha/beta", "ALPHA_BETA"),
-        ];
-
-        for (input, expected) in cases {
-            assert_eq!(workstation_env_token(input), expected);
-        }
     }
 
     #[test]

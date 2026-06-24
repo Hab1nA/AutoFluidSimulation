@@ -297,6 +297,139 @@ pub fn wait_for_pid_dead(pid: u32, timeout: Duration) -> bool {
     !is_pid_alive(pid)
 }
 
+// ------------------------------------------------------------------
+// 环境变量辅助
+// ------------------------------------------------------------------
+
+/// 返回环境变量值（去首尾空白后非空）。
+pub(crate) fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+// ------------------------------------------------------------------
+// 工作站环境标识符
+// ------------------------------------------------------------------
+
+/// 将工作站 ID 转换为大写、下划线分隔的环境标识符。
+///
+/// 非字母数字字符折叠为单个 `_`，首尾 `_` 会被移除。
+/// 空输入返回 `"DEFAULT"`。
+pub(crate) fn workstation_env_token(workstation_id: &str) -> String {
+    let mut token = String::new();
+    let mut last_was_separator = false;
+    for ch in workstation_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch.to_ascii_uppercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !token.is_empty() {
+            token.push('_');
+            last_was_separator = true;
+        }
+    }
+    while token.ends_with('_') {
+        token.pop();
+    }
+    if token.is_empty() {
+        "DEFAULT".to_string()
+    } else {
+        token
+    }
+}
+
+// ------------------------------------------------------------------
+// PowerShell 候选路径
+// ------------------------------------------------------------------
+
+/// 返回要尝试的 PowerShell 可执行文件列表。
+///
+/// 若环境变量 `AUTOFLUID_POWERSHELL_EXE` 已设置且非空则仅返回该值，
+/// 否则依次尝试 `pwsh.exe`（PowerShell 7+）和 `powershell.exe`（Windows PowerShell）。
+#[cfg(target_os = "windows")]
+pub(crate) fn powershell_candidates() -> Vec<String> {
+    if let Some(value) = env_non_empty("AUTOFLUID_POWERSHELL_EXE") {
+        return vec![value];
+    }
+    vec!["pwsh.exe".to_string(), "powershell.exe".to_string()]
+}
+
+/// 返回默认的 PowerShell 可执行文件（`powershell_candidates()` 的第一个）。
+///
+/// 在非 Windows 平台上返回 `"sh"`。
+pub(crate) fn resolve_powershell_exe() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        powershell_candidates()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "powershell.exe".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "sh".to_string()
+    }
+}
+
+// ------------------------------------------------------------------
+// 进程命令行查询
+// ------------------------------------------------------------------
+
+/// 查询给定 PID 的进程命令行（Windows 使用 CIM，Unix 使用 `ps`）。
+///
+/// Windows 上依次尝试 `powershell_candidates()` 中的每个 PowerShell 可执行文件，
+/// 第一个成功返回结果的即被采用，从而提高鲁棒性。
+pub(crate) fn process_command_line(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for powershell in powershell_candidates() {
+            let Ok(output) = Command::new(&powershell)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
+                    ),
+                ])
+                .output()
+            else {
+                continue;
+            };
+            if output.status.success() {
+                let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !command_line.is_empty() {
+                    return Some(command_line);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if command_line.is_empty() {
+            None
+        } else {
+            Some(command_line)
+        }
+    }
+}
+
 pub fn kill_process_tree(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -394,6 +527,70 @@ mod tests {
                 ("AUTOFLUID_IPC_PORT".to_string(), "19527".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn workstation_env_token_normalizes_edge_cases() {
+        let cases = [
+            ("", "DEFAULT"),
+            ("  ", "DEFAULT"),
+            ("___", "DEFAULT"),
+            ("WS-A", "WS_A"),
+            ("WS--A", "WS_A"),
+            ("-WS-A", "WS_A"),
+            ("WS_A_", "WS_A"),
+            ("my__ws", "MY_WS"),
+            ("WS 01", "WS_01"),
+            ("ws.a", "WS_A"),
+            ("alpha/beta", "ALPHA_BETA"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(super::workstation_env_token(input), expected);
+        }
+    }
+
+    #[test]
+    fn env_non_empty_returns_none_for_unset_or_blank() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        let key = format!(
+            "AUTOFLUID_TEST_ENV_NON_EMPTY_{}",
+            crate::generate_request_id()
+        );
+        std::env::remove_var(&key);
+        assert!(super::env_non_empty(&key).is_none());
+
+        std::env::set_var(&key, "   ");
+        assert!(super::env_non_empty(&key).is_none());
+
+        std::env::set_var(&key, " hello ");
+        assert_eq!(super::env_non_empty(&key).as_deref(), Some("hello"));
+
+        std::env::remove_var(&key);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_candidates_uses_env_override() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        let key = "AUTOFLUID_POWERSHELL_EXE";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "C:\\custom\\pwsh.exe");
+        let candidates = super::powershell_candidates();
+        assert_eq!(candidates, vec!["C:\\custom\\pwsh.exe"]);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_candidates_defaults_to_pwsh_then_powershell() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        let candidates = super::powershell_candidates();
+        assert_eq!(candidates, vec!["pwsh.exe", "powershell.exe"]);
     }
 
     #[test]

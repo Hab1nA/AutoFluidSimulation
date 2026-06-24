@@ -141,7 +141,6 @@ AutoFluidSimulation/
 │   ├── config.py            # 配置中心（路径、SSH、引擎参数）
 │   ├── config_fingerprint.py # 配置指纹（数据库分片）
 │   ├── daemon.py            # PipelineDaemon 守护进程
-│   ├── config_assigner.py    # ConfigAssigner 构型→工作站分配
 │   ├── local_worker.py       # LocalWorker 本地 Worker 客户端
 │   ├── local_worker_registry.py # LocalWorkerRegistry 注册与心跳
 │   ├── local_worker_adapter.py  # LocalWorkerAdapter Daemon 侧代理

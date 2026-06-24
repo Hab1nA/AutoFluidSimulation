@@ -41,11 +41,14 @@ def _load_toml_at_startup() -> dict[str, Any]:
         if sys.version_info >= (3, 11):
             import tomllib
             with open(toml_path, "rb") as f:
-                return cast(dict[str, Any], tomllib.load(f))
+                return tomllib.load(f)
         else:
             import toml
             return cast(dict[str, Any], toml.load(toml_path))
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("TOML 配置文件解析失败 (%s): %s", toml_path, exc)
         return {}
 
 
@@ -120,7 +123,6 @@ class WorkstationConfig(RemoteConfig, total=False):
     reachable_host: str
     reachable_port: int
     connectivity_mode: str
-    postprocess_script: str
     postprocess_output_dir: str
     postprocess_animation_dir: str
     postprocess_metrics_dir: str
@@ -507,12 +509,6 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
 }
 
 # ============================================================================
-# 配置指纹与数据库分片（实际实现已迁入 config_fingerprint.py）
-# ============================================================================
-from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint  # noqa: F401
-
-
-# ============================================================================
 # 调度引擎配置
 # ============================================================================
 ENGINE_CONFIG: EngineConfig = {
@@ -714,11 +710,14 @@ def load_toml_config(toml_path: str | None = None) -> dict[str, Any]:
         if sys.version_info >= (3, 11):
             import tomllib
             with open(toml_path, "rb") as f:
-                return cast(dict[str, Any], tomllib.load(f))
+                return tomllib.load(f)
         else:
             import toml
             return cast(dict[str, Any], toml.load(toml_path))
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("TOML 配置文件解析失败 (%s): %s", toml_path, exc)
         return {}
 
 

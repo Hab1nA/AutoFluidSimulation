@@ -155,7 +155,16 @@ def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
     source = _source()
 
     assert "NormalizePathEnvironmentVariables" in source
-    assert source.count("PrepareSpaceClaimEnvironment(psi);") >= 2
+    assert "private static Process? LaunchAndResolve" in source
+    assert source.count("LaunchAndResolve(") >= 3
+    launch_start = source.index("private static Process? LaunchAndResolve")
+    launch_end = source.index("private static void PrepareSpaceClaimEnvironment", launch_start)
+    launch_block = source[launch_start:launch_end]
+    assert "PrepareSpaceClaimEnvironment(psi);" in launch_block
+    assert "configureEnvironment(psi);" in launch_block
+    assert launch_block.index("PrepareSpaceClaimEnvironment(psi);") < launch_block.index(
+        "configureEnvironment(psi);"
+    )
     normalize_start = source.index("private static void NormalizePathEnvironmentVariables")
     normalize_block = source[normalize_start:source.index("private static int? TryReturnSuccessIfScdocExists", normalize_start)]
     current_env_call = normalize_block.index("NormalizeCurrentProcessPathEnvironment();")
@@ -203,11 +212,9 @@ def test_persistent_bridge_quit_has_deadline() -> None:
     source = _source()
 
     assert "PersistentQuitTimeoutSeconds" in source
-    assert "quitRequestedAt" in source
-    assert re.search(
-        r"quitRequestedAt\.Value\)\.TotalSeconds\s*>=\s*PersistentQuitTimeoutSeconds",
-        source,
-    )
+    assert "Stopwatch? quitTimer = null;" in source
+    assert "quitTimer = Stopwatch.StartNew();" in source
+    assert re.search(r"quitTimer\.Elapsed\.TotalSeconds\s*>=\s*PersistentQuitTimeoutSeconds", source)
     assert 'TryKillWorkingProcess(workingProcess, "persistent quit timeout")' in source
     assert "exitCode = (int)ExitCode.Timeout;" in source
 

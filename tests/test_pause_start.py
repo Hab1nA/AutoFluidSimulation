@@ -335,12 +335,6 @@ class MockStepFileMonitor:
                         if cn is not None:
                             self.on_file_ready(cn, fpath)
 
-    def get_pending_configs(self) -> list[tuple[int, str]]:
-        """返回待处理的构型列表（委托给原始实现）。"""
-        # ★ 不能 from engine.file_monitor import StepFileMonitor（已被 mock 替换），
-        #    使用 teardown_mock_environment 前保存的 _OriginalStepFileMonitor 引用
-        return _OriginalStepFileMonitor.get_pending_configs(self)
-
     @staticmethod
     def parse_config_name(filename: str) -> int | None:
         """从文件名解析构型编号（委托给原始实现）。"""
