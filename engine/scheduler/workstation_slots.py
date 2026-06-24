@@ -43,6 +43,15 @@ class WorkstationSlotCoordinator:
         with self._lock:
             return dict(self._busy_by_workstation)
 
+    def update_workstation_ids(self, workstation_ids: list[str]) -> None:
+        """Refresh assignable workstation IDs without dropping active reservations."""
+        if not workstation_ids:
+            raise ValueError("至少需要一个工作站槽位")
+        if len(set(workstation_ids)) != len(workstation_ids):
+            raise ValueError("工作站槽位 ID 重复")
+        with self._lock:
+            self._workstation_ids = list(workstation_ids)
+
     def claim(self, config_name: int) -> str | None:
         """Reserve the first idle workstation and persist it on the config."""
         config_name = int(config_name)

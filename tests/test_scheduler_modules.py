@@ -1944,6 +1944,35 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(4, "transfer") == STATUS_WAITING
         assert self.scheduler.meshing_monitor.qsize() == 0
 
+    def test_refresh_workstation_slots_updates_scheduler_submodules(self, monkeypatch):
+        """配置刷新后调度器和子模块应共享新的工作站槽位列表。"""
+        from engine.scheduler import main as scheduler_module
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.scheduler.meshing_monitor._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+
+        assert self.scheduler.workstation_slots.claim(1) == "WS-A"
+        assert self.scheduler.workstation_slots.claim(2) is None
+
+        monkeypatch.setattr(
+            scheduler_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}],
+        )
+
+        self.scheduler.refresh_workstation_slots()
+
+        assert self.scheduler.workstation_slots.claim(2) == "WS-B"
+        assert self.scheduler.worker_pool._workstation_slots is self.scheduler.workstation_slots
+        assert self.scheduler.meshing_monitor._workstation_slots is self.scheduler.workstation_slots
+
     def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):
         """clean 删除本地产物后，resume 不应继续信任 Completed 状态。"""
         monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
@@ -3000,6 +3029,140 @@ class TestPipelineDaemonCleanStep:
         assert data["ssh_checks"] == {"default": "ok"}
         assert daemon._last_worker_ssh_checks == {"default": "ok"}
         assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
+
+    def test_worker_start_refreshes_scheduler_workstation_slots_after_reload(
+        self,
+        monkeypatch,
+    ):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        def _reload_config() -> bool:
+            daemon_module.WORKSTATIONS[:] = [
+                {"id": "WS-A"},
+                {"id": "WS-B"},
+            ]
+            return True
+
+        class _SSH:
+            def is_connected(self) -> bool:
+                return True
+
+        class _Runner:
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                pass
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        class _Scheduler:
+            def __init__(self, state) -> None:
+                self.workstation_slots = WorkstationSlotCoordinator(state, ["WS-A"])
+                self.worker_pool = type(
+                    "_WorkerPool",
+                    (),
+                    {"_workstation_slots": self.workstation_slots},
+                )()
+                self.meshing_monitor = type(
+                    "_MeshingMonitor",
+                    (),
+                    {"_workstation_slots": self.workstation_slots},
+                )()
+
+            def refresh_workstation_slots(self) -> None:
+                workstation_ids = [
+                    str(workstation.get("id"))
+                    for workstation in daemon_module.WORKSTATIONS
+                    if workstation.get("id")
+                ] or [DEFAULT_WORKSTATION_ID]
+                self.workstation_slots.update_workstation_ids(workstation_ids)
+                self.worker_pool._workstation_slots = self.workstation_slots
+                self.meshing_monitor._workstation_slots = self.workstation_slots
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}],
+        )
+
+        tmpdir = tempfile.mkdtemp(prefix="worker_start_slots_")
+        db_path = os.path.join(tmpdir, "test.db")
+        orig_db_path = IPC_CONFIG["db_path"]
+        IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({
+                1: [1.0, 2.0, 3.0, 4.0],
+                2: [5.0, 6.0, 7.0, 8.0],
+            })
+            scheduler = _Scheduler(state)
+            daemon = PipelineDaemon.__new__(PipelineDaemon)
+            daemon.state = state
+            daemon.runner = _Runner()
+            daemon.scheduler = scheduler
+            daemon.local_worker_registry = LocalWorkerRegistry()
+            daemon._last_worker_ssh_checks = {}
+            daemon._config_warnings = []
+
+            assert scheduler.workstation_slots.claim(1) == "WS-A"
+            assert scheduler.workstation_slots.claim(2) is None
+
+            ok, data, message = daemon.handle_worker_start({})
+
+            assert ok is True
+            assert message == "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+            assert data["ssh_checks"] == {"WS-A": "ok", "WS-B": "ok"}
+            assert scheduler.workstation_slots.claim(2) == "WS-B"
+            assert scheduler.worker_pool._workstation_slots is scheduler.workstation_slots
+            assert scheduler.meshing_monitor._workstation_slots is scheduler.workstation_slots
+        finally:
+            IPC_CONFIG["db_path"] = orig_db_path
+            if os.path.exists(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_worker_start_fails_when_scheduler_workstation_slot_refresh_fails(
+        self,
+        monkeypatch,
+    ):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        def _reload_config() -> bool:
+            return True
+
+        class _Runner:
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                pass
+
+        class _Scheduler:
+            def refresh_workstation_slots(self) -> None:
+                raise ValueError("工作站槽位 ID 重复")
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}],
+        )
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon.scheduler = _Scheduler()
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon._last_worker_ssh_checks = {}
+        daemon._config_warnings = []
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is False
+        assert data is None
+        assert message == "刷新工作站槽位失败: 工作站槽位 ID 重复"
 
     def test_worker_register_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
         from engine import daemon as daemon_module

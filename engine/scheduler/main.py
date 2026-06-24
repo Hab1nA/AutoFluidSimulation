@@ -167,6 +167,17 @@ class PipelineScheduler:
 
         logger.info("流水线调度器初始化完成")
 
+    def refresh_workstation_slots(self) -> None:
+        """Refresh Transfer-to-Meshing slot IDs from the current configuration."""
+        workstation_ids = [
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        ] or [DEFAULT_WORKSTATION_ID]
+        self.workstation_slots.update_workstation_ids(workstation_ids)
+        self.worker_pool._workstation_slots = self.workstation_slots
+        self.meshing_monitor._workstation_slots = self.workstation_slots
+
     def _current_reset_generation(self, config_name: int, step_name: str) -> int:
         """Return reset generation for a config step."""
         with self._reset_generation_lock:

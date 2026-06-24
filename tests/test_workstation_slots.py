@@ -4,6 +4,8 @@ import os
 import shutil
 import tempfile
 
+import pytest
+
 from engine.config import DEFAULT_WORKSTATION_ID, IPC_CONFIG, STATUS_COMPLETED, STATUS_RUNNING
 from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 from engine.state_manager import StateManager
@@ -48,6 +50,52 @@ class TestWorkstationSlotCoordinator:
 
         assert slots.claim(3) == "WS-A"
         assert self.state.get_config_workstation(3) == "WS-A"
+
+    def test_update_workstation_ids_adds_new_idle_slot(self) -> None:
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B"])
+
+        assert slots.claim(1) == "WS-A"
+        assert slots.claim(2) == "WS-B"
+        assert slots.claim(3) is None
+
+        slots.update_workstation_ids(["WS-A", "WS-B", "WS-C"])
+
+        assert slots.claim(3) == "WS-C"
+        assert self.state.get_config_workstation(3) == "WS-C"
+        assert slots.busy_workstations() == {"WS-A": 1, "WS-B": 2, "WS-C": 3}
+
+    def test_update_workstation_ids_stops_assigning_removed_idle_slot(self) -> None:
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B"])
+
+        slots.update_workstation_ids(["WS-B"])
+
+        assert slots.claim(1) == "WS-B"
+        slots.release_config(1)
+        assert slots.claim(2) == "WS-B"
+        assert self.state.get_config_workstation(1) == "WS-B"
+        assert self.state.get_config_workstation(2) == "WS-B"
+
+    def test_update_workstation_ids_preserves_removed_busy_slot_until_release(self) -> None:
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B"])
+
+        assert slots.claim(1) == "WS-A"
+        slots.update_workstation_ids(["WS-B"])
+
+        assert slots.busy_workstations() == {"WS-A": 1}
+        assert slots.claim(2) == "WS-B"
+        assert slots.claim(3) is None
+
+        slots.release_config(1)
+
+        assert slots.busy_workstations() == {"WS-B": 2}
+
+    def test_update_workstation_ids_rejects_empty_or_duplicate_ids(self) -> None:
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+
+        with pytest.raises(ValueError, match="至少需要一个工作站槽位"):
+            slots.update_workstation_ids([])
+        with pytest.raises(ValueError, match="工作站槽位 ID 重复"):
+            slots.update_workstation_ids(["WS-A", "WS-A"])
 
     def test_seed_from_state_restores_active_transfer_and_meshing_slots(self) -> None:
         self.state.set_config_workstation(1, "WS-A")

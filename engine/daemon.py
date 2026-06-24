@@ -1159,6 +1159,13 @@ class PipelineDaemon:
                 self.runner.disconnect_ssh()
             except Exception as e:
                 logger.debug("[Worker] 刷新配置后断开旧 SSH 连接异常: %s", e)
+            scheduler = getattr(self, "scheduler", None)
+            if scheduler is not None and hasattr(scheduler, "refresh_workstation_slots"):
+                try:
+                    scheduler.refresh_workstation_slots()
+                except Exception as e:
+                    logger.warning("[Worker] 刷新工作站槽位异常: %s", e)
+                    return False, None, f"刷新工作站槽位失败: {e}"
 
         results.update(self._refresh_workstation_ssh_checks())
         results["registry_ready"] = False
