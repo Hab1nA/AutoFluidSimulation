@@ -115,6 +115,7 @@ print(json.dumps({
     "engine_config": {
         "meshing_timeout": cfg.ENGINE_CONFIG["meshing_timeout"],
         "solver_timeout": cfg.ENGINE_CONFIG["solver_timeout"],
+        "postprocess_timeout": cfg.ENGINE_CONFIG["postprocess_timeout"],
     },
 }, ensure_ascii=False))
 '''
@@ -139,7 +140,8 @@ print(json.dumps({
         snapshot = self._load_config_snapshot_without_startup_toml()
         assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
         assert snapshot["engine_config"]["meshing_timeout"] == 1800
-        assert snapshot["engine_config"]["solver_timeout"] == 14400
+        assert snapshot["engine_config"]["solver_timeout"] == 28800
+        assert snapshot["engine_config"]["postprocess_timeout"] == 14400
 
 
 # ====================================================================

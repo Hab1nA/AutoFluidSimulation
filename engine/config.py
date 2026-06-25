@@ -536,13 +536,13 @@ ENGINE_CONFIG: EngineConfig = {
     # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
     "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）
-    "solver_timeout": _toml_or_default("solver", "solver_timeout", 14400),
+    "solver_timeout": _toml_or_default("solver", "solver_timeout", 28800),
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
     "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
     "solver_iteration_count": _toml_or_default("solver", "solver_iteration_count", 1000),
     # 后处理超时（秒）。后处理是工作站本地结果生成，不包含后续服务器上传。
-    "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 3600),
+    "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 14400),
     # 后处理工作站导出目录。TOML 中使用 [postprocess].output_dir / animation_dir / metrics_dir。
     "postprocess_output_dir": _toml_or_default(
         "postprocess",
