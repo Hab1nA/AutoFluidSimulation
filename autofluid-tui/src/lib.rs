@@ -1412,6 +1412,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
     ctx.rt.block_on(ctx.ipc.disconnect());
 
+    finish_app_shutdown(&mut ctx);
+
+    Ok(())
+}
+
+fn finish_app_shutdown(ctx: &mut EventContext) {
     if *ctx.full_quit {
         if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
             finish_pending_worker_lifecycle_task(worker_task, ctx.state, ctx.log_buffer);
@@ -1426,11 +1432,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         if let Err(e) = result {
             log::warn!("完全退出清理后台引擎失败: {}", e);
         }
-    } else if let Err(e) = daemon_mgr::DaemonManager::stop_server_ipc_tunnel(ctx.project_dir) {
-        log::warn!("普通退出清理服务器 IPC 隧道失败: {}", e);
+    } else {
+        log::info!("普通退出仅关闭 TUI，保留 server IPC 隧道供 LocalWorker 继续运行");
     }
-
-    Ok(())
 }
 
 fn submit_command(
@@ -2605,6 +2609,82 @@ mod tests {
             "FullQuit handling should not perform worker PID cleanup before the shutdown phase"
         );
 
+        std::fs::remove_dir_all(project_dir).ok();
+    }
+
+    #[test]
+    fn normal_quit_preserves_server_ipc_tunnel_for_detached_worker() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-normal-quit-preserves-tunnel-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
+
+        #[cfg(target_os = "windows")]
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live tunnel process");
+
+        #[cfg(not(target_os = "windows"))]
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live tunnel process");
+
+        let pid = child.id();
+        std::fs::write(&pid_file, pid.to_string()).expect("write tunnel pid");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = false;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(
+            pid_file.exists(),
+            "normal quit must keep the IPC tunnel pid file"
+        );
+        assert!(
+            crate::utils::is_pid_alive(pid),
+            "normal quit must not terminate the IPC tunnel process"
+        );
+
+        let killed = crate::utils::kill_process_tree(pid);
+        assert!(
+            !crate::utils::is_pid_alive(pid)
+                || (killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2)))
+        );
         std::fs::remove_dir_all(project_dir).ok();
     }
 
