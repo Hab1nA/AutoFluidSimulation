@@ -30,6 +30,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.file_monitor import StepFileMonitor
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 
 from .worker_pool import WorkerPoolManager
@@ -614,11 +615,18 @@ class PipelineScheduler:
                     if step in ("meshing", "solver", "postprocess"):
                         remote_executor = self.runner.get_remote_executor()
                         workstation_id = self._workstation_for_config(cn)
-                        remote_status = remote_executor.query_remote_task_status(
-                            cn,
-                            step,
-                            workstation_id=workstation_id,
-                        )
+                        try:
+                            remote_status = remote_executor.query_remote_task_status(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
+                        except InfrastructureUnavailableError as e:
+                            logger.warning(
+                                "[Resume] 构型%s %s 查询远程状态时基础设施不可用: %s",
+                                cn, step, e,
+                            )
+                            break
                         if remote_status == "completed":
                             self.state.set_step_status(cn, step, STATUS_COMPLETED)
                             if step == "solver":

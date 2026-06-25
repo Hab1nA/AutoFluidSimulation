@@ -25,6 +25,7 @@ from engine.config import (
 )
 from engine.state_manager import StateManager
 from executor.remote_executor import RemoteExecutor
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 from engine.scheduler.utils import (
     pause_aware_sleep, wait_unless_paused_or_stopped,
@@ -272,6 +273,15 @@ class MeshingMonitor:
         should_requeue = False
         try:
             should_requeue = self._process_single_meshing(config_name)
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[MeshingMonitor] 构型{config_name} 基础设施不可用（不消耗业务重试次数）: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "meshing", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            should_requeue = True
         except (RuntimeError, ValueError, OSError, ConnectionError) as e:
             logger.error(
                 f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
@@ -558,5 +568,7 @@ class MeshingMonitor:
                 timeout=float(ENGINE_CONFIG["transfer_timeout"]),
                 workstation_id=workstation_id,
             )
+        except InfrastructureUnavailableError:
+            raise
         except Exception:
             return False

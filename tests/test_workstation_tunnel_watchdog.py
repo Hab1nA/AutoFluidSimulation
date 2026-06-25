@@ -14,6 +14,11 @@ SERVER_IPC_SCRIPT_PATH = (
 def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
 
+    assert "[string]$RemoteBindHost = \"\"" in source
+    assert "[int]$RemoteBindPort = 0" in source
+    assert "[string]$TargetHost = \"\"" in source
+    assert "[int]$TargetPort = 0" in source
+    assert "[string]$TunnelTarget = \"\"" in source
     assert "[int]$OwnerPid = 0" in source
     assert "[string]$OwnerMarkerPath = \"\"" in source
     assert "[int]$MaxConsecutiveFailures = 5" in source
@@ -86,11 +91,42 @@ def test_reverse_tunnel_watchdog_launcher_carries_owner_and_budget_arguments() -
     launcher_end = source.index("function Remove-TunnelWatchdogLauncher")
     launcher_source = source[launcher_start:launcher_end]
 
+    assert "-RemoteBindHost" in launcher_source
+    assert "-RemoteBindPort" in launcher_source
+    assert "-TargetHost" in launcher_source
+    assert "-TargetPort" in launcher_source
+    assert "-TunnelTarget" in launcher_source
     assert "-OwnerPid" in launcher_source
     assert "-OwnerMarkerPath" in launcher_source
     assert "-MaxConsecutiveFailures" in launcher_source
     assert "-MaxRecoverySeconds" in launcher_source
     assert "-LogRepeatSeconds" in launcher_source
+
+
+def test_tunnel_owner_marker_takes_precedence_over_stale_pid() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    owner_fn = source[
+        source.index("function Test-TunnelOwnerAlive"):
+        source.index("function Stop-ReverseTunnelChild")
+    ]
+
+    marker_check = 'if (-not [string]::IsNullOrWhiteSpace($OwnerMarkerPath))'
+    pid_check = "if ($OwnerPid -gt 0)"
+
+    assert owner_fn.index(marker_check) < owner_fn.index(pid_check)
+    assert "return Test-Path -LiteralPath $OwnerMarkerPath" in owner_fn
+
+
+def test_tunnel_watchdog_task_restarts_at_startup_and_logon() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    install_start = source.index("function Install-TunnelWatchdogTask")
+    install_end = source.index("function Uninstall-TunnelWatchdogTask")
+    install_source = source[install_start:install_end]
+
+    assert "New-ScheduledTaskTrigger -AtStartup" in install_source
+    assert "New-ScheduledTaskTrigger -AtLogOn" in install_source
+    assert "-StartWhenAvailable" in install_source
+    assert "-Trigger $triggers" in install_source
 
 
 def test_server_ipc_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit() -> None:

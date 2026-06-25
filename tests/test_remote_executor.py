@@ -16,6 +16,7 @@ from engine.config import (
 )
 import executor.remote_executor as remote_executor_module
 from executor.remote_executor import RemoteExecutor
+from utils.infrastructure import InfrastructureUnavailableError
 
 
 @pytest.fixture(autouse=True)
@@ -532,14 +533,9 @@ def test_execute_transfer_deletes_partial_remote_file_on_upload_failure(tmp_path
     state = _StateRecorder()
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
 
-    assert executor.execute_transfer(2) is False
+    with pytest.raises(InfrastructureUnavailableError, match="SFTP 上传失败"):
+        executor.execute_transfer(2)
     assert deleted == ["D:/remote scdoc/model_gen4_2.scdoc"]
-    assert state.status_updates[-1] == (
-        2,
-        "transfer",
-        STATUS_ERROR,
-        "SFTP 上传失败",
-    )
 
 
 def test_execute_transfer_rejects_empty_local_scdoc(tmp_path, monkeypatch):
@@ -1210,7 +1206,7 @@ def test_query_remote_task_status_returns_failed_for_error_flag():
     assert executor.query_remote_task_status(3, "solver") == "failed"
 
 
-def test_query_remote_task_status_returns_unknown_on_remote_check_failure():
+def test_query_remote_task_status_raises_infrastructure_error_on_ssh_failure():
     state = _StateRecorder()
     state.remote_tasks[(4, "meshing")] = {
         "config_name": 4,
@@ -1230,7 +1226,8 @@ def test_query_remote_task_status_returns_unknown_on_remote_check_failure():
 
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
 
-    assert executor.query_remote_task_status(4, "meshing") == "unknown"
+    with pytest.raises(InfrastructureUnavailableError, match="sftp unavailable"):
+        executor.query_remote_task_status(4, "meshing")
 
 
 def test_execute_solver_uses_workstation_specific_paths(monkeypatch):

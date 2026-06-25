@@ -6,6 +6,11 @@ param(
     [switch]$NoWatchdog,
     [ValidateSet("Workstation", "LocalWorker")]
     [string]$TunnelKind = "Workstation",
+    [string]$RemoteBindHost = "",
+    [int]$RemoteBindPort = 0,
+    [string]$TargetHost = "",
+    [int]$TargetPort = 0,
+    [string]$TunnelTarget = "",
     [int]$OwnerPid = 0,
     [string]$OwnerMarkerPath = "",
     [int]$RestartDelaySeconds = 5,
@@ -35,11 +40,11 @@ function Test-TunnelOwnerConfigured {
 }
 
 function Test-TunnelOwnerAlive {
-    if ($OwnerPid -gt 0) {
-        return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
-    }
     if (-not [string]::IsNullOrWhiteSpace($OwnerMarkerPath)) {
         return Test-Path -LiteralPath $OwnerMarkerPath
+    }
+    if ($OwnerPid -gt 0) {
+        return $null -ne (Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue)
     }
     return $false
 }
@@ -146,6 +151,10 @@ function Resolve-WScriptExe {
 }
 
 function Get-TunnelSshTarget {
+    if (-not [string]::IsNullOrWhiteSpace($TunnelTarget)) {
+        return $TunnelTarget
+    }
+
     if ($TunnelKind -eq "LocalWorker" -and
         -not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST)) {
         return $env:AUTOFLUID_LOCAL_WORKER_TUNNEL_HOST
@@ -189,6 +198,10 @@ function Get-EnvInt {
 }
 
 function Get-RemoteBindHost {
+    if (-not [string]::IsNullOrWhiteSpace($RemoteBindHost)) {
+        return $RemoteBindHost
+    }
+
     if ($TunnelKind -eq "LocalWorker") {
         if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_WORKER_REACHABLE_HOST)) {
             return $env:AUTOFLUID_WORKER_REACHABLE_HOST
@@ -203,6 +216,10 @@ function Get-RemoteBindHost {
 }
 
 function Get-RemoteBindPort {
+    if ($RemoteBindPort -gt 0) {
+        return $RemoteBindPort
+    }
+
     if ($TunnelKind -eq "LocalWorker") {
         return Get-EnvInt -Name "AUTOFLUID_WORKER_SSH_PORT" -DefaultValue 2223
     }
@@ -254,7 +271,17 @@ function New-TunnelWatchdogLauncher {
         [Parameter(Mandatory = $true)]
         [int]$RemotePort,
         [Parameter(Mandatory = $true)]
-        [string]$PowerShellExe
+        [string]$PowerShellExe,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRemoteBindHost,
+        [Parameter(Mandatory = $true)]
+        [int]$ResolvedRemoteBindPort,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedTargetHost,
+        [Parameter(Mandatory = $true)]
+        [int]$ResolvedTargetPort,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedTunnelTarget
     )
 
     $scriptPath = $PSCommandPath
@@ -270,6 +297,11 @@ function New-TunnelWatchdogLauncher {
         "-ExecutionPolicy", "Bypass",
         "-File", $scriptPath,
         "-TunnelKind", $TunnelKind,
+        "-RemoteBindHost", $ResolvedRemoteBindHost,
+        "-RemoteBindPort", ([string]$ResolvedRemoteBindPort),
+        "-TargetHost", $ResolvedTargetHost,
+        "-TargetPort", ([string]$ResolvedTargetPort),
+        "-TunnelTarget", $ResolvedTunnelTarget,
         "-NoWatchdog",
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-OwnerPid", ([string]$OwnerPid),
@@ -309,22 +341,34 @@ function Install-TunnelWatchdogTask {
 
     $taskName = Get-TunnelWatchdogTaskName -RemotePort $RemotePort
     $wscriptExe = Resolve-WScriptExe
-    $launcherPath = New-TunnelWatchdogLauncher -RemotePort $RemotePort -PowerShellExe $PowerShellExe
+    $launcherPath = New-TunnelWatchdogLauncher `
+        -RemotePort $RemotePort `
+        -PowerShellExe $PowerShellExe `
+        -ResolvedRemoteBindHost $remoteHost `
+        -ResolvedRemoteBindPort $remotePort `
+        -ResolvedTargetHost $targetHost `
+        -ResolvedTargetPort $targetPort `
+        -ResolvedTunnelTarget $tunnelTarget
     $arguments = ConvertTo-WindowsCommandArgument -Value $launcherPath
 
     $action = New-ScheduledTaskAction -Execute $wscriptExe -Argument $arguments
-    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+    $triggers = @(
+        New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 1) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
+        New-ScheduledTaskTrigger -AtStartup
+        New-ScheduledTaskTrigger -AtLogOn
+    )
     $settings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
         -MultipleInstances IgnoreNew `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
 
     Register-ScheduledTask -TaskName $taskName `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger $triggers `
         -Settings $settings `
         -Description "AutoFluid $TunnelKind reverse tunnel watchdog for remote port $RemotePort" `
         -Force | Out-Null
@@ -343,6 +387,10 @@ function Uninstall-TunnelWatchdogTask {
 }
 
 function Get-TargetHost {
+    if (-not [string]::IsNullOrWhiteSpace($TargetHost)) {
+        return $TargetHost
+    }
+
     if ($TunnelKind -eq "LocalWorker") {
         if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_HOST)) {
             return $env:AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_HOST
@@ -362,6 +410,10 @@ function Get-TargetHost {
 }
 
 function Get-TargetPort {
+    if ($TargetPort -gt 0) {
+        return $TargetPort
+    }
+
     if ($TunnelKind -eq "LocalWorker") {
         return Get-EnvInt -Name "AUTOFLUID_LOCAL_WORKER_TUNNEL_TARGET_PORT" -DefaultValue 22
     }
@@ -659,6 +711,11 @@ function Start-ReverseTunnelSupervisor {
         "-File", $PSCommandPath,
         "-Monitor",
         "-TunnelKind", $TunnelKind,
+        "-RemoteBindHost", $remoteHost,
+        "-RemoteBindPort", ([string]$remotePort),
+        "-TargetHost", $targetHost,
+        "-TargetPort", ([string]$targetPort),
+        "-TunnelTarget", $tunnelTarget,
         "-MonitorRemotePort", ([string]$RemotePort),
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-OwnerPid", ([string]$OwnerPid),

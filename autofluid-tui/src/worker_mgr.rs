@@ -464,6 +464,14 @@ impl WorkerManager {
             &tunnel_script.to_string_lossy(),
             "-TunnelKind",
             "Workstation",
+            "-RemoteBindHost",
+            &spec.remote_host,
+            "-RemoteBindPort",
+            &spec.remote_port.to_string(),
+            "-TargetHost",
+            &spec.target_host,
+            "-TargetPort",
+            &spec.target_port.to_string(),
         ])
         .env("AUTOFLUID_SSH_REACHABLE_HOST", &spec.remote_host)
         .env("AUTOFLUID_SSH_REACHABLE_PORT", spec.remote_port.to_string())
@@ -1650,6 +1658,25 @@ mod tests {
         assert!(workstation_tunnel_lines
             .iter()
             .any(|line| line.contains("AUTOFLUID_SSH_REACHABLE_PORT=2225")));
+        let ws_b_tunnel_line = workstation_tunnel_lines
+            .iter()
+            .find(|line| {
+                line.contains("-RemoteBindPort 2224")
+                    || line.contains("\"-RemoteBindPort\" \"2224\"")
+            })
+            .expect("WS-B tunnel command should carry explicit remote port");
+        assert!(
+            ws_b_tunnel_line.contains("-RemoteBindHost 127.0.0.1")
+                || ws_b_tunnel_line.contains("\"-RemoteBindHost\" \"127.0.0.1\"")
+        );
+        assert!(
+            ws_b_tunnel_line.contains("-TargetHost 172.17.135.89")
+                || ws_b_tunnel_line.contains("\"-TargetHost\" \"172.17.135.89\"")
+        );
+        assert!(
+            ws_b_tunnel_line.contains("-TargetPort 22")
+                || ws_b_tunnel_line.contains("\"-TargetPort\" \"22\"")
+        );
         let local_worker_tunnel_line = lines
             .iter()
             .find(|line| line.contains("-TunnelKind LocalWorker"))

@@ -704,7 +704,8 @@ class FileCleaner:
                 )
         except (OSError, ConnectionError) as e:
             logger.error(f"[Cleaner] 远程缓存清理异常: {e}")
-            raise RuntimeError(f"远程缓存清理未完成: {e}") from e
+            from utils.infrastructure import InfrastructureUnavailableError
+            raise InfrastructureUnavailableError(f"远程缓存清理未完成: {e}") from e
 
     def _clean_single_step(self, step_name: str, config_name: int | None = None) -> None:
         """清理单个步骤的文件（内部方法）。"""
@@ -844,7 +845,8 @@ class FileCleaner:
                     )
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
-                raise RuntimeError(f"远程文件清理未完成: step={step_name}: {e}") from e
+                from utils.infrastructure import InfrastructureUnavailableError
+                raise InfrastructureUnavailableError(f"远程文件清理未完成: step={step_name}: {e}") from e
 
     def _remote_cache_dirs(
         self,

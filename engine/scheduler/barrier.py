@@ -17,6 +17,7 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 from engine.scheduler.utils import pause_aware_sleep, PauseGuard
 
@@ -454,6 +455,15 @@ class BarrierCoordinator:
                 try:
                     if not self._execute_solver_for_config(config_name):
                         break
+                except InfrastructureUnavailableError as e:
+                    logger.warning(
+                        "[Solver] 构型%s 基础设施不可用，等待恢复后重试: %s",
+                        config_name,
+                        e,
+                    )
+                    # 基础设施恢复后重新进入循环，尝试下一个可执行的构型
+                    if not pause_aware_sleep(30, self._paused, self._stopped):
+                        break
                 finally:
                     with self._solver_dispatch_lock:
                         self._solver_active_config = None
@@ -480,11 +490,21 @@ class BarrierCoordinator:
         if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
-            remote_status = remote_executor.query_remote_task_status(
-                config_name,
-                "solver",
-                workstation_id=workstation_id,
-            )
+            try:
+                remote_status = remote_executor.query_remote_task_status(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
+            except InfrastructureUnavailableError as e:
+                logger.warning(
+                    f"[Solver] 构型{config_name} 查询远程状态时基础设施不可用: {e}",
+                )
+                self.state.set_step_status(
+                    config_name, "solver", STATUS_RETRYING,
+                    f"基础设施恢复中: {e}",
+                )
+                raise
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
                 if self._is_stale_step_result(config_name, "solver", generation):
@@ -602,11 +622,21 @@ class BarrierCoordinator:
         if postprocess_status == STATUS_RUNNING:
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
-            remote_status = remote_executor.query_remote_task_status(
-                config_name,
-                "postprocess",
-                workstation_id=workstation_id,
-            )
+            try:
+                remote_status = remote_executor.query_remote_task_status(
+                    config_name,
+                    "postprocess",
+                    workstation_id=workstation_id,
+                )
+            except InfrastructureUnavailableError as e:
+                logger.warning(
+                    f"[PostProcess] 构型{config_name} 查询远程状态时基础设施不可用: {e}",
+                )
+                self.state.set_step_status(
+                    config_name, "postprocess", STATUS_RETRYING,
+                    f"基础设施恢复中: {e}",
+                )
+                raise
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
                 remote_executor.forget_remote_task(
@@ -649,29 +679,39 @@ class BarrierCoordinator:
 
     def _wait_for_solver_completion(self, config_name: int) -> None:
         """轮询等待 Solver 完成，并按控制状态更新数据库。"""
-        if self.runner.wait_solver_completion(
-            config_name,
-            paused_event=self._paused,
-            stopped_event=self._stopped,
-        ):
-            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
-            logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
-        else:
-            # ★ 区分暂停和真正的超时
-            if self._paused.is_set():
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_PAUSED,
-                    "等待求解期间暂停"
-                )
-            elif self._stopped.is_set():
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_PAUSED,
-                    "引擎已停止"
-                )
+        try:
+            if self.runner.wait_solver_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
+                self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+                logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
             else:
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_ERROR, "求解超时"
-                )
+                # ★ 区分暂停和真正的超时
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_PAUSED,
+                        "等待求解期间暂停"
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_PAUSED,
+                        "引擎已停止"
+                    )
+                else:
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_ERROR, "求解超时"
+                    )
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[Solver] 构型{config_name} 基础设施不可用: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "solver", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            raise
 
     def _execute_postprocess_for_config(self, config_name: int) -> None:
         """执行单个构型的后处理步骤。"""
@@ -692,38 +732,48 @@ class BarrierCoordinator:
 
     def _wait_for_postprocess_completion(self, config_name: int) -> None:
         """轮询等待 PostProcess 完成，并按控制状态更新数据库。"""
-        if self.runner.wait_postprocess_completion(
-            config_name,
-            paused_event=self._paused,
-            stopped_event=self._stopped,
-        ):
-            self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
-            cleanup = getattr(self.runner, "cleanup_completed_postprocess_task", None)
-            if callable(cleanup):
-                cleanup(config_name)
-            logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
-        else:
-            if self._paused.is_set():
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_PAUSED,
-                    "等待后处理期间暂停",
-                )
-            elif self._stopped.is_set():
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_PAUSED,
-                    "引擎已停止",
-                )
+        try:
+            if self.runner.wait_postprocess_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
+                self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+                cleanup = getattr(self.runner, "cleanup_completed_postprocess_task", None)
+                if callable(cleanup):
+                    cleanup(config_name)
+                logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
             else:
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_ERROR,
-                    "后处理超时",
-                )
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_PAUSED,
+                        "等待后处理期间暂停",
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_PAUSED,
+                        "引擎已停止",
+                    )
+                else:
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_ERROR,
+                        "后处理超时",
+                    )
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[PostProcess] 构型{config_name} 基础设施不可用: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "postprocess", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            raise
 
     def _report_solver_terminal_if_ready(self) -> None:
         """PostProcess 全部终结时报告流水线自然完成或失败终态。"""

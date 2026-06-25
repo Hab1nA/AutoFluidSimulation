@@ -25,6 +25,7 @@ from engine.config import (
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
 from engine.task_runner import TaskRunner
+from utils.infrastructure import InfrastructureUnavailableError
 
 
 # ====================================================================
@@ -152,6 +153,20 @@ class TestRetryManager:
         # 因暂停导致的失败应标记 Paused（或因线程调度竞态可能走正常重试路径）
         status = self.state.get_step_status(1, "sc")
         assert status in (STATUS_PAUSED, STATUS_RETRYING, STATUS_ERROR)
+
+    def test_infrastructure_error_does_not_consume_business_retry_budget(self):
+        """SSH/隧道基础设施故障不应消耗构型业务重试次数。"""
+        def tunnel_dropped(_cn):
+            raise InfrastructureUnavailableError("WS-B tunnel 127.0.0.1:2224 unavailable")
+
+        with pytest.raises(InfrastructureUnavailableError):
+            self.retry_mgr.execute_with_retry(1, "transfer", tunnel_dropped)
+
+        step = self.state.get_all_steps_for_config(1)["transfer"]
+        assert step["status"] == STATUS_RETRYING
+        assert step["retry_count"] == 0
+        assert "基础设施恢复中" in step["error_message"]
+        assert "127.0.0.1:2224" in step["error_message"]
 
     def test_pause_aware_sleep_completes(self):
         """无中断时 pause_aware_sleep 应正常完成。"""

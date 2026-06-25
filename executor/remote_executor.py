@@ -16,7 +16,7 @@ import re
 import time
 import threading
 from contextlib import AbstractContextManager
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, NoReturn, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
@@ -30,6 +30,7 @@ from engine.config import (
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
 from executor.postprocess_paths import resolve_postprocess_paths
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -46,6 +47,21 @@ def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
         for ch in escaped
     )
     return f'"{escaped}"' if needs_quote else escaped
+
+
+def _raise_infra_on_ssh_error(exc: Exception) -> "NoReturn":
+    """Wrap SSH/SFTP connection errors as infrastructure exceptions.
+
+    Call this in except blocks that catch ``(OSError, ConnectionError)`` to
+    convert them into :class:`InfrastructureUnavailableError` so the scheduler
+    knows the failure is not a business-logic error and should not consume the
+    config retry budget.
+
+    Raises:
+        InfrastructureUnavailableError: always
+    """
+    raise InfrastructureUnavailableError(str(exc)) from exc
+
 
 # 远程脚本文件列表（部署到 scripts_dir）
 REMOTE_SCRIPT_FILES = [
@@ -375,10 +391,7 @@ class RemoteExecutor:
                 if ssh.check_remote_file(error_flag_file):
                     return "failed"
             except (OSError, ConnectionError) as e:
-                logger.warning(
-                    f"{self._log_prefix(step_name)} 构型{config_name} 远程 flag 检查状态未知: {e}"
-                )
-                return "unknown"
+                _raise_infra_on_ssh_error(e)
 
             try:
                 query_cmd = f'schtasks /Query /TN "{task_name}" /FO CSV /NH'
@@ -390,10 +403,7 @@ class RemoteExecutor:
                     return "running"
                 return "lost"
             except (OSError, ConnectionError) as e:
-                logger.warning(
-                    f"{self._log_prefix(step_name)} 构型{config_name} 远程计划任务查询状态未知: {e}"
-                )
-                return "unknown"
+                _raise_infra_on_ssh_error(e)
 
     def _remote_task_pid_running(
         self,
@@ -678,12 +688,13 @@ class RemoteExecutor:
                     if self._paused_event is not None and self._paused_event.is_set():
                         logger.info(f"[Transfer] 构型{config_name} 上传因暂停中断")
                         return False
-                    self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "SFTP 上传失败")
-                    return False
+                    raise InfrastructureUnavailableError(
+                        f"SFTP 上传失败（构型{config_name}）"
+                    )
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[Transfer] 文件传输异常: {e}")
-                self.state.set_step_status(config_name, "transfer", STATUS_ERROR, str(e))
-                return False
+                _raise_infra_on_ssh_error(e)
 
     # ------------------------------------------------------------------
     # 网格划分
@@ -905,9 +916,10 @@ class RemoteExecutor:
                 else:
                     logger.error(f"{log_prefix} 网格划分远程任务启动失败: 构型{config_name}")
                 return success
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"{log_prefix} 网格划分启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def execute_meshing(
         self,
@@ -973,9 +985,10 @@ class RemoteExecutor:
                     )
                     return True
             return False
+        except InfrastructureUnavailableError:
+            raise
         except (OSError, ConnectionError) as e:
-            logger.error(f"[Meshing] 检查网格划分状态异常: {e}")
-            return False
+            _raise_infra_on_ssh_error(e)
 
     def check_meshing_outputs_exist(
         self,
@@ -1004,9 +1017,10 @@ class RemoteExecutor:
             with self._ssh_guard(workstation_id):
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 return mesh_file is not None and _check_remote_file(ssh, mesh_file)
+        except InfrastructureUnavailableError:
+            raise
         except (OSError, ConnectionError) as e:
-            logger.warning(f"[Meshing] 检查远程输出文件异常: {e}")
-            return False
+            _raise_infra_on_ssh_error(e)
 
     def wait_meshing_completion(
         self, config_name: int,
@@ -1114,8 +1128,10 @@ class RemoteExecutor:
                                 workstation_id,
                             )
                             return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
+                _raise_infra_on_ssh_error(e)
 
             time.sleep(poll_interval)
 
@@ -1464,9 +1480,10 @@ class RemoteExecutor:
                 else:
                     logger.error(f"[Solver] 远程求解启动失败: 构型{config_name}")
                     return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[Solver] 仿真求解启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def execute_postprocess(
         self,
@@ -1542,9 +1559,10 @@ class RemoteExecutor:
                     return True
                 logger.error(f"[PostProcess] 独立后处理远程任务启动失败: 构型{config_name}")
                 return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[PostProcess] 独立后处理启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def _register_postprocess_from_solver(
         self,
@@ -1781,8 +1799,10 @@ class RemoteExecutor:
                                 workstation_id,
                             )
                             return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
+                _raise_infra_on_ssh_error(e)
 
             time.sleep(poll_interval)
 
@@ -1854,8 +1874,10 @@ class RemoteExecutor:
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[PostProcess] 构型{config_name} 后处理完成")
                         return True
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[PostProcess] 轮询构型{config_name} 后处理状态异常: {e}")
+                _raise_infra_on_ssh_error(e)
 
             time.sleep(poll_interval)
 
