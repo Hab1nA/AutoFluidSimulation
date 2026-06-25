@@ -862,9 +862,9 @@ def test_resume_triggers_immediate_scan():
         ctx.cleanup()
 
 
-def test_start_dispatches_solver_serially_when_barrier_already_met():
+def test_start_dispatches_solver_serially_per_workstation_when_barrier_already_met():
     print("\n" + "=" * 60)
-    print("测试 10.1: 屏障已通过时 start 串行分发 Solver")
+    print("测试 10.1: 屏障已通过时 start 在同一工作站串行分发 Solver")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
@@ -890,7 +890,7 @@ def test_start_dispatches_solver_serially_when_barrier_already_met():
             cn for cn in ctx.state.get_all_configs()
             if ctx.state.get_step_status(cn, "solver") == STATUS_RUNNING
         ]
-        assert running == [1], f"Solver 应串行执行，当前 Running={running}"
+        assert running == [1], f"同一工作站 Solver 应串行执行，当前 Running={running}"
 
         ok = ctx.wait_for_condition(
             lambda: sorted(ctx.runner._solver_dispatched) == [1, 2, 3]
@@ -901,11 +901,11 @@ def test_start_dispatches_solver_serially_when_barrier_already_met():
             timeout=5,
         )
         assert ok, (
-            "屏障已通过且 Solver=Waiting 时，start 后应串行完成所有 Solver "
+            "屏障已通过且 Solver=Waiting 时，start 后应在同一工作站串行完成所有 Solver "
             f"(实际: {ctx.runner._solver_dispatched})"
         )
         assert ctx.runner._solver_max_active_count == 1, (
-            "Solver 不允许并行执行，"
+            "同一工作站 Solver 不允许并行执行，"
             f"实际最大并发={ctx.runner._solver_max_active_count}"
         )
 
@@ -972,7 +972,10 @@ def main():
         ("暂停后文件监控停止扫描", test_file_monitor_paused_on_pause),
         ("暂停期间STEP文件不被捕捉", test_pause_blocks_step_file_callback),
         ("恢复后立即触发完整轮询", test_resume_triggers_immediate_scan),
-        ("屏障已通过时start串行分发Solver", test_start_dispatches_solver_serially_when_barrier_already_met),
+        (
+            "屏障已通过时start在同一工作站串行分发Solver",
+            test_start_dispatches_solver_serially_per_workstation_when_barrier_already_met,
+        ),
         ("多次pause-start状态切换", test_multiple_pause_start_cycles),
     ]
 

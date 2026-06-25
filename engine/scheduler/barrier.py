@@ -65,10 +65,12 @@ class BarrierCoordinator:
         self._solver_terminal_reported = False
         self._guard = PauseGuard(paused_event, stopped_event)
 
-        # ---- Solver 线程（串行执行：同一时刻仅一个构型求解）----
+        # ---- Solver 线程（同一工作站串行，不同工作站可并行）----
         self._solver_threads: list[threading.Thread] = []
+        self._solver_thread_workstations: dict[threading.Thread, str] = {}
         self._solver_dispatch_lock = threading.Lock()
         self._solver_active_config: int | None = None
+        self._solver_active_by_workstation: dict[str, int] = {}
         self._workstation_barriers_passed: set[str] = set()
         self._configured_workstation_ids = {
             str(workstation.get("id"))
@@ -225,6 +227,8 @@ class BarrierCoordinator:
             if t.is_alive():
                 t.join(timeout=timeout)
         self._solver_threads.clear()
+        self._solver_thread_workstations.clear()
+        self._solver_active_by_workstation.clear()
 
     # ------------------------------------------------------------------
     # 全局屏障监控
@@ -354,8 +358,8 @@ class BarrierCoordinator:
         """
         工作站屏障通过后，启动对应构型的仿真求解。
 
-        Solver 使用单个调度线程串行执行，确保同一时刻只有一个构型
-        处于求解阶段。
+        Solver 以工作站为并发边界：同一工作站串行执行，多个已通过
+        屏障的工作站可并行求解。
         若暂停标志已置位，则等待恢复后再分发。
         """
         # ★ 分发前检查暂停标志（统一使用 PauseGuard）
@@ -364,36 +368,60 @@ class BarrierCoordinator:
             return False
 
         logger.info("=" * 60)
-        logger.info("开始串行调度仿真求解任务...")
+        logger.info("开始按工作站调度仿真求解任务...")
         logger.info("=" * 60)
 
         allowed_snapshot = (
             set(allowed_workstations)
             if allowed_workstations is not None
-            else None
+            else self._ready_workstations_for_solver()
         )
+        if not allowed_snapshot:
+            return False
+
+        started_any = False
+        live_threads_exist = False
         with self._solver_dispatch_lock:
             self._solver_threads = [t for t in self._solver_threads if t.is_alive()]
-            if self._solver_threads:
-                logger.info("[Solver] 串行调度线程已在运行，跳过重复启动")
-                return True
+            self._solver_thread_workstations = {
+                t: workstation_id
+                for t, workstation_id in self._solver_thread_workstations.items()
+                if t.is_alive()
+            }
+            live_workstations = set(self._solver_thread_workstations.values())
+            live_threads_exist = bool(self._solver_threads)
 
-            if self._next_solver_config(allowed_snapshot) is None:
+            for workstation_id in sorted(allowed_snapshot):
+                if workstation_id in live_workstations:
+                    logger.info(
+                        "[Solver] 工作站 %s 调度线程已在运行，跳过重复启动",
+                        workstation_id,
+                    )
+                    continue
+
+                workstation_scope = {workstation_id}
+                if self._next_solver_config(workstation_scope) is None:
+                    continue
+
+                t = threading.Thread(
+                    target=self._solver_dispatch_loop,
+                    args=(workstation_scope,),
+                    name=f"SolverDispatcher-{workstation_id}",
+                    daemon=True,
+                )
+                t.start()
+                self._solver_threads.append(t)
+                self._solver_thread_workstations[t] = workstation_id
+                started_any = True
+
+            if not started_any and not live_threads_exist:
                 logger.info("[Solver] 当前没有待执行的求解任务")
                 self._report_solver_terminal_if_ready()
                 return False
 
-            t = threading.Thread(
-                target=self._solver_dispatch_loop,
-                args=(allowed_snapshot,),
-                name="SolverDispatcher",
-                daemon=True,
-            )
-            t.start()
-            self._solver_threads.append(t)
-
-        logger.info("[Solver] 串行调度线程已启动")
-        return True
+        if started_any:
+            logger.info("[Solver] 已启动 %s 个工作站调度线程", len(allowed_snapshot))
+        return started_any or live_threads_exist
 
     def _next_solver_config(
         self,
@@ -442,8 +470,11 @@ class BarrierCoordinator:
         self,
         allowed_workstations: set[str] | None = None,
     ) -> None:
-        """串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
-        logger.info("[Solver] 串行调度循环启动")
+        """按工作站串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
+        logger.info(
+            "[Solver] 工作站调度循环启动: %s",
+            ",".join(sorted(allowed_workstations)) if allowed_workstations else "all",
+        )
         try:
             while not self._stopped.is_set():
                 config_name = self._next_solver_config(allowed_workstations)
@@ -452,6 +483,8 @@ class BarrierCoordinator:
 
                 with self._solver_dispatch_lock:
                     self._solver_active_config = config_name
+                    workstation_id = self._workstation_for_config(config_name)
+                    self._solver_active_by_workstation[workstation_id] = config_name
                 try:
                     if not self._execute_solver_for_config(config_name):
                         break
@@ -467,9 +500,11 @@ class BarrierCoordinator:
                 finally:
                     with self._solver_dispatch_lock:
                         self._solver_active_config = None
+                        workstation_id = self._workstation_for_config(config_name)
+                        self._solver_active_by_workstation.pop(workstation_id, None)
         finally:
             self._report_solver_terminal_if_ready()
-            logger.info("[Solver] 串行调度循环退出")
+            logger.info("[Solver] 工作站调度循环退出")
 
     def _execute_solver_for_config(self, config_name: int) -> bool:
         """

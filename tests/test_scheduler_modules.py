@@ -4422,6 +4422,54 @@ class TestBarrierCoordinator:
         assert self.state.is_global_barrier_met() is False
         assert self.runner._sc_cleanup_called is False
 
+    def test_ready_workstations_start_solver_dispatchers_in_parallel(self):
+        """多个工作站屏障通过后，应为各工作站并行启动 Solver。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for config_name, workstation_id in {
+            1: "WS-A",
+            2: "WS-B",
+            3: "WS-C",
+        }.items():
+            self.state.set_config_workstation(config_name, workstation_id)
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(config_name, step, STATUS_COMPLETED)
+            self.state.set_step_status(config_name, "solver", STATUS_WAITING)
+
+        started = threading.Event()
+        release = threading.Event()
+        active: set[int] = set()
+        max_active = 0
+        active_lock = threading.Lock()
+        execution_order: list[int] = []
+
+        def execute_solver(config_name: int) -> bool:
+            nonlocal max_active
+            with active_lock:
+                active.add(config_name)
+                execution_order.append(config_name)
+                max_active = max(max_active, len(active))
+                if len(active) == 3:
+                    started.set()
+            release.wait(timeout=5)
+            with active_lock:
+                active.discard(config_name)
+            return _MockTaskRunner.execute_solver(self.runner, config_name)
+
+        self.runner.execute_solver = execute_solver
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        assert started.wait(timeout=2), execution_order
+        release.set()
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert max_active == 3
+        assert sorted(self.runner._solver_dispatched) == [1, 2, 3]
+
     def test_unassigned_configs_block_workstation_barrier_dispatch(self):
         """仍有 default/Waiting 构型时，真实工作站屏障不应提前放行。"""
         self._use_multi_workstation_barrier()

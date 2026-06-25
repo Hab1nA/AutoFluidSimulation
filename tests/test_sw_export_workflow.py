@@ -153,8 +153,124 @@ class TestSwComConnection(unittest.TestCase):
         self.assertEqual(self.SWExecutor._SW_DOC_PART, 1)
         self.assertEqual(self.SWExecutor._SW_DOC_ASSEMBLY, 2)
         self.assertEqual(self.SWExecutor._SW_OPEN_SILENT, 1)
+        self.assertEqual(self.SWExecutor._SW_OPEN_READONLY, 2)
         self.assertEqual(self.SWExecutor._SW_SAVE_AS_CURRENT_VERSION, 0)
         self.assertEqual(self.SWExecutor._SW_SAVE_AS_OPTIONS_SILENT, 1)
+
+    def test_open_sw_model_uses_readonly_option(self):
+        """OpenDoc6 应以只读方式打开源模型，避免链接设计表回写源 Excel。"""
+        fake_pythoncom = _FakePythoncom()
+        fake_win32com = types.ModuleType("win32com")
+        fake_win32com_client = types.ModuleType("win32com.client")
+        fake_win32com_client.VARIANT = _FakeVariant
+        fake_win32com.client = fake_win32com_client
+
+        mock_app = MagicMock()
+        mock_doc = MagicMock()
+        mock_doc.GetTitle.return_value = "model_gen4.SLDPRT"
+        mock_app.OpenDoc6.return_value = mock_doc
+
+        executor = self.SWExecutor.__new__(self.SWExecutor)
+        executor._last_open_error = None
+
+        with patch.dict(
+            sys.modules,
+            {
+                "pythoncom": fake_pythoncom,
+                "win32com": fake_win32com,
+                "win32com.client": fake_win32com_client,
+            },
+        ):
+            result = executor._open_sw_model(
+                mock_app,
+                r"C:\test\model_gen4.SLDPRT",
+                self.SWExecutor._SW_DOC_PART,
+            )
+
+        self.assertIs(result, mock_doc)
+        args, _kwargs = mock_app.OpenDoc6.call_args
+        self.assertEqual(
+            args[2],
+            self.SWExecutor._SW_OPEN_SILENT | self.SWExecutor._SW_OPEN_READONLY,
+        )
+
+    def test_export_restores_excel_when_design_table_rewrites_source(self):
+        """SolidWorks 链接设计表若回写源 Excel，导出后必须恢复原始参数表。"""
+        from executor import sw_executor as sw_module
+
+        tmpdir = tempfile.mkdtemp(prefix="sw_excel_guard_")
+        try:
+            step_dir = os.path.join(tmpdir, "steps")
+            os.makedirs(step_dir, exist_ok=True)
+            excel_path = os.path.join(tmpdir, "model.xlsx")
+            sw_model = os.path.join(tmpdir, "model.SLDPRT")
+            with open(sw_model, "wb") as f:
+                f.write(b"model")
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.cell(row=1, column=1, value="Design Table")
+            ws.cell(row=2, column=1, value="Config")
+            for row, config_id in enumerate([1, 2, 3], start=3):
+                ws.cell(row=row, column=1, value=config_id)
+            wb.save(excel_path)
+            original_excel = open(excel_path, "rb").read()
+
+            fake_pythoncom = _FakePythoncom()
+            fake_win32com = types.ModuleType("win32com")
+            fake_win32com_client = types.ModuleType("win32com.client")
+            fake_win32com_client.VARIANT = _FakeVariant
+            fake_win32com.client = fake_win32com_client
+
+            mock_doc = MagicMock()
+            mock_doc.ShowConfiguration2.return_value = True
+            mock_doc.Extension.Rebuild.return_value = True
+
+            def save_as_side_effect(filepath, *_args):
+                corrupt_wb = openpyxl.load_workbook(excel_path)
+                corrupt_ws = corrupt_wb.active
+                corrupt_ws.cell(row=5, column=1, value=2)
+                corrupt_wb.save(excel_path)
+                with open(filepath, "wb") as f:
+                    f.write(b"step")
+                return True
+
+            mock_doc.Extension.SaveAs.side_effect = save_as_side_effect
+
+            executor = self.SWExecutor.__new__(self.SWExecutor)
+            executor.state = None
+            executor._paused_event = None
+            executor._stopped_event = None
+            executor._pipeline_control = None
+            executor._cached_sw_app = MagicMock()
+            executor._cached_doc = mock_doc
+            executor._com_initialized = True
+            executor._cleanup_lock = None
+            executor._first_cleanup_done = True
+            executor._final_cleanup_done = False
+            executor.last_error = ""
+            executor._last_open_error = None
+
+            with patch.dict(
+                sys.modules,
+                {
+                    "pythoncom": fake_pythoncom,
+                    "win32com": fake_win32com,
+                    "win32com.client": fake_win32com_client,
+                },
+            ), patch.dict(
+                sw_module.LOCAL_PATHS,
+                {
+                    "step_dir": step_dir,
+                    "sw_model": sw_model,
+                    "excel": excel_path,
+                },
+            ):
+                self.assertTrue(executor._export_sw_per_config_admitted(1))
+
+            self.assertEqual(open(excel_path, "rb").read(), original_excel)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_verify_com_object_valid(self):
         mock_obj = MagicMock()
