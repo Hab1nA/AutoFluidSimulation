@@ -114,7 +114,8 @@ impl WorkerManager {
 
         // 1. 启动所有工作站 SSH 反向隧道
         if !self.start_workstation_tunnels(project_dir, log_buffer) {
-            log_buffer.push_info("❌ 工作站 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
+            log_buffer
+                .push_info("❌ 工作站 SSH 隧道全部启动失败，已停止 Worker 启动流程".to_string());
             self.rollback_failed_worker_start(log_buffer);
             return false;
         }
@@ -224,13 +225,30 @@ impl WorkerManager {
 
     fn start_workstation_tunnels(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
         let specs = workstation_tunnel_specs_for_project(project_dir);
-        let mut success = true;
+        if specs.is_empty() {
+            log_buffer.push_info("❌ 未找到可用的工作站 SSH 隧道配置".to_string());
+            return false;
+        }
+
+        let mut success_count = 0usize;
+        let mut failure_count = 0usize;
         for spec in specs {
-            if !self.start_workstation_tunnel(project_dir, log_buffer, &spec) {
-                success = false;
+            if self.start_workstation_tunnel(project_dir, log_buffer, &spec) {
+                success_count += 1;
+            } else {
+                failure_count += 1;
             }
         }
-        success
+
+        if success_count == 0 {
+            return false;
+        }
+        if failure_count > 0 {
+            log_buffer.push_info(format!(
+                "⚠️ 部分工作站 SSH 隧道启动失败，继续使用已连通工作站 ({success_count} 成功 / {failure_count} 失败)"
+            ));
+        }
+        true
     }
 
     /// 启动本地 LocalWorker 子进程。
@@ -1729,6 +1747,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
+    #[test]
+    fn start_workers_with_prepare_continues_when_some_workstation_tunnels_fail() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-partial-tunnel-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_workstation_reverse_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+        std::fs::write(project_dir.join("main.py"), "print('worker')").expect("write main.py");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            three_workstation_toml(),
+        )
+        .expect("write config");
+        let marker = project_dir.join("worker-partial.log");
+        let powershell_exe =
+            fake_failing_workstation_marker_exe(&project_dir, "fake_pwsh_partial", &marker, 2225);
+        let python_exe = fake_worker_env_marker_exe(&project_dir, "fake_python", &marker);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::set_var("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1");
+        std::env::set_var("AUTOFLUID_WORKER_SSH_PORT", "2223");
+        std::env::set_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel");
+
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let result = wm.start_workers_with_prepare(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            |buffer| {
+                buffer.push_info("daemon prepare".to_string());
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&marker)
+                    .and_then(|mut file| {
+                        use std::io::Write;
+                        writeln!(file, "daemon")
+                    })
+                    .expect("write daemon marker");
+                true
+            },
+        );
+
+        assert!(
+            result,
+            "one failed workstation tunnel should not block worker start"
+        );
+        let order = wait_for_marker_lines(&marker, 6);
+        assert!(order.contains("-RemoteBindPort 2222"));
+        assert!(order.contains("-RemoteBindPort 2224"));
+        assert!(order.contains("-RemoteBindPort 2225"));
+        assert!(order.contains("daemon"));
+        assert!(order.contains("worker 127.0.0.1 2223 reverse_tunnel"));
+        assert!(order.contains("-TunnelKind LocalWorker"));
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("部分工作站 SSH 隧道启动失败")));
+
+        let _ = wm.stop_workers_for_project(None, &mut log_buffer);
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("PYTHON");
+        std::env::remove_var("AUTOFLUID_WORKER_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_WORKER_SSH_PORT");
+        std::env::remove_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
     fn wait_for_marker_lines(marker: &std::path::Path, expected_lines: usize) -> String {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -1774,6 +1868,44 @@ mod tests {
                 ),
             )
             .expect("write fake argument marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_failing_workstation_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+        failing_port: u16,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %* AUTOFLUID_SSH_REACHABLE_PORT=%AUTOFLUID_SSH_REACHABLE_PORT%>>\"{}\"\r\necho %* | findstr /C:\"-RemoteBindPort {}\" >nul && exit /b 1\r\nexit /b 0\r\n",
+                    marker.display(),
+                    failing_port
+                ),
+            )
+            .expect("write fake failing marker exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s AUTOFLUID_SSH_REACHABLE_PORT=%s\\n' \"$*\" \"$AUTOFLUID_SSH_REACHABLE_PORT\" >> '{}'\ncase \" $* \" in *\" -RemoteBindPort {} \"*) exit 1;; esac\nexit 0\n",
+                    marker.display(),
+                    failing_port
+                ),
+            )
+            .expect("write fake failing marker exe");
             make_executable(&path);
             path
         }

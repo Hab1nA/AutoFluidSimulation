@@ -345,6 +345,16 @@ class FileCleaner:
                 return str(workstation_id)
         return DEFAULT_WORKSTATION_ID
 
+    def _workstations_for_config_cleanup(self, config_name: int) -> list[str]:
+        workstation_id = self._workstation_for_config(config_name)
+        configured_ids = self._configured_workstation_ids()
+        if (
+            workstation_id == DEFAULT_WORKSTATION_ID
+            and DEFAULT_WORKSTATION_ID not in configured_ids
+        ):
+            return configured_ids
+        return [workstation_id]
+
     # ------------------------------------------------------------------
     # 系统自检
     # ------------------------------------------------------------------
@@ -788,52 +798,55 @@ class FileCleaner:
                 processed_count = 0
                 failed_count = 0
                 for cn in configs:
-                    workstation_id = self._workstation_for_config(int(cn))
-                    with self._ssh_guard(workstation_id):
-                        ssh = self._get_ssh_for_workstation(workstation_id)
-                        if not ssh.is_connected():
-                            logger.warning(
-                                f"[Cleaner] SSH 未连接，跳过远程文件清理: "
-                                f"{step_name}/构型{cn}/{workstation_id}"
-                            )
-                            failed_count += len(file_templates)
-                            continue
-                        remote_config = self._remote_config_for_workstation(workstation_id)
-                        target_dir = str(remote_config.get(dir_key, "")) if dir_key else ""
-                        remote_dir = target_dir.replace("\\", "/").rstrip("/")
-                        remote_paths = []
-                        for file_template in file_templates:
-                            filename = str(file_template).format(config=cn)
-                            remote_paths.append(f"{remote_dir}/{filename}")
-                        if callable(extra_paths_factory):
-                            remote_paths.extend(
-                                path
-                                for path in extra_paths_factory(cn, remote_config)
-                                if path
-                            )
-                        deduped_remote_paths = list(dict.fromkeys(remote_paths))
-                        for remote_path in deduped_remote_paths:
-                            if ssh.delete_remote_file(remote_path):
-                                processed_count += 1
-                                logger.info(
-                                    f"[Cleaner] 已处理远程文件清理: {remote_path}",
-                                    extra={"broadcast": False},
+                    workstation_ids = self._workstations_for_config_cleanup(int(cn))
+                    for workstation_id in workstation_ids:
+                        with self._ssh_guard(workstation_id):
+                            ssh = self._get_ssh_for_workstation(workstation_id)
+                            if not ssh.is_connected():
+                                logger.warning(
+                                    f"[Cleaner] SSH 未连接，跳过远程文件清理: "
+                                    f"{step_name}/构型{cn}/{workstation_id}"
                                 )
-                            else:
-                                failed_count += 1
-                        if step_name == "postprocess":
-                            config_dirs = [
-                                _postprocess_output_config_dir(remote_config, int(cn)),
-                                _postprocess_metrics_config_dir(remote_config, int(cn)),
-                            ]
-                            clear_remote_directory = getattr(ssh, "clear_remote_directory", None)
-                            if callable(clear_remote_directory):
-                                for config_dir in config_dirs:
-                                    if not config_dir:
-                                        continue
-                                    _, clear_failed_count = clear_remote_directory(config_dir)
-                                    if clear_failed_count:
-                                        failed_count += clear_failed_count
+                                failed_count += len(file_templates)
+                                continue
+                            remote_config = self._remote_config_for_workstation(workstation_id)
+                            target_dir = str(remote_config.get(dir_key, "")) if dir_key else ""
+                            remote_dir = target_dir.replace("\\", "/").rstrip("/")
+                            remote_paths = []
+                            for file_template in file_templates:
+                                filename = str(file_template).format(config=cn)
+                                remote_paths.append(f"{remote_dir}/{filename}")
+                            if callable(extra_paths_factory):
+                                remote_paths.extend(
+                                    path
+                                    for path in extra_paths_factory(cn, remote_config)
+                                    if path
+                                )
+                            deduped_remote_paths = list(dict.fromkeys(remote_paths))
+                            for remote_path in deduped_remote_paths:
+                                if ssh.delete_remote_file(remote_path):
+                                    processed_count += 1
+                                    logger.info(
+                                        f"[Cleaner] 已处理远程文件清理: {remote_path}",
+                                        extra={"broadcast": False},
+                                    )
+                                else:
+                                    failed_count += 1
+                            if step_name == "postprocess":
+                                config_dirs = [
+                                    _postprocess_output_config_dir(remote_config, int(cn)),
+                                    _postprocess_metrics_config_dir(remote_config, int(cn)),
+                                ]
+                                clear_remote_directory = getattr(
+                                    ssh, "clear_remote_directory", None
+                                )
+                                if callable(clear_remote_directory):
+                                    for config_dir in config_dirs:
+                                        if not config_dir:
+                                            continue
+                                        _, clear_failed_count = clear_remote_directory(config_dir)
+                                        if clear_failed_count:
+                                            failed_count += clear_failed_count
                 logger.info(
                     f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
                     f"已处理 {processed_count} 个，失败 {failed_count} 个"

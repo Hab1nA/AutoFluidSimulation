@@ -1030,6 +1030,100 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_remote_step_file_cleanup_unassigned_config_cleans_all_workstations(
+        self, tmp_path, monkeypatch
+    ):
+        """多工作站模式下，未分配构型的远程清理应覆盖所有工作站。"""
+        workstations = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\ws_a\working",
+                "scripts_dir": r"D:\ws_a\scripts",
+                "ref_files_dir": r"D:\ws_a\refs",
+                "scdoc_dir": r"D:\ws_a\scdoc",
+                "msh_dir": r"D:\ws_a\msh",
+                "result_dir": r"D:\ws_a\case",
+                "flag_dir": r"D:\ws_a\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+            {
+                "id": "WS-B",
+                "host": "10.0.0.2",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"E:\ws_b\working",
+                "scripts_dir": r"E:\ws_b\scripts",
+                "ref_files_dir": r"E:\ws_b\refs",
+                "scdoc_dir": r"E:\ws_b\scdoc",
+                "msh_dir": r"E:\ws_b\msh",
+                "result_dir": r"E:\ws_b\case",
+                "flag_dir": r"E:\ws_b\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+        ]
+        monkeypatch.setattr("engine.config.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.WORKSTATIONS", workstations)
+        monkeypatch.setattr(
+            "executor.cleaner.get_workstation_config",
+            lambda wid: next(dict(ws) for ws in workstations if ws["id"] == wid),
+        )
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+
+        orig = cfg.IPC_CONFIG["db_path"]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            ssh_by_id = {"WS-A": _ConnectedSSH(), "WS-B": _ConnectedSSH()}
+            requested_ids: list[str] = []
+
+            def get_ssh(workstation_id: str = "default") -> _ConnectedSSH:
+                requested_ids.append(workstation_id)
+                return ssh_by_id[workstation_id]
+
+            cleaner = FileCleaner(state, get_ssh)
+
+            cleaner.clean_step_files("meshing", config_name=2)
+
+            assert requested_ids == ["WS-A", "WS-B"]
+            assert ssh_by_id["WS-A"].deleted == [
+                "D:/ws_a/msh/model_gen4_2.msh.h5",
+                "D:/ws_a/flags/meshing_done_2.txt",
+                "D:/ws_a/flags/meshing_done_2.txt.error",
+            ]
+            assert ssh_by_id["WS-B"].deleted == [
+                "E:/ws_b/msh/model_gen4_2.msh.h5",
+                "E:/ws_b/flags/meshing_done_2.txt",
+                "E:/ws_b/flags/meshing_done_2.txt.error",
+            ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
     def test_clean_postprocess_deletes_metrics_animation_and_runtime_artifacts(
         self, tmp_path, monkeypatch
     ):
