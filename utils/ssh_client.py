@@ -499,8 +499,11 @@ class RemoteWorkstation:
                     self._sftp.rmdir(child_path)
                     deleted_count += 1
                 except (paramiko.SSHException, OSError, EOFError) as e:
-                    logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
-                    failed_count += 1
+                    if self._remove_remote_directory_via_shell(child_path):
+                        deleted_count += 1
+                    else:
+                        logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
+                        failed_count += 1
             else:
                 try:
                     self._sftp.remove(child_path)
@@ -509,6 +512,25 @@ class RemoteWorkstation:
                     logger.warning(f"[SSH] 删除远程文件失败: {child_path}: {e}")
                     failed_count += 1
         return (deleted_count, failed_count)
+
+    def _remove_remote_directory_via_shell(self, remote_dir: str) -> bool:
+        """Fallback for Windows OpenSSH SFTP rmdir permission quirks."""
+        windows_path = remote_dir.replace("/", "\\")
+        quoted = windows_path.replace('"', r'\"')
+        command = f'cmd /c rmdir "{quoted}"'
+        out, err, code = self.exec_command(command, timeout=30)
+        if code == 0:
+            logger.info(
+                f"[SSH] 远程子目录已通过 shell 删除: {remote_dir}",
+                extra={"broadcast": False},
+            )
+            return True
+        logger.debug(
+            f"[SSH] shell 删除远程子目录失败: {remote_dir}: code={code}, "
+            f"stdout={out.strip()}, stderr={err.strip()}",
+            extra={"broadcast": False},
+        )
+        return False
 
     def list_remote_directory(self, remote_dir: str) -> list[str]:
         """返回远程目录下的直接子项名称；目录不存在时返回空列表。"""

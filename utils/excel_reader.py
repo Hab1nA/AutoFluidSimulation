@@ -72,11 +72,13 @@ def read_model_configs(excel_path: str) -> dict[int, list[float]]:
             try:
                 config_name = int(row[0])  # 第1列：构型名称（整数）
                 params = [float(row[i]) for i in PARAM_COLUMN_RANGE]  # 第2-5列：参数
-                configs[config_name] = params
-                logger.debug(f"[Excel] 读取构型 {config_name}: 参数 = {params}")
             except (ValueError, TypeError, IndexError) as e:
                 logger.warning(f"[Excel] 跳过无效行: {row}, 错误: {e}")
                 continue
+            if config_name in configs:
+                raise ValueError(f"Excel 参数表存在重复构型编号: {config_name}")
+            configs[config_name] = params
+            logger.debug(f"[Excel] 读取构型 {config_name}: 参数 = {params}")
     finally:
         if wb is not None:
             wb.close()

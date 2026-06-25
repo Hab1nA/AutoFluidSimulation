@@ -1554,6 +1554,28 @@ class TestExcelReader:
         with pytest.raises(FileNotFoundError):
             read_model_configs("/nonexistent/path.xlsx")
 
+    def test_read_duplicate_config_id_fails(self, tmp_path):
+        """重复构型编号应失败，避免静默覆盖导致少跑构型。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("openpyxl 未安装")
+
+        from utils.excel_reader import read_model_configs
+
+        excel_file = tmp_path / "test.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Name", "P1", "P2", "P3", "P4"])
+        ws.append(["", "", "", "", ""])
+        ws.append([1, 1.0, 2.0, 3.0, 4.0])
+        ws.append([1, 5.0, 6.0, 7.0, 8.0])
+        wb.save(str(excel_file))
+        wb.close()
+
+        with pytest.raises(ValueError, match="重复构型编号: 1"):
+            read_model_configs(str(excel_file))
+
     def test_read_empty_rows_stops(self, tmp_path):
         """遇到空行停止读取。"""
         try:
