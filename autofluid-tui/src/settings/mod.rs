@@ -270,7 +270,7 @@ pub struct MeshingConfig {
 impl Default for MeshingConfig {
     fn default() -> Self {
         Self {
-            meshing_timeout: 1800,
+            meshing_timeout: 3600,
             meshing_processor_count: 8,
         }
     }
@@ -2170,7 +2170,7 @@ fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
         assert_eq!(spaceclaim.sc_gui_stable_delay, 5);
         assert_eq!(spaceclaim.sc_persistent_ready_timeout, 180);
         assert_eq!(spaceclaim.sc_scdoc_stable_seconds, 3.0);
-        assert_eq!(meshing.meshing_timeout, 1800);
+        assert_eq!(meshing.meshing_timeout, 3600);
         assert_eq!(solver.solver_timeout, 14400);
     }
 
@@ -2227,7 +2227,7 @@ project_dir = "/srv/autofluid"
         assert_eq!(config.solidworks.sw_macro_timeout, 120);
         assert!(config.solidworks.sw_close_doc_on_finish);
         assert_eq!(config.solidworks.sw_startup, 60);
-        assert_eq!(config.meshing.meshing_timeout, 1800);
+        assert_eq!(config.meshing.meshing_timeout, 3600);
         assert_eq!(config.meshing.meshing_processor_count, 16);
         assert_eq!(config.solver.solver_timeout, 14400);
         assert_eq!(config.solver.solver_processor_count, 64);
