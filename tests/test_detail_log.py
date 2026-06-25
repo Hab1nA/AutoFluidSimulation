@@ -18,8 +18,6 @@ import tempfile
 import shutil
 import logging
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="log_test_")
 _TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)

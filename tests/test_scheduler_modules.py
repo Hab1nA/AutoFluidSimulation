@@ -38,8 +38,8 @@ class TestRetryManager:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="retry_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         configs = {i: [1.0, 2.0, 3.0, 4.0] for i in range(1, 4)}
@@ -50,7 +50,8 @@ class TestRetryManager:
         self.retry_mgr = RetryManager(self.state, self.paused, self.stopped)
 
     def teardown_method(self):
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -1327,8 +1328,8 @@ class TestPipelineSchedulerStartRecovery:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="scheduler_start_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         self.runner = _MockTaskRunner(self.state)
@@ -1344,7 +1345,8 @@ class TestPipelineSchedulerStartRecovery:
 
     def teardown_method(self):
         self.scheduler.stop()
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -4123,12 +4125,11 @@ class TestBarrierCoordinator:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="barrier_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
         import engine.scheduler.barrier as barrier_module
         self._barrier_module = barrier_module
-        self._orig_barrier_workstations = barrier_module.WORKSTATIONS
-        barrier_module.WORKSTATIONS = [{"id": DEFAULT_WORKSTATION_ID}]
+        self._mp.setattr(barrier_module, "WORKSTATIONS", [{"id": DEFAULT_WORKSTATION_ID}])
 
         self.state = StateManager(db_path=self.db_path)
         self.runner = _MockTaskRunner(self.state)
@@ -4150,12 +4151,10 @@ class TestBarrierCoordinator:
         )
 
     def teardown_method(self):
-        # ★ 先停止所有后台线程再清理数据库，避免 SolverDispatcher 线程
-        #   在 teardown 删除 DB 后仍尝试访问 sqlite 文件。
         self.stopped.set()
         self.coordinator.join_solver_threads(timeout=5)
-        self._barrier_module.WORKSTATIONS = self._orig_barrier_workstations
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -4854,8 +4853,8 @@ class TestMeshingMonitor:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="meshing_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         self.remote = _MockRemoteExecutor(self.state)
@@ -4872,7 +4871,8 @@ class TestMeshingMonitor:
 
     def teardown_method(self):
         self.stopped.set()
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 

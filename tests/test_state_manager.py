@@ -27,10 +27,7 @@ StateManager 单元测试 (M2)
 """
 from __future__ import annotations
 
-import os
 import threading
-import tempfile
-import shutil
 
 import pytest
 
@@ -44,21 +41,21 @@ from engine.state_manager import StateManager
 
 
 class _TmpDB:
-    """临时数据库上下文管理器，确保每个测试使用隔离的数据库。"""
+    """临时数据库上下文管理器。
 
-    def __init__(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="sm_test_")
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+    使用 monkeypatch.setitem 安全设置 IPC_CONFIG["db_path"]，
+    利用 tmp_path 自动清理临时目录。支持 pytest-xdist 并行执行。
+    """
+
+    def __init__(self, monkeypatch, tmp_path):
+        self.db_path = str(tmp_path / "test.db")
+        monkeypatch.setitem(IPC_CONFIG, "db_path", self.db_path)
 
     def __enter__(self) -> StateManager:
         return StateManager(db_path=self.db_path)
 
     def __exit__(self, *_):
-        IPC_CONFIG["db_path"] = self._orig_db_path
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
+        pass  # monkeypatch + tmp_path 自动恢复/清理
 
 
 
@@ -71,8 +68,8 @@ class _TmpDB:
 class TestInit:
     """验证数据库初始化。"""
 
-    def test_tables_created(self):
-        with _TmpDB() as sm:
+    def test_tables_created(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             import sqlite3
             conn = sqlite3.connect(sm.db_path)
             tables = {row[0] for row in conn.execute(
@@ -84,23 +81,23 @@ class TestInit:
             assert "engine_state" in tables
             assert "remote_tasks" in tables
 
-    def test_wal_mode(self):
-        with _TmpDB() as sm:
+    def test_wal_mode(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             import sqlite3
             conn = sqlite3.connect(sm.db_path)
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
             conn.close()
             assert mode.lower() == "wal"
 
-    def test_engine_state_defaults(self):
-        with _TmpDB() as sm:
+    def test_engine_state_defaults(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.get_engine_status() == "stopped"
             assert sm.is_sw_macro_started() is False
             assert sm.is_global_barrier_met() is False
             assert sm.get_solver_progress() is None
 
-    def test_indexes_created(self):
-        with _TmpDB() as sm:
+    def test_indexes_created(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             import sqlite3
             conn = sqlite3.connect(sm.db_path)
             indexes = {row[1] for row in conn.execute(
@@ -111,8 +108,8 @@ class TestInit:
             assert "idx_steps_status" in indexes
             assert "idx_remote_tasks_step" in indexes
 
-    def test_workstation_columns_created(self):
-        with _TmpDB() as sm:
+    def test_workstation_columns_created(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             import sqlite3
             conn = sqlite3.connect(sm.db_path)
             steps_columns = {
@@ -130,8 +127,8 @@ class TestInit:
 class TestRemoteTasks:
     """验证远程后台任务元数据持久化。"""
 
-    def test_save_get_list_and_delete_remote_task(self):
-        with _TmpDB() as sm:
+    def test_save_get_list_and_delete_remote_task(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.save_remote_task(
                 config_name=1,
@@ -164,8 +161,8 @@ class TestRemoteTasks:
             assert sm.get_remote_task(1, "meshing") is None
             assert sm.get_all_remote_tasks() == []
 
-    def test_save_remote_task_upserts_same_config_and_step(self):
-        with _TmpDB() as sm:
+    def test_save_remote_task_upserts_same_config_and_step(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.save_remote_task(
                 config_name=1,
@@ -190,8 +187,8 @@ class TestRemoteTasks:
             assert tasks[0]["task_name"] == "AutoFluid_new"
             assert tasks[0]["started_at"] == 20.0
 
-    def test_remote_tasks_are_isolated_by_workstation(self):
-        with _TmpDB() as sm:
+    def test_remote_tasks_are_isolated_by_workstation(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.save_remote_task(
                 workstation_id="WS-A",
@@ -225,8 +222,8 @@ class TestRemoteTasks:
             assert sm.get_remote_task(1, "meshing", workstation_id="WS-A") is None
             assert sm.get_remote_task(1, "meshing", workstation_id="WS-B") is not None
 
-    def test_delete_all_remote_tasks_can_clear_all_or_one_workstation(self):
-        with _TmpDB() as sm:
+    def test_delete_all_remote_tasks_can_clear_all_or_one_workstation(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.save_remote_task(
                 workstation_id="WS-A",
@@ -256,8 +253,8 @@ class TestRemoteTasks:
 
             assert sm.get_all_remote_tasks() == []
 
-    def test_reset_config_steps_deletes_downstream_remote_tasks(self):
-        with _TmpDB() as sm:
+    def test_reset_config_steps_deletes_downstream_remote_tasks(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.save_remote_task(
                 config_name=1,
@@ -288,48 +285,48 @@ class TestRemoteTasks:
 class TestLoadConfigs:
     """验证构型数据同步。"""
 
-    def test_normal_load(self):
-        with _TmpDB() as sm:
+    def test_normal_load(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.get_all_configs() == [1, 2]
 
-    def test_creates_step_records(self):
-        with _TmpDB() as sm:
+    def test_creates_step_records(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             for step in STEP_NAMES:
                 assert sm.get_step_status(1, step) == STATUS_WAITING
 
-    def test_incremental_update_preserves_status(self):
-        with _TmpDB() as sm:
+    def test_incremental_update_preserves_status(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             # 重新加载相同构型
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
 
-    def test_new_config_added_incrementally(self):
-        with _TmpDB() as sm:
+    def test_new_config_added_incrementally(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.get_all_configs() == [1, 2]
             assert sm.get_step_status(2, "sw") == STATUS_WAITING
 
-    def test_removed_config_deleted(self):
-        with _TmpDB() as sm:
+    def test_removed_config_deleted(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             # 移除构型 1
             sm.load_configs({2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.get_all_configs() == [2]
 
-    def test_empty_dict_clears_all(self):
-        with _TmpDB() as sm:
+    def test_empty_dict_clears_all(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.load_configs({})
             assert sm.get_all_configs() == []
 
-    def test_params_updated(self):
-        with _TmpDB() as sm:
+    def test_params_updated(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.load_configs({1: [10.0, 20.0, 30.0, 40.0]})
             params = sm.get_config_params(1)
@@ -343,13 +340,13 @@ class TestLoadConfigs:
 class TestGetConfigParams:
     """验证参数读取。"""
 
-    def test_returns_params(self):
-        with _TmpDB() as sm:
+    def test_returns_params(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({5: [1.1, 2.2, 3.3, 4.4]})
             assert sm.get_config_params(5) == [1.1, 2.2, 3.3, 4.4]
 
-    def test_nonexistent_returns_none(self):
-        with _TmpDB() as sm:
+    def test_nonexistent_returns_none(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.get_config_params(999) is None
 
 
@@ -360,37 +357,37 @@ class TestGetConfigParams:
 class TestStepStatus:
     """验证步骤状态 CRUD。"""
 
-    def test_set_and_get(self):
-        with _TmpDB() as sm:
+    def test_set_and_get(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_RUNNING)
             assert sm.get_step_status(1, "sw") == STATUS_RUNNING
 
-    def test_error_message_persisted(self):
-        with _TmpDB() as sm:
+    def test_error_message_persisted(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sc", STATUS_ERROR, "连接失败")
             # 通过 get_all_steps_for_config 验证错误消息
             steps = sm.get_all_steps_for_config(1)
             assert steps["sc"]["error_message"] == "连接失败"
 
-    def test_invalid_status_raises(self):
-        with _TmpDB() as sm:
+    def test_invalid_status_raises(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             with pytest.raises(ValueError):
                 sm.set_step_status(1, "sw", "InvalidStatus")
 
-    def test_nonexistent_step_name_does_not_crash(self):
+    def test_nonexistent_step_name_does_not_crash(self, monkeypatch, tmp_path):
         """不存在的步骤名不会导致崩溃（UPDATE 影响 0 行，查询返回默认值）。"""
-        with _TmpDB() as sm:
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             # 非法步骤名不抛异常（UPDATE 影响 0 行）
             sm.set_step_status(1, "InvalidStep", STATUS_RUNNING)
             # 查询不存在的步骤返回默认值 Waiting
             assert sm.get_step_status(1, "InvalidStep") == STATUS_WAITING
 
-    def test_nonexistent_step_returns_waiting(self):
-        with _TmpDB() as sm:
+    def test_nonexistent_step_returns_waiting(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             # 未 load_configs，步骤记录不存在
             assert sm.get_step_status(999, "sw") == STATUS_WAITING
 
@@ -402,8 +399,8 @@ class TestStepStatus:
 class TestGetAllStepsForConfig:
     """验证全步骤详情查询。"""
 
-    def test_returns_all_steps(self):
-        with _TmpDB() as sm:
+    def test_returns_all_steps(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             steps = sm.get_all_steps_for_config(1)
             assert set(steps.keys()) == set(STEP_NAMES)
@@ -412,8 +409,8 @@ class TestGetAllStepsForConfig:
                 assert "retry_count" in steps[step_name]
                 assert "error_message" in steps[step_name]
 
-    def test_nonexistent_config_returns_empty(self):
-        with _TmpDB() as sm:
+    def test_nonexistent_config_returns_empty(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             steps = sm.get_all_steps_for_config(999)
             assert steps == {}
 
@@ -425,16 +422,16 @@ class TestGetAllStepsForConfig:
 class TestGetAllStatuses:
     """验证全构型全步骤状态查询。"""
 
-    def test_returns_all_configs_and_steps(self):
-        with _TmpDB() as sm:
+    def test_returns_all_configs_and_steps(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             statuses = sm.get_all_statuses()
             assert 1 in statuses
             assert 2 in statuses
             assert set(statuses[1].keys()) == set(STEP_NAMES)
 
-    def test_status_values_correct(self):
-        with _TmpDB() as sm:
+    def test_status_values_correct(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(1, "sc", STATUS_RUNNING)
@@ -442,9 +439,9 @@ class TestGetAllStatuses:
             assert statuses[1]["sw"] == STATUS_COMPLETED
             assert statuses[1]["sc"] == STATUS_RUNNING
 
-    def test_load_configs_backfills_missing_step_rows_for_existing_config(self):
+    def test_load_configs_backfills_missing_step_rows_for_existing_config(self, monkeypatch, tmp_path):
         """旧状态库缺少新增步骤行时，重新加载构型应补齐。"""
-        with _TmpDB() as sm:
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             with sm._get_connection() as conn:
                 conn.execute(
@@ -458,9 +455,9 @@ class TestGetAllStatuses:
             assert set(statuses[1].keys()) == set(STEP_NAMES)
             assert statuses[1]["postprocess"] == STATUS_WAITING
 
-    def test_set_step_status_inserts_missing_step_row_for_existing_config(self):
+    def test_set_step_status_inserts_missing_step_row_for_existing_config(self, monkeypatch, tmp_path):
         """缺失步骤行不应导致状态更新静默丢失。"""
-        with _TmpDB() as sm:
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             with sm._get_connection() as conn:
                 conn.execute(
@@ -480,15 +477,15 @@ class TestGetAllStatuses:
 class TestRetryCount:
     """验证重试计数。"""
 
-    def test_increment_from_zero(self):
-        with _TmpDB() as sm:
+    def test_increment_from_zero(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             assert sm.get_step_retry_count(1, "sc") == 0
             count = sm.increment_retry(1, "sc")
             assert count == 1
 
-    def test_increment_multiple(self):
-        with _TmpDB() as sm:
+    def test_increment_multiple(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.increment_retry(1, "sc")
             sm.increment_retry(1, "sc")
@@ -496,14 +493,14 @@ class TestRetryCount:
             assert count == 3
             assert sm.get_step_retry_count(1, "sc") == 3
 
-    def test_nonexistent_step_returns_zero(self):
-        with _TmpDB() as sm:
+    def test_nonexistent_step_returns_zero(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.get_step_retry_count(999, "sw") == 0
 
-    def test_increment_nonexistent_step_logs_warning(self, caplog):
+    def test_increment_nonexistent_step_logs_warning(self, caplog, monkeypatch, tmp_path):
         """缺失步骤记录仍保持旧返回值，但要暴露数据不一致信号。"""
         caplog.set_level("WARNING")
-        with _TmpDB() as sm:
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.increment_retry(999, "sw") == 0
         assert "increment_retry: 构型999 步骤sw 记录不存在" in caplog.text
 
@@ -515,34 +512,34 @@ class TestRetryCount:
 class TestSetMeshingRunningIfIdle:
     """验证 Meshing 原子防护。"""
 
-    def test_first_set_succeeds(self):
-        with _TmpDB() as sm:
+    def test_first_set_succeeds(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             assert sm.set_meshing_running_if_idle(1) is True
             assert sm.get_step_status(1, "meshing") == STATUS_RUNNING
 
-    def test_second_set_fails(self):
-        with _TmpDB() as sm:
+    def test_second_set_fails(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_meshing_running_if_idle(1)
             assert sm.set_meshing_running_if_idle(2) is False
 
-    def test_after_completed_allows_new(self):
-        with _TmpDB() as sm:
+    def test_after_completed_allows_new(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_meshing_running_if_idle(1)
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
             assert sm.set_meshing_running_if_idle(2) is True
 
-    def test_different_workstations_can_run_meshing_concurrently(self):
-        with _TmpDB() as sm:
+    def test_different_workstations_can_run_meshing_concurrently(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
             assert sm.set_meshing_running_if_idle(1, workstation_id="WS-A") is True
             assert sm.set_meshing_running_if_idle(2, workstation_id="WS-B") is True
 
-    def test_same_workstation_retrying_meshing_keeps_slot_busy(self):
-        with _TmpDB() as sm:
+    def test_same_workstation_retrying_meshing_keeps_slot_busy(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_RETRYING)
             sm.set_config_workstation(1, "WS-A")
@@ -550,8 +547,8 @@ class TestSetMeshingRunningIfIdle:
             assert sm.set_meshing_running_if_idle(2, workstation_id="WS-A") is False
             assert sm.get_step_status(2, "meshing") == STATUS_WAITING
 
-    def test_different_workstation_retrying_meshing_does_not_block_slot(self):
-        with _TmpDB() as sm:
+    def test_different_workstation_retrying_meshing_does_not_block_slot(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_RETRYING)
             sm.set_config_workstation(1, "WS-A")
@@ -560,8 +557,8 @@ class TestSetMeshingRunningIfIdle:
             assert sm.get_step_status(2, "meshing") == STATUS_RUNNING
 
 
-    def test_same_workstation_rejects_second_meshing(self):
-        with _TmpDB() as sm:
+    def test_same_workstation_rejects_second_meshing(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
             assert sm.set_meshing_running_if_idle(1, workstation_id="WS-A") is True
@@ -575,8 +572,8 @@ class TestSetMeshingRunningIfIdle:
 class TestResetConfigSteps:
     """验证步骤重置。"""
 
-    def test_reset_single_config_all_steps(self):
-        with _TmpDB() as sm:
+    def test_reset_single_config_all_steps(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(1, "sc", STATUS_ERROR, "失败")
@@ -584,8 +581,8 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "sw") == STATUS_WAITING
             assert sm.get_step_status(1, "sc") == STATUS_WAITING
 
-    def test_reset_from_step(self):
-        with _TmpDB() as sm:
+    def test_reset_from_step(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(1, "sc", STATUS_COMPLETED)
@@ -601,8 +598,8 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "solver") == STATUS_WAITING
             assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
 
-    def test_reset_from_meshing_clears_workstation_assignment(self):
-        with _TmpDB() as sm:
+    def test_reset_from_meshing_clears_workstation_assignment(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_config_workstation(1, "WS-A")
             sm.set_step_status(1, "transfer", STATUS_COMPLETED)
@@ -614,8 +611,8 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "transfer") == STATUS_WAITING
             assert sm.get_step_status(1, "meshing") == STATUS_WAITING
 
-    def test_reset_from_solver_resets_postprocess(self):
-        with _TmpDB() as sm:
+    def test_reset_from_solver_resets_postprocess(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
                 sm.set_step_status(1, step, STATUS_COMPLETED)
@@ -626,8 +623,8 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "solver") == STATUS_WAITING
             assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
 
-    def test_reset_from_postprocess_only_resets_postprocess(self):
-        with _TmpDB() as sm:
+    def test_reset_from_postprocess_only_resets_postprocess(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
                 sm.set_step_status(1, step, STATUS_COMPLETED)
@@ -637,8 +634,8 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "solver") == STATUS_COMPLETED
             assert sm.get_step_status(1, "postprocess") == STATUS_WAITING
 
-    def test_reset_all_configs(self):
-        with _TmpDB() as sm:
+    def test_reset_all_configs(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(2, "sw", STATUS_ERROR, "err")
@@ -646,16 +643,16 @@ class TestResetConfigSteps:
             assert sm.get_step_status(1, "sw") == STATUS_WAITING
             assert sm.get_step_status(2, "sw") == STATUS_WAITING
 
-    def test_reset_sw_clears_sw_macro_started_when_no_completed(self):
-        with _TmpDB() as sm:
+    def test_reset_sw_clears_sw_macro_started_when_no_completed(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_sw_macro_started(True)
             sm.set_step_status(1, "sw", STATUS_ERROR)
             sm.reset_config_steps(1, from_step="sw")
             assert sm.is_sw_macro_started() is False
 
-    def test_reset_sw_keeps_sw_macro_started_when_other_completed(self):
-        with _TmpDB() as sm:
+    def test_reset_sw_keeps_sw_macro_started_when_other_completed(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_sw_macro_started(True)
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
@@ -665,8 +662,8 @@ class TestResetConfigSteps:
             # 构型 1 仍有 SW=Completed，标志应保持
             assert sm.is_sw_macro_started() is True
 
-    def test_retry_count_reset_to_zero(self):
-        with _TmpDB() as sm:
+    def test_retry_count_reset_to_zero(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.increment_retry(1, "sc")
             sm.increment_retry(1, "sc")
@@ -685,8 +682,8 @@ class TestResetConfigSteps:
 class TestResetAll:
     """验证全量重置。"""
 
-    def test_resets_all_steps_and_flags(self):
-        with _TmpDB() as sm:
+    def test_resets_all_steps_and_flags(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(2, "solver", STATUS_RUNNING)
@@ -708,22 +705,22 @@ class TestResetAll:
 class TestEngineStatus:
     """验证引擎状态 CRUD。"""
 
-    def test_default_is_stopped(self):
-        with _TmpDB() as sm:
+    def test_default_is_stopped(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.get_engine_status() == "stopped"
 
-    def test_set_running(self):
-        with _TmpDB() as sm:
+    def test_set_running(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_engine_status("running")
             assert sm.get_engine_status() == "running"
 
-    def test_set_paused(self):
-        with _TmpDB() as sm:
+    def test_set_paused(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_engine_status("paused")
             assert sm.get_engine_status() == "paused"
 
-    def test_invalid_status_raises(self):
-        with _TmpDB() as sm:
+    def test_invalid_status_raises(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             with pytest.raises(ValueError):
                 sm.set_engine_status("invalid")
 
@@ -731,8 +728,8 @@ class TestEngineStatus:
 class TestSolverProgress:
     """验证 Solver progress 状态 CRUD。"""
 
-    def test_set_get_and_clear_solver_progress(self):
-        with _TmpDB() as sm:
+    def test_set_get_and_clear_solver_progress(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             progress = {
                 "config_name": 5,
                 "current_iter": 350,
@@ -747,8 +744,8 @@ class TestSolverProgress:
             sm.clear_solver_progress()
             assert sm.get_solver_progress() is None
 
-    def test_get_solver_progress_returns_none_for_corrupt_json(self):
-        with _TmpDB() as sm:
+    def test_get_solver_progress_returns_none_for_corrupt_json(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             with sm._get_connection() as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
@@ -757,8 +754,8 @@ class TestSolverProgress:
 
             assert sm.get_solver_progress() is None
 
-    def test_reset_from_solver_clears_solver_progress(self):
-        with _TmpDB() as sm:
+    def test_reset_from_solver_clears_solver_progress(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_solver_progress({"config_name": 1, "remaining_sec": 30.0})
 
@@ -774,29 +771,29 @@ class TestSolverProgress:
 class TestSetAllRunningToPaused:
     """验证批量状态切换。"""
 
-    def test_running_to_paused(self):
-        with _TmpDB() as sm:
+    def test_running_to_paused(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_RUNNING)
             sm.set_all_running_to_paused()
             assert sm.get_step_status(1, "sw") == STATUS_PAUSED
 
-    def test_retrying_to_paused(self):
-        with _TmpDB() as sm:
+    def test_retrying_to_paused(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sc", STATUS_RETRYING)
             sm.set_all_running_to_paused()
             assert sm.get_step_status(1, "sc") == STATUS_PAUSED
 
-    def test_completed_not_affected(self):
-        with _TmpDB() as sm:
+    def test_completed_not_affected(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_all_running_to_paused()
             assert sm.get_step_status(1, "sw") == STATUS_COMPLETED
 
-    def test_waiting_not_affected(self):
-        with _TmpDB() as sm:
+    def test_waiting_not_affected(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             sm.set_all_running_to_paused()
             assert sm.get_step_status(1, "sw") == STATUS_WAITING
@@ -809,17 +806,17 @@ class TestSetAllRunningToPaused:
 class TestSwMacroStarted:
     """验证 SW 宏启动标志。"""
 
-    def test_default_false(self):
-        with _TmpDB() as sm:
+    def test_default_false(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.is_sw_macro_started() is False
 
-    def test_set_true(self):
-        with _TmpDB() as sm:
+    def test_set_true(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_sw_macro_started(True)
             assert sm.is_sw_macro_started() is True
 
-    def test_set_false(self):
-        with _TmpDB() as sm:
+    def test_set_false(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_sw_macro_started(True)
             sm.set_sw_macro_started(False)
             assert sm.is_sw_macro_started() is False
@@ -832,17 +829,17 @@ class TestSwMacroStarted:
 class TestGlobalBarrierMet:
     """验证全局屏障标志。"""
 
-    def test_default_false(self):
-        with _TmpDB() as sm:
+    def test_default_false(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.is_global_barrier_met() is False
 
-    def test_set_true(self):
-        with _TmpDB() as sm:
+    def test_set_true(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_global_barrier_met(True)
             assert sm.is_global_barrier_met() is True
 
-    def test_set_false(self):
-        with _TmpDB() as sm:
+    def test_set_false(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.set_global_barrier_met(True)
             sm.set_global_barrier_met(False)
             assert sm.is_global_barrier_met() is False
@@ -855,16 +852,16 @@ class TestGlobalBarrierMet:
 class TestGetConfigsAtStep:
     """验证过滤查询。"""
 
-    def test_with_status_filter(self):
-        with _TmpDB() as sm:
+    def test_with_status_filter(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(2, "sw", STATUS_RUNNING)
             completed = sm.get_configs_at_step("sw", STATUS_COMPLETED)
             assert completed == [1]
 
-    def test_without_status_filter(self):
-        with _TmpDB() as sm:
+    def test_without_status_filter(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             all_at_sw = sm.get_configs_at_step("sw")
             assert sorted(all_at_sw) == [1, 2]
@@ -873,8 +870,8 @@ class TestGetConfigsAtStep:
 class TestStepStatusCounts:
     """验证批量步骤状态统计。"""
 
-    def test_get_step_status_counts_returns_single_step_distribution(self):
-        with _TmpDB() as sm:
+    def test_get_step_status_counts_returns_single_step_distribution(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({
                 1: [1.0, 2.0, 3.0, 4.0],
                 2: [5.0, 6.0, 7.0, 8.0],
@@ -889,8 +886,8 @@ class TestStepStatusCounts:
             assert counts[STATUS_ERROR] == 1
             assert counts[STATUS_WAITING] == 1
 
-    def test_empty_result(self):
-        with _TmpDB() as sm:
+    def test_empty_result(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             assert sm.get_configs_at_step("solver", STATUS_COMPLETED) == []
 
@@ -902,25 +899,25 @@ class TestStepStatusCounts:
 class TestAllConfigsCompletedAtStep:
     """验证屏障判断。"""
 
-    def test_all_completed(self):
-        with _TmpDB() as sm:
+    def test_all_completed(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
             sm.set_step_status(2, "meshing", STATUS_COMPLETED)
             assert sm.all_configs_completed_at_step("meshing") is True
 
-    def test_not_all_completed(self):
-        with _TmpDB() as sm:
+    def test_not_all_completed(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
             assert sm.all_configs_completed_at_step("meshing") is False
 
-    def test_empty_configs_returns_true(self):
-        with _TmpDB() as sm:
+    def test_empty_configs_returns_true(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             assert sm.all_configs_completed_at_step("meshing") is True
 
-    def test_filters_by_workstation(self):
-        with _TmpDB() as sm:
+    def test_filters_by_workstation(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_config_workstation(1, "WS-A")
             sm.set_config_workstation(2, "WS-B")
@@ -929,8 +926,8 @@ class TestAllConfigsCompletedAtStep:
             assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-A") is True
             assert sm.all_configs_completed_at_step("meshing", workstation_id="WS-B") is False
 
-    def test_default_workstation_filter_includes_new_configs(self):
-        with _TmpDB() as sm:
+    def test_default_workstation_filter_includes_new_configs(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
 
@@ -939,16 +936,16 @@ class TestAllConfigsCompletedAtStep:
                 workstation_id="default",
             ) is False
 
-    def test_filters_by_config_names(self):
-        with _TmpDB() as sm:
+    def test_filters_by_config_names(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "meshing", STATUS_COMPLETED)
 
             assert sm.all_configs_completed_at_step("meshing", config_names=[1]) is True
             assert sm.all_configs_completed_at_step("meshing", config_names=[1, 2]) is False
 
-    def test_filters_by_workstation_and_config_names(self):
-        with _TmpDB() as sm:
+    def test_filters_by_workstation_and_config_names(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({
                 1: [1.0, 2.0, 3.0, 4.0],
                 2: [5.0, 6.0, 7.0, 8.0],
@@ -980,8 +977,8 @@ class TestAllConfigsCompletedAtStep:
 class TestGetErrorConfigs:
     """验证错误查询。"""
 
-    def test_returns_errors(self):
-        with _TmpDB() as sm:
+    def test_returns_errors(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sc", STATUS_ERROR, "超时")
             sm.set_step_status(2, "solver", STATUS_ERROR, "发散")
@@ -991,8 +988,8 @@ class TestGetErrorConfigs:
             assert (1, "sc", "超时") in error_tuples
             assert (2, "solver", "发散") in error_tuples
 
-    def test_no_errors_returns_empty(self):
-        with _TmpDB() as sm:
+    def test_no_errors_returns_empty(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             assert sm.get_error_configs() == []
 
@@ -1004,14 +1001,14 @@ class TestGetErrorConfigs:
 class TestGetStatistics:
     """验证聚合统计。"""
 
-    def test_total_configs(self):
-        with _TmpDB() as sm:
+    def test_total_configs(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             stats = sm.get_statistics()
             assert stats["total_configs"] == 2
 
-    def test_step_counts(self):
-        with _TmpDB() as sm:
+    def test_step_counts(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sw", STATUS_COMPLETED)
             sm.set_step_status(2, "sw", STATUS_RUNNING)
@@ -1020,16 +1017,16 @@ class TestGetStatistics:
             assert stats["steps"]["sw"][STATUS_RUNNING] == 1
             assert stats["steps"]["sw"][STATUS_WAITING] == 0
 
-    def test_error_count(self):
-        with _TmpDB() as sm:
+    def test_error_count(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
             sm.set_step_status(1, "sc", STATUS_ERROR, "err1")
             sm.set_step_status(2, "solver", STATUS_ERROR, "err2")
             stats = sm.get_statistics()
             assert stats["error_count"] == 2
 
-    def test_empty_database(self):
-        with _TmpDB() as sm:
+    def test_empty_database(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             stats = sm.get_statistics()
             assert stats["total_configs"] == 0
             assert stats["error_count"] == 0
@@ -1045,8 +1042,8 @@ class TestGetStatistics:
 class TestConcurrency:
     """验证多线程同时读写不抛异常。"""
 
-    def test_concurrent_writes(self):
-        with _TmpDB() as sm:
+    def test_concurrent_writes(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             configs = {i: [float(i), 0.0, 0.0, 0.0] for i in range(1, 11)}
             sm.load_configs(configs)
             errors: list[Exception] = []
@@ -1066,8 +1063,8 @@ class TestConcurrency:
                 t.join(timeout=10)
             assert not errors, f"并发写入出错: {errors}"
 
-    def test_concurrent_reads_and_writes(self):
-        with _TmpDB() as sm:
+    def test_concurrent_reads_and_writes(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             configs = {i: [float(i), 0.0, 0.0, 0.0] for i in range(1, 6)}
             sm.load_configs(configs)
             errors: list[Exception] = []
@@ -1101,8 +1098,8 @@ class TestConcurrency:
                 t.join(timeout=5)
             assert not errors, f"并发读写出错: {errors}"
 
-    def test_concurrent_increment_retry(self):
-        with _TmpDB() as sm:
+    def test_concurrent_increment_retry(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
             errors: list[Exception] = []
 

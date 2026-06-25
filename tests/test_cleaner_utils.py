@@ -127,7 +127,7 @@ class TestFileCleanerSystemCheck:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             # 提供一个返回 "未连接" 的 SSH getter，避免 None 调用
@@ -150,7 +150,7 @@ class TestFileCleanerSystemCheck:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_remote_system_check_holds_ssh_lock(self, tmp_path):
+    def test_remote_system_check_holds_ssh_lock(self, tmp_path, monkeypatch):
         """远端系统自检应在共享 SSH 锁内执行。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -170,7 +170,7 @@ class TestFileCleanerSystemCheck:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -184,7 +184,7 @@ class TestFileCleanerSystemCheck:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_remote_system_check_reports_each_configured_workstation(self, tmp_path):
+    def test_remote_system_check_reports_each_configured_workstation(self, tmp_path, monkeypatch):
         """系统自检应逐台工作站检查 SSH/远端环境，不能只检查第一台。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -213,7 +213,7 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         WORKSTATIONS[:] = [
             {**REMOTE_CONFIG, "id": "WS-A", "host": "172.17.135.240"},
             {**REMOTE_CONFIG, "id": "WS-B", "host": "172.17.135.89"},
@@ -236,7 +236,7 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
 
-    def test_system_check_reports_configured_fluent_path_per_workstation(self, tmp_path):
+    def test_system_check_reports_configured_fluent_path_per_workstation(self, tmp_path, monkeypatch):
         """CHECK 返回内容应包含每台工作站配置的 Fluent 可执行文件路径。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -268,7 +268,7 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -296,7 +296,7 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
 
-    def test_system_check_reports_configured_paths_when_workstation_disconnected(self, tmp_path):
+    def test_system_check_reports_configured_paths_when_workstation_disconnected(self, tmp_path, monkeypatch):
         """即使 SSH 断开，CHECK 也应显示配置的 Fluent/MPI 路径为未检查。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -312,7 +312,7 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -346,7 +346,7 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
 
-    def test_system_check_marks_reconnect_failure_as_failed(self, tmp_path):
+    def test_system_check_marks_reconnect_failure_as_failed(self, tmp_path, monkeypatch):
         """SSH 检查中途重连失败时，CHECK 不应把工作站误计为成功。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -380,7 +380,7 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -410,7 +410,7 @@ class TestFileCleanerSystemCheck:
             cfg.IPC_CONFIG["db_path"] = orig
             WORKSTATIONS[:] = original_workstations
 
-    def test_system_check_returns_structured_summary(self, tmp_path):
+    def test_system_check_returns_structured_summary(self, tmp_path, monkeypatch):
         """CHECK 应返回可直接驱动新版页面的结构化总览。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -422,7 +422,7 @@ class TestFileCleanerSystemCheck:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
@@ -457,7 +457,7 @@ class TestFileCleanerSystemCheck:
         original_db_path = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -496,7 +496,7 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         original_db_path = cfg.IPC_CONFIG["db_path"]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         try:
             state = StateManager(db_path=cfg.IPC_CONFIG["db_path"])
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
@@ -525,7 +525,7 @@ class TestFileCleanerSystemCheck:
         original_db_path = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -572,7 +572,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -599,7 +599,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -625,7 +625,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -656,7 +656,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh = _ConnectedSSH()
@@ -730,7 +730,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh_by_id = {ws["id"]: _ConnectedSSH(str(ws["id"])) for ws in workstations}
@@ -776,7 +776,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -790,7 +790,7 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_clean_all_cache_fails_when_workstation_ssh_disconnected(self, tmp_path):
+    def test_clean_all_cache_fails_when_workstation_ssh_disconnected(self, tmp_path, monkeypatch):
         """clean all cache 不应在远程工作站不可达时静默成功。"""
 
         class _DisconnectedSSH:
@@ -803,7 +803,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
@@ -888,7 +888,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
@@ -929,7 +929,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -943,7 +943,7 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_remote_step_file_cleanup_fails_when_ssh_disconnected(self, tmp_path):
+    def test_remote_step_file_cleanup_fails_when_ssh_disconnected(self, tmp_path, monkeypatch):
         """远程步骤文件清理不可达时应失败，避免 clean 指令误报成功。"""
 
         class _DisconnectedSSH:
@@ -956,7 +956,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -1005,7 +1005,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -1063,7 +1063,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -1125,7 +1125,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -1165,7 +1165,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -1201,7 +1201,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh = _ConnectedSSH()

@@ -18,6 +18,7 @@ SolidWorks Export 工作流通用验证测试脚本
   python tests/test_sw_export_workflow.py
 ===============================================================================
 """
+import atexit
 import os
 import sys
 import time
@@ -31,8 +32,6 @@ import pytest
 
 openpyxl = pytest.importorskip("openpyxl", reason="test_sw_export_workflow 需要 openpyxl 创建测试 Excel 文件")
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 # 必须在任何 engine.*/utils.* 导入之前设置日志目录环境变量，
 # 因为 engine.config._env_override 在模块导入时读取环境变量。
 # 同时也要为直接读取 LOCAL_PATHS["log_dir"] 的代码创建目录。
@@ -43,6 +42,7 @@ os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.makedirs(_TEST_DATA_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
 os.environ["AUTOFLUID_DATA_DIR"] = _TEST_DATA_DIR
+atexit.register(lambda: shutil.rmtree(_TEST_TMP_ROOT, ignore_errors=True) if os.path.exists(_TEST_TMP_ROOT) else None)
 
 
 class _FakePythoncom(types.ModuleType):
@@ -181,7 +181,6 @@ class TestDesignTableValidation(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sw_test_dt_")
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from engine.task_runner import TaskRunner
         self.runner_class = TaskRunner
         from engine.state_manager import StateManager
@@ -809,7 +808,6 @@ class TestComBindingCompatibility(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="sw_test_com_")
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from engine.state_manager import StateManager
         self._db_path = os.path.join(self.tmpdir, "test_state.db")
         self.state = StateManager(db_path=self._db_path)

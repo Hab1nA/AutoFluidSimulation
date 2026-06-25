@@ -24,6 +24,7 @@ Pause/Start 功能验证测试脚本
   python tests/test_pause_start.py
 ===============================================================================
 """
+import atexit
 import os
 import sys
 import time
@@ -31,12 +32,11 @@ import threading
 import tempfile
 import shutil
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="sw_test_ps_")
 _TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
+atexit.register(lambda: shutil.rmtree(_TEST_TMP_ROOT, ignore_errors=True) if os.path.exists(_TEST_TMP_ROOT) else None)
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,

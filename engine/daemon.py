@@ -50,6 +50,7 @@ from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
 from ipc.server import IPCServer
 from utils.log_paths import service_log_file
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger, install_broadcast_handler, get_broadcast_handler
 from utils.excel_reader import read_model_configs
 from utils.process_utils import (
@@ -1889,11 +1890,18 @@ class PipelineDaemon:
                 continue
 
             workstation_id = str(task.get("workstation_id", "default"))
-            status = remote_executor.query_remote_task_status(
-                task_config,
-                task_step,
-                workstation_id=workstation_id,
-            )
+            try:
+                status = remote_executor.query_remote_task_status(
+                    task_config,
+                    task_step,
+                    workstation_id=workstation_id,
+                )
+            except InfrastructureUnavailableError as e:
+                logger.warning(
+                    "[IPC] 构型%s %s 远程状态查询基础设施不可用: %s",
+                    task_config, task_step, e,
+                )
+                return task_config, task_step, "disconnected"
             if status in {"running", "unknown"}:
                 return task_config, task_step, status
 
