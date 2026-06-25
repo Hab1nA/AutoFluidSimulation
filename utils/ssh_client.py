@@ -501,6 +501,11 @@ class RemoteWorkstation:
                 except (paramiko.SSHException, OSError, EOFError) as e:
                     if self._remove_remote_directory_via_shell(child_path):
                         deleted_count += 1
+                    elif child_failed == 0:
+                        logger.warning(
+                            f"[SSH] 远程子目录已清空但目录本身仍被 Windows 占用，保留: "
+                            f"{child_path}: {e}"
+                        )
                     else:
                         logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
                         failed_count += 1

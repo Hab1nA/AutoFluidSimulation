@@ -44,6 +44,38 @@ def test_clear_remote_directory_falls_back_to_shell_rmdir_when_sftp_rmdir_denied
     assert commands == ['cmd /c rmdir "D:\\metrics\\model_gen4_1\\run"']
 
 
+def test_clear_remote_directory_tolerates_empty_child_dir_locked_by_windows():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Entry:
+        filename = "run"
+        st_mode = stat.S_IFDIR
+
+    class _Sftp:
+        def listdir_attr(self, remote_dir: str):
+            if remote_dir == "D:/metrics/model_gen4_1":
+                return [_Entry()]
+            if remote_dir == "D:/metrics/model_gen4_1/run":
+                return []
+            raise AssertionError(remote_dir)
+
+        @staticmethod
+        def rmdir(_path: str) -> None:
+            raise PermissionError("Permission denied")
+
+    host._sftp = _Sftp()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(
+            host,
+            "exec_command",
+            return_value=("", "另一个程序正在使用此文件，进程无法访问。", 32),
+        ):
+            deleted, failed = host.clear_remote_directory("D:/metrics/model_gen4_1")
+
+    assert (deleted, failed) == (0, 0)
+
+
 def test_connect_uses_password_auth_when_password_is_configured(monkeypatch):
     calls: list[dict[str, object]] = []
 
