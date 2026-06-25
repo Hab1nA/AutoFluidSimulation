@@ -1945,6 +1945,40 @@ class RemoteExecutor:
             except (OSError, ConnectionError) as e:
                 logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 终止远程任务异常: {e}")
 
+    def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+        """Terminate every persisted remote task and clear its tracking record."""
+        tasks = list(self.state.get_all_remote_tasks())
+        results = {"cancelled": 0, "failed": 0}
+        for task in tasks:
+            try:
+                config_name = int(str(task["config_name"]))
+                step_name = str(task["step_name"])
+                workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning("[RemoteTask] 跳过无效远程任务记录: %s (%s)", task, e)
+                results["failed"] += 1
+                continue
+
+            before_failed = results["failed"]
+            try:
+                self._kill_remote_task_for_config(config_name, step_name, workstation_id)
+            except Exception as e:
+                logger.warning(
+                    "[RemoteTask] 取消远程任务异常: config=%s step=%s workstation=%s error=%s",
+                    config_name,
+                    step_name,
+                    workstation_id,
+                    e,
+                )
+                results["failed"] += 1
+            else:
+                if results["failed"] == before_failed:
+                    results["cancelled"] += 1
+
+        if tasks:
+            logger.info("[RemoteTask] 已取消持久化远程任务: %s", results)
+        return results
+
     def _cleanup_completed_remote_task(
         self,
         config_name: int,

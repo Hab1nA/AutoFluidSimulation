@@ -1084,6 +1084,16 @@ class PipelineScheduler:
             logger.debug(f"SCPool 停止清理异常: {e}")
 
         try:
+            remote_executor = self.runner.get_remote_executor()
+            cancel_remote_tasks = getattr(remote_executor, "cancel_all_tracked_remote_tasks", None)
+            if callable(cancel_remote_tasks):
+                results = cancel_remote_tasks()
+                if results.get("cancelled") or results.get("failed"):
+                    logger.info("[Scheduler] 停止时远程任务清理结果: %s", results)
+        except Exception as e:
+            logger.warning(f"远程任务停止清理异常（已忽略）: {e}")
+
+        try:
             # 停止文件监控，避免 stop 清队列期间 STEP 回调重新入队。
             if self._file_monitor:
                 self._file_monitor.stop()

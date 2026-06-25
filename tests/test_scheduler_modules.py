@@ -1211,6 +1211,7 @@ class _MockRemoteExecutor:
         self._postprocess_handoff_result = True
         self._remote_task_events: list[tuple[str, int, str, str]] = []
         self._meshing_waits: list[tuple[int, str]] = []
+        self._cancel_all_calls = 0
 
     def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         self._meshing_started.append((config_name, workstation_id))
@@ -1286,6 +1287,12 @@ class _MockRemoteExecutor:
         )
         return True
 
+    def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+        self._cancel_all_calls += 1
+        tasks = list(self.state.get_all_remote_tasks())
+        self.state.delete_all_remote_tasks()
+        return {"cancelled": len(tasks), "failed": 0}
+
 
 class _SpyFileMonitor:
     """记录调度器是否启动了 STEP 文件监控。"""
@@ -1349,6 +1356,25 @@ class TestPipelineSchedulerStartRecovery:
             self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_stop_cancels_tracked_remote_tasks_before_disconnect(self):
+        """full quit/daemon stop 应终止并清除持久化远程任务。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.save_remote_task(
+            workstation_id="WS-A",
+            config_name=1,
+            step_name="postprocess",
+            task_name="AutoFluid_postprocess",
+            flag_file="D:/flags/postprocess_done_1.txt",
+            error_flag_file="D:/flags/postprocess_done_1.txt.error",
+            started_at=time.time(),
+        )
+
+        self.scheduler.stop()
+
+        remote_executor = self.runner.get_remote_executor()
+        assert remote_executor._cancel_all_calls == 1
+        assert self.state.get_all_remote_tasks() == []
 
     def test_server_mode_defaults_to_one_sc_worker_for_local_worker_sc_slots(self, monkeypatch):
         """server 模式下 SC 投递默认匹配 LocalWorker 单个 SC 槽位。"""
