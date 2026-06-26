@@ -532,7 +532,7 @@ ENGINE_CONFIG: EngineConfig = {
     # 文件传输超时（秒）
     "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）
-    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 3600),
+    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 7200),
     # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
     "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）

@@ -139,7 +139,7 @@ print(json.dumps({
     def test_timeout_fallbacks_match_repository_toml(self):
         snapshot = self._load_config_snapshot_without_startup_toml()
         assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
-        assert snapshot["engine_config"]["meshing_timeout"] == 3600
+        assert snapshot["engine_config"]["meshing_timeout"] == 7200
         assert snapshot["engine_config"]["solver_timeout"] == 28800
         assert snapshot["engine_config"]["postprocess_timeout"] == 14400
 

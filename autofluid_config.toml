@@ -119,7 +119,7 @@ sc_persistent_ready_timeout = 180
 sc_scdoc_stable_seconds = 3.0
 
 [meshing]
-meshing_timeout = 3600
+meshing_timeout = 7200
 meshing_processor_count = 8
 
 [solver]
