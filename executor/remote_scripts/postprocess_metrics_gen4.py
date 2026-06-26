@@ -168,6 +168,8 @@ def _collect_reports(
     thrust_axis: str,
     exit_to_throat_area_ratio: float,
     cstar_reference: float,
+    transcript_path: Path | None = None,
+    transcript_search_dir: Path | None = None,
 ) -> dict[str, float]:
     report_path = output_dir / "metrics_reports.csv"
     reports_dir = output_dir / "fluent_reports"
@@ -277,7 +279,10 @@ def _collect_reports(
             named_expressions.delete(old_name)
         _define_expression(named_expressions, name, definition)
         named_expressions.compute()
-    expression_values = _parse_expression_values(_find_latest_transcript(output_dir / "run"), set(expressions))
+    expression_transcript = transcript_path or _find_latest_transcript(
+        transcript_search_dir or output_dir / "run"
+    )
+    expression_values = _parse_expression_values(expression_transcript, set(expressions))
     report_values.update(expression_values)
     chamber_volume = report_values["chamber_volume"]
     report_values["chamber_pressure_abs"] = (
@@ -289,6 +294,60 @@ def _collect_reports(
     for index, (name, value) in enumerate(report_values.items()):
         _write_report_value(report_path, name, value, append=index > 0)
     return report_values
+
+
+def compute_metrics_with_solver(
+    solver: Any,
+    *,
+    output_dir: Path,
+    compute_script: Path,
+    ambient_pressure: float,
+    pressure_reference: float,
+    tcomb: float,
+    chamber_x_max: float | None,
+    thrust_axis: str,
+    exit_to_throat_area_ratio: float,
+    cstar_reference: float,
+    config_name: str,
+    config_id: int | None,
+    transcript_path: Path | None = None,
+    transcript_search_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Compute metrics using an already-running Fluent solver session."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_chamber_x_max = (
+        chamber_x_max
+        if chamber_x_max is not None
+        else _infer_chamber_x_max(solver, output_dir / "fluent_reports")
+    )
+    _collect_reports(
+        solver,
+        output_dir,
+        resolved_chamber_x_max,
+        tcomb,
+        ambient_pressure,
+        pressure_reference,
+        thrust_axis,
+        exit_to_throat_area_ratio,
+        cstar_reference,
+        transcript_path=transcript_path,
+        transcript_search_dir=transcript_search_dir,
+    )
+
+    compute_module = _load_compute_module(compute_script)
+    metrics = compute_module.compute_metrics(
+        reports_path=output_dir / "metrics_reports.csv",
+        exit_surface_path=None,
+        chamber_cells_path=None,
+        wall_faces_path=None,
+        ambient_pressure=ambient_pressure,
+        tcomb=tcomb,
+        chamber_x_max=None,
+        config_id=config_id,
+    )
+    compute_module._write_metrics(output_dir / f"{config_name}.csv", metrics)
+    compute_module._write_metrics(output_dir / "metrics_summary.csv", metrics)
+    return metrics
 
 
 def main() -> None:
@@ -310,42 +369,28 @@ def main() -> None:
         fluent_path=str(args.fluent_path),
         start_transcript=True,
         start_timeout=180,
+        start_watchdog=False,
     )
     try:
         solver.settings.file.read_case_data(file_name=str(args.case_data))
-        chamber_x_max = (
-            args.chamber_x_max
-            if args.chamber_x_max is not None
-            else _infer_chamber_x_max(solver, output_dir / "fluent_reports")
-        )
-        _collect_reports(
+        config_name = args.config_name or _default_config_name(args.case_data)
+        compute_metrics_with_solver(
             solver,
-            output_dir,
-            chamber_x_max,
-            args.tcomb,
-            args.ambient_pressure,
-            args.pressure_reference,
-            args.thrust_axis,
-            args.exit_to_throat_area_ratio,
-            args.cstar_reference,
+            output_dir=output_dir,
+            compute_script=args.compute_script,
+            ambient_pressure=args.ambient_pressure,
+            pressure_reference=args.pressure_reference,
+            tcomb=args.tcomb,
+            chamber_x_max=args.chamber_x_max,
+            thrust_axis=args.thrust_axis,
+            exit_to_throat_area_ratio=args.exit_to_throat_area_ratio,
+            cstar_reference=args.cstar_reference,
+            config_name=config_name,
+            config_id=args.config_id,
+            transcript_search_dir=run_dir,
         )
     finally:
         solver.exit()
-
-    compute_module = _load_compute_module(args.compute_script)
-    config_name = args.config_name or _default_config_name(args.case_data)
-    metrics = compute_module.compute_metrics(
-        reports_path=output_dir / "metrics_reports.csv",
-        exit_surface_path=None,
-        chamber_cells_path=None,
-        wall_faces_path=None,
-        ambient_pressure=args.ambient_pressure,
-        tcomb=args.tcomb,
-        chamber_x_max=None,
-        config_id=args.config_id,
-    )
-    compute_module._write_metrics(output_dir / f"{config_name}.csv", metrics)
-    compute_module._write_metrics(output_dir / "metrics_summary.csv", metrics)
 
 
 if __name__ == "__main__":

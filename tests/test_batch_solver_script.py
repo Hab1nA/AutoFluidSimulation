@@ -456,7 +456,7 @@ def test_solver_runs_postprocess_in_same_fluent_session(tmp_path, monkeypatch):
     assert session.exit_calls == 1
 
 
-def test_metrics_postprocess_receives_configured_fluent_path(tmp_path, monkeypatch):
+def test_metrics_postprocess_reuses_active_solver_session(tmp_path, monkeypatch):
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
     args = _make_args(tmp_path)
     args.metrics_script = str(tmp_path / "postprocess_metrics_gen4.py")
@@ -470,19 +470,34 @@ def test_metrics_postprocess_receives_configured_fluent_path(tmp_path, monkeypat
     args.metrics_exit_to_throat_area_ratio = 7.42
     args.metrics_cstar_reference = 1830.4
     args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
-    Path(args.metrics_script).write_text("# metrics", encoding="utf-8")
+    Path(args.metrics_script).write_text(
+        "\n".join(
+            [
+                "def compute_metrics_with_solver(solver, **kwargs):",
+                "    from pathlib import Path",
+                "    output_dir = Path(kwargs['output_dir'])",
+                "    output_dir.mkdir(parents=True, exist_ok=True)",
+                "    marker = getattr(solver, 'metrics_marker', 'missing')",
+                "    transcript = kwargs.get('transcript_path')",
+                "    (output_dir / 'called.txt').write_text(f'{marker}|{transcript}', encoding='utf-8')",
+                "    return {'ok': True}",
+            ]
+        ),
+        encoding="utf-8",
+    )
     Path(args.compute_metrics_script).write_text("# compute", encoding="utf-8")
-    case_path = str(tmp_path / "case.cas.h5")
-    Path(case_path).write_text("case", encoding="utf-8")
-    commands: list[list[str]] = []
+    session = _SuccessfulSolverSession()
+    session.metrics_marker = "same-session"
+    transcript_file = str(tmp_path / "flags" / "solver_progress_7.json.transcript")
 
-    def fake_run(command: list[str], check: bool) -> None:
-        commands.append(command)
+    module._run_metrics_postprocess_in_session(
+        args,
+        session,
+        transcript_file,
+        args.config_id,
+    )
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-
-    module._run_metrics_postprocess(args, case_path, args.config_id)
-
-    assert commands
-    assert "--fluent-path" in commands[0]
-    assert commands[0][commands[0].index("--fluent-path") + 1] == args.fluent_path
+    marker_file = Path(args.metrics_output_dir, f"model_gen4_{args.config_id}", "called.txt")
+    marker_text = marker_file.read_text(encoding="utf-8")
+    assert marker_text.startswith("same-session|")
+    assert transcript_file in marker_text
