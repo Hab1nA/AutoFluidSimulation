@@ -318,6 +318,7 @@ class RemoteExecutor:
         step_name: str,
         task_name: str,
         flag_file: str,
+        error_flag_file: str | None = None,
     ) -> None:
         """保存远程计划任务元数据，供 daemon 重启后恢复。"""
         artifacts = self._remote_task_artifacts(task_name, flag_file)
@@ -327,7 +328,7 @@ class RemoteExecutor:
             step_name=step_name,
             task_name=task_name,
             flag_file=flag_file,
-            error_flag_file=f"{flag_file}.error",
+            error_flag_file=error_flag_file or f"{flag_file}.error",
             log_file=artifacts["log_file"],
             pid_file=artifacts["pid_file"],
             script_file=artifacts["script_file"],
@@ -1586,13 +1587,13 @@ class RemoteExecutor:
             solver_task_name = self._remote_tasks.get(
                 self._remote_task_key(config_name, "solver", workstation_id),
             )
-        if solver_task_name is None:
-            solver_task = self._get_remote_task_from_state(
-                config_name,
-                "solver",
-                workstation_id,
-            )
-            if solver_task is not None:
+        solver_task = self._get_remote_task_from_state(
+            config_name,
+            "solver",
+            workstation_id,
+        )
+        if solver_task is not None:
+            if solver_task_name is None:
                 solver_task_name = str(solver_task["task_name"])
         if not solver_task_name:
             logger.warning(
@@ -1600,6 +1601,17 @@ class RemoteExecutor:
                 "将尝试启动独立后处理"
             )
             return False
+
+        solver_error_flag = None
+        if solver_task is not None:
+            raw_error_flag = solver_task.get("error_flag_file")
+            if raw_error_flag:
+                solver_error_flag = str(raw_error_flag)
+        if solver_error_flag is None:
+            try:
+                solver_error_flag = f"{self._solver_flag_file(config_name, remote_config)}.error"
+            except ValueError:
+                solver_error_flag = None
 
         self._remember_remote_task(
             config_name,
@@ -1613,6 +1625,7 @@ class RemoteExecutor:
             step_name="postprocess",
             task_name=solver_task_name,
             flag_file=flag_file,
+            error_flag_file=solver_error_flag,
         )
         logger.info(
             f"[PostProcess] 构型{config_name} 已接管 Solver Fluent 会话，等待后处理完成"
@@ -1835,7 +1848,18 @@ class RemoteExecutor:
         except ValueError:
             logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
             return False
-        error_flag = f"{flag_file}.error"
+        error_flags = [f"{flag_file}.error"]
+        task = self._get_remote_task_from_state(config_name, "postprocess", workstation_id)
+        if task is not None:
+            task_error_flag = task.get("error_flag_file")
+            if task_error_flag and str(task_error_flag) not in error_flags:
+                error_flags.insert(0, str(task_error_flag))
+        try:
+            solver_wrapper_error = f"{self._solver_flag_file(config_name, remote_config)}.error"
+            if solver_wrapper_error not in error_flags:
+                error_flags.append(solver_wrapper_error)
+        except ValueError:
+            pass
 
         timeout = ENGINE_CONFIG["postprocess_timeout"]
         poll_interval = 30
@@ -1861,8 +1885,13 @@ class RemoteExecutor:
             try:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
-                    if ssh.check_remote_file(error_flag):
-                        logger.error(f"[PostProcess] 构型{config_name} 后处理远程任务执行失败")
+                    for error_flag in error_flags:
+                        if not ssh.check_remote_file(error_flag):
+                            continue
+                        logger.error(
+                            f"[PostProcess] 构型{config_name} 后处理远程任务执行失败"
+                            f"（错误标志: {error_flag}）"
+                        )
                         ssh.delete_remote_file(error_flag)
                         self._cleanup_completed_remote_task(
                             config_name,

@@ -837,6 +837,9 @@ class TestExecutePostprocess:
         assert state.remote_tasks[(3, "postprocess")]["flag_file"] == (
             "D:/flags/postprocess_done_3.txt"
         )
+        assert state.remote_tasks[(3, "postprocess")]["error_flag_file"] == (
+            "D:/flags/solver_done_3.txt.error"
+        )
 
     def test_execute_postprocess_starts_standalone_task_when_solver_task_missing(self, monkeypatch):
         """Solver task 已清理时，PostProcess 应能独立启动恢复。"""
@@ -950,3 +953,45 @@ class TestExecutePostprocess:
 
         assert executor.wait_postprocess_completion(4) is False
         assert deleted == ["D:/flags/postprocess_done_4.txt.error"]
+
+    def test_wait_postprocess_completion_detects_solver_wrapper_error_flag(
+        self,
+        monkeypatch,
+    ):
+        """同一 Solver 会话内后处理失败会由 wrapper 写入 solver .error。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_timeout", 30)
+
+        checked: list[str] = []
+        deleted: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                checked.append(path)
+                return path == "D:/flags/solver_done_2.txt.error"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                return True
+
+        state = _StateRecorder()
+        state.remote_tasks[(2, "postprocess")] = {
+            "config_name": 2,
+            "step_name": "postprocess",
+            "task_name": "AutoFluid_solver_wrapper_task",
+            "flag_file": "D:/flags/postprocess_done_2.txt",
+            "error_flag_file": "D:/flags/solver_done_2.txt.error",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+        assert executor.wait_postprocess_completion(2) is False
+        assert checked == ["D:/flags/solver_done_2.txt.error"]
+        assert deleted == ["D:/flags/solver_done_2.txt.error"]
