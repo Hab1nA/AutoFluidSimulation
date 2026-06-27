@@ -90,11 +90,16 @@ pub fn save_settings(
                             log_buffer.push_info("✅ 后台引擎配置已重新加载".to_string());
                         }
                         Ok(resp) => {
-                            log_buffer
-                                .push_info(format!("⚠️ 后台引擎配置重载失败: {}", resp.message));
+                            let message =
+                                format!("后台引擎配置重载失败，已保存但未生效: {}", resp.message);
+                            ss.save_error = Some(message.clone());
+                            log_buffer.push_info(format!("⚠️ {}", message));
                         }
                         Err(e) => {
-                            log_buffer.push_info(format!("⚠️ 后台引擎配置重载通信失败: {}", e));
+                            let message =
+                                format!("后台引擎配置重载通信失败，已保存但未生效: {}", e);
+                            ss.save_error = Some(message.clone());
+                            log_buffer.push_info(format!("⚠️ {}", message));
                         }
                     }
                 } else {

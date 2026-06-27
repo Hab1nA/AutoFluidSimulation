@@ -24,6 +24,11 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 }
 
+fn is_ctrl_char(key: KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+}
+
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
         KeyCode::Tab => {
@@ -36,9 +41,8 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('c')
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && state.focus_zone != FocusZone::CommandInput =>
+        KeyCode::Char(_)
+            if is_ctrl_char(key, 'c') && state.focus_zone != FocusZone::CommandInput =>
         {
             // Ctrl+C 退出（命令输入区的 Ctrl+C 由 handle_command_input 处理为复制）
             state.should_quit = true;
@@ -65,26 +69,26 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         // ── Clipboard shortcuts ──────────────────────────────────
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'a') => {
             state.command_buffer.select_all();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             state.command_buffer.copy_selection();
             AppAction::None
         }
-        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'x') => {
             state.command_buffer.cut_selection();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'u') => {
             state.command_buffer.clear();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'v') => {
             state.command_buffer.paste_from_clipboard();
             state.needs_redraw = true;
             AppAction::None
@@ -190,7 +194,7 @@ fn handle_command_passthrough(key: KeyEvent, state: &mut AppState) -> AppAction 
                 return AppAction::SubmitCommand(cmd);
             }
         }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'u') => {
             state.command_buffer.clear();
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
@@ -395,7 +399,7 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             // Ctrl+C 在设置页非编辑态：退出设置
             if let Some(ref mut ss) = state.settings_state {
                 if ss.dirty {
@@ -414,10 +418,8 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.close_settings();
             AppAction::DiscardSettings
         }
-        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            AppAction::SaveSettings
-        }
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 's') => AppAction::SaveSettings,
+        KeyCode::Char(_) if is_ctrl_char(key, 'z') => {
             if let Some(ref mut ss) = state.settings_state {
                 ss.undo();
                 state.needs_redraw = true;
@@ -528,19 +530,19 @@ fn handle_settings_text_input(key: KeyEvent, ss: &mut crate::settings::SettingsS
             AppAction::None
         }
         // ── Clipboard shortcuts ──────────────────────────────────────
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'a') => {
             ss.select_all();
             AppAction::None
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             ss.copy_selection();
             AppAction::None
         }
-        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'x') => {
             ss.cut_selection();
             AppAction::None
         }
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'v') => {
             ss.paste_from_clipboard();
             AppAction::None
         }
@@ -746,5 +748,59 @@ mod tests {
         let ss = state.settings_state.as_ref().expect("settings state");
         assert_eq!(ss.workstation_column_offset, 0);
         assert_eq!(ss.buffer.cursor, 3);
+    }
+
+    #[test]
+    fn settings_ctrl_c_while_editing_does_not_close_or_mutate_field() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.buffer.select_all();
+        ss.focus.editing = true;
+
+        let action = handle_key(
+            key(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            &mut state,
+        );
+
+        assert!(matches!(action, AppAction::None));
+        assert!(!state.should_quit);
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert!(ss.focus.editing);
+        assert_eq!(ss.buffer.text, "abcd");
+        assert_eq!(state.ui_mode, UiMode::Settings);
+    }
+
+    #[test]
+    fn settings_ctrl_c_when_not_editing_closes_settings() {
+        let mut state = AppState::new();
+        state.open_settings();
+
+        let action = handle_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut state);
+
+        assert!(matches!(action, AppAction::DiscardSettings));
+        assert!(!state.should_quit);
+        assert!(state.settings_state.is_none());
+        assert_eq!(state.ui_mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn settings_escape_while_editing_cancels_edit_only() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.focus.editing = true;
+
+        let action = handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+        assert!(matches!(action, AppAction::None));
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert!(!ss.focus.editing);
+        assert_eq!(state.ui_mode, UiMode::Settings);
     }
 }

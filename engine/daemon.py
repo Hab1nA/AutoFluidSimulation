@@ -852,6 +852,9 @@ class PipelineDaemon:
         """处理 check 命令（系统自检）。"""
         if self.runner is None:
             raise RuntimeError("TaskRunner 未初始化，请先调用 start()")
+        from engine.config import reload_config_from_toml
+
+        reload_config_from_toml()
         results = dict(self.runner.run_system_check())
         results["health"] = self._build_health_snapshot()
         self._refresh_check_summary_from_health(results)

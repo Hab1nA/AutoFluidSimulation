@@ -3885,6 +3885,45 @@ class TestPipelineDaemonCleanStep:
         assert data["local_worker_checks"] == expected["local_worker_checks"]
         assert message == "系统自检完成"
 
+    def test_check_reloads_config_before_running_system_check(self, monkeypatch):
+        from engine import config as config_module
+        from engine.daemon import PipelineDaemon
+
+        events: list[str] = []
+        path_snapshot = {"sw_exe": r"C:\old\SLDWORKS.exe"}
+
+        def _reload_config() -> bool:
+            events.append("reload")
+            path_snapshot["sw_exe"] = r"C:\new\SLDWORKS.exe"
+            return True
+
+        class _Runner:
+            def run_system_check(self) -> dict[str, object]:
+                events.append("check")
+                return {
+                    "local_checks": {
+                        "SW可执行文件": {
+                            "path": path_snapshot["sw_exe"],
+                            "exists": False,
+                        }
+                    },
+                    "remote_checks": {},
+                    "daemon_checks": {},
+                    "workstation_checks": {},
+                }
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._build_health_snapshot = lambda: {}
+
+        ok, data, message = daemon.handle_check({})
+
+        assert ok is True
+        assert message == "系统自检完成"
+        assert events == ["reload", "check"]
+        assert data["local_checks"]["SW可执行文件"]["path"] == r"C:\new\SLDWORKS.exe"
+
     def test_check_summary_includes_health_warnings_and_failures(self):
         from engine.daemon import PipelineDaemon
 
