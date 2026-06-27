@@ -784,8 +784,34 @@ def test_dashboard_marks_stale_workstation_ssh_check_non_ok(monkeypatch):
 
     health = daemon._build_health_snapshot()
 
-    assert health["server_to_workstation_ssh"] != "ok"
+    assert health["server_to_workstation_ssh"] == "unknown"
     assert health["workstation_ssh_details"] == {"WS-A": "stale"}
+
+
+def test_dashboard_treats_stale_mixed_with_disconnected_as_unknown(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [
+            {"id": "WS-A", "host": "172.17.135.240", "port": 22},
+            {"id": "WS-B", "host": "172.17.135.89", "port": 22},
+        ],
+    )
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_000.0)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({})
+    daemon._last_worker_ssh_checks = {"WS-A": "ok", "WS-B": "disconnected"}
+    daemon._last_worker_ssh_check_times = {"WS-A": 800.0, "WS-B": 995.0}
+    daemon._config_warnings = []
+
+    health = daemon._build_health_snapshot()
+
+    assert health["server_to_workstation_ssh"] == "unknown"
+    assert health["workstation_ssh_details"] == {
+        "WS-A": "stale",
+        "WS-B": "disconnected",
+    }
 
 
 def test_background_ssh_health_does_not_refresh_cached_ok_timestamp(monkeypatch):

@@ -10,10 +10,19 @@ import os
 import re
 import sys
 import logging
-from typing import Any, TypedDict, cast
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict, cast
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+@dataclass(frozen=True)
+class ConfigValidationIssue:
+    """One startup configuration validation item and its daemon log level."""
+
+    message: str
+    log_level: Literal["info", "warning"]
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
@@ -927,13 +936,16 @@ def reload_config_from_toml() -> bool:
 # reload_config_from_toml()
 
 
-def validate_config() -> list[str]:
-    """验证配置完整性，返回警告信息列表。"""
-    warnings: list[str] = []
+def validate_config_details() -> list[ConfigValidationIssue]:
+    """验证配置完整性，返回带日志级别的启动提示。"""
+    issues: list[ConfigValidationIssue] = []
 
     if not REMOTE_CONFIG["password"]:
-        warnings.append(
-            "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD"
+        issues.append(
+            ConfigValidationIssue(
+                "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD",
+                "info",
+            )
         )
 
     if is_server_mode():
@@ -943,29 +955,45 @@ def validate_config() -> list[str]:
             raw_port = int(workstation.get("port", 22) or 22)
             reachable_host = str(workstation.get("reachable_host", "")).strip()
             if not reachable_host:
-                warnings.append(
-                    f"工作站 {ws_id} 在 server 模式下缺少 "
-                    f"AUTOFLUID_SSH_REACHABLE_HOST，将检查原始地址 "
-                    f"{raw_host}:{raw_port}"
+                issues.append(
+                    ConfigValidationIssue(
+                        f"工作站 {ws_id} 在 server 模式下缺少 "
+                        f"AUTOFLUID_SSH_REACHABLE_HOST，将检查原始地址 "
+                        f"{raw_host}:{raw_port}",
+                        "warning",
+                    )
                 )
                 continue
             if "reachable_port" not in workstation:
-                warnings.append(
-                    f"工作站 {ws_id} 在 server 模式下缺少 "
-                    f"AUTOFLUID_SSH_REACHABLE_PORT，将使用原始端口 {raw_port}"
+                issues.append(
+                    ConfigValidationIssue(
+                        f"工作站 {ws_id} 在 server 模式下缺少 "
+                        f"AUTOFLUID_SSH_REACHABLE_PORT，将使用原始端口 {raw_port}",
+                        "warning",
+                    )
                 )
-        return warnings
+        return issues
 
     if not os.path.exists(LOCAL_PATHS["sw_model"]):
-        warnings.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")
+        issues.append(ConfigValidationIssue(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["excel"]):
-        warnings.append(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}")
+        issues.append(ConfigValidationIssue(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["sc_exe"]):
-        warnings.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
+        issues.append(ConfigValidationIssue(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["sw_exe"]):
-        warnings.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
+        issues.append(
+            ConfigValidationIssue(
+                f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动",
+                "info",
+            )
+        )
 
-    return warnings
+    return issues
+
+
+def validate_config() -> list[str]:
+    """验证配置完整性，返回兼容旧调用方的提示文本列表。"""
+    return [issue.message for issue in validate_config_details()]

@@ -13,7 +13,7 @@ import csv
 import importlib.util
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import ansys.fluent.core as pyfluent
 
@@ -355,15 +355,18 @@ def compute_metrics_with_solver(
     )
 
     compute_module = _load_compute_module(compute_script)
-    metrics = compute_module.compute_metrics(
-        reports_path=output_dir / "metrics_reports.csv",
-        exit_surface_path=None,
-        chamber_cells_path=None,
-        wall_faces_path=None,
-        ambient_pressure=ambient_pressure,
-        tcomb=tcomb,
-        chamber_x_max=None,
-        config_id=config_id,
+    metrics = cast(
+        dict[str, Any],
+        compute_module.compute_metrics(
+            reports_path=output_dir / "metrics_reports.csv",
+            exit_surface_path=None,
+            chamber_cells_path=None,
+            wall_faces_path=None,
+            ambient_pressure=ambient_pressure,
+            tcomb=tcomb,
+            chamber_x_max=None,
+            config_id=config_id,
+        ),
     )
     compute_module._write_metrics(output_dir / f"{config_name}.csv", metrics)
     compute_module._write_metrics(output_dir / "metrics_summary.csv", metrics)

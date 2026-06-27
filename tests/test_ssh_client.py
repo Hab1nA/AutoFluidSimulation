@@ -227,6 +227,31 @@ def test_connect_returns_false_and_clears_connection_on_socket_timeout(monkeypat
     assert host._sftp is None
 
 
+def test_connect_can_suppress_expected_failure_logs(monkeypatch, caplog):
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **_kwargs: object) -> None:
+            raise socket.timeout("connect timed out")
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    with caplog.at_level("ERROR"):
+        assert host.connect(log_failure=False) is False
+
+    assert not any("SSH 连接失败" in record.getMessage() for record in caplog.records)
+
+
 def test_connect_uses_configured_key_file(monkeypatch):
     calls: list[dict[str, object]] = []
 

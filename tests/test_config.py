@@ -364,6 +364,23 @@ class TestValidateConfig:
         warnings = validate_config()
         assert any("SSH 密码" in w for w in warnings)
 
+    def test_validation_details_marks_local_environment_warnings_info(self, tmp_path, monkeypatch):
+        from engine.config import LOCAL_PATHS, REMOTE_CONFIG, validate_config_details
+
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        monkeypatch.setitem(LOCAL_PATHS, "sw_model", str(tmp_path / "missing.SLDPRT"))
+        for key, name in [("excel", "t.xlsx"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
+            f = tmp_path / name
+            f.touch()
+            monkeypatch.setitem(LOCAL_PATHS, key, str(f))
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "")
+
+        issues = validate_config_details()
+
+        assert any("SSH 密码" in issue.message for issue in issues)
+        assert any("SW 模型文件不存在" in issue.message for issue in issues)
+        assert {issue.log_level for issue in issues} == {"info"}
+
     def test_warns_missing_sw_model(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
 
@@ -466,6 +483,34 @@ class TestValidateConfig:
         assert any("WS-A" in warning for warning in warnings)
         assert any("AUTOFLUID_SSH_REACHABLE_HOST" in warning for warning in warnings)
         assert any("172.17.135.240:22" in warning for warning in warnings)
+
+    def test_server_mode_reachability_warnings_stay_warning_level(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config_details
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            issues = validate_config_details()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert len(issues) == 1
+        assert issues[0].log_level == "warning"
+        assert "AUTOFLUID_SSH_REACHABLE_HOST" in issues[0].message
 
     def test_server_mode_warns_when_reachable_port_missing(self, monkeypatch):
         from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config

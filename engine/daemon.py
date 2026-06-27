@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.config import (
     LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING, STATUS_ERROR,
     ensure_directories, get_step_filename, get_workstation_ssh_health_interval,
-    is_server_mode, validate_config,
+    is_server_mode, validate_config_details,
 )
 from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint
 from engine.local_worker_adapter import LocalWorkerAdapter
@@ -235,10 +235,13 @@ class PipelineDaemon:
         from engine.config import reload_config_from_toml
         reload_config_from_toml()
         ensure_directories()
-        config_warnings = validate_config()
-        self._config_warnings = list(config_warnings)
-        for w in config_warnings:
-            logger.warning(f"[CONFIG] {w}")
+        config_issues = validate_config_details()
+        self._config_warnings = [issue.message for issue in config_issues]
+        for issue in config_issues:
+            if issue.log_level == "warning":
+                logger.warning("[CONFIG] %s", issue.message)
+            else:
+                logger.info("[CONFIG] %s", issue.message)
 
         self._running = True
         self._started_at_epoch = time.time()
@@ -915,7 +918,7 @@ class PipelineDaemon:
                 self._load_configs_from_worker(worker_configs)
             except ValueError as e:
                 return False, None, f"LocalWorker 构型数据无效: {e}"
-            self._refresh_workstation_ssh_checks()
+            self._refresh_workstation_ssh_checks(connect=False)
         return True, worker, "LocalWorker 已注册"
 
     def _load_configs_from_worker(self, raw_configs: dict[Any, Any]) -> None:
@@ -1235,12 +1238,13 @@ class PipelineDaemon:
             results["ssh_targets"][ws_id] = target
             try:
                 if connect:
-                    ssh = self.runner.get_ssh(ws_id)
-                    ensure_connected = getattr(ssh, "ensure_connected", None)
-                    if callable(ensure_connected):
-                        connected = bool(ensure_connected())
-                    else:
-                        connected = bool(ssh.is_connected())
+                    try:
+                        ssh = self.runner.get_ssh(ws_id, log_failure=False)
+                    except TypeError as e:
+                        if "log_failure" not in str(e):
+                            raise
+                        ssh = self.runner.get_ssh(ws_id)
+                    connected = bool(ssh.is_connected())
                 else:
                     # Passive health must not promote cached Paramiko transport state
                     # to "ok"; stale transports can outlive reverse tunnels.
@@ -1261,6 +1265,8 @@ class PipelineDaemon:
                         target["connectivity_mode"],
                     )
             except Exception as e:
+                if isinstance(e, TypeError):
+                    raise
                 results["ssh_checks"][ws_id] = f"error: {e}"
                 logger.warning(
                     "[Worker] 工作站 %s SSH 连通检查失败 "
@@ -1508,6 +1514,8 @@ class PipelineDaemon:
         if any(value == "ok" for value in detail_values):
             server_to_workstation_ssh = "ok"
         elif any(value == "unknown" for value in detail_values):
+            server_to_workstation_ssh = "unknown"
+        elif any(value == "stale" for value in detail_values):
             server_to_workstation_ssh = "unknown"
         else:
             server_to_workstation_ssh = "disconnected"

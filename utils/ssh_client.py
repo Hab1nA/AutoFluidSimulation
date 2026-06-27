@@ -77,7 +77,7 @@ class RemoteWorkstation:
     # 连接管理
     # ------------------------------------------------------------------
 
-    def connect(self) -> bool:
+    def connect(self, *, log_failure: bool = True) -> bool:
         """建立 SSH 连接。"""
         if paramiko is None:
             raise ModuleNotFoundError(
@@ -112,12 +112,14 @@ class RemoteWorkstation:
             logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
         except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
-            logger.error(f"[SSH] SSH 连接失败: {e}")
+            if log_failure:
+                logger.error(f"[SSH] SSH 连接失败: {e}")
             if transport is not None:
                 try:
                     transport.close()
                 except (OSError, EOFError, socket.timeout) as close_error:
-                    logger.warning(f"[SSH] Transport 关闭异常: {close_error}")
+                    if log_failure:
+                        logger.warning(f"[SSH] Transport 关闭异常: {close_error}")
             self._ssh = None
             self._sftp = None
             return False
@@ -162,11 +164,12 @@ class RemoteWorkstation:
         transport = self._ssh.get_transport()
         return bool(transport is not None and transport.is_active())
 
-    def ensure_connected(self) -> bool:
+    def ensure_connected(self, *, log_failure: bool = True) -> bool:
         """确保连接有效，若断开则自动重连。"""
         if not self.is_connected():
-            logger.info("[SSH] SSH 已断开，尝试重新连接...")
-            return self.connect()
+            if log_failure:
+                logger.info("[SSH] SSH 已断开，尝试重新连接...")
+            return self.connect(log_failure=log_failure)
         return True
 
     # ------------------------------------------------------------------

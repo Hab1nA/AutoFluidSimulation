@@ -3249,7 +3249,7 @@ class TestPipelineDaemonCleanStep:
         assert data is None
         assert message == "刷新工作站槽位失败: 工作站槽位 ID 重复"
 
-    def test_worker_register_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
+    def test_worker_register_passively_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
@@ -3265,8 +3265,10 @@ class TestPipelineDaemonCleanStep:
             def __init__(self, state, local_worker_adapter=None) -> None:
                 self.state = state
                 self.local_worker_adapter = local_worker_adapter
+                self.get_ssh_calls: list[tuple[str, bool]] = []
 
-            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+            def get_ssh(self, workstation_id: str = "default", *, connect: bool = True) -> _SSH:
+                self.get_ssh_calls.append((workstation_id, connect))
                 return _SSH()
 
         class _Scheduler:
@@ -3300,8 +3302,9 @@ class TestPipelineDaemonCleanStep:
 
         assert ok is True
         assert message == "LocalWorker 已注册"
-        assert daemon._last_worker_ssh_checks == {"default": "ok"}
-        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
+        assert daemon.runner.get_ssh_calls == []
+        assert daemon._last_worker_ssh_checks == {"default": "unknown"}
+        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "unknown"
 
     def test_worker_start_fails_when_all_workstation_ssh_checks_fail(self, monkeypatch):
         from engine import config as config_module
@@ -3455,11 +3458,8 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
-                return True
-
             def is_connected(self) -> bool:
-                return False
+                return True
 
         class _Runner:
             def get_ssh(self, workstation_id: str = "default") -> _SSH:
@@ -3491,6 +3491,67 @@ class TestPipelineDaemonCleanStep:
             for record in caplog.records
         )
 
+    def test_workstation_ssh_refresh_uses_single_quiet_active_probe(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def __init__(self) -> None:
+                self.is_connected_calls = 0
+                self.ensure_connected_calls = 0
+
+            def is_connected(self) -> bool:
+                self.is_connected_calls += 1
+                return False
+
+            def ensure_connected(self) -> bool:
+                self.ensure_connected_calls += 1
+                return False
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.ssh = _SSH()
+                self.get_ssh_calls: list[tuple[str, bool, bool]] = []
+
+            def get_ssh(
+                self,
+                workstation_id: str = "default",
+                *,
+                connect: bool = True,
+                log_failure: bool = True,
+            ) -> _SSH:
+                self.get_ssh_calls.append((workstation_id, connect, log_failure))
+                return self.ssh
+
+        runner = _Runner()
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = runner
+        daemon._last_worker_ssh_checks = {}
+
+        result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "disconnected"}
+        assert runner.get_ssh_calls == [("WS-A", True, False)]
+        assert runner.ssh.is_connected_calls == 1
+        assert runner.ssh.ensure_connected_calls == 0
+
+    def test_workstation_ssh_refresh_reraises_unrelated_type_error(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default", *, log_failure: bool = True):
+                raise TypeError("internal type mismatch")
+
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+
+        with pytest.raises(TypeError, match="internal type mismatch"):
+            daemon._refresh_workstation_ssh_checks()
+
     def test_workstation_ssh_refresh_warns_when_error_connection_recovers(
         self,
         monkeypatch,
@@ -3500,7 +3561,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:
@@ -3530,7 +3591,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:
@@ -3560,7 +3621,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:

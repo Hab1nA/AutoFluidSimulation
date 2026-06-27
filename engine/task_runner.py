@@ -127,12 +127,14 @@ class TaskRunner:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
         *,
         connect: bool = True,
+        log_failure: bool = True,
     ) -> RemoteWorkstation:
         """获取（或创建）SSH 客户端实例。线程安全。
 
         Args:
             workstation_id: 工作站 ID。
             connect: True 时确保连接可用；False 时只返回缓存/新建客户端，不发起网络连接。
+            log_failure: False 时将预期的连接失败保留为返回状态，不输出 WARNING+ 日志。
         """
         locks_guard = getattr(self, "_ssh_locks_guard", None)
         if locks_guard is None:
@@ -162,8 +164,17 @@ class TaskRunner:
                 if stopped_event is not None and stopped_event.is_set():
                     logger.debug("调度器已停止，跳过 SSH 重连: %s", workstation_id)
                     return ssh
-                if not ssh.connect():
-                    logger.error("SSH 重连失败: %s", workstation_id)
+                try:
+                    connected = ssh.connect(log_failure=log_failure)
+                except TypeError as e:
+                    if "log_failure" not in str(e):
+                        raise
+                    connected = ssh.connect()
+                if not connected:
+                    if log_failure:
+                        logger.error("SSH 重连失败: %s", workstation_id)
+                    else:
+                        logger.debug("SSH 重连失败: %s", workstation_id)
             return ssh
 
     def _acquire_ssh_lock(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import time
 
 
@@ -46,7 +47,7 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
         "ensure_directories",
         lambda: config_events.append("ensure"),
     )
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: released.append(True))
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -66,6 +67,58 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     assert config_events == ["reload", "ensure"]
     assert released == [True]
     assert not (tmp_path / "server-mode.db").exists()
+
+
+def test_daemon_start_logs_config_issues_by_severity(monkeypatch, tmp_path, caplog) -> None:
+    from engine import daemon as daemon_module
+    from engine.config import ConfigValidationIssue
+    from engine.daemon import PipelineDaemon
+
+    class _FakeIPCServer:
+        def __init__(self) -> None:
+            self._daemon: PipelineDaemon | None = None
+
+        def register_default_handlers(self, daemon: PipelineDaemon) -> None:
+            self._daemon = daemon
+
+        def start(self) -> None:
+            assert self._daemon is not None
+            self._daemon._stop_event.set()
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
+    monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
+    monkeypatch.setattr(
+        daemon_module,
+        "validate_config_details",
+        lambda: [
+            ConfigValidationIssue("local path missing", "info"),
+            ConfigValidationIssue("reachable host missing", "warning"),
+        ],
+    )
+    monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
+    monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
+    monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
+    monkeypatch.setattr(PipelineDaemon, "_setup_signal_handlers", lambda self: None)
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "excel", str(tmp_path / "missing.xlsx"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+
+    daemon = PipelineDaemon()
+    with caplog.at_level(logging.INFO):
+        daemon.start()
+
+    config_records = [
+        record for record in caplog.records
+        if record.name == "PipelineDaemon" and record.getMessage().startswith("[CONFIG]")
+    ]
+    assert [(record.levelno, record.getMessage()) for record in config_records] == [
+        (logging.INFO, "[CONFIG] local path missing"),
+        (logging.WARNING, "[CONFIG] reachable host missing"),
+    ]
+    assert daemon._config_warnings == ["local path missing", "reachable host missing"]
 
 
 def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path) -> None:
@@ -119,7 +172,7 @@ def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTOFLUID_OPENCLAW_WEBHOOK_URL", "http://127.0.0.1/webhook")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -322,7 +375,7 @@ def test_server_mode_uses_latest_existing_state_db_when_excel_is_missing(
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -364,7 +417,7 @@ def test_server_mode_does_not_read_local_excel_on_start(monkeypatch, tmp_path) -
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "read_model_configs", fail_read_model_configs)
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
