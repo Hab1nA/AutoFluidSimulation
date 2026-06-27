@@ -36,6 +36,7 @@ class _AssignedState(_State):
             "1": {"sw": "Completed", "meshing": "Running"},
             "2": {"sw": "Completed", "meshing": "Running"},
             "3": {"sw": "Completed", "meshing": "Waiting"},
+            "4": {"sw": "Completed", "meshing": "Running"},
         }
 
     def get_config_workstation(self, config_name):
@@ -43,6 +44,7 @@ class _AssignedState(_State):
             1: "WS-A",
             2: "WS-B",
             3: "WS-C",
+            4: "WS-D",
         }.get(int(config_name))
 
 
@@ -289,7 +291,7 @@ def test_handle_get_dashboard_includes_config_workstations(monkeypatch):
     monkeypatch.setattr(
         daemon_module,
         "WORKSTATIONS",
-        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}, {"id": "WS-D"}],
     )
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.state = _AssignedState()
@@ -304,10 +306,12 @@ def test_handle_get_dashboard_includes_config_workstations(monkeypatch):
     assert ok is True
     assert data["statuses"]["1"]["meshing"] == "Running"
     assert data["statuses"]["2"]["meshing"] == "Running"
+    assert data["statuses"]["4"]["meshing"] == "Running"
     assert data["config_workstations"] == {
         "1": "WS-A",
         "2": "WS-B",
         "3": "WS-C",
+        "4": "WS-D",
     }
 
 
@@ -335,11 +339,13 @@ def test_handle_get_dashboard_includes_workstation_barrier_snapshot(monkeypatch)
     monkeypatch.setattr(
         daemon_module,
         "WORKSTATIONS",
-        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+        [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}, {"id": "WS-D"}],
     )
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.state = _State()
-    daemon.scheduler = _Scheduler({"WS-A": True, "WS-B": False, "WS-C": False})
+    daemon.scheduler = _Scheduler(
+        {"WS-A": True, "WS-B": False, "WS-C": False, "WS-D": True}
+    )
     daemon._pipeline_ever_started = True
     daemon._started_at_epoch = None
     daemon._config_warnings = []
@@ -353,6 +359,7 @@ def test_handle_get_dashboard_includes_workstation_barrier_snapshot(monkeypatch)
         "WS-A": True,
         "WS-B": False,
         "WS-C": False,
+        "WS-D": True,
     }
 
 def test_handle_get_dashboard_includes_solver_progress(monkeypatch):

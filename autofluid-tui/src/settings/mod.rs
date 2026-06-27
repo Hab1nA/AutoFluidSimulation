@@ -763,6 +763,7 @@ pub struct SettingsState {
     pub config: SettingsConfig,
     pub focus: SettingsFocus,
     pub scroll: u16,
+    pub workstation_column_offset: usize,
     pub dirty: bool,
     pub validation_errors: Vec<ValidationError>,
     /// 通用文本编辑缓冲区（光标、选区、剪贴板）。
@@ -793,6 +794,7 @@ impl SettingsState {
             config,
             focus: SettingsFocus::default(),
             scroll: 0,
+            workstation_column_offset: 0,
             dirty: false,
             validation_errors: Vec::new(),
             buffer: TextBuffer::new(),
@@ -815,6 +817,7 @@ impl SettingsState {
             config: SettingsConfig::default(),
             focus: SettingsFocus::default(),
             scroll: 0,
+            workstation_column_offset: 0,
             dirty: false,
             validation_errors: Vec::new(),
             buffer: TextBuffer::new(),
@@ -1250,16 +1253,11 @@ impl SettingsState {
 
     fn ensure_workstation_index(&mut self, workstation_index: usize) {
         while self.config.workstations.len() <= workstation_index {
-            let id = match self.config.workstations.len() {
-                0 => "WS-A",
-                1 => "WS-B",
-                2 => "WS-C",
-                _ => "",
-            };
+            let id = default_workstation_id(self.config.workstations.len());
             self.config
                 .workstations
                 .push(WorkstationConfig::from_remote_config(
-                    id,
+                    &id,
                     &self.config.remote_config,
                 ));
         }
@@ -1363,6 +1361,48 @@ impl SettingsState {
                 .field_count()
                 .saturating_sub(1);
             self.focus.workstation_index = None;
+        }
+    }
+
+    pub fn scroll_workstation_columns_left(&mut self, visible_columns: usize) {
+        self.workstation_column_offset = self.workstation_column_offset.saturating_sub(1);
+        self.keep_workstation_focus_visible(visible_columns);
+    }
+
+    pub fn scroll_workstation_columns_right(&mut self, visible_columns: usize) {
+        let visible_columns = visible_columns
+            .max(1)
+            .min(self.config.workstations.len().max(1));
+        let max_offset = self
+            .config
+            .workstations
+            .len()
+            .saturating_sub(visible_columns);
+        self.workstation_column_offset = (self.workstation_column_offset + 1).min(max_offset);
+        self.keep_workstation_focus_visible(visible_columns);
+    }
+
+    fn keep_workstation_focus_visible(&mut self, visible_columns: usize) {
+        let Some(ws_idx) = self.focus.workstation_index else {
+            return;
+        };
+        let total = self.config.workstations.len();
+        if total == 0 {
+            self.focus.workstation_index = None;
+            self.workstation_column_offset = 0;
+            return;
+        }
+
+        let visible_columns = visible_columns.max(1).min(total);
+        let max_offset = total.saturating_sub(visible_columns);
+        let start = self.workstation_column_offset.min(max_offset);
+        self.workstation_column_offset = start;
+        let end = start + visible_columns;
+
+        if ws_idx < start {
+            self.focus.workstation_index = Some(start);
+        } else if ws_idx >= end {
+            self.focus.workstation_index = Some(end.saturating_sub(1));
         }
     }
 
@@ -1521,6 +1561,15 @@ impl SettingsState {
 
     pub fn paste_from_clipboard(&mut self) -> bool {
         self.buffer.paste_from_clipboard()
+    }
+}
+
+fn default_workstation_id(index: usize) -> String {
+    if index < 26 {
+        let letter = char::from(b'A' + index as u8);
+        format!("WS-{letter}")
+    } else {
+        format!("WS-{}", index + 1)
     }
 }
 
@@ -1689,6 +1738,29 @@ fluent_path = 'D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
             state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 3),
             r"D:\ws-b\scdoc"
         );
+    }
+
+    #[test]
+    fn workstation_field_edit_creates_ws_d_with_stable_id() {
+        let mut state = SettingsState::default_for_tests();
+        state.set_workstation_field_value(
+            3,
+            SettingCategory::RemoteConnection,
+            0,
+            "172.17.135.200",
+        );
+
+        assert_eq!(state.config.workstations.len(), 4);
+        assert_eq!(state.config.workstations[3].id, "WS-D");
+        assert_eq!(state.config.workstations[3].host, "172.17.135.200");
+    }
+
+    #[test]
+    fn default_workstation_id_uses_letters_then_numeric_fallback() {
+        assert_eq!(default_workstation_id(0), "WS-A");
+        assert_eq!(default_workstation_id(3), "WS-D");
+        assert_eq!(default_workstation_id(25), "WS-Z");
+        assert_eq!(default_workstation_id(26), "WS-27");
     }
 
     #[test]

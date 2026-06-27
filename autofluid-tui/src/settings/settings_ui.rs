@@ -10,6 +10,8 @@ use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
 use crate::utils::{pad_label_by_display_width, truncate_for_display};
 
+const MIN_WORKSTATION_COLUMN_WIDTH: u16 = 8;
+
 pub struct SettingsRenderInfo {
     pub content_total_lines: usize,
     pub content_visible_lines: usize,
@@ -17,6 +19,26 @@ pub struct SettingsRenderInfo {
     pub button_bar_y: u16,
     /// Map field targets to content-area row/column bounds.
     pub field_positions: Vec<SettingsFieldHit>,
+}
+
+pub fn settings_workstation_visible_columns(area: Rect, total: usize) -> usize {
+    let dialog_area = centered_rect(90, 90, area);
+    let inner_width = dialog_area.width.saturating_sub(2);
+    let content_width = inner_width.saturating_sub(1);
+    workstation_visible_columns_for_content_width(content_width, total)
+}
+
+fn workstation_visible_columns_for_content_width(content_width: u16, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+
+    let label_width: u16 = 18;
+    let value_start = label_width + 2;
+    let available_width = content_width.saturating_sub(value_start);
+    let max_visible_workstations =
+        usize::from((available_width / MIN_WORKSTATION_COLUMN_WIDTH).max(1));
+    total.min(max_visible_workstations)
 }
 
 pub fn render_settings_dialog(
@@ -537,16 +559,24 @@ fn render_workstation_category_field_range(
     content_width: u16,
     theme: &AppTheme,
 ) {
-    let workstation_count = ss.config.workstations.len().min(3);
+    let label_width: u16 = 18;
+    let value_start = label_width + 2;
+    let available_width = content_width.saturating_sub(value_start);
+    let workstation_count =
+        workstation_visible_columns_for_content_width(content_width, ss.config.workstations.len());
     if workstation_count == 0 {
         return;
     }
+    let workstation_start = ss.workstation_column_offset.min(
+        ss.config
+            .workstations
+            .len()
+            .saturating_sub(workstation_count),
+    );
 
-    let label_width: u16 = 18;
-    let value_start = label_width + 2;
-    let value_width = content_width
-        .saturating_sub(value_start)
-        .checked_div(workstation_count as u16)
+    let workstation_count_u16 = workstation_count.min(usize::from(u16::MAX)) as u16;
+    let value_width = available_width
+        .checked_div(workstation_count_u16)
         .unwrap_or(1)
         .max(1);
 
@@ -557,7 +587,13 @@ fn render_workstation_category_field_range(
             Style::default().fg(theme.gray_4),
         ),
     ];
-    for workstation in ss.config.workstations.iter().take(workstation_count) {
+    for workstation in ss
+        .config
+        .workstations
+        .iter()
+        .skip(workstation_start)
+        .take(workstation_count)
+    {
         let title = if workstation.id.is_empty() {
             "WS".to_string()
         } else {
@@ -585,9 +621,10 @@ fn render_workstation_category_field_range(
             ),
         ];
 
-        for ws_idx in 0..workstation_count {
-            let x_start = value_start + (ws_idx as u16 * value_width);
-            let x_end = if ws_idx + 1 == workstation_count {
+        for visible_idx in 0..workstation_count {
+            let ws_idx = workstation_start + visible_idx;
+            let x_start = value_start + (visible_idx as u16 * value_width);
+            let x_end = if visible_idx + 1 == workstation_count {
                 content_width
             } else {
                 x_start + value_width
@@ -799,6 +836,32 @@ mod tests {
         state
     }
 
+    fn state_with_four_workstations() -> SettingsState {
+        let mut state = state_with_three_workstations();
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-D".to_string(),
+            host: "172.17.135.200".to_string(),
+            scdoc_dir: r"D:\ws-d\scdoc".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state
+    }
+
+    fn state_with_six_workstations() -> SettingsState {
+        let mut state = state_with_four_workstations();
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-E".to_string(),
+            host: "172.17.135.201".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-F".to_string(),
+            host: "172.17.135.202".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state
+    }
+
     #[test]
     fn workstation_field_hits_match_rendered_three_column_bounds() {
         let state = state_with_three_workstations();
@@ -829,6 +892,144 @@ mod tests {
         assert_eq!((host_hits[1].x_start, host_hits[1].x_end), (40, 60));
         assert_eq!(host_hits[2].workstation_index, Some(2));
         assert_eq!((host_hits[2].x_start, host_hits[2].x_end), (60, 80));
+    }
+
+    #[test]
+    fn workstation_field_hits_include_fourth_workstation_column() {
+        let state = state_with_four_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            100,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 4);
+        assert_eq!(host_hits[3].workstation_index, Some(3));
+        assert_eq!((host_hits[3].x_start, host_hits[3].x_end), (80, 100));
+        assert!(rendered.contains("WS-D"));
+        assert!(rendered.contains("172.17.135.200"));
+    }
+
+    #[test]
+    fn four_workstation_columns_remain_visible_in_narrow_terminal() {
+        let state = state_with_four_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            60,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 4);
+        assert_eq!((host_hits[3].x_start, host_hits[3].x_end), (50, 60));
+        assert!(rendered.contains("WS-D"));
+    }
+
+    #[test]
+    fn workstation_columns_are_width_capped_before_becoming_unreadable() {
+        let state = state_with_six_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            60,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 5);
+        assert_eq!((host_hits[4].x_start, host_hits[4].x_end), (52, 60));
+        assert!(rendered.contains("WS-E"));
+        assert!(!rendered.contains("WS-F"));
+    }
+
+    #[test]
+    fn workstation_column_offset_reveals_later_columns() {
+        let mut state = state_with_four_workstations();
+        state.workstation_column_offset = 1;
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            44,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 3);
+        assert_eq!(host_hits[0].workstation_index, Some(1));
+        assert_eq!(host_hits[2].workstation_index, Some(3));
+        assert!(rendered.contains("WS-D"));
+        assert!(!rendered.contains("WS-A"));
     }
 
     #[test]

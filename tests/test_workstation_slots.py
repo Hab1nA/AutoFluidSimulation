@@ -56,6 +56,28 @@ class TestWorkstationSlotCoordinator:
         assert state.get_config_workstation(3) == "WS-C"
         assert slots.busy_workstations() == {"WS-A": 1, "WS-B": 2, "WS-C": 3}
 
+    def test_claims_fourth_workstation_slot(self, tmp_db_path):
+        state = StateManager(db_path=tmp_db_path)
+        state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+            4: [13.0, 14.0, 15.0, 16.0],
+        })
+        slots = WorkstationSlotCoordinator(state, ["WS-A", "WS-B", "WS-C", "WS-D"])
+
+        assert slots.claim(1) == "WS-A"
+        assert slots.claim(2) == "WS-B"
+        assert slots.claim(3) == "WS-C"
+        assert slots.claim(4) == "WS-D"
+        assert state.get_config_workstation(4) == "WS-D"
+        assert slots.busy_workstations() == {
+            "WS-A": 1,
+            "WS-B": 2,
+            "WS-C": 3,
+            "WS-D": 4,
+        }
+
     def test_update_workstation_ids_stops_assigning_removed_idle_slot(self, tmp_db_path):
         state = self._setup_state(tmp_db_path)
         slots = WorkstationSlotCoordinator(state, ["WS-A", "WS-B"])

@@ -271,6 +271,11 @@ scdoc_dir = ''
                 password: String::new(),
                 ..Default::default()
             },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                password: "secret-d".to_string(),
+                ..Default::default()
+            },
         ];
 
         let result = write_env_passwords(&config);
@@ -283,6 +288,7 @@ scdoc_dir = ''
         assert!(contents.contains("AUTOFLUID_WS_A_SSH_PASSWORD=secret-a\n"));
         assert!(contents.contains("AUTOFLUID_WS_B_SSH_PASSWORD=\n"));
         assert!(contents.contains("AUTOFLUID_WS_C_SSH_PASSWORD=\n"));
+        assert!(contents.contains("AUTOFLUID_WS_D_SSH_PASSWORD=secret-d\n"));
         assert!(!contents.contains("AUTOFLUID_WS_A_PASSWORD=legacy-a\n"));
 
         let _ = std::fs::remove_dir_all(project_dir);

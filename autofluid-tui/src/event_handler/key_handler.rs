@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::event_handler::{SCROLL_LINE_STEP, SCROLL_PAGE_STEP};
+use crate::settings::settings_ui::settings_workstation_visible_columns;
 use crate::state::app_state::{AppState, FocusZone, UiMode};
 
 pub enum AppAction {
@@ -423,6 +424,26 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
             AppAction::None
         }
+        KeyCode::Left => {
+            let area = state.terminal_size;
+            if let Some(ref mut ss) = state.settings_state {
+                let visible_columns =
+                    settings_workstation_visible_columns(area, ss.config.workstations.len());
+                ss.scroll_workstation_columns_left(visible_columns);
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Right => {
+            let area = state.terminal_size;
+            if let Some(ref mut ss) = state.settings_state {
+                let visible_columns =
+                    settings_workstation_visible_columns(area, ss.config.workstations.len());
+                ss.scroll_workstation_columns_right(visible_columns);
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
         KeyCode::Up => {
             if let Some(ref mut ss) = state.settings_state {
                 ss.move_focus_up();
@@ -589,5 +610,141 @@ mod tests {
         assert_eq!(state.focus_zone, FocusZone::CommandInput);
         assert_eq!(state.command_buffer.text, "");
         assert_eq!(state.command_buffer.cursor, 0);
+    }
+
+    #[test]
+    fn settings_left_right_scroll_workstation_columns_when_not_editing() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let right = handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+        assert!(matches!(right, AppAction::None));
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+
+        let left = handle_key(key(KeyCode::Left, KeyModifiers::NONE), &mut state);
+        assert!(matches!(left, AppAction::None));
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            0
+        );
+    }
+
+    #[test]
+    fn settings_right_scroll_caps_at_visible_workstation_window() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+    }
+
+    #[test]
+    fn settings_scroll_keeps_workstation_focus_visible() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+        ss.set_focus(1, 0, Some(0));
+
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert_eq!(ss.workstation_column_offset, 1);
+        assert_eq!(ss.focus.workstation_index, Some(1));
+    }
+
+    #[test]
+    fn settings_left_right_keep_text_cursor_behavior_while_editing() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.set_focus(1, 0, Some(0));
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.buffer.move_cursor_end();
+        ss.focus.editing = true;
+
+        handle_key(key(KeyCode::Left, KeyModifiers::NONE), &mut state);
+
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert_eq!(ss.workstation_column_offset, 0);
+        assert_eq!(ss.buffer.cursor, 3);
     }
 }

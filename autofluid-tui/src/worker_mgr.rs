@@ -3,8 +3,9 @@
 //! 管理本地 LocalWorker 子进程和工作站 SSH 反向隧道进程的生命周期。
 //! 与 `DaemonManager` 类似，通过子进程方式启动/停止 worker 相关进程。
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::ipc::client::IpcClient;
@@ -14,6 +15,8 @@ use crate::utils::{
     is_pid_alive, kill_process_tree, process_command_line, resolve_powershell_exe,
     run_command_with_timeout, wait_for_pid_dead, workstation_env_token,
 };
+
+const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "/root/AutoFluidSimulation";
 
 /// 进程终止结果
 enum StopResult {
@@ -120,7 +123,14 @@ impl WorkerManager {
             return false;
         }
 
-        // 2. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
+        // 2. 在 server 模式下把反向隧道 reachable 地址合并到 ocar .env。
+        if let Err(e) = sync_server_workstation_reachable_env(project_dir) {
+            log_buffer.push_info(format!("❌ 同步服务器工作站 SSH reachable 配置失败: {e}"));
+            self.rollback_failed_worker_start(log_buffer);
+            return false;
+        }
+
+        // 3. 通知 daemon 端刷新配置并验证工作站 SSH 连通性
         if !prepare_remote_workers(log_buffer) {
             log_buffer
                 .push_info("❌ daemon 端 Worker 准备失败，已停止本地 Worker 启动".to_string());
@@ -128,14 +138,14 @@ impl WorkerManager {
             return false;
         }
 
-        // 3. 启动本地 LocalWorker 进程
+        // 4. 启动本地 LocalWorker 进程
         if !self.start_local_worker(project_dir, log_buffer) {
             log_buffer.push_info("❌ 本地 Worker 启动失败".to_string());
             self.rollback_failed_worker_start(log_buffer);
             return false;
         }
 
-        // 4. 启动服务器到本机的 SSH 反向隧道；此时 LocalWorker PID 已可作为 owner。
+        // 5. 启动服务器到本机的 SSH 反向隧道；此时 LocalWorker PID 已可作为 owner。
         if !self.start_tunnel(project_dir, log_buffer, "LocalWorker") {
             log_buffer.push_info("❌ 本机 SSH 隧道启动失败，已停止 Worker 启动流程".to_string());
             self.rollback_failed_worker_start(log_buffer);
@@ -914,6 +924,7 @@ fn default_workstation_tunnel_port(index: usize) -> u16 {
     if index == 0 {
         2222
     } else {
+        // 2223 is reserved for the local-worker SSH tunnel; workstation tunnels continue at 2224.
         2224u16.saturating_add(index.saturating_sub(1) as u16)
     }
 }
@@ -935,6 +946,253 @@ fn first_non_empty(values: &[Option<&str>]) -> Option<String> {
         .map(|value| value.trim())
         .find(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn sync_server_workstation_reachable_env(project_dir: &str) -> Result<(), String> {
+    if !is_server_mode() {
+        return Ok(());
+    }
+
+    let updates = workstation_server_env_updates_for_path(&PathBuf::from(project_dir));
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    let payload = format_env_update_payload(&updates);
+    let remote_command = server_reachable_env_merge_command(project_dir);
+    run_server_env_sync_command(
+        &server_ssh_exe(),
+        &server_ssh_target(),
+        &remote_command,
+        &payload,
+    )
+}
+
+fn workstation_server_env_updates_for_path(project_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut updates: Vec<(String, String)> = workstation_tunnel_specs_for_path(project_dir)
+        .into_iter()
+        .flat_map(|spec| {
+            let token = workstation_env_token(&spec.id);
+            [
+                (
+                    format!("AUTOFLUID_{token}_SSH_REACHABLE_HOST"),
+                    spec.remote_host,
+                ),
+                (
+                    format!("AUTOFLUID_{token}_SSH_REACHABLE_PORT"),
+                    spec.remote_port.to_string(),
+                ),
+                (
+                    format!("AUTOFLUID_{token}_SSH_CONNECTIVITY_MODE"),
+                    "reverse_tunnel".to_string(),
+                ),
+            ]
+        })
+        .collect();
+    updates.extend(blank_workstation_password_env_updates_for_path(project_dir));
+    updates
+}
+
+fn blank_workstation_password_env_updates_for_path(
+    project_dir: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut updates = blank_workstation_password_env_updates_from_dotenv(project_dir);
+    let mut config = std::fs::read_to_string(project_dir.join("autofluid_config.toml"))
+        .ok()
+        .and_then(|contents| toml::from_str::<SettingsConfig>(&contents).ok())
+        .unwrap_or_default();
+    config.apply_derived_defaults();
+    for workstation in config.workstations {
+        if !workstation.auth_method.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        let token = workstation_env_token(&workstation.id);
+        let key = format!("AUTOFLUID_{token}_SSH_PASSWORD");
+        if !updates.iter().any(|(existing, _)| existing == &key) {
+            updates.push((key, String::new()));
+        }
+    }
+    updates
+}
+
+fn blank_workstation_password_env_updates_from_dotenv(
+    project_dir: &std::path::Path,
+) -> Vec<(String, String)> {
+    let Ok(contents) = std::fs::read_to_string(project_dir.join(".env")) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let (key, value) = trimmed.split_once('=')?;
+            let key = key.trim();
+            if key.starts_with("AUTOFLUID_WS_")
+                && key.ends_with("_SSH_PASSWORD")
+                && value.trim().is_empty()
+            {
+                Some((key.to_string(), String::new()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn format_env_update_payload(updates: &[(String, String)]) -> Vec<u8> {
+    let mut payload = String::new();
+    for (key, value) in updates {
+        payload.push_str(key);
+        payload.push('=');
+        payload.push_str(value);
+        payload.push('\n');
+    }
+    payload.into_bytes()
+}
+
+fn server_reachable_env_merge_command(project_dir: &str) -> String {
+    let remote_project_dir = server_project_dir_for_path(project_dir);
+    let script = r##"
+import os
+import sys
+
+updates = {}
+for raw_line in sys.stdin.read().splitlines():
+    if not raw_line or "=" not in raw_line:
+        continue
+    key, value = raw_line.split("=", 1)
+    key = key.strip()
+    if key:
+        updates[key] = value
+
+path = ".env"
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        lines = handle.read().splitlines()
+except FileNotFoundError:
+    lines = []
+
+seen = set()
+merged = []
+for line in lines:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#") or "=" not in line:
+        merged.append(line)
+        continue
+    key = line.split("=", 1)[0].strip()
+    if key in updates:
+        merged.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        merged.append(line)
+
+for key, value in updates.items():
+    if key not in seen:
+        merged.append(f"{key}={value}")
+
+tmp = f"{path}.tmp"
+with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+    handle.write("\n".join(merged))
+    handle.write("\n")
+os.replace(tmp, path)
+"##;
+    format!(
+        "cd {} && python3 -c {}",
+        shell_single_quote(&remote_project_dir),
+        shell_single_quote(script)
+    )
+}
+
+fn run_server_env_sync_command(
+    ssh_exe: &str,
+    target: &str,
+    remote_command: &str,
+    payload: &[u8],
+) -> Result<(), String> {
+    let mut command = Command::new(ssh_exe);
+    command
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            target,
+            remote_command,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("启动服务器 .env 同步命令失败: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(payload) {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(format!("写入服务器 .env 同步数据失败: {e}"));
+        }
+    }
+
+    match child.wait_with_output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            if detail.is_empty() {
+                Err(format!("服务器 .env 同步命令退出状态: {}", output.status))
+            } else {
+                Err(format!(
+                    "服务器 .env 同步命令退出状态: {}, {}",
+                    output.status, detail
+                ))
+            }
+        }
+        Err(e) => Err(format!("读取服务器 .env 同步命令输出失败: {e}")),
+    }
+}
+
+fn is_server_mode() -> bool {
+    std::env::var("AUTOFLUID_SERVER_MODE")
+        .map(|mode| mode.eq_ignore_ascii_case("server"))
+        .unwrap_or(false)
+}
+
+fn server_ssh_exe() -> String {
+    env_str("AUTOFLUID_SSH_EXE").unwrap_or_else(|| "ssh".to_string())
+}
+
+fn server_ssh_target() -> String {
+    first_non_empty(&[
+        env_str("AUTOFLUID_SERVER_DAEMON_SSH_TARGET").as_deref(),
+        env_str("AUTOFLUID_SERVER_TUNNEL_HOST").as_deref(),
+        env_str("AUTOFLUID_SERVER_HOST").as_deref(),
+        env_str("AUTOFLUID_IPC_HOST").as_deref(),
+        Some("ocar"),
+    ])
+    .unwrap_or_else(|| "ocar".to_string())
+}
+
+fn server_project_dir_for_path(project_dir: &str) -> String {
+    env_str("AUTOFLUID_SERVER_DAEMON_PROJECT_DIR")
+        .or_else(|| env_str("AUTOFLUID_SERVER_PROJECT_DIR"))
+        .or_else(|| {
+            std::fs::read_to_string(PathBuf::from(project_dir).join("autofluid_config.toml"))
+                .ok()
+                .and_then(|contents| toml::from_str::<SettingsConfig>(&contents).ok())
+                .map(|config| config.server.project_dir)
+                .filter(|path| !path.trim().is_empty())
+        })
+        .unwrap_or_else(|| SERVER_DAEMON_DEFAULT_PROJECT_DIR.to_string())
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn watchdog_uninstall_command(tunnel_script: &std::path::Path, tunnel_kind: &str) -> Command {
@@ -1369,6 +1627,73 @@ mod tests {
                 },
             ]
         );
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn workstation_tunnel_specs_use_four_workstation_defaults() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-four-specs-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            four_workstation_toml(),
+        )
+        .expect("write config");
+        std::env::remove_var("AUTOFLUID_SSH_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_A_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_B_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_C_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_D_SSH_REACHABLE_PORT");
+
+        let specs = workstation_tunnel_specs_for_path(&project_dir);
+
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[3].id, "WS-D");
+        assert_eq!(specs[3].remote_host, "127.0.0.1");
+        assert_eq!(specs[3].remote_port, 2226);
+        assert_eq!(specs[3].target_host, "172.17.135.200");
+        assert_eq!(specs[3].target_port, 22);
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn server_reachable_env_updates_include_ws_d_tunnel_metadata() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-env-updates-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            four_workstation_toml(),
+        )
+        .expect("write config");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_WS_A_SSH_PASSWORD=secret-a\nAUTOFLUID_WS_D_SSH_PASSWORD=\n",
+        )
+        .expect("write env");
+        std::env::remove_var("AUTOFLUID_SSH_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_D_SSH_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_WS_D_SSH_REACHABLE_PORT");
+        std::env::remove_var("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE");
+
+        let payload =
+            format_env_update_payload(&workstation_server_env_updates_for_path(&project_dir));
+        let payload = String::from_utf8(payload).expect("utf8 payload");
+
+        assert!(payload.contains("AUTOFLUID_WS_D_SSH_REACHABLE_HOST=127.0.0.1\n"));
+        assert!(payload.contains("AUTOFLUID_WS_D_SSH_REACHABLE_PORT=2226\n"));
+        assert!(payload.contains("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE=reverse_tunnel\n"));
+        assert!(payload.contains("AUTOFLUID_WS_D_SSH_PASSWORD=\n"));
+        assert!(!payload.contains("secret-a"));
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
@@ -1961,6 +2286,30 @@ conda_env = "base"
 conda_exe = "conda"
 mpi_bin_dir = "/tmp/mpi"
 "#
+    }
+
+    fn four_workstation_toml() -> String {
+        format!(
+            r#"{}
+
+[[workstations]]
+id = "WS-D"
+host = "172.17.135.200"
+port = 22
+username = "ps"
+working_dir = "/tmp/d"
+scripts_dir = "/tmp/d/scripts"
+ref_files_dir = "/tmp/d/ref"
+scdoc_dir = "/tmp/d/scdoc"
+msh_dir = "/tmp/d/msh"
+result_dir = "/tmp/d/result"
+flag_dir = "/tmp/d/flags"
+conda_env = "base"
+conda_exe = "conda"
+mpi_bin_dir = "/tmp/mpi"
+"#,
+            three_workstation_toml()
+        )
     }
 
     fn fake_worker_env_marker_exe(

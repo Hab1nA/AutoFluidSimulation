@@ -207,7 +207,7 @@ class TestFileCleanerSystemCheck:
 
         def _get_ssh(workstation_id: str = "default") -> _SSH:
             seen.append(workstation_id)
-            return _SSH(workstation_id, workstation_id != "WS-C")
+            return _SSH(workstation_id, workstation_id not in {"WS-C", "WS-D"})
 
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
@@ -218,6 +218,7 @@ class TestFileCleanerSystemCheck:
             {**REMOTE_CONFIG, "id": "WS-A", "host": "172.17.135.240"},
             {**REMOTE_CONFIG, "id": "WS-B", "host": "172.17.135.89"},
             {**REMOTE_CONFIG, "id": "WS-C", "host": "172.17.135.254"},
+            {**REMOTE_CONFIG, "id": "WS-D", "host": "172.17.135.200"},
         ]
         try:
             state = StateManager(db_path=db_path)
@@ -225,11 +226,12 @@ class TestFileCleanerSystemCheck:
 
             result = cleaner.run_system_check()
 
-            assert seen == ["WS-A", "WS-B", "WS-C"]
+            assert seen == ["WS-A", "WS-B", "WS-C", "WS-D"]
             per_workstation = result["remote_checks"]["workstations"]
             assert per_workstation["WS-A"]["ssh"] == "连接成功"
             assert per_workstation["WS-B"]["python_version"] == "python-on-WS-B"
             assert per_workstation["WS-C"]["ssh"] == "连接失败"
+            assert per_workstation["WS-D"]["ssh"] == "连接失败"
             assert result["remote_checks"]["status"] == "partial"
             assert result["remote_checks"]["ok"] is False
         finally:

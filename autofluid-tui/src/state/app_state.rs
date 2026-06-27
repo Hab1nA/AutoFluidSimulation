@@ -943,8 +943,12 @@ mod tests {
             .engine_info
             .workstation_barriers
             .insert("WS-C".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-D".to_string(), true);
 
-        assert!(state.info_bar_text().contains("屏障:A | B | C"));
+        assert!(state.info_bar_text().contains("屏障:A | B | C | D"));
     }
 
     #[test]
@@ -964,12 +968,17 @@ mod tests {
             .engine_info
             .workstation_barriers
             .insert("WS-C".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-D".to_string(), false);
 
         let line = state.info_bar_line();
 
         assert_span_color(&line, "A", Some(state.theme.success));
         assert_span_color(&line, "B", Some(state.theme.error));
         assert_span_color(&line, "C", Some(state.theme.success));
+        assert_span_color(&line, "D", Some(state.theme.error));
         assert_span_color(&line, " | ", Some(state.theme.gray_5));
     }
 
@@ -1059,6 +1068,7 @@ mod tests {
                 "WS-A": true,
                 "WS-B": false,
                 "WS-C": true,
+                "WS-D": false,
                 "ignored": "yes"
             }
         }));
@@ -1074,6 +1084,10 @@ mod tests {
         assert_eq!(
             state.engine_info.workstation_barriers.get("WS-C"),
             Some(&true)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-D"),
+            Some(&false)
         );
         assert!(!state
             .engine_info

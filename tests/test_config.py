@@ -1499,6 +1499,42 @@ class TestWorkstationLookup:
             REMOTE_CONFIG.update(original_remote)
             WORKSTATIONS[:] = original_workstations
 
+    def test_ws_d_password_uses_per_workstation_env(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_PASSWORD", "secret-d")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-D",
+                        "host": "172.17.135.200",
+                        "username": "ps",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_d = cfg.get_workstation_config("WS-D")
+
+            assert ws_d["password"] == "secret-d"
+            assert ws_d["auth_method"] == "password"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
     def test_workstation_legacy_password_env_is_ignored(self, monkeypatch):
         import engine.config as cfg
         from engine.config import REMOTE_CONFIG, WORKSTATIONS
@@ -1627,6 +1663,9 @@ class TestWorkstationLookup:
         monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_HOST", "127.0.0.1")
         monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_PORT", "2224")
         monkeypatch.setenv("AUTOFLUID_WS_B_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_REACHABLE_PORT", "2226")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
         monkeypatch.setattr(
             cfg,
             "load_toml_config",
@@ -1638,6 +1677,7 @@ class TestWorkstationLookup:
                 "workstations": [
                     {"id": "WS-A", "host": "172.17.135.240", "username": "ps"},
                     {"id": "WS-B", "host": "172.17.135.89", "username": "ps"},
+                    {"id": "WS-D", "host": "172.17.135.200", "username": "ps"},
                 ],
             },
         )
@@ -1645,6 +1685,7 @@ class TestWorkstationLookup:
             assert cfg.reload_config_from_toml() is True
             ws_a = cfg.get_workstation_config("WS-A")
             ws_b = cfg.get_workstation_config("WS-B")
+            ws_d = cfg.get_workstation_config("WS-D")
 
             assert ws_a["reachable_host"] == "127.0.0.1"
             assert ws_a["reachable_port"] == 2222
@@ -1652,6 +1693,66 @@ class TestWorkstationLookup:
             assert ws_b["reachable_host"] == "127.0.0.1"
             assert ws_b["reachable_port"] == 2224
             assert ws_b["connectivity_mode"] == "reverse_tunnel"
+            assert ws_d["reachable_host"] == "127.0.0.1"
+            assert ws_d["reachable_port"] == 2226
+            assert ws_d["connectivity_mode"] == "reverse_tunnel"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_reload_config_refreshes_ws_d_reachable_env_from_dotenv(
+        self, monkeypatch, tmp_path
+    ):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "\n".join(
+                [
+                    "AUTOFLUID_WS_D_SSH_REACHABLE_HOST=127.0.0.1",
+                    "AUTOFLUID_WS_D_SSH_REACHABLE_PORT=2226",
+                    "AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE=reverse_tunnel",
+                    "AUTOFLUID_WS_D_SSH_PASSWORD=",
+                    "AUTOFLUID_WS_A_SSH_PASSWORD=should-not-load-from-runtime-reload",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_REACHABLE_HOST", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_REACHABLE_PORT", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_A_SSH_PASSWORD", raising=False)
+        monkeypatch.setattr(cfg, "_env_path", str(env_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                },
+                "workstations": [
+                    {"id": "WS-D", "host": "172.17.135.254", "username": "ps"},
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_d = cfg.get_workstation_config("WS-D")
+
+            assert ws_d["host"] == "127.0.0.1"
+            assert ws_d["port"] == 2226
+            assert ws_d["connectivity_mode"] == "reverse_tunnel"
+            assert ws_d["password"] == ""
+            assert ws_d["auth_method"] == "none"
+            assert os.environ["AUTOFLUID_WS_D_SSH_PASSWORD"] == ""
+            assert "AUTOFLUID_WS_A_SSH_PASSWORD" not in os.environ
         finally:
             REMOTE_CONFIG.clear()
             REMOTE_CONFIG.update(original_remote)

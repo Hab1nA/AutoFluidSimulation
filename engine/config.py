@@ -26,10 +26,11 @@ class ConfigValidationIssue:
 
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
     _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     load_dotenv(_env_path)
 except ImportError:
+    dotenv_values = None  # type: ignore[assignment]
     pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
 
 # ============================================================================
@@ -337,6 +338,38 @@ WORKSTATIONS: list[WorkstationConfig] = [_workstation_from_remote_config()]
 def _workstation_env_token(workstation_id: str) -> str:
     token = re.sub(r"[^A-Za-z0-9]+", "_", workstation_id).strip("_").upper()
     return token or "DEFAULT"
+
+
+def _is_runtime_workstation_env_key(key: str, value: str) -> bool:
+    if key in {
+        "AUTOFLUID_SSH_REACHABLE_HOST",
+        "AUTOFLUID_SSH_REACHABLE_PORT",
+        "AUTOFLUID_SSH_CONNECTIVITY_MODE",
+    }:
+        return True
+    if not key.startswith("AUTOFLUID_WS_"):
+        return False
+    if key.endswith(
+        ("_SSH_REACHABLE_HOST", "_SSH_REACHABLE_PORT", "_SSH_CONNECTIVITY_MODE")
+    ):
+        return True
+    return key.endswith("_SSH_PASSWORD") and value == ""
+
+
+def _reload_workstation_reachable_env_from_dotenv() -> None:
+    """Refresh tunnel keys written by the TUI into the server .env."""
+    if dotenv_values is None:
+        return
+    try:
+        values = dotenv_values(_env_path)
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        logger.warning("[Config] 重新加载 .env reachable 配置失败: %s", exc)
+        return
+    for key, value in values.items():
+        if value is not None and _is_runtime_workstation_env_key(key, value):
+            if key.endswith("_SSH_PASSWORD") and key in os.environ:
+                continue
+            os.environ[key] = value
 
 
 def _first_env_value(env_names: tuple[str, ...]) -> str | None:
@@ -833,6 +866,7 @@ def reload_config_from_toml() -> bool:
 
     密码只从环境变量读取，不从 TOML 读取。
     """
+    _reload_workstation_reachable_env_from_dotenv()
     toml_data = load_toml_config()
     if toml_data:
         # 展开非密码配置中的 ${VAR} 环境变量引用。

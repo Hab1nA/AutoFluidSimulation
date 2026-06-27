@@ -6,6 +6,7 @@ use crossterm::event::{MouseEvent, MouseEventKind};
 
 use crate::event_handler::{actions, HORIZONTAL_SCROLL_STEP, SCROLL_LINE_STEP, SCROLL_WHEEL_STEP};
 use crate::ipc::client::IpcClient;
+use crate::settings::settings_ui::settings_workstation_visible_columns;
 use crate::settings::SettingsState;
 use crate::state::app_state::{FocusZone, ScrollbarDragZone, UiMode};
 use crate::state::AppState;
@@ -243,7 +244,15 @@ fn handle_scroll_up(
         || state.ui_mode == UiMode::Settings
     {
         if state.ui_mode == UiMode::Settings {
+            let area = state.terminal_size;
             if let Some(ref mut ss) = state.settings_state {
+                if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    let visible_columns =
+                        settings_workstation_visible_columns(area, ss.config.workstations.len());
+                    ss.scroll_workstation_columns_left(visible_columns);
+                    state.needs_redraw = true;
+                    return;
+                }
                 if ss.scroll > 0 {
                     ss.scroll = ss.scroll.saturating_sub(SCROLL_LINE_STEP);
                     state.needs_redraw = true;
@@ -298,7 +307,15 @@ fn handle_scroll_down(
         || state.ui_mode == UiMode::Settings
     {
         if state.ui_mode == UiMode::Settings {
+            let area = state.terminal_size;
             if let Some(ref mut ss) = state.settings_state {
+                if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    let visible_columns =
+                        settings_workstation_visible_columns(area, ss.config.workstations.len());
+                    ss.scroll_workstation_columns_right(visible_columns);
+                    state.needs_redraw = true;
+                    return;
+                }
                 ss.scroll = ss.scroll.saturating_add(SCROLL_LINE_STEP);
                 state.needs_redraw = true;
             }
@@ -1445,6 +1462,63 @@ mod tests {
         assert_eq!(
             detect_settings_field(content_x + 80, content_y + 5, area, &state),
             None
+        );
+    }
+
+    #[test]
+    fn shift_mouse_wheel_scrolls_settings_workstation_columns() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        handle_scroll_down(
+            &mut state,
+            false,
+            false,
+            false,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+
+        handle_scroll_up(
+            &mut state,
+            false,
+            false,
+            false,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            0
         );
     }
 }
