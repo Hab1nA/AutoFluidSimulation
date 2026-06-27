@@ -18,7 +18,7 @@ from typing import Any
 import ansys.fluent.core as pyfluent
 
 SIDEWALL_ZONES = ("wall_chamber", "wall_nozzle", "wall_throat")
-FLUID_ZONE = "s------6.5076"
+DEFAULT_FLUID_ZONE = "s------6.5076"
 OUTLET_ZONE = "outlet"
 INLET_OXIDIZER = "inlet_oxidizer"
 INLET_FUEL = "inlet_fuel"
@@ -96,6 +96,25 @@ def _parse_report_unit(path: Path) -> str | None:
 def _run_report(command: Any, path: Path, **kwargs: Any) -> float:
     command(write_to_file=True, file_name=str(path), **kwargs)
     return _parse_report_file(path)
+
+
+def _resolve_fluid_cell_zone(solver: Any) -> str:
+    """Return the active case's Fluent fluid cell zone name."""
+    try:
+        fluid_zones = solver.settings.setup.cell_zone_conditions.fluid
+        names = list(fluid_zones.get_object_names())
+    except (AttributeError, TypeError):
+        names = []
+    candidates = [
+        str(name)
+        for name in names
+        if str(name).startswith("s------") and "." in str(name)
+    ]
+    if candidates:
+        return candidates[0]
+    if names:
+        return str(names[0])
+    return DEFAULT_FLUID_ZONE
 
 
 def _run_length_report_m(command: Any, path: Path, **kwargs: Any) -> float:
@@ -179,6 +198,7 @@ def _collect_reports(
 
     si = solver.settings.results.report.surface_integrals
     vi = solver.settings.results.report.volume_integrals
+    fluid_zone = _resolve_fluid_cell_zone(solver)
 
     _define_custom_field_function(
         solver,
@@ -218,7 +238,7 @@ def _collect_reports(
         "qdot_actual": _run_report(
             vi.volume_integral,
             reports_dir / "qdot_actual.txt",
-            cell_zones=[FLUID_ZONE],
+            cell_zones=[fluid_zone],
             cell_function="heat-release-rate",
         ),
         "outlet_axis_velocity_mass_avg": outlet_axis_velocity_mass_avg,
@@ -261,7 +281,7 @@ def _collect_reports(
     }
     report_values["chamber_wall_pressure_abs"] = report_values["chamber_pressure_gauge"] + pressure_reference
 
-    zone = FLUID_ZONE
+    zone = fluid_zone
     hot_condition = f"StaticTemperature > {tcomb:g} [K]"
     chamber_condition = f"Position.x <= {chamber_x_max:.17g} [m]"
     phi = "((1-MeanMixtureFraction)/(MeanMixtureFraction+1e-12))/4"

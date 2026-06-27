@@ -60,6 +60,17 @@ def test_pause_arriving_during_resume_wins_after_reconciliation() -> None:
     assert control.paused_event.is_set() is True
 
 
+def test_resume_transition_opens_pause_gate_for_reconciliation() -> None:
+    """resume 扫描自身触发的 dispatch 不能被旧 paused 标志自锁。"""
+    control = PipelineControl()
+    control.pause()
+
+    with control.resume_transition():
+        assert control.paused_event.is_set() is False
+
+    assert control.paused_event.is_set() is False
+
+
 def test_external_start_does_not_block_pause_acknowledgement() -> None:
     """pause 不等待已准入的长耗时副作用完成，后续副作用会被拒绝。"""
     control = PipelineControl()

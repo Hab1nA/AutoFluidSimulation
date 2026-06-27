@@ -104,6 +104,22 @@ def _move_and_rename(config_id: int, working_dir_t: str, working_dir_v: str, ani
         print(f"[{config_id}] 移动动画: {src_path} -> {dst_path}")
 
 
+def _final_animation_paths(config_id: int, anim_dir: str) -> tuple[str, str]:
+    return (
+        os.path.join(anim_dir, f"v_gen4_{config_id}.mp4"),
+        os.path.join(anim_dir, f"t_gen4_{config_id}.mp4"),
+    )
+
+
+def _final_animation_files_exist(config_id: int, anim_dir: str) -> bool:
+    return all(os.path.isfile(path) for path in _final_animation_paths(config_id, anim_dir))
+
+
+def _is_video_options_journal_error(error: Exception) -> bool:
+    message = str(error)
+    return "Video Options" in message and "cannot find widget" in message
+
+
 def _cleanup_working_dirs(config_id: int, working_dirs: list[str]) -> None:
     for dir_path in working_dirs:
         if not os.path.exists(dir_path):
@@ -211,6 +227,12 @@ def _write_flag(flag_file: str) -> None:
     os.replace(tmp_file, flag_file)
 
 
+def _run_metrics_and_write_flag(args: argparse.Namespace, case_path: str, config_id: int) -> None:
+    _run_metrics_postprocess(args, case_path, config_id)
+    _write_flag(args.flag_file)
+    print(f"[{config_id}] 后处理完成标志已写入: {args.flag_file}")
+
+
 def main() -> None:
     args = parse_args()
     if args.config_id < 0:
@@ -221,7 +243,6 @@ def main() -> None:
     data_path = os.path.join(args.case_dir, f"model_gen4_{config_id}.dat.h5")
     _require_file(case_path, "Case 文件")
     _require_file(data_path, "Data 文件")
-    _require_file(args.post_journal_path, "后处理 Journal 文件")
 
     for dir_path in (
         args.postprocess_output_dir,
@@ -238,6 +259,13 @@ def main() -> None:
     print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 额外后处理 Journal: {args.extra_post_journal_path or '<none>'}")
     print(f"[配置] 后处理输出目录: {args.postprocess_output_dir}")
+
+    if _final_animation_files_exist(config_id, args.anim_dir):
+        print(f"[{config_id}] 最终动画已存在，跳过视频后处理 Journal")
+        _run_metrics_and_write_flag(args, case_path, config_id)
+        return
+
+    _require_file(args.post_journal_path, "后处理 Journal 文件")
 
     session = pyfluent.launch_fluent(
         mode=pyfluent.FluentMode.SOLVER,
@@ -270,8 +298,14 @@ def main() -> None:
         time.sleep(2)
         _move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
     except Exception as e:
-        print(f"[错误] 后处理模型 {config_id} 时发生异常: {e}")
-        raise
+        if _is_video_options_journal_error(e) and _final_animation_files_exist(config_id, args.anim_dir):
+            print(
+                f"[{config_id}] 视频 Journal GUI 控件失败，但最终动画已存在，"
+                "继续执行指标后处理"
+            )
+        else:
+            print(f"[错误] 后处理模型 {config_id} 时发生异常: {e}")
+            raise
     finally:
         print(f"[{config_id}] 正在清理后处理日志文件...")
         _cleanup_log_files(config_id, args.working_dir)
@@ -279,9 +313,7 @@ def main() -> None:
         _cleanup_working_dirs(config_id, [args.working_dir_t, args.working_dir_v])
         _close_session(config_id, session)
 
-    _run_metrics_postprocess(args, case_path, config_id)
-    _write_flag(args.flag_file)
-    print(f"[{config_id}] 后处理完成标志已写入: {args.flag_file}")
+    _run_metrics_and_write_flag(args, case_path, config_id)
 
 
 if __name__ == "__main__":

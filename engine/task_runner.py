@@ -72,6 +72,7 @@ class TaskRunner:
         self._local_worker_adapter = local_worker_adapter
         self.last_sw_error = ""
         self.last_sc_error = ""
+        self.last_solver_error = ""
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -457,12 +458,16 @@ class TaskRunner:
         stopped_event: threading.Event | None = None,
     ) -> bool:
         """等待求解完成（委托给 RemoteExecutor）。"""
-        return self._remote_executor.wait_solver_completion(
+        result = self._remote_executor.wait_solver_completion(
             config_name,
             paused_event,
             stopped_event,
             workstation_id=self._workstation_for_config(config_name),
         )
+        self.last_solver_error = str(
+            getattr(self._remote_executor, "last_solver_error", "")
+        )
+        return result
 
     # ------------------------------------------------------------------
     # 阶段 6: 后处理（委托给 RemoteExecutor）

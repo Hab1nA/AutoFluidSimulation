@@ -752,6 +752,69 @@ def test_wait_meshing_completion_returns_false_immediately_on_error_flag(monkeyp
     assert (3, "meshing") not in state.remote_tasks
 
 
+def test_wait_solver_completion_records_remote_error_summary(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 60)
+
+    error_flag = "D:/flags/solver_done_3.txt.error"
+    read_paths: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return remote_path.replace("\\", "/") == error_flag
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            read_paths.append(remote_path)
+            normalized = remote_path.replace("\\", "/")
+            if normalized == error_flag:
+                return "error 1"
+            if normalized == "D:/flags/autofluid_bg_solver.log":
+                return "\n".join(
+                    [
+                        "iteration 420",
+                        "BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES",
+                        "Fatal error identified on the Fluent server",
+                    ]
+                )
+            return ""
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            return True
+
+        def cleanup_remote_task_entry(self, task_name: str, pid_file: str | None = None) -> bool:
+            return True
+
+    state = _StateRecorder()
+    state.remote_tasks[(3, "solver")] = {
+        "config_name": 3,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver",
+        "flag_file": "D:/flags/solver_done_3.txt",
+        "error_flag_file": error_flag,
+        "log_file": "D:/flags/autofluid_bg_solver.log",
+        "pid_file": "D:/flags/autofluid_bg_solver.pid",
+        "started_at": 0.0,
+    }
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: 0.0)
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("error flag should stop Solver polling immediately")
+        ),
+    )
+
+    assert executor.wait_solver_completion(3) is False
+    assert [path.replace("\\", "/") for path in read_paths] == [
+        error_flag,
+        "D:/flags/autofluid_bg_solver.log",
+    ]
+    assert "BAD TERMINATION" in executor.last_solver_error
+    assert "Fatal error identified" in executor.last_solver_error
+
+
 def test_wait_meshing_completion_requires_mesh_after_done_flag(monkeypatch):
     monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
     monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")

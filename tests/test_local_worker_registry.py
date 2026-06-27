@@ -84,6 +84,29 @@ def test_heartbeat_refreshes_worker_deadline() -> None:
     assert registry.has_online_worker() is True
 
 
+def test_heartbeat_can_rebuild_worker_metadata_after_registry_clear() -> None:
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+
+    worker = registry.heartbeat(
+        "local-pc-01",
+        capabilities={"sw": True, "sc_slots": 1},
+        network={
+            "reachable_host": "127.0.0.1",
+            "ssh_port": 2223,
+            "connectivity_mode": "reverse_tunnel",
+        },
+    )
+
+    assert worker["capabilities"] == {"sw": True, "sc_slots": 1}
+    assert worker["network"] == {
+        "reachable_host": "127.0.0.1",
+        "ssh_port": 2223,
+        "connectivity_mode": "reverse_tunnel",
+    }
+
+
 def test_register_worker_preserves_ocar_reachable_network_metadata() -> None:
     from engine.local_worker_registry import LocalWorkerRegistry
 

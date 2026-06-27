@@ -131,7 +131,11 @@ class LocalWorker:
         """Return the IPC request used to refresh this LocalWorker heartbeat."""
         return create_request(
             CMD_WORKER_HEARTBEAT,
-            {"worker_id": self.config.worker_id},
+            {
+                "worker_id": self.config.worker_id,
+                "capabilities": dict(self.config.capabilities),
+                "network": dict(self.config.network),
+            },
             auth_token=self.config.auth_token,
         )
 

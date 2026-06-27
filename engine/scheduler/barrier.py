@@ -435,6 +435,24 @@ class BarrierCoordinator:
             STATUS_RETRYING,
         )
 
+        # Daemon 重启后内存中的工作站调度线程列表为空，但远程 Fluent
+        # 任务可能仍在运行。必须先恢复这些 Running 任务的轮询，避免同一
+        # 工作站启动新的独立 PostProcess/Solver 并争用工作目录和 Fluent 资源。
+        for cn in self.state.get_all_configs():
+            if self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
+                continue
+            if (
+                allowed_workstations is not None
+                and self._workstation_for_config(cn) not in allowed_workstations
+            ):
+                continue
+            solver_status = self.state.get_step_status(cn, "solver")
+            postprocess_status = self.state.get_step_status(cn, "postprocess")
+            if solver_status == STATUS_RUNNING:
+                return cn
+            if solver_status == STATUS_COMPLETED and postprocess_status == STATUS_RUNNING:
+                return cn
+
         # PostProcess 是 Solver 的尾部阶段。若某些构型已经完成 Solver，
         # 优先补齐这些后处理 backlog，再启动新的 Solver 任务。
         for cn in self.state.get_all_configs():
@@ -522,7 +540,11 @@ class BarrierCoordinator:
             self._execute_or_recover_postprocess_for_config(config_name)
             return True
 
-        if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
+        if self.state.get_step_status(config_name, "solver") in (
+            STATUS_RUNNING,
+            STATUS_PAUSED,
+            STATUS_RETRYING,
+        ):
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
             try:
@@ -654,7 +676,7 @@ class BarrierCoordinator:
         if postprocess_status == STATUS_ERROR:
             return
 
-        if postprocess_status == STATUS_RUNNING:
+        if postprocess_status in (STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING):
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
             try:
@@ -735,8 +757,11 @@ class BarrierCoordinator:
                         "引擎已停止"
                     )
                 else:
+                    error_message = str(
+                        getattr(self.runner, "last_solver_error", "") or "求解超时"
+                    )
                     self.state.set_step_status(
-                        config_name, "solver", STATUS_ERROR, "求解超时"
+                        config_name, "solver", STATUS_ERROR, error_message
                     )
         except InfrastructureUnavailableError as e:
             logger.warning(

@@ -903,6 +903,8 @@ class TestFileCleanerCleanStepFiles:
 
             assert any(path.endswith("meshing_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
             assert any(path.endswith("solver_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_progress_1.json") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_progress_1.json.transcript") for path in ssh_by_id["WS-A"].deleted)
             assert any(path.endswith("postprocess_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
         finally:
             cfg.IPC_CONFIG["db_path"] = orig

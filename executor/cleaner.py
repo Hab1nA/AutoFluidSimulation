@@ -55,7 +55,11 @@ def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int
     if not flag_dir:
         return []
     flag_file = f"{flag_dir}/{stem}_{config_name}.txt"
-    return [flag_file, f"{flag_file}.error"]
+    paths = [flag_file, f"{flag_file}.error"]
+    if stem == "solver_done":
+        progress_file = f"{flag_dir}/solver_progress_{config_name}.json"
+        paths.extend([progress_file, f"{progress_file}.transcript"])
+    return paths
 
 
 def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -> list[str]:

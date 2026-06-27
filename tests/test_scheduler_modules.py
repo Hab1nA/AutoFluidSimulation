@@ -1759,6 +1759,17 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
 
+    def test_completed_solver_kept_when_remote_size_probe_is_unknown(self):
+        """远程 size probe 返回 None 时代表未知，不能误判 Completed Solver 输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
     def test_postprocess_artifact_exists_accepts_linux_absolute_path(self, monkeypatch):
         """多工作站支持 Linux 绝对路径时，PostProcess 产物探测不能被前导 / 过滤掉。"""
         monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", "")
@@ -4323,6 +4334,31 @@ class TestBarrierCoordinator:
         assert not self.stopped.is_set()
         assert not t.is_alive()
 
+    def test_idle_workstation_does_not_steal_solver_from_other_workstations(self):
+        """Solver 不应跨工作站接手其他站点生成的 Meshing 产物。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-C")
+        for cn in (1, 2, 3):
+            self.state.set_step_status(cn, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "solver", STATUS_COMPLETED)
+        self.state.set_step_status(2, "postprocess", STATUS_COMPLETED)
+
+        assert self.coordinator._next_solver_config({"WS-B"}) is None
+
+        started = self.coordinator._dispatch_solver_tasks({"WS-B"})
+
+        assert started is False
+        assert self.runner._solver_dispatched == []
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+        assert self.state.get_step_status(3, "solver") == STATUS_WAITING
+
     def test_barrier_waits_when_paused(self):
         """暂停期间屏障监控等待，恢复后继续。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -4420,6 +4456,28 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+
+    def test_solver_wait_failure_uses_runner_error_message(self):
+        """Solver 等待失败时应保留远端错误摘要，而不是统一写成超时。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+        self.runner.last_solver_error = "BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        errors = {
+            (config_name, step_name): error_message
+            for config_name, step_name, error_message in self.state.get_error_configs()
+        }
+        assert (
+            errors[(1, "solver")]
+            == "BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES"
+        )
 
     def test_workstation_barrier_dispatches_only_ready_workstation(self):
         """单个工作站 Meshing 完成后，应只分发该工作站的 Solver。"""
@@ -4706,6 +4764,45 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(2, "postprocess") == STATUS_COMPLETED
 
+    def test_running_solver_on_same_workstation_preempts_postprocess_backlog_after_restart(self):
+        """重启恢复时同工作站 Running Solver 应先于 PostProcess backlog 恢复。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            2: [5.0, 6.0, 7.0, 8.0],
+            7: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (2, 7):
+            self.state.set_config_workstation(cn, "WS-B")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "solver", STATUS_COMPLETED)
+        self.state.set_step_status(2, "postprocess", STATUS_WAITING)
+        self.state.set_step_status(7, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        execution_order: list[tuple[str, int]] = []
+
+        def wait_solver_completion(config_name: int, paused_event=None, stopped_event=None) -> bool:
+            execution_order.append(("wait_solver", config_name))
+            self.runner._solver_wait_count += 1
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+            return True
+
+        def execute_postprocess(config_name: int) -> bool:
+            execution_order.append(("postprocess", config_name))
+            return _MockTaskRunner.execute_postprocess(self.runner, config_name)
+
+        self.runner.wait_solver_completion = wait_solver_completion
+        self.runner.execute_postprocess = execute_postprocess
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert execution_order[:2] == [
+            ("wait_solver", 7),
+            ("postprocess", 2),
+        ]
+
     def test_all_postprocess_backlog_runs_before_new_solver(self):
         """多个 PostProcess backlog 应全部完成后才启动后续 Solver。"""
         self.state.load_configs({
@@ -4780,6 +4877,22 @@ class TestBarrierCoordinator:
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
+        assert self.runner._solver_dispatched == []
+        assert self.runner._solver_wait_count == 1
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_paused_solver_with_remote_task_recovers_wait_without_restart(self):
+        """Daemon 停止落库 Paused 后，远程 Solver 仍运行时应恢复轮询。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_PAUSED)
         self.runner._remote_executor._remote_task_status = "running"
 
         assert self.coordinator.dispatch_solver_if_ready() is True

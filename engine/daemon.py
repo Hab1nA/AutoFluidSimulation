@@ -973,7 +973,19 @@ class PipelineDaemon:
         worker_id = str(params.get("worker_id") or "")
         if not worker_id:
             return False, None, "缺少 worker_id"
-        worker = self.local_worker_registry.heartbeat(worker_id)
+        capabilities = params.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = None
+        network = params.get("network")
+        if not isinstance(network, dict):
+            network = None
+        remote_addr = params.get("remote_addr")
+        worker = self.local_worker_registry.heartbeat(
+            worker_id,
+            capabilities=capabilities,
+            network=network,
+            remote_addr=str(remote_addr) if remote_addr else None,
+        )
         return True, worker, "LocalWorker 心跳已更新"
 
     def handle_worker_poll(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:

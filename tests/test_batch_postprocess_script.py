@@ -68,6 +68,16 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
         working_dir_t=str(working_dir_t),
         working_dir_v=str(working_dir_v),
         fluent_path=str(tmp_path / "fluent.exe"),
+        metrics_script=None,
+        compute_metrics_script=None,
+        metrics_output_dir=str(tmp_path / "metrics"),
+        metrics_processor_count=1,
+        metrics_ambient_pressure=0.0,
+        metrics_pressure_reference=101325.0,
+        metrics_tcomb=1000.0,
+        metrics_thrust_axis="x",
+        metrics_exit_to_throat_area_ratio=7.42,
+        metrics_cstar_reference=1830.4,
     )
 
 
@@ -149,6 +159,64 @@ def test_postprocess_does_not_write_flag_when_journal_fails(tmp_path, monkeypatc
         module.main()
 
     assert not Path(args.flag_file).exists()
+
+
+def test_postprocess_skips_video_journals_when_final_animations_exist(tmp_path, monkeypatch):
+    def fail_launch(**kwargs: object):
+        raise AssertionError("Fluent should not be launched when final videos already exist")
+
+    module = _load_batch_postprocess_module(monkeypatch, fail_launch)
+    args = _make_args(tmp_path)
+    Path(args.anim_dir).mkdir(parents=True)
+    Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").write_bytes(b"v")
+    Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").write_bytes(b"t")
+    metrics_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        module,
+        "_run_metrics_postprocess",
+        lambda parsed_args, case_path, config_id: metrics_calls.append((case_path, config_id)),
+    )
+
+    module.main()
+
+    assert metrics_calls == [
+        (str(Path(args.case_dir, f"model_gen4_{args.config_id}.cas.h5")), args.config_id)
+    ]
+    assert Path(args.flag_file).read_text(encoding="utf-8").strip() == "OK"
+
+
+def test_postprocess_continues_video_options_failure_when_final_animations_exist(
+    tmp_path,
+    monkeypatch,
+):
+    class _VideoOptionsFailingSession(_SuccessfulPostprocessSession):
+        def _read_journal(self, path: str) -> None:
+            self.read_journal_calls.append(path)
+            Path(self.anim_dir, f"v_gen4_{self.config_id}.mp4").write_bytes(b"v")
+            Path(self.anim_dir, f"t_gen4_{self.config_id}.mp4").write_bytes(b"t")
+            raise RuntimeError(
+                'cx-name-to-id: cannot find widget: "Video Options*Table1*IntegerEntry2(FPS)"'
+            )
+
+    session = _VideoOptionsFailingSession()
+    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: session)
+    args = _make_args(tmp_path)
+    session.anim_dir = Path(args.anim_dir)
+    session.config_id = args.config_id
+    metrics_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        module,
+        "_run_metrics_postprocess",
+        lambda parsed_args, case_path, config_id: metrics_calls.append((case_path, config_id)),
+    )
+
+    module.main()
+
+    assert session.read_journal_calls == [args.post_journal_path]
+    assert metrics_calls
+    assert Path(args.flag_file).exists()
 
 
 def test_postprocess_launch_uses_configured_fluent_path(tmp_path, monkeypatch):

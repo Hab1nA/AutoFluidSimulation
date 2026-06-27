@@ -4,6 +4,7 @@ import csv
 import importlib.util
 import math
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -387,6 +388,24 @@ def test_default_config_name_strips_fluent_case_suffix(monkeypatch) -> None:
     assert module._default_config_name(Path("model_gen4_12.cas.h5")) == "model_gen4_12"
     assert module._default_config_name(Path("model_gen4_12.dat.h5")) == "model_gen4_12"
     assert module._default_config_name(Path("custom.case")) == "custom"
+
+
+def test_resolve_fluid_cell_zone_uses_case_specific_fluent_name(monkeypatch) -> None:
+    module = _load_postprocess_module(monkeypatch)
+
+    class _FluidZones:
+        def get_object_names(self):
+            return ["s------6.5084"]
+
+    solver = SimpleNamespace(
+        settings=SimpleNamespace(
+            setup=SimpleNamespace(
+                cell_zone_conditions=SimpleNamespace(fluid=_FluidZones())
+            )
+        )
+    )
+
+    assert module._resolve_fluid_cell_zone(solver) == "s------6.5084"
 
 
 def test_config_named_metrics_csv_is_single_row(tmp_path: Path) -> None:

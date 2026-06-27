@@ -867,7 +867,9 @@ class PipelineScheduler:
             try:
                 if hasattr(ssh, "get_remote_file_size"):
                     size = ssh.get_remote_file_size(remote_path, timeout=5.0)
-                    if size is None or size <= 0:
+                    if size is None:
+                        return None
+                    if size <= 0:
                         return False
                     continue
                 if not ssh.check_remote_file(remote_path, timeout=5.0):

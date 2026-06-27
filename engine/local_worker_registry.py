@@ -48,7 +48,13 @@ class LocalWorkerRegistry:
             self._workers[worker_id] = worker
             return self._with_online(worker)
 
-    def heartbeat(self, worker_id: str) -> dict[str, Any]:
+    def heartbeat(
+        self,
+        worker_id: str,
+        capabilities: dict[str, Any] | None = None,
+        network: dict[str, Any] | None = None,
+        remote_addr: str | None = None,
+    ) -> dict[str, Any]:
         """Refresh one worker heartbeat, creating a minimal entry if needed."""
         now = self._clock()
         with self._lock:
@@ -62,6 +68,10 @@ class LocalWorkerRegistry:
                     "last_seen_at": now,
                 },
             )
+            if capabilities is not None:
+                worker["capabilities"] = dict(capabilities)
+            if network is not None or remote_addr:
+                worker["network"] = self._network_snapshot(network, remote_addr)
             worker["last_seen_at"] = now
             self._prune_offline_workers_locked()
             self._prune_finished_tasks_locked()

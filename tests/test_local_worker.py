@@ -55,7 +55,16 @@ def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> Non
     }
     assert heartbeat["command"] == CMD_WORKER_HEARTBEAT
     assert heartbeat["auth_token"] == "secret"
-    assert heartbeat["params"] == {"worker_id": "local-pc-01"}
+    assert heartbeat["params"] == {
+        "worker_id": "local-pc-01",
+        "capabilities": {"sw": True, "sc_slots": 1},
+        "network": {
+            "candidate_hosts": ["172.17.135.240", "100.64.1.20"],
+            "reachable_host": "100.64.1.20",
+            "connectivity_mode": "tailscale",
+            "ssh_port": 22,
+        },
+    }
 
     poll = worker.build_poll_request()
     assert poll["command"] == CMD_WORKER_POLL

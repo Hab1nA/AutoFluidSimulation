@@ -128,6 +128,7 @@ class RemoteExecutor:
         self._last_successful_sync_signature: tuple[object, ...] | None = None
         self._last_successful_sync_signatures: dict[str, tuple[object, ...]] = {}
         self.last_meshing_error = ""
+        self.last_solver_error = ""
 
     # 步骤名 → 日志前缀映射（项目规范：中文消息 + 英文标签前缀）
     _STEP_LOG_PREFIX: dict[str, str] = {
@@ -1724,6 +1725,7 @@ class RemoteExecutor:
         )
         file_grace_period = 60
         first_file_seen_time: float | None = None
+        self.last_solver_error = ""
 
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
@@ -1748,8 +1750,17 @@ class RemoteExecutor:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
+                        error_summary = self._read_remote_task_error_summary(
+                            ssh,
+                            config_name,
+                            "solver",
+                            workstation_id,
+                            error_flag,
+                        )
+                        self.last_solver_error = error_summary
                         logger.error(
-                            f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
+                            f"[Solver] 构型{config_name} 仿真求解远程任务执行失败: "
+                            f"{error_summary}"
                         )
                         ssh.delete_remote_file(error_flag)
                         self._clear_solver_progress(progress_file, ssh)
@@ -1796,6 +1807,9 @@ class RemoteExecutor:
                                 f"[Solver] 构型{config_name}: {', '.join(missing)} "
                                 f"{file_grace_period}s 内未生成，判定为导出错误"
                             )
+                            self.last_solver_error = (
+                                f"{', '.join(missing)} {file_grace_period}s 内未生成"
+                            )
                             # 清理部分文件 + 标志文件，确保 retry 从干净状态开始
                             if cas_exists and cas_file:
                                 ssh.delete_remote_file(cas_file)
@@ -1820,6 +1834,7 @@ class RemoteExecutor:
             time.sleep(poll_interval)
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
+        self.last_solver_error = f"仿真求解超时 ({timeout}s)"
         # 超时后终止远程进程，防止资源泄漏和重试冲突
         self._kill_remote_task_for_config(config_name, "solver", workstation_id)
         with self._ssh_guard(workstation_id):
