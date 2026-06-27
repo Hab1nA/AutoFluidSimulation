@@ -56,6 +56,16 @@ def test_reverse_tunnel_monitor_binds_recovery_to_owner_budget_and_log_limit() -
     assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in monitor_source
 
 
+def test_reverse_tunnel_monitor_keeps_recovering_after_budget_exhaustion() -> None:
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    register_start = source.index("function Register-TunnelFailure")
+    register_end = source.index("function Reset-TunnelFailureBudget")
+    register_source = source[register_start:register_end]
+
+    assert "budget exhausted" in register_source
+    assert "return $false" not in register_source
+
+
 def test_reverse_tunnel_startup_noops_when_owner_is_gone() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
     owner_guard = (

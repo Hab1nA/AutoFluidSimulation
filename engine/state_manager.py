@@ -819,6 +819,7 @@ class StateManager:
                         "DELETE FROM engine_state WHERE key = ?",
                         ("solver_progress",),
                     )
+                    self._clear_solver_progress_by_config_locked(conn, config_name)
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'sw'} 起的所有步骤")
 
@@ -839,6 +840,10 @@ class StateManager:
                 conn.execute(
                     "DELETE FROM engine_state WHERE key = ?",
                     ("solver_progress",),
+                )
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress_by_config",),
                 )
         logger.warning("已重置所有构型的所有步骤！")
 
@@ -877,6 +882,18 @@ class StateManager:
                     "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
                     ("solver_progress", payload),
                 )
+                config_name = progress.get("config_name")
+                if config_name is not None:
+                    try:
+                        if not isinstance(config_name, str | int | float):
+                            raise TypeError
+                        self._set_solver_progress_by_config_locked(
+                            conn,
+                            int(config_name),
+                            progress,
+                        )
+                    except (TypeError, ValueError):
+                        logger.debug("[State] solver_progress 缺少有效 config_name，跳过 per-config map")
 
     def get_solver_progress(self) -> dict[str, object] | None:
         """读取当前 Solver 剩余时间进度；不存在或损坏时返回 None。"""
@@ -891,8 +908,53 @@ class StateManager:
             value = json.loads(row["value"])
         except json.JSONDecodeError:
             logger.warning("[State] solver_progress JSON 损坏，已忽略")
-            return None
-        return value if isinstance(value, dict) else None
+        else:
+            if isinstance(value, dict):
+                return value
+        progress_by_config = self.get_solver_progress_by_config()
+        return self._latest_solver_progress_from_map(progress_by_config)
+
+    def set_solver_progress_by_config(
+        self,
+        config_name: int,
+        progress: dict[str, object],
+    ) -> None:
+        """按构型存储 Solver 剩余时间进度。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                self._set_solver_progress_by_config_locked(conn, config_name, progress)
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    ("solver_progress", json.dumps(progress, ensure_ascii=False)),
+                )
+
+    def get_solver_progress_by_config(self) -> dict[str, dict[str, object]]:
+        """读取所有构型的 Solver 剩余时间进度。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM engine_state WHERE key = ?",
+                ("solver_progress_by_config",),
+            ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning("[State] solver_progress_by_config JSON 损坏，已忽略")
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): progress
+            for key, progress in value.items()
+            if isinstance(progress, dict)
+        }
+
+    def clear_solver_progress_by_config(self, config_name: int) -> None:
+        """清理指定构型的 Solver progress。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                self._clear_solver_progress_by_config_locked(conn, config_name)
 
     def clear_solver_progress(self) -> None:
         """清理当前 Solver 剩余时间进度。"""
@@ -902,6 +964,82 @@ class StateManager:
                     "DELETE FROM engine_state WHERE key = ?",
                     ("solver_progress",),
                 )
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress_by_config",),
+                )
+
+    def _set_solver_progress_by_config_locked(
+        self,
+        conn: sqlite3.Connection,
+        config_name: int,
+        progress: dict[str, object],
+    ) -> None:
+        progress_by_config = self._read_solver_progress_by_config_locked(conn)
+        progress_by_config[str(config_name)] = progress
+        conn.execute(
+            "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+            ("solver_progress_by_config", json.dumps(progress_by_config, ensure_ascii=False)),
+        )
+
+    def _clear_solver_progress_by_config_locked(
+        self,
+        conn: sqlite3.Connection,
+        config_name: int,
+    ) -> None:
+        progress_by_config = self._read_solver_progress_by_config_locked(conn)
+        progress_by_config.pop(str(config_name), None)
+        if progress_by_config:
+            conn.execute(
+                "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                ("solver_progress_by_config", json.dumps(progress_by_config, ensure_ascii=False)),
+            )
+            latest_progress = self._latest_solver_progress_from_map(progress_by_config)
+            if latest_progress is None:
+                conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress",))
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    (
+                        "solver_progress",
+                        json.dumps(latest_progress, ensure_ascii=False),
+                    ),
+                )
+        else:
+            conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress_by_config",))
+            conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress",))
+
+    @staticmethod
+    def _read_solver_progress_by_config_locked(
+        conn: sqlite3.Connection,
+    ) -> dict[str, dict[str, object]]:
+        row = conn.execute(
+            "SELECT value FROM engine_state WHERE key = ?",
+            ("solver_progress_by_config",),
+        ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): progress
+            for key, progress in value.items()
+            if isinstance(progress, dict)
+        }
+
+    @staticmethod
+    def _latest_solver_progress_from_map(
+        progress_by_config: dict[str, dict[str, object]],
+    ) -> dict[str, object] | None:
+        for key in reversed(progress_by_config):
+            progress = progress_by_config.get(key)
+            if isinstance(progress, dict):
+                return progress
+        return None
 
     def set_all_running_to_paused(self):
         """将所有 Running 和 Retrying 状态的步骤批量切换为 Paused。"""

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
-    CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
+    CMD_START, CMD_PAUSE, CMD_STOP, CMD_STOP_STEP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
     CMD_GET_LOG_ENTRIES, CMD_GET_DASHBOARD, CMD_RELOAD_CONFIG,
@@ -107,6 +107,7 @@ class IPCServer:
         self.register_handler(CMD_START, daemon.handle_start)
         self.register_handler(CMD_PAUSE, daemon.handle_pause)
         self.register_handler(CMD_STOP, daemon.handle_stop)
+        self.register_handler(CMD_STOP_STEP, daemon.handle_stop_step)
         self.register_handler(CMD_CHECK, daemon.handle_check)
 
         # 查询

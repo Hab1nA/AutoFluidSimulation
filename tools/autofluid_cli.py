@@ -22,6 +22,7 @@ from ipc.protocol import (
     CMD_PAUSE,
     CMD_RESET_STEP,
     CMD_START,
+    CMD_STOP_STEP,
     CMD_WORKER_RESTART,
     CMD_WORKER_START,
     CMD_WORKER_STOP,
@@ -371,6 +372,11 @@ def _build_parser() -> argparse.ArgumentParser:
     reset.add_argument("config_name")
     reset.add_argument("step", nargs="?")
 
+    stop_step = sub.add_parser("stop-step")
+    stop_step.add_argument("config_name")
+    stop_step.add_argument("step")
+    stop_step.add_argument("--reason", default="用户请求停止远程任务")
+
     daemon = sub.add_parser("daemon")
     daemon.add_argument("action", choices=["start", "stop", "restart", "status"])
 
@@ -462,6 +468,16 @@ def run_cli(
                 return _json_result(ok=False, command="reset", message=f"无效步骤名: {step}", exit_code=2)
             params = {"config_name": _safe_int_or_all(args.config_name), "step_name": step}
             return _ipc_result("reset", client.request(CMD_RESET_STEP, params))
+        if args.command == "stop-step":
+            step = str(args.step).lower()
+            if step not in {"meshing", "solver", "postprocess"}:
+                return _json_result(ok=False, command="stop-step", message=f"无效步骤名: {step}", exit_code=2)
+            params = {
+                "config_name": _safe_int_or_all(args.config_name),
+                "step_name": step,
+                "reason": args.reason,
+            }
+            return _ipc_result("stop-step", client.request(CMD_STOP_STEP, params))
         if args.command == "alerts" and args.alerts_command == "watch":
             return _watch_alerts(
                 args,

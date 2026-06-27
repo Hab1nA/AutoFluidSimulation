@@ -875,6 +875,29 @@ def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
     assert timeouts == [11, None]
 
 
+def test_get_remote_file_size_raises_when_remote_file_is_missing():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Channel:
+        def settimeout(self, timeout):
+            pass
+
+    class _SFTP:
+        channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            raise FileNotFoundError(remote_path)
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with pytest.raises(FileNotFoundError):
+            host.get_remote_file_size("D:/remote/missing.scdoc", timeout=11)
+
+
 def test_read_remote_text_file_applies_timeout_and_decodes_utf8():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     timeouts: list[float | None] = []

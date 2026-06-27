@@ -97,11 +97,11 @@ function Register-TunnelFailure {
     if ($FailureState.ConsecutiveFailures -ge $MaxConsecutiveFailures -or $elapsed -ge $MaxRecoverySeconds) {
         Write-RateLimitedTunnelLog `
             -LogPath $LogPath `
-            -Message "$TunnelKind reverse tunnel recovery budget exhausted after $($FailureState.ConsecutiveFailures) failures over $([math]::Round($elapsed, 1))s: $Reason" `
+            -Message "$TunnelKind reverse tunnel recovery budget exhausted after $($FailureState.ConsecutiveFailures) failures over $([math]::Round($elapsed, 1))s; continuing while owner is alive: $Reason" `
             -Key "budget-exhausted" `
             -LogState $LogState `
             -Force
-        return $false
+        return $true
     }
     Write-RateLimitedTunnelLog `
         -LogPath $LogPath `

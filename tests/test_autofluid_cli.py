@@ -91,6 +91,30 @@ def test_reset_remote_step_sends_reset_step():
     assert client.calls == [("reset_step", {"config_name": "all", "step_name": "solver"}, None)]
 
 
+def test_stop_step_sends_stop_step():
+    client = _FakeClient()
+
+    result, payload = _run([
+        "stop-step",
+        "5",
+        "solver",
+        "--reason",
+        "license startup stuck",
+    ], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [(
+        "stop_step",
+        {
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        },
+        None,
+    )]
+
+
 def test_worker_restart_sends_worker_restart():
     client = _FakeClient()
 

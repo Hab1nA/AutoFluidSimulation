@@ -306,7 +306,7 @@ class RemoteWorkstation:
         *,
         timeout: float | None = None,
     ) -> int | None:
-        """返回远程文件大小；文件不存在或连接异常时返回 None。"""
+        """返回远程文件大小；连接/探测异常时返回 None，文件不存在时抛 FileNotFoundError。"""
         if not self.ensure_connected():
             return None
         if self._sftp is None:
@@ -314,7 +314,7 @@ class RemoteWorkstation:
         try:
             return int(self._sftp_stat(remote_path, timeout=timeout).st_size)
         except FileNotFoundError:
-            return None
+            raise
         except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
@@ -797,6 +797,70 @@ class RemoteWorkstation:
             return True
         except (paramiko.SSHException, OSError, EOFError) as e:
             logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
+            return False
+
+    def cleanup_fluent_processes_for_task(self, task: dict[str, object]) -> bool:
+        """Use task-specific command-line evidence to terminate detached Fluent children."""
+        if not self.ensure_connected():
+            return False
+        task_name = str(task.get("task_name") or "").strip()
+        config_name = str(task.get("config_name") or "").strip()
+        evidence = [
+            task_name,
+            os.path.basename(str(task.get("script_file") or "")),
+            os.path.basename(str(task.get("pid_file") or "")),
+            os.path.basename(str(task.get("log_file") or "")),
+        ]
+        if config_name:
+            evidence.extend([
+                f"model_gen4_{config_name}",
+                f"solver_progress_{config_name}",
+                f"solver_done_{config_name}",
+                f"postprocess_done_{config_name}",
+            ])
+        evidence = [item for item in evidence if item]
+        if not evidence:
+            return True
+
+        def ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        evidence_array = "@(" + ",".join(ps_quote(item.lower()) for item in evidence) + ")"
+        process_names = "@('fluent','cx2410','mpiexec','hydra_pmi_proxy','fl_mpi2410','ansyscl')"
+        script = (
+            "$ErrorActionPreference='SilentlyContinue';"
+            f"$evidence={evidence_array};"
+            f"$names={process_names};"
+            "$matches=Get-CimInstance Win32_Process | Where-Object {"
+            "  $name=([string]$_.Name).ToLower();"
+            "  $cmd=([string]$_.CommandLine).ToLower();"
+            "  ($names -contains [IO.Path]::GetFileNameWithoutExtension($name)) -and "
+            "  ($evidence | Where-Object { $_ -and $cmd.Contains($_) })"
+            "};"
+            "$matches | ForEach-Object {"
+            "  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; "
+            "        Write-Output ('killed=' + $_.ProcessId + ':' + $_.Name) }"
+            "  catch { Write-Output ('failed=' + $_.ProcessId + ':' + $_.Name + ':' + $_.Exception.Message) }"
+            "}"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        try:
+            out, err, code = self.exec_command(
+                f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}",
+                timeout=60,
+            )
+            if code != 0:
+                logger.warning(
+                    "[SSH] Fluent 任务证据清理返回非零码 %s: %s",
+                    code,
+                    err or out,
+                )
+                return False
+            if out.strip():
+                logger.info("[SSH] Fluent 任务证据清理结果: %s", out.strip())
+            return True
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning("[SSH] Fluent 任务证据清理异常: %s", e)
             return False
 
     def cleanup_remote_task_entry(

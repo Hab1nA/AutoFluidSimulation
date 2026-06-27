@@ -423,6 +423,34 @@ impl IpcClient {
         .await
     }
 
+    pub async fn stop_step(
+        &mut self,
+        config_name: serde_json::Value,
+        step_name: &str,
+        reason: Option<&str>,
+    ) -> Result<IpcResponse, String> {
+        let mut params = serde_json::Map::new();
+        params.insert("config_name".to_string(), config_name);
+        params.insert(
+            "step_name".to_string(),
+            serde_json::Value::String(step_name.to_string()),
+        );
+        if let Some(reason) = reason {
+            params.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+        }
+        self.send_request_with_timeout(
+            &IpcRequest::with_params(
+                super::protocol::CMD_STOP_STEP,
+                serde_json::Value::Object(params),
+            ),
+            RESET_TIMEOUT,
+        )
+        .await
+    }
+
     pub async fn reload_config(&mut self) -> Result<IpcResponse, String> {
         self.send_request(&IpcRequest::new(super::protocol::CMD_RELOAD_CONFIG))
             .await

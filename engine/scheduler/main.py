@@ -877,6 +877,8 @@ class PipelineScheduler:
             except TypeError:
                 if not ssh.check_remote_file(remote_path):
                     return False
+            except FileNotFoundError:
+                return False
             except Exception:
                 return None
         return True
@@ -916,11 +918,15 @@ class PipelineScheduler:
                 f"{animation_dir}/t_gen4_{cn}.mp4",
                 f"{animation_dir}/v_gen4_{cn}.mp4",
             ])
+        saw_unknown = False
         for remote_path in candidates:
             try:
                 if hasattr(ssh, "get_remote_file_size"):
                     size = ssh.get_remote_file_size(remote_path, timeout=5.0)
-                    if size is not None and size > 0:
+                    if size is None:
+                        saw_unknown = True
+                        continue
+                    if size > 0:
                         return True
                     continue
                 if ssh.check_remote_file(remote_path, timeout=5.0):
@@ -928,9 +934,11 @@ class PipelineScheduler:
             except TypeError:
                 if ssh.check_remote_file(remote_path):
                     return True
+            except FileNotFoundError:
+                continue
             except Exception:
                 return None
-        return False
+        return None if saw_unknown else False
 
     def _forget_completed_config_remote_tasks(self, cn: int) -> None:
         """清理已完成构型残留的远程任务元数据。"""

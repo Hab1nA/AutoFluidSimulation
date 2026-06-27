@@ -120,6 +120,7 @@ pub struct EngineInfo {
     pub daemon_uptime_seconds: Option<u64>,
     pub config_load_error: Option<String>,
     pub solver_progress: Option<SolverProgress>,
+    pub solver_progress_by_config: BTreeMap<u64, SolverProgress>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -416,6 +417,17 @@ impl AppState {
                 .map(str::to_string);
             self.engine_info.solver_progress =
                 obj.get("solver_progress").and_then(parse_solver_progress);
+            self.engine_info.solver_progress_by_config = obj
+                .get("solver_progress_by_config")
+                .map(parse_solver_progress_by_config)
+                .unwrap_or_default();
+            if self.engine_info.solver_progress_by_config.is_empty() {
+                if let Some(progress) = self.engine_info.solver_progress.clone() {
+                    self.engine_info
+                        .solver_progress_by_config
+                        .insert(progress.config_name, progress);
+                }
+            }
         }
         self.needs_redraw = true;
     }
@@ -466,7 +478,7 @@ impl AppState {
     pub fn step_cell_text(&self, config: &str, step: &str) -> String {
         let status = self.get_step_status(config, step);
         if self.should_show_solver_progress(config, step, status) {
-            if let Some(progress) = self.engine_info.solver_progress.as_ref() {
+            if let Some(progress) = self.solver_progress_for_config(config) {
                 return format!(
                     "{} {}",
                     status_icon(status),
@@ -489,7 +501,7 @@ impl AppState {
         if step != "solver" || status != STATUS_RUNNING {
             return false;
         }
-        let Some(progress) = self.engine_info.solver_progress.as_ref() else {
+        let Some(progress) = self.solver_progress_for_config(config) else {
             return false;
         };
         let iteration_is_valid = progress
@@ -501,6 +513,19 @@ impl AppState {
             && iteration_is_valid
             && timestamp_is_valid
             && config.parse::<u64>().ok() == Some(progress.config_name)
+    }
+
+    fn solver_progress_for_config(&self, config: &str) -> Option<&SolverProgress> {
+        let config_name = config.parse::<u64>().ok()?;
+        self.engine_info
+            .solver_progress_by_config
+            .get(&config_name)
+            .or_else(|| {
+                self.engine_info
+                    .solver_progress
+                    .as_ref()
+                    .filter(|progress| progress.config_name == config_name)
+            })
     }
 
     #[cfg(test)]
@@ -807,6 +832,25 @@ fn parse_solver_progress(value: &serde_json::Value) -> Option<SolverProgress> {
     })
 }
 
+fn parse_solver_progress_by_config(value: &serde_json::Value) -> BTreeMap<u64, SolverProgress> {
+    let mut progress_by_config = BTreeMap::new();
+    let Some(obj) = value.as_object() else {
+        return progress_by_config;
+    };
+    for (key, value) in obj {
+        let Ok(config_name) = key.parse::<u64>() else {
+            continue;
+        };
+        let Some(progress) = parse_solver_progress(value) else {
+            continue;
+        };
+        if progress.config_name == config_name {
+            progress_by_config.insert(config_name, progress);
+        }
+    }
+    progress_by_config
+}
+
 fn expire_click<T>(
     click_time: &mut Option<std::time::Instant>,
     clicked: &mut Option<T>,
@@ -1060,6 +1104,32 @@ mod tests {
             status_color(STATUS_RUNNING)
         );
         assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
+    }
+
+    #[test]
+    fn solver_running_cells_show_remaining_time_for_multiple_configs() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "1": {"solver": "Running"},
+            "2": {"solver": "Running"}
+        }));
+        state.update_engine_info(&serde_json::json!({
+            "solver_progress_by_config": {
+                "1": {
+                    "config_name": 1,
+                    "total_iter": 1000,
+                    "remaining_sec": 3600.0
+                },
+                "2": {
+                    "config_name": 2,
+                    "total_iter": 1000,
+                    "remaining_sec": 125.0
+                }
+            }
+        }));
+
+        assert_eq!(state.step_cell_text("1", "solver"), "⏳ 01:00:00");
+        assert_eq!(state.step_cell_text("2", "solver"), "⏳ 00:02:05");
     }
 
     #[test]

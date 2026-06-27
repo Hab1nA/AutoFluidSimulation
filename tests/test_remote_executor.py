@@ -68,7 +68,9 @@ class _StateRecorder:
         self.status_updates: list[tuple[int, str, str, str]] = []
         self.remote_tasks: dict[tuple[int, str], dict[str, object]] = {}
         self.solver_progress_updates: list[dict[str, object]] = []
+        self.solver_progress_by_config_updates: list[tuple[int, dict[str, object]]] = []
         self.solver_progress_clears = 0
+        self.solver_progress_by_config_clears: list[int] = []
 
     def set_step_status(
         self,
@@ -114,8 +116,18 @@ class _StateRecorder:
     def set_solver_progress(self, progress: dict[str, object]) -> None:
         self.solver_progress_updates.append(progress)
 
+    def set_solver_progress_by_config(
+        self,
+        config_name: int,
+        progress: dict[str, object],
+    ) -> None:
+        self.solver_progress_by_config_updates.append((config_name, progress))
+
     def clear_solver_progress(self) -> None:
         self.solver_progress_clears += 1
+
+    def clear_solver_progress_by_config(self, config_name: int) -> None:
+        self.solver_progress_by_config_clears.append(config_name)
 
     @staticmethod
     def _remote_task_key(
@@ -898,7 +910,8 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
     assert checked == [error_flag]
     assert deleted == [error_flag, "D:/flags/solver_progress_4.json"]
     assert 4 not in executor._remote_tasks
-    assert state.solver_progress_clears == 1
+    assert state.solver_progress_by_config_clears == [4]
+    assert state.solver_progress_clears == 0
 
 
 def test_start_meshing_persists_remote_task_metadata(monkeypatch):
@@ -1293,6 +1306,105 @@ def test_query_remote_task_status_raises_infrastructure_error_on_ssh_failure():
         executor.query_remote_task_status(4, "meshing")
 
 
+def test_kill_remote_task_runs_task_specific_fluent_cleanup_for_solver():
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver_2",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "log_file": "D:/flags/autofluid_bg_solver_2.log",
+        "pid_file": "D:/flags/autofluid_bg_solver_2.pid",
+        "started_at": 100.0,
+    }
+    calls: list[tuple[str, object]] = []
+
+    class _SSH:
+        def kill_remote_task(self, task_name: str) -> bool:
+            calls.append(("kill", task_name))
+            return True
+
+        def cleanup_fluent_processes_for_task(self, task: dict[str, object]) -> bool:
+            calls.append(("fluent_cleanup", dict(task)))
+            return True
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[2] = "AutoFluid_solver_2"
+
+    executor._kill_remote_task_for_config(2, "solver")
+
+    assert calls == [
+        ("kill", "AutoFluid_solver_2"),
+        ("fluent_cleanup", {
+            "config_name": 2,
+            "step_name": "solver",
+            "task_name": "AutoFluid_solver_2",
+            "flag_file": "D:/flags/solver_done_2.txt",
+            "error_flag_file": "D:/flags/solver_done_2.txt.error",
+            "log_file": "D:/flags/autofluid_bg_solver_2.log",
+            "pid_file": "D:/flags/autofluid_bg_solver_2.pid",
+            "started_at": 100.0,
+        }),
+    ]
+    assert (2, "solver") not in state.remote_tasks
+
+
+def test_kill_remote_task_reports_failure_when_ssh_kill_fails():
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver_2",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "started_at": 100.0,
+    }
+
+    class _SSH:
+        def kill_remote_task(self, task_name: str) -> bool:
+            assert task_name == "AutoFluid_solver_2"
+            return False
+
+        def cleanup_fluent_processes_for_task(self, task: dict[str, object]) -> bool:
+            raise AssertionError("Fluent cleanup must not run after failed task kill")
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[2] = "AutoFluid_solver_2"
+
+    assert executor._kill_remote_task_for_config(2, "solver") is False
+
+
+def test_stop_remote_step_propagates_failed_task_kill():
+    state = _StateRecorder()
+    state.remote_tasks[(5, "solver")] = {
+        "config_name": 5,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver_5",
+        "flag_file": "D:/flags/solver_done_5.txt",
+        "error_flag_file": "D:/flags/solver_done_5.txt.error",
+        "started_at": 100.0,
+    }
+    writes: list[tuple[str, str]] = []
+
+    class _SSH:
+        def _write_remote_text_file(self, remote_path: str, text: str) -> bool:
+            writes.append((remote_path, text))
+            return True
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    monkeypatch_kill_result = False
+
+    def _kill(config_name: int, step_name: str, workstation_id: str = DEFAULT_WORKSTATION_ID):
+        assert (config_name, step_name, workstation_id) == (5, "solver", DEFAULT_WORKSTATION_ID)
+        return monkeypatch_kill_result
+
+    executor._kill_remote_task_for_config = _kill  # type: ignore[method-assign]
+
+    assert executor.stop_remote_step(5, "solver", reason="license startup failed") is False
+    assert writes == [("D:/flags/solver_done_5.txt.error", "license startup failed")]
+
+
 def test_execute_solver_uses_workstation_specific_paths(monkeypatch):
     monkeypatch.setitem(REMOTE_CONFIG, "scripts_dir", r"D:\default scripts")
     monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\default msh")
@@ -1458,8 +1570,119 @@ def test_wait_solver_completion_reads_progress_and_updates_state(monkeypatch):
 
     assert executor.wait_solver_completion(4) is True
     assert read_paths == ["D:/flags/solver_progress_4.json"]
-    assert state.solver_progress_updates == [progress_payload]
-    assert state.solver_progress_clears == 1
+    assert state.solver_progress_by_config_updates == [(4, progress_payload)]
+    assert state.solver_progress_updates == []
+    assert state.solver_progress_by_config_clears == [4]
+    assert state.solver_progress_clears == 0
+
+
+def test_wait_solver_completion_fails_fast_when_remote_task_lost_during_startup(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 28_800)
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_startup_timeout", 300)
+
+    state = _StateRecorder()
+    state.remote_tasks[(5, "solver")] = {
+        "config_name": 5,
+        "step_name": "solver",
+        "task_name": "AutoFluid_lost",
+        "flag_file": "D:/flags/solver_done_5.txt",
+        "error_flag_file": "D:/flags/solver_done_5.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_lost.pid",
+        "started_at": 1_000.0,
+    }
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            return None
+
+        def read_remote_pid_file(self, pid_file: str) -> int:
+            return 4242
+
+        def exec_command(self, command: str, timeout: int = 30):
+            if command.startswith("schtasks"):
+                return "ERROR: The system cannot find the file specified.", "", 1
+            if command.startswith("tasklist"):
+                return "INFO: No tasks are running which match the specified criteria.\r\n", "", 0
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[5] = "AutoFluid_lost"
+    times = iter([1_360.0, 1_360.0, 1_360.0, 1_360.0])
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("startup failure must not wait for solver timeout")
+        ),
+    )
+
+    assert executor.wait_solver_completion(5) is False
+    assert "启动" in executor.last_solver_error
+
+
+def test_wait_solver_completion_fails_fast_when_task_running_without_startup_progress(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 28_800)
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_startup_timeout", 300)
+
+    state = _StateRecorder()
+    state.remote_tasks[(5, "solver")] = {
+        "config_name": 5,
+        "step_name": "solver",
+        "task_name": "AutoFluid_running",
+        "flag_file": "D:/flags/solver_done_5.txt",
+        "error_flag_file": "D:/flags/solver_done_5.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_running.pid",
+        "started_at": 1_000.0,
+    }
+    killed: list[tuple[int, str, str]] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            return None
+
+        def read_remote_pid_file(self, pid_file: str) -> int:
+            return 4242
+
+        def exec_command(self, command: str, timeout: int = 30):
+            if command.startswith("schtasks"):
+                return "TaskName: AutoFluid_running", "", 0
+            if command.startswith("tasklist"):
+                return "python.exe                   4242 Console                    1     20,000 K", "", 0
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[5] = "AutoFluid_running"
+    monkeypatch.setattr(
+        executor,
+        "_kill_remote_task_for_config",
+        lambda config_name, step_name, workstation_id=DEFAULT_WORKSTATION_ID: killed.append(
+            (config_name, step_name, workstation_id)
+        ) or True,
+    )
+    times = iter([1_360.0, 1_360.0, 1_360.0, 1_360.0])
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+    monkeypatch.setattr(
+        remote_executor_module.time,
+        "sleep",
+        lambda _: (_ for _ in ()).throw(
+            AssertionError("startup failure must not wait for solver timeout")
+        ),
+    )
+
+    assert executor.wait_solver_completion(5) is False
+    assert "启动窗口内未产生进度" in executor.last_solver_error
+    assert killed == [(5, "solver", DEFAULT_WORKSTATION_ID)]
 
 
 def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypatch):

@@ -728,6 +728,89 @@ class TestEngineStatus:
 class TestSolverProgress:
     """验证 Solver progress 状态 CRUD。"""
 
+    def test_set_get_and_clear_solver_progress_by_config(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
+            sm.set_solver_progress_by_config(1, {
+                "config_name": 1,
+                "current_iter": 100,
+                "total_iter": 1000,
+                "remaining_sec": 900.0,
+            })
+            sm.set_solver_progress_by_config(2, {
+                "config_name": 2,
+                "current_iter": 500,
+                "total_iter": 1000,
+                "remaining_sec": 120.0,
+            })
+
+            progress = sm.get_solver_progress_by_config()
+
+            assert progress == {
+                "1": {
+                    "config_name": 1,
+                    "current_iter": 100,
+                    "total_iter": 1000,
+                    "remaining_sec": 900.0,
+                },
+                "2": {
+                    "config_name": 2,
+                    "current_iter": 500,
+                    "total_iter": 1000,
+                    "remaining_sec": 120.0,
+                },
+            }
+            assert sm.get_solver_progress() == progress["2"]
+            sm.clear_solver_progress_by_config(1)
+            assert sm.get_solver_progress_by_config() == {"2": progress["2"]}
+            sm.clear_solver_progress()
+            assert sm.get_solver_progress_by_config() == {}
+
+    def test_legacy_solver_progress_returns_last_writer(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
+            sm.set_solver_progress_by_config(2, {
+                "config_name": 2,
+                "current_iter": 500,
+                "total_iter": 1000,
+                "remaining_sec": 120.0,
+            })
+            sm.set_solver_progress_by_config(1, {
+                "config_name": 1,
+                "current_iter": 100,
+                "total_iter": 1000,
+                "remaining_sec": 900.0,
+            })
+
+            assert sm.get_solver_progress() == {
+                "config_name": 1,
+                "current_iter": 100,
+                "total_iter": 1000,
+                "remaining_sec": 900.0,
+            }
+
+    def test_clear_solver_progress_by_config_preserves_last_writer(self, monkeypatch, tmp_path):
+        with _TmpDB(monkeypatch, tmp_path) as sm:
+            progress_1 = {
+                "config_name": 1,
+                "current_iter": 100,
+                "total_iter": 1000,
+                "remaining_sec": 900.0,
+            }
+            progress_2 = {
+                "config_name": 2,
+                "current_iter": 500,
+                "total_iter": 1000,
+                "remaining_sec": 120.0,
+            }
+            sm.set_solver_progress_by_config(1, progress_1)
+            sm.set_solver_progress_by_config(2, progress_2)
+            sm.clear_solver_progress_by_config(2)
+
+            assert sm.get_solver_progress_by_config() == {"1": progress_1}
+            assert sm.get_solver_progress() == progress_1
+            sm.clear_solver_progress_by_config(1)
+            assert sm.get_solver_progress_by_config() == {}
+            assert sm.get_solver_progress() is None
+
     def test_set_get_and_clear_solver_progress(self, monkeypatch, tmp_path):
         with _TmpDB(monkeypatch, tmp_path) as sm:
             progress = {
@@ -757,11 +840,12 @@ class TestSolverProgress:
     def test_reset_from_solver_clears_solver_progress(self, monkeypatch, tmp_path):
         with _TmpDB(monkeypatch, tmp_path) as sm:
             sm.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-            sm.set_solver_progress({"config_name": 1, "remaining_sec": 30.0})
+            sm.set_solver_progress_by_config(1, {"config_name": 1, "remaining_sec": 30.0})
+            sm.set_solver_progress_by_config(2, {"config_name": 2, "remaining_sec": 60.0})
 
             sm.reset_config_steps(1, from_step="solver")
 
-            assert sm.get_solver_progress() is None
+            assert sm.get_solver_progress_by_config() == {"2": {"config_name": 2, "remaining_sec": 60.0}}
 
 
 # ====================================================================

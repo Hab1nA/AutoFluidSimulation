@@ -1190,7 +1190,10 @@ class _MockSSH:
         return self.connected
 
     def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None) -> int | None:
-        return self.remote_file_sizes.get(remote_path.replace("\\", "/"))
+        normalized = remote_path.replace("\\", "/")
+        if normalized not in self.remote_file_sizes:
+            raise FileNotFoundError(normalized)
+        return self.remote_file_sizes[normalized]
 
     def check_remote_file(self, remote_path: str, *, timeout: float | None = None) -> bool:
         return remote_path.replace("\\", "/") in self.remote_file_sizes
@@ -1765,6 +1768,14 @@ class TestPipelineSchedulerStartRecovery:
         for step in ["sw", "sc", "transfer", "meshing", "solver"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self._record_remote_outputs(1, transfer=True, meshing=True)
+        original_get_size = self.runner._ssh.get_remote_file_size
+
+        def unknown_solver_size(remote_path: str, *, timeout: float | None = None) -> int | None:
+            if remote_path.replace("\\", "/").endswith((".cas.h5", ".dat.h5")):
+                return None
+            return original_get_size(remote_path, timeout=timeout)
+
+        self.runner._ssh.get_remote_file_size = unknown_solver_size
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -2549,6 +2560,7 @@ class _DaemonState:
         self.remote_tasks = remote_tasks or []
         self.statuses = statuses or {}
         self.set_status_calls = []
+        self.step_status_calls = []
         self.delete_all_remote_tasks_calls = []
 
     def get_engine_status(self):
@@ -2569,6 +2581,10 @@ class _DaemonState:
 
     def get_step_status(self, config_name, step_name):
         return self.statuses.get(config_name, {}).get(step_name, STATUS_WAITING)
+
+    def set_step_status(self, config_name, step_name, status, error_message=""):
+        self.statuses.setdefault(config_name, {})[step_name] = status
+        self.step_status_calls.append((config_name, step_name, status, error_message))
 
     def delete_all_remote_tasks(self, workstation_id=None):
         self.delete_all_remote_tasks_calls.append(workstation_id)
@@ -2603,6 +2619,9 @@ class _DaemonRemoteExecutor:
         self.remote_status = remote_status or {}
         self.query_calls = []
         self.forgotten: list[tuple[int, str]] = []
+        self.stopped_steps: list[tuple[int, str, str, str]] = []
+        self.stop_result = True
+        self.stop_exception: Exception | None = None
 
     def query_remote_task_status(self, config_name, step_name, workstation_id="default"):
         self.query_calls.append((config_name, step_name, workstation_id))
@@ -2610,6 +2629,18 @@ class _DaemonRemoteExecutor:
 
     def forget_remote_task(self, config_name, step_name, workstation_id="default"):
         self.forgotten.append((config_name, step_name, workstation_id))
+
+    def stop_remote_step(
+        self,
+        config_name,
+        step_name,
+        workstation_id="default",
+        reason="",
+    ):
+        if self.stop_exception is not None:
+            raise self.stop_exception
+        self.stopped_steps.append((config_name, step_name, workstation_id, reason))
+        return self.stop_result
 
 
 class TestPipelineDaemonCleanStep:
@@ -3953,6 +3984,73 @@ class TestPipelineDaemonCleanStep:
         assert daemon.runner.clean_calls == [("meshing", 1)]
         assert daemon.scheduler.workstation_slots.released_configs == [1]
         assert daemon.scheduler.workstation_slots.clear_count == 0
+
+    def test_stop_step_stops_only_tracked_remote_task_and_marks_error(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            remote_tasks=[{
+                "config_name": 5,
+                "step_name": "solver",
+                "workstation_id": "WS-C",
+            }],
+            statuses={5: {"solver": STATUS_RUNNING}},
+        )
+        daemon.runner = _CleanStepRunner({(5, "solver"): "running"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_stop_step({
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        })
+
+        assert ok is True
+        assert data == {
+            "config_name": 5,
+            "step_name": "solver",
+            "workstation_id": "WS-C",
+            "stopped": True,
+        }
+        assert "已停止构型5的 solver 远程任务" in message
+        assert daemon.runner.remote_executor.stopped_steps == [
+            (5, "solver", "WS-C", "license startup stuck")
+        ]
+        assert daemon.state.step_status_calls == [
+            (5, "solver", STATUS_ERROR, "license startup stuck")
+        ]
+        assert daemon.state.get_step_status(5, "solver") == STATUS_ERROR
+
+    def test_stop_step_does_not_mark_error_when_remote_stop_fails(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            remote_tasks=[{
+                "config_name": 5,
+                "step_name": "solver",
+                "workstation_id": "WS-C",
+            }],
+            statuses={5: {"solver": STATUS_RUNNING}},
+        )
+        daemon.runner = _CleanStepRunner({(5, "solver"): "running"})
+        daemon.runner.remote_executor.stop_result = False
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_stop_step({
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "停止构型5的 solver 远程任务失败" in message
+        assert daemon.state.step_status_calls == []
+        assert daemon.state.get_step_status(5, "solver") == STATUS_RUNNING
 
     def test_clean_remote_all_configs_clears_workstation_slots_after_success(self, monkeypatch):
         from engine import daemon as daemon_module

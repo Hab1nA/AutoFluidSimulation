@@ -407,6 +407,39 @@ class RemoteExecutor:
             except (OSError, ConnectionError) as e:
                 _raise_infra_on_ssh_error(e)
 
+    def stop_remote_step(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+        reason: str = "",
+    ) -> bool:
+        """Terminate one tracked remote step without stopping the whole pipeline."""
+        wrote_error_flag = True
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
+        if task is not None:
+            error_flag = task.get("error_flag_file")
+            if error_flag:
+                wrote_error_flag = False
+                with self._ssh_guard(workstation_id):
+                    ssh = self._get_ssh_for_workstation(workstation_id)
+                    write_text = getattr(ssh, "_write_remote_text_file", None)
+                    if callable(write_text):
+                        try:
+                            write_text(str(error_flag), reason or "stop_step")
+                            wrote_error_flag = True
+                        except (OSError, ConnectionError) as e:
+                            logger.warning(
+                                "%s 构型%s 写入 stop_step 错误标志失败: %s",
+                                self._log_prefix(step_name),
+                                config_name,
+                                e,
+                            )
+                    else:
+                        wrote_error_flag = True
+        killed = self._kill_remote_task_for_config(config_name, step_name, workstation_id)
+        return bool(killed and wrote_error_flag)
+
     def _remote_task_pid_running(
         self,
         ssh: "RemoteWorkstation",
@@ -1638,26 +1671,26 @@ class RemoteExecutor:
         ssh: "RemoteWorkstation",
         progress_file: str,
         config_name: int,
-    ) -> None:
+    ) -> bool:
         """读取远程 Solver progress JSON 并写入状态。"""
         read_remote_text_file = getattr(ssh, "read_remote_text_file", None)
         if not callable(read_remote_text_file):
-            return
+            return False
         raw = read_remote_text_file(progress_file, timeout=5)
         if not raw:
-            return
+            return False
         try:
             progress = json.loads(raw)
         except json.JSONDecodeError:
             logger.debug(f"[Solver] progress JSON 暂不可读，忽略本轮: {progress_file}")
-            return
+            return False
         if not isinstance(progress, dict):
-            return
+            return False
         if progress.get("config_name") != config_name:
             logger.debug(
                 f"[Solver] progress 构型不匹配，忽略: {progress.get('config_name')} != {config_name}"
             )
-            return
+            return False
         sanitized = {
             key: progress[key]
             for key in (
@@ -1669,19 +1702,30 @@ class RemoteExecutor:
             )
             if key in progress
         }
+        set_by_config = getattr(self.state, "set_solver_progress_by_config", None)
+        if callable(set_by_config):
+            set_by_config(config_name, sanitized)
+            return True
         set_solver_progress = getattr(self.state, "set_solver_progress", None)
         if callable(set_solver_progress):
             set_solver_progress(sanitized)
+            return True
+        return False
 
     def _clear_solver_progress(
         self,
         progress_file: str,
         ssh: RemoteWorkstation | None = None,
+        config_name: int | None = None,
     ) -> None:
         """清理本地与远程 Solver progress。"""
-        clear_solver_progress = getattr(self.state, "clear_solver_progress", None)
-        if callable(clear_solver_progress):
-            clear_solver_progress()
+        clear_by_config = getattr(self.state, "clear_solver_progress_by_config", None)
+        if config_name is not None and callable(clear_by_config):
+            clear_by_config(config_name)
+        else:
+            clear_solver_progress = getattr(self.state, "clear_solver_progress", None)
+            if callable(clear_solver_progress):
+                clear_solver_progress()
         if ssh is None:
             return
         delete_remote_file = getattr(ssh, "delete_remote_file", None)
@@ -1717,6 +1761,10 @@ class RemoteExecutor:
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
 
         timeout = ENGINE_CONFIG["solver_timeout"]
+        startup_timeout_value = ENGINE_CONFIG.get("solver_startup_timeout", 300)
+        if not isinstance(startup_timeout_value, str | int | float):
+            startup_timeout_value = 300
+        startup_timeout = float(startup_timeout_value)
         poll_interval = 30
         start_time = self._remote_task_start_time(
             config_name,
@@ -1725,6 +1773,7 @@ class RemoteExecutor:
         )
         file_grace_period = 60
         first_file_seen_time: float | None = None
+        progress_seen = False
         self.last_solver_error = ""
 
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
@@ -1734,7 +1783,7 @@ class RemoteExecutor:
             if paused_event is not None:
                 pause_start = time.time()
                 if not wait_unless_paused_or_stopped(paused_event, stopped_event or threading.Event()):
-                    self._clear_solver_progress(progress_file)
+                    self._clear_solver_progress(progress_file, config_name=config_name)
                     return False
                 # 暂停补偿：将超时计时器和文件宽限计时器向后推移暂停时长
                 pause_duration = time.time() - pause_start
@@ -1743,7 +1792,7 @@ class RemoteExecutor:
                     if first_file_seen_time is not None:
                         first_file_seen_time += pause_duration
             if stopped_event is not None and stopped_event.is_set():
-                self._clear_solver_progress(progress_file)
+                self._clear_solver_progress(progress_file, config_name=config_name)
                 return False
 
             try:
@@ -1763,7 +1812,7 @@ class RemoteExecutor:
                             f"{error_summary}"
                         )
                         ssh.delete_remote_file(error_flag)
-                        self._clear_solver_progress(progress_file, ssh)
+                        self._clear_solver_progress(progress_file, ssh, config_name)
                         self._cleanup_completed_remote_task(
                             config_name,
                             "solver",
@@ -1771,7 +1820,10 @@ class RemoteExecutor:
                             workstation_id,
                         )
                         return False
-                    self._read_solver_progress(ssh, progress_file, config_name)
+                    progress_seen = (
+                        self._read_solver_progress(ssh, progress_file, config_name)
+                        or progress_seen
+                    )
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
                         cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
@@ -1779,7 +1831,7 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            self._clear_solver_progress(progress_file, ssh)
+                            self._clear_solver_progress(progress_file, ssh, config_name)
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -1818,7 +1870,7 @@ class RemoteExecutor:
                                 ssh.delete_remote_file(dat_file)
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
-                            self._clear_solver_progress(progress_file, ssh)
+                            self._clear_solver_progress(progress_file, ssh, config_name)
                             self._cleanup_completed_remote_task(
                                 config_name,
                                 "solver",
@@ -1831,6 +1883,23 @@ class RemoteExecutor:
             except (OSError, ConnectionError) as e:
                 _raise_infra_on_ssh_error(e)
 
+            if not progress_seen and time.time() - start_time >= startup_timeout:
+                status = self.query_remote_task_status(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
+                if status in {"lost", "failed", "running"}:
+                    self.last_solver_error = (
+                        f"Solver 启动失败: 远程任务状态为 {status}，"
+                        "启动窗口内未产生进度"
+                    )
+                    logger.error("[Solver] 构型%s %s", config_name, self.last_solver_error)
+                    if status == "running":
+                        self._kill_remote_task_for_config(config_name, "solver", workstation_id)
+                    self._clear_solver_progress(progress_file, config_name=config_name)
+                    return False
+
             time.sleep(poll_interval)
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
@@ -1840,9 +1909,9 @@ class RemoteExecutor:
         with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                self._clear_solver_progress(progress_file, ssh)
+                self._clear_solver_progress(progress_file, ssh, config_name)
             except (OSError, ConnectionError):
-                self._clear_solver_progress(progress_file)
+                self._clear_solver_progress(progress_file, config_name=config_name)
         return False
 
     def wait_postprocess_completion(
@@ -1965,7 +2034,7 @@ class RemoteExecutor:
         config_name: int,
         step_name: str,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
-    ) -> None:
+    ) -> bool:
         """超时后终止远程后台任务。
 
         从 _remote_tasks 中取出任务名称，调用 SSH kill_remote_task 终止。
@@ -1975,19 +2044,35 @@ class RemoteExecutor:
             config_name: 构型编号
             step_name: 步骤名（用于日志）
         """
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
         task_name = self._pop_remote_task(config_name, step_name, workstation_id)
         self._delete_remote_task_from_state(config_name, step_name, workstation_id)
         if not task_name:
             logger.debug(f"{self._log_prefix(step_name)} 构型{config_name} 无远程任务记录，跳过终止")
-            return
+            return True
 
         with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                ssh.kill_remote_task(task_name)
+                killed = bool(ssh.kill_remote_task(task_name))
+                if not killed:
+                    logger.warning(
+                        f"{self._log_prefix(step_name)} 构型{config_name} 远程任务终止失败: {task_name}"
+                    )
+                    return False
+                cleanup_fluent = getattr(ssh, "cleanup_fluent_processes_for_task", None)
+                fluent_cleaned = True
+                if step_name in {"solver", "postprocess"} and callable(cleanup_fluent):
+                    fluent_cleaned = bool(cleanup_fluent(task or {
+                        "config_name": config_name,
+                        "step_name": step_name,
+                        "task_name": task_name,
+                    }))
                 logger.info(f"{self._log_prefix(step_name)} 构型{config_name} 已请求终止远程任务: {task_name}")
+                return fluent_cleaned
             except (OSError, ConnectionError) as e:
                 logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 终止远程任务异常: {e}")
+                return False
 
     def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
         """Terminate every persisted remote task and clear its tracking record."""
@@ -2005,7 +2090,7 @@ class RemoteExecutor:
 
             before_failed = results["failed"]
             try:
-                self._kill_remote_task_for_config(config_name, step_name, workstation_id)
+                killed = self._kill_remote_task_for_config(config_name, step_name, workstation_id)
             except Exception as e:
                 logger.warning(
                     "[RemoteTask] 取消远程任务异常: config=%s step=%s workstation=%s error=%s",
@@ -2016,8 +2101,10 @@ class RemoteExecutor:
                 )
                 results["failed"] += 1
             else:
-                if results["failed"] == before_failed:
+                if killed and results["failed"] == before_failed:
                     results["cancelled"] += 1
+                else:
+                    results["failed"] += 1
 
         if tasks:
             logger.info("[RemoteTask] 已取消持久化远程任务: %s", results)

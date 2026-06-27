@@ -11,6 +11,7 @@ use crate::generate_request_id;
 pub const CMD_START: &str = "start";
 pub const CMD_PAUSE: &str = "pause";
 pub const CMD_STOP: &str = "stop";
+pub const CMD_STOP_STEP: &str = "stop_step";
 pub const CMD_CHECK: &str = "check";
 pub const CMD_RESET_STEP: &str = "reset_step";
 pub const CMD_CLEAN_STEP: &str = "clean_step";

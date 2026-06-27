@@ -202,6 +202,7 @@ class PipelineDaemon:
         self._child_health_check_interval_seconds = _CHILD_HEALTH_CHECK_INTERVAL_SECONDS
         self._started_at_epoch: float | None = None
         self._last_worker_ssh_checks: dict[str, str] = {}
+        self._last_worker_ssh_check_times: dict[str, float] = {}
         self._ssh_health_thread: threading.Thread | None = None
         self._ssh_health_stop_event = threading.Event()
         self._ssh_health_interval_seconds = get_workstation_ssh_health_interval()
@@ -1272,6 +1273,19 @@ class PipelineDaemon:
                 )
 
         self._last_worker_ssh_checks = dict(results["ssh_checks"])
+        if connect:
+            now = time.time()
+            self._last_worker_ssh_check_times = {
+                ws_id: now for ws_id in results["ssh_checks"]
+            }
+        else:
+            # Passive background checks intentionally do not prove fresh
+            # connectivity. Preserve the last active-check timestamp so a
+            # cached "ok" naturally ages into "stale" on the dashboard.
+            previous_times = getattr(self, "_last_worker_ssh_check_times", {})
+            self._last_worker_ssh_check_times = (
+                dict(previous_times) if isinstance(previous_times, dict) else {}
+            )
         return results
 
     def _start_workstation_ssh_health_monitor(self) -> None:
@@ -1420,8 +1434,15 @@ class PipelineDaemon:
                 "daemon_uptime_seconds": uptime_seconds,
                 "config_load_error": getattr(self, "_config_load_error", None),
                 "solver_progress": None,
+                "solver_progress_by_config": {},
             }
             return True, status, ""
+        get_solver_progress_by_config = getattr(self.state, "get_solver_progress_by_config", None)
+        solver_progress_by_config = (
+            get_solver_progress_by_config()
+            if callable(get_solver_progress_by_config)
+            else {}
+        )
         status = {
             "engine_status": self.state.get_engine_status(),
             "sw_macro_started": self.state.is_sw_macro_started(),
@@ -1433,6 +1454,7 @@ class PipelineDaemon:
             "daemon_uptime_seconds": uptime_seconds,
             "config_load_error": getattr(self, "_config_load_error", None),
             "solver_progress": self.state.get_solver_progress(),
+            "solver_progress_by_config": solver_progress_by_config,
         }
         return True, status, ""
 
@@ -1465,15 +1487,23 @@ class PipelineDaemon:
         last_worker_checks = getattr(self, "_last_worker_ssh_checks", {})
         if not isinstance(last_worker_checks, dict):
             last_worker_checks = {}
+        last_check_times = getattr(self, "_last_worker_ssh_check_times", {})
+        if not isinstance(last_check_times, dict):
+            last_check_times = {}
+        stale_after = max(120.0, float(getattr(self, "_ssh_health_interval_seconds", 30.0)) * 3)
+        now = time.time()
         workstation_configs: list[Mapping[str, Any]] = list(WORKSTATIONS) or [{"id": "default"}]
         for workstation in workstation_configs:
             workstation_id = str(workstation.get("id", "default"))
             workstation_targets[workstation_id] = self._workstation_ssh_target(workstation)
             # Dashboard health is passive: report the latest active health check
             # instead of trusting cached Paramiko transport state.
-            workstation_details[workstation_id] = str(
-                last_worker_checks.get(workstation_id, "unknown")
-            )
+            status = str(last_worker_checks.get(workstation_id, "unknown"))
+            checked_at = last_check_times.get(workstation_id)
+            if status == "ok" and isinstance(checked_at, int | float):
+                if now - float(checked_at) > stale_after:
+                    status = "stale"
+            workstation_details[workstation_id] = status
         detail_values = set(workstation_details.values())
         if any(value == "ok" for value in detail_values):
             server_to_workstation_ssh = "ok"
@@ -1733,6 +1763,69 @@ class PipelineDaemon:
                 self.scheduler.request_file_monitor_reset()
 
         return True, None, msg
+
+    def handle_stop_step(self, params: dict) -> tuple[bool, Any, str]:
+        """停止指定构型的一个远程步骤，不影响其他正在运行的任务。"""
+        config_name = params.get("config_name")
+        step_name = str(params.get("step_name") or "").lower()
+        reason = str(params.get("reason") or "用户请求停止远程任务").strip()
+        valid_config_name, config_name, config_error = self._normalize_config_name_for_mutation(
+            config_name,
+            allow_none=False,
+        )
+        if not valid_config_name:
+            return False, None, config_error
+        if config_name == "all":
+            return False, None, "stop_step 必须指定单个构型"
+        if step_name not in {"meshing", "solver", "postprocess"}:
+            return False, None, "stop_step 仅支持 meshing、solver、postprocess"
+        state = getattr(self, "state", None)
+        runner = getattr(self, "runner", None)
+        if state is None or runner is None:
+            return False, None, "Daemon 尚未初始化流水线组件"
+        get_all_remote_tasks = getattr(state, "get_all_remote_tasks", None)
+        get_remote_executor = getattr(runner, "get_remote_executor", None)
+        if not callable(get_all_remote_tasks) or not callable(get_remote_executor):
+            return False, None, "远程任务管理接口不可用"
+
+        target_task: dict[str, Any] | None = None
+        for task in get_all_remote_tasks():
+            try:
+                task_config = int(task.get("config_name"))
+            except (TypeError, ValueError):
+                continue
+            if task_config == config_name and str(task.get("step_name")) == step_name:
+                target_task = dict(task)
+                break
+        if target_task is None:
+            return False, None, f"未找到构型{config_name}的 {step_name} 远程任务"
+
+        workstation_id = str(target_task.get("workstation_id", "default"))
+        remote_executor = get_remote_executor()
+        stop_remote_step = getattr(remote_executor, "stop_remote_step", None)
+        if not callable(stop_remote_step):
+            return False, None, "远程任务停止接口不可用"
+        try:
+            stopped = bool(stop_remote_step(config_name, step_name, workstation_id, reason))
+        except Exception as exc:
+            logger.warning(
+                "[IPC] stop_step 失败: config=%s step=%s workstation=%s error=%s",
+                config_name,
+                step_name,
+                workstation_id,
+                exc,
+            )
+            return False, None, f"停止构型{config_name}的 {step_name} 远程任务异常: {exc}"
+        if not stopped:
+            return False, None, f"停止构型{config_name}的 {step_name} 远程任务失败"
+        state.set_step_status(config_name, step_name, STATUS_ERROR, reason)
+        data = {
+            "config_name": config_name,
+            "step_name": step_name,
+            "workstation_id": workstation_id,
+            "stopped": True,
+        }
+        return True, data, f"已停止构型{config_name}的 {step_name} 远程任务"
 
     def _release_cleaned_workstation_slots(
         self,
