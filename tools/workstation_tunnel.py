@@ -102,6 +102,26 @@ def _remote_script_path(install_dir: str) -> str:
     return f"{install_dir.rstrip('/')}/{SCRIPT_NAME}"
 
 
+def _user_install_dir(username: str) -> str:
+    username = username.strip()
+    if not username:
+        return ""
+    return f"C:/Users/{username}/AppData/Local/AutoFluid/tunnel"
+
+
+def _normalize_install_dir(install_dir: str) -> str:
+    return install_dir.replace("\\", "/").rstrip("/")
+
+
+def _candidate_install_dirs(install_dir: str, username: str) -> list[str]:
+    candidates = [install_dir]
+    fallback_dir = _user_install_dir(username)
+    normalized_candidates = {_normalize_install_dir(path) for path in candidates}
+    if fallback_dir and _normalize_install_dir(fallback_dir) not in normalized_candidates:
+        candidates.append(fallback_dir)
+    return candidates
+
+
 def _ps_file_command(script_path: str, action: str, spec: WorkstationTunnelSpec, install_dir: str) -> str:
     args = [
         "powershell.exe",
@@ -156,10 +176,18 @@ def repair_workstation_tunnel(
         auth_method=spec.auth_method,
     )
     try:
-        mkdir_command = f'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Path {_quote_ps_value(install_dir.replace("/", "\\"))} -Force | Out-Null"'
+        mkdir_command = _mkdir_command(install_dir)
         _, mkdir_err, mkdir_code = ssh.exec_command(mkdir_command, timeout=30)
         if mkdir_code != 0:
-            return _result(spec, False, "mkdir_failed", mkdir_err)
+            fallback_dir = _user_install_dir(spec.username)
+            if not fallback_dir:
+                return _result(spec, False, "mkdir_failed", mkdir_err)
+            mkdir_command = _mkdir_command(fallback_dir)
+            _, fallback_err, fallback_code = ssh.exec_command(mkdir_command, timeout=30)
+            if fallback_code != 0:
+                return _result(spec, False, "mkdir_failed", fallback_err or mkdir_err)
+            install_dir = fallback_dir
+            remote_script = _remote_script_path(install_dir)
         if not ssh.upload_file(str(local_script), remote_script):
             return _result(spec, False, "upload_failed", "")
         install_cmd = _ps_file_command(remote_script, "-Install", spec, install_dir)
@@ -169,10 +197,19 @@ def repair_workstation_tunnel(
         status_result = status_workstation_tunnel(spec, install_dir=install_dir, ssh_factory=lambda **_: ssh)
         result = _result(spec, True, "installed", out)
         result["installed"] = True
+        result["install_dir"] = install_dir
         result["status_check"] = status_result
         return result
     finally:
         ssh.disconnect()
+
+
+def _mkdir_command(install_dir: str) -> str:
+    escaped_dir = _quote_ps_value(install_dir.replace("/", "\\"))
+    return (
+        'powershell.exe -NoProfile -Command '
+        f'"New-Item -ItemType Directory -Path {escaped_dir} -Force | Out-Null"'
+    )
 
 
 def status_workstation_tunnel(
@@ -181,7 +218,6 @@ def status_workstation_tunnel(
     install_dir: str = DEFAULT_INSTALL_DIR,
     ssh_factory: SshFactory | None = None,
 ) -> dict[str, Any]:
-    remote_script = _remote_script_path(install_dir)
     factory = _ssh_factory(ssh_factory)
     ssh = factory(
         host=spec.host,
@@ -192,17 +228,28 @@ def status_workstation_tunnel(
         auth_method=spec.auth_method,
     )
     try:
-        status_cmd = _ps_file_command(remote_script, "-Status", spec, install_dir)
-        out, err, code = ssh.exec_command(status_cmd, timeout=30)
-        if code != 0:
-            return _result(spec, False, "status_failed", err or out)
-        try:
-            payload = json.loads(out.strip() or "{}")
-        except json.JSONDecodeError:
-            payload = {"raw": out.strip()}
-        ok = bool(payload.get("task_exists")) and bool(payload.get("remote_tunnel_ok"))
-        result = _result(spec, ok, "ok" if ok else "not_ready", "")
-        result["status_payload"] = payload
+        failed_attempts: list[dict[str, str]] = []
+        for candidate_dir in _candidate_install_dirs(install_dir, spec.username):
+            remote_script = _remote_script_path(candidate_dir)
+            status_cmd = _ps_file_command(remote_script, "-Status", spec, candidate_dir)
+            out, err, code = ssh.exec_command(status_cmd, timeout=30)
+            if code != 0:
+                failed_attempts.append({"install_dir": candidate_dir, "detail": err or out})
+                continue
+            try:
+                payload = json.loads(out.strip() or "{}")
+            except json.JSONDecodeError:
+                payload = {"raw": out.strip()}
+            ok = bool(payload.get("task_exists")) and bool(payload.get("remote_tunnel_ok"))
+            result = _result(spec, ok, "ok" if ok else "not_ready", "")
+            result["install_dir"] = candidate_dir
+            result["status_payload"] = payload
+            if failed_attempts:
+                result["failed_attempts"] = failed_attempts
+            return result
+        result = _result(spec, False, "status_failed", failed_attempts[-1]["detail"] if failed_attempts else "")
+        result["install_dir"] = install_dir
+        result["failed_attempts"] = failed_attempts
         return result
     finally:
         ssh.disconnect()
@@ -214,7 +261,6 @@ def uninstall_workstation_tunnel(
     install_dir: str = DEFAULT_INSTALL_DIR,
     ssh_factory: SshFactory | None = None,
 ) -> dict[str, Any]:
-    remote_script = _remote_script_path(install_dir)
     factory = _ssh_factory(ssh_factory)
     ssh = factory(
         host=spec.host,
@@ -225,9 +271,21 @@ def uninstall_workstation_tunnel(
         auth_method=spec.auth_method,
     )
     try:
-        command = _ps_file_command(remote_script, "-Uninstall", spec, install_dir)
-        out, err, code = ssh.exec_command(command, timeout=30)
-        return _result(spec, code == 0, "ok" if code == 0 else "uninstall_failed", err or out)
+        attempts: list[dict[str, str | int]] = []
+        ok = False
+        detail = ""
+        for candidate_dir in _candidate_install_dirs(install_dir, spec.username):
+            remote_script = _remote_script_path(candidate_dir)
+            command = _ps_file_command(remote_script, "-Uninstall", spec, candidate_dir)
+            out, err, code = ssh.exec_command(command, timeout=30)
+            attempts.append({"install_dir": candidate_dir, "exit_code": code, "detail": err or out})
+            if code == 0:
+                ok = True
+                detail = err or out
+        result = _result(spec, ok, "ok" if ok else "uninstall_failed", detail or str(attempts[-1]["detail"]))
+        result["install_dir"] = install_dir
+        result["attempts"] = attempts
+        return result
     finally:
         ssh.disconnect()
 

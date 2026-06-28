@@ -39,6 +39,28 @@ class FakeRemoteWorkstation:
         self.commands.append("disconnect")
 
 
+class ProgramDataDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if "C:\\ProgramData\\AutoFluid\\tunnel" in command:
+            return "", "拒绝访问。", 1
+        return "{}", "", 0
+
+
+class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if "C:\\ProgramData\\AutoFluid\\tunnel" in command:
+            return "", "script not found", 1
+        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
+class BothDirsDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        return "", "拒绝访问。", 1
+
+
 def test_repair_deploys_workstation_owned_tunnel_to_raw_workstation_host(tmp_path: Path) -> None:
     script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
     script.write_text("script", encoding="utf-8")
@@ -79,6 +101,174 @@ def test_repair_deploys_workstation_owned_tunnel_to_raw_workstation_host(tmp_pat
     assert "-TargetPort 22" in install_command
     assert "OwnerMarkerPath" not in install_command
     assert "OwnerPid" not in install_command
+
+
+def test_repair_falls_back_to_user_install_dir_when_programdata_is_denied(tmp_path: Path) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=ProgramDataDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    remote = FakeRemoteWorkstation.instances[0]
+    assert remote.uploads == [
+        (
+            str(script),
+            "C:/Users/ps/AppData/Local/AutoFluid/tunnel/start_workstation_owned_reverse_tunnel.ps1",
+        )
+    ]
+    all_commands = "\n".join(remote.commands)
+    assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
+    assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
+    assert "-Install" in all_commands
+
+
+def test_repair_reports_mkdir_failed_when_programdata_and_user_dir_are_denied(tmp_path: Path) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=BothDirsDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "mkdir_failed"
+    assert FakeRemoteWorkstation.instances[0].uploads == []
+
+
+def test_repair_does_not_try_user_fallback_without_username(tmp_path: Path) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=BothDirsDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "mkdir_failed"
+    remote = FakeRemoteWorkstation.instances[0]
+    assert len([command for command in remote.commands if "New-Item" in command]) == 1
+
+
+def test_status_falls_back_to_user_install_dir_when_programdata_script_is_missing() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=ProgramDataMissingRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert result["install_dir"] == "C:/Users/ps/AppData/Local/AutoFluid/tunnel"
+    remote = FakeRemoteWorkstation.instances[0]
+    all_commands = "\n".join(remote.commands)
+    assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
+    assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
+
+
+def test_uninstall_attempts_programdata_and_user_install_dirs() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.uninstall_workstation_tunnel(
+        spec,
+        ssh_factory=ProgramDataMissingRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    remote = FakeRemoteWorkstation.instances[0]
+    all_commands = "\n".join(remote.commands)
+    assert all_commands.count("-Uninstall") == 2
+    assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
+    assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
+
+
+def test_candidate_install_dirs_deduplicates_backslash_fallback_path() -> None:
+    candidates = workstation_tunnel._candidate_install_dirs(  # noqa: SLF001
+        "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel",
+        "ps",
+    )
+
+    assert candidates == ["C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel"]
+
+
+def test_candidate_install_dirs_skips_user_fallback_without_username() -> None:
+    candidates = workstation_tunnel._candidate_install_dirs(  # noqa: SLF001
+        "C:/ProgramData/AutoFluid/tunnel",
+        "",
+    )
+
+    assert candidates == ["C:/ProgramData/AutoFluid/tunnel"]
 
 
 def test_workstation_tunnel_specs_use_reachable_port_but_raw_host_for_bootstrap() -> None:

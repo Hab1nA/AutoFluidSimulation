@@ -156,3 +156,12 @@ def test_workstation_owned_tunnel_task_uses_bounded_scheduler_restart_count() ->
 
     assert "-RestartCount 10" in source
     assert "-RestartCount 999" not in source
+
+
+def test_workstation_owned_tunnel_task_does_not_double_quote_file_argument() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert '"-File", $scriptPath' in source
+    assert '"-File", "`"$scriptPath`""' not in source

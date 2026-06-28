@@ -273,7 +273,7 @@ function Install-OwnedTunnelTask {
     $args = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
-        "-File", "`"$scriptPath`"",
+        "-File", $scriptPath,
         "-Monitor",
         "-WorkstationId", $WorkstationId,
         "-RemoteBindHost", $RemoteBindHost,
