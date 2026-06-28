@@ -48,6 +48,14 @@ class ProgramDataDeniedRemoteWorkstation(FakeRemoteWorkstation):
         return "{}", "", 0
 
 
+class ProgramDataInstallDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if "-Install" in command and "C:\\ProgramData\\AutoFluid\\tunnel" in command:
+            return "", "拒绝访问。", 1
+        return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
 class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
@@ -153,6 +161,41 @@ def test_repair_falls_back_to_user_install_dir_when_programdata_is_denied(tmp_pa
     assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
     assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
     assert "-Install" in all_commands
+
+
+def test_repair_falls_back_to_user_install_dir_when_programdata_install_is_denied(tmp_path: Path) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=ProgramDataInstallDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert result["install_dir"] == "C:/Users/ps/AppData/Local/AutoFluid/tunnel"
+    remote = FakeRemoteWorkstation.instances[0]
+    assert remote.uploads[-1] == (
+        str(script),
+        "C:/Users/ps/AppData/Local/AutoFluid/tunnel/start_workstation_owned_reverse_tunnel.ps1",
+    )
+    all_commands = "\n".join(remote.commands)
+    assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
+    assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
 
 
 def test_repair_generates_and_authorizes_workstation_tunnel_key(tmp_path: Path, monkeypatch) -> None:

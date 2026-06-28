@@ -246,6 +246,25 @@ def repair_workstation_tunnel(
         install_cmd = _ps_file_command(remote_script, "-Install", spec, install_dir)
         out, err, code = ssh.exec_command(install_cmd, timeout=60)
         if code != 0:
+            fallback_dir = _user_install_dir(spec.username)
+            if install_dir == DEFAULT_INSTALL_DIR and fallback_dir:
+                mkdir_command = _mkdir_command(fallback_dir)
+                _, fallback_mkdir_err, fallback_mkdir_code = ssh.exec_command(mkdir_command, timeout=30)
+                if fallback_mkdir_code != 0:
+                    return _result(spec, False, "mkdir_failed", fallback_mkdir_err or err or out)
+                install_dir = fallback_dir
+                remote_script = _remote_script_path(install_dir)
+                if not ssh.upload_file(str(local_script), remote_script):
+                    return _result(spec, False, "upload_failed", "")
+                install_cmd = _ps_file_command(remote_script, "-Install", spec, install_dir)
+                out, err, code = ssh.exec_command(install_cmd, timeout=60)
+                if code == 0:
+                    status_result = status_workstation_tunnel(spec, install_dir=install_dir, ssh_factory=lambda **_: ssh)
+                    result = _result(spec, True, "installed", out)
+                    result["installed"] = True
+                    result["install_dir"] = install_dir
+                    result["status_check"] = status_result
+                    return result
             return _result(spec, False, "install_failed", err or out)
         status_result = status_workstation_tunnel(spec, install_dir=install_dir, ssh_factory=lambda **_: ssh)
         result = _result(spec, True, "installed", out)
