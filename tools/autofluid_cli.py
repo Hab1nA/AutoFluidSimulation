@@ -250,6 +250,10 @@ def _alert_payload(entry: dict[str, Any], fingerprint: str) -> dict[str, Any]:
         "timestamp": entry.get("timestamp"),
         "log_id": entry.get("id"),
         "fingerprint": fingerprint,
+        "name": "AutoFluid Alert",
+        "deliver": True,
+        "channel": "qqbot",
+        "to": "qqbot:c2c:95D5600461EFF47937CB8CF0C3E2AB2D",
     }
 
 
