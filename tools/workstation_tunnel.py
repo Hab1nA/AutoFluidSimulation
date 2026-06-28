@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -302,7 +303,7 @@ def _authorize_tunnel_public_key(public_key: str, *, auth_target: str = DEFAULT_
         "        fh.write(key+'\\n')\n"
     )
     result = subprocess.run(
-        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, "python3", "-c", script],
+        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, f"python3 -c {shlex.quote(script)}"],
         input=public_key,
         check=False,
         capture_output=True,
@@ -329,7 +330,7 @@ def _deauthorize_tunnel_public_key(public_key: str, *, auth_target: str) -> None
         "        fh.write('\\n'.join(lines)+'\\n')\n"
     )
     result = subprocess.run(
-        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, "python3", "-c", script],
+        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, f"python3 -c {shlex.quote(script)}"],
         input=public_key,
         check=False,
         capture_output=True,

@@ -188,6 +188,8 @@ def test_repair_generates_and_authorizes_workstation_tunnel_key(tmp_path: Path, 
     assert "-TunnelIdentityFile C:\\Users\\ps\\.ssh\\autofluid_tunnel_ed25519" in all_commands
     assert auth_calls
     assert auth_calls[0][0][:4] == ["ssh", "-o", "StrictHostKeyChecking=accept-new", "root@39.98.196.94"]
+    assert len(auth_calls[0][0]) == 5
+    assert auth_calls[0][0][4].startswith("python3 -c ")
     assert auth_calls[0][1] == "ssh-ed25519 AAAATEST autofluid-test-tunnel"
 
 
@@ -226,6 +228,8 @@ def test_uninstall_deauthorizes_and_deletes_workstation_tunnel_key(monkeypatch) 
     assert "autofluid_tunnel_ed25519.pub" in all_commands
     assert "del /q" in all_commands
     assert auth_calls[0][0][:4] == ["ssh", "-o", "StrictHostKeyChecking=accept-new", "root@39.98.196.94"]
+    assert len(auth_calls[0][0]) == 5
+    assert auth_calls[0][0][4].startswith("python3 -c ")
     assert auth_calls[0][1] == "ssh-ed25519 AAAATEST autofluid-test-tunnel"
 
 
