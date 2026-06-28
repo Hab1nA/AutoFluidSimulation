@@ -134,7 +134,7 @@ function Test-RemoteTunnelEndpoint {
     )
     $remoteCommand = "python3 -c `"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',$RemoteBindPort)); s.close()`""
     try {
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 2>&1 | Out-Null
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TunnelTarget $remoteCommand 2>&1 | Out-Null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -182,6 +182,7 @@ function Get-ReverseTunnelArguments {
         "-o", "ServerAliveInterval=5",
         "-o", "ServerAliveCountMax=3",
         "-o", "TCPKeepAlive=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
         "-N",
         "-R", $forwardSpec,
         $TunnelTarget

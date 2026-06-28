@@ -195,7 +195,7 @@ def test_repair_does_not_try_user_fallback_without_username(tmp_path: Path) -> N
     assert result["ok"] is False
     assert result["status"] == "mkdir_failed"
     remote = FakeRemoteWorkstation.instances[0]
-    assert len([command for command in remote.commands if "New-Item" in command]) == 1
+    assert len([command for command in remote.commands if "mkdir" in command]) == 1
 
 
 def test_status_falls_back_to_user_install_dir_when_programdata_script_is_missing() -> None:
@@ -270,6 +270,23 @@ def test_candidate_install_dirs_skips_user_fallback_without_username() -> None:
     )
 
     assert candidates == ["C:/ProgramData/AutoFluid/tunnel"]
+
+
+def test_mkdir_command_uses_idempotent_cmd_mkdir() -> None:
+    command = workstation_tunnel._mkdir_command(  # noqa: SLF001
+        "C:/Users/ps/AppData/Local/AutoFluid/tunnel"
+    )
+
+    assert command == (
+        'cmd.exe /d /c if not exist "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" '
+        'mkdir "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel"'
+    )
+
+
+def test_mkdir_command_escapes_cmd_percent_expansion() -> None:
+    command = workstation_tunnel._mkdir_command("C:/Users/p%s/AutoFluid/tunnel")  # noqa: SLF001
+
+    assert '"C:\\Users\\p^%s\\AutoFluid\\tunnel"' in command
 
 
 def test_workstation_tunnel_specs_use_reachable_port_but_raw_host_for_bootstrap() -> None:

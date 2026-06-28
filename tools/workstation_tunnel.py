@@ -240,11 +240,13 @@ def repair_workstation_tunnel(
 
 
 def _mkdir_command(install_dir: str) -> str:
-    escaped_dir = _quote_ps_value(install_dir.replace("/", "\\"))
-    return (
-        'powershell.exe -NoProfile -Command '
-        f'"New-Item -ItemType Directory -Path {escaped_dir} -Force | Out-Null"'
-    )
+    escaped_dir = _quote_cmd_value(install_dir.replace("/", "\\"))
+    return f"cmd.exe /d /c if not exist {escaped_dir} mkdir {escaped_dir}"
+
+
+def _quote_cmd_value(value: str) -> str:
+    escaped = value.replace("^", "^^").replace("%", "^%").replace('"', '""')
+    return f'"{escaped}"'
 
 
 def status_workstation_tunnel(

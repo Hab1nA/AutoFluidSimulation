@@ -129,6 +129,7 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert '"ExitOnForwardFailure=yes"' in source
     assert '"ServerAliveInterval=5"' in source
     assert '"ServerAliveCountMax=3"' in source
+    assert '"StrictHostKeyChecking=accept-new"' in source
     assert '$forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"' in source
     assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
     assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
