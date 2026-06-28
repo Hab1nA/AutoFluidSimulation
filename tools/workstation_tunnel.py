@@ -265,6 +265,18 @@ def repair_workstation_tunnel(
                     result["install_dir"] = install_dir
                     result["status_check"] = status_result
                     return result
+                fallback_out, fallback_err, fallback_code = _install_cmd_lifecycle_fallback(
+                    ssh,
+                    remote_script,
+                    spec,
+                    install_dir,
+                )
+                if fallback_code == 0:
+                    result = _result(spec, True, "installed", fallback_out)
+                    result["installed"] = True
+                    result["install_dir"] = install_dir
+                    result["lifecycle_fallback"] = True
+                    return result
             return _result(spec, False, "install_failed", err or out)
         status_result = status_workstation_tunnel(spec, install_dir=install_dir, ssh_factory=lambda **_: ssh)
         result = _result(spec, True, "installed", out)
@@ -439,6 +451,7 @@ def uninstall_workstation_tunnel(
         result = _result(spec, ok, "ok" if ok else "uninstall_failed", detail or str(attempts[-1]["detail"]))
         result["install_dir"] = install_dir
         result["attempts"] = attempts
+        result["lifecycle_cleanup"] = _cleanup_cmd_lifecycle_fallback(ssh, spec)
         result["key_cleanup"] = _cleanup_workstation_tunnel_key(ssh, spec)
         return result
     finally:
@@ -469,6 +482,83 @@ def _cleanup_workstation_tunnel_key(ssh: WorkstationSsh, spec: WorkstationTunnel
     if del_code != 0:
         return {"ok": False, "stage": "delete_key", "detail": del_err}
     return {"ok": True, "deauthorized": deauthorized}
+
+
+def _install_cmd_lifecycle_fallback(
+    ssh: WorkstationSsh,
+    remote_script: str,
+    spec: WorkstationTunnelSpec,
+    install_dir: str,
+) -> tuple[str, str, int]:
+    task_name = f"AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}"
+    monitor_command = _monitor_command(remote_script, spec, install_dir)
+    scheduled_cmd = (
+        "cmd.exe /d /c "
+        f"schtasks.exe /Create /SC MINUTE /MO 1 /TN {_quote_cmd_value(task_name)} "
+        f"/TR {_quote_cmd_value(monitor_command)} /F "
+        f"&& schtasks.exe /Run /TN {_quote_cmd_value(task_name)}"
+    )
+    out, err, code = ssh.exec_command(scheduled_cmd, timeout=60)
+    if code == 0:
+        return out, err, code
+    run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    run_cmd = (
+        "cmd.exe /d /c "
+        f"reg.exe add {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} "
+        f"/t REG_SZ /d {_quote_cmd_value(monitor_command)} /f "
+        f"&& start \"\" {monitor_command}"
+    )
+    return ssh.exec_command(run_cmd, timeout=60)
+
+
+def _cleanup_cmd_lifecycle_fallback(ssh: WorkstationSsh, spec: WorkstationTunnelSpec) -> dict[str, Any]:
+    task_name = f"AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}"
+    run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    cleanup_cmd = (
+        "cmd.exe /d /c "
+        f"schtasks.exe /Delete /TN {_quote_cmd_value(task_name)} /F 2>nul "
+        f"& reg.exe delete {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} /f 2>nul "
+        "& exit /b 0"
+    )
+    out, err, code = ssh.exec_command(cleanup_cmd, timeout=30)
+    return {"ok": code == 0, "detail": err or out}
+
+
+def _monitor_command(remote_script: str, spec: WorkstationTunnelSpec, install_dir: str) -> str:
+    args = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        remote_script.replace("/", "\\"),
+        "-Monitor",
+        "-WorkstationId",
+        spec.id,
+        "-RemoteBindHost",
+        spec.remote_bind_host,
+        "-RemoteBindPort",
+        str(spec.remote_bind_port),
+        "-TargetHost",
+        "127.0.0.1",
+        "-TargetPort",
+        "22",
+        "-TunnelTarget",
+        spec.tunnel_target,
+        "-TunnelIdentityFile",
+        spec.tunnel_identity_file.replace("/", "\\"),
+        "-InstallDir",
+        install_dir.replace("/", "\\"),
+    ]
+    return " ".join(_cmd_arg(item) for item in args)
+
+
+def _cmd_arg(value: str) -> str:
+    if not value:
+        return '""'
+    if any(ch in value for ch in ' \t"&|<>'):
+        return _quote_cmd_value(value)
+    return value
 
 
 def _result(spec: WorkstationTunnelSpec, ok: bool, status: str, detail: str) -> dict[str, Any]:
