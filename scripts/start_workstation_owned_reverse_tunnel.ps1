@@ -47,6 +47,10 @@ function Get-OwnedTunnelTaskName {
     return "AutoFluidWorkstationTunnel-$WorkstationId-$RemoteBindPort"
 }
 
+function Get-OwnedTunnelRunKeyPath {
+    return "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+}
+
 function Get-OwnedTunnelScriptPath {
     return Join-Path $InstallDir "start_workstation_owned_reverse_tunnel.ps1"
 }
@@ -322,7 +326,18 @@ function Install-OwnedTunnelTask {
     }
     catch {
         Write-OwnedTunnelLog -Message "Register with RunLevel Highest failed; retrying as current user task. $($_.Exception.Message)"
-        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -Force -ErrorAction Stop | Out-Null
+        try {
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -Force -ErrorAction Stop | Out-Null
+        }
+        catch {
+            Write-OwnedTunnelLog -Message "Register current user task failed; installing HKCU Run fallback. $($_.Exception.Message)"
+            $runKey = Get-OwnedTunnelRunKeyPath
+            New-Item -Path $runKey -Force | Out-Null
+            Set-ItemProperty -Path $runKey -Name $taskName -Value "$powerShellExe $argumentText"
+            Start-Process -FilePath $powerShellExe -ArgumentList $argumentText -WindowStyle Hidden
+            Write-Output "Installed workstation-owned AutoFluid tunnel run key: $taskName"
+            return
+        }
     }
     Start-ScheduledTask -TaskName $taskName
     Write-Output "Installed workstation-owned AutoFluid tunnel task: $taskName"
@@ -333,6 +348,7 @@ function Uninstall-OwnedTunnelTask {
     Disable-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path (Get-OwnedTunnelRunKeyPath) -Name $taskName -ErrorAction SilentlyContinue
     Stop-OwnedTunnelProcesses
     Start-Sleep -Seconds 1
     Stop-OwnedTunnelProcesses
@@ -342,12 +358,14 @@ function Uninstall-OwnedTunnelTask {
 function Get-OwnedTunnelStatus {
     $taskName = Get-OwnedTunnelTaskName
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    $runValue = (Get-ItemProperty -Path (Get-OwnedTunnelRunKeyPath) -Name $taskName -ErrorAction SilentlyContinue).$taskName
     $sshExe = Resolve-SshExe
     $statusObject = [ordered]@{
         workstation_id = $WorkstationId
         task_name = $taskName
         task_exists = $null -ne $task
         task_state = if ($null -eq $task) { "missing" } else { [string]$task.State }
+        registry_run_exists = -not [string]::IsNullOrWhiteSpace([string]$runValue)
         monitor_processes = @((Get-OwnedTunnelProcesses -Kind "Monitor")).Count
         ssh_processes = @((Get-OwnedTunnelProcesses -Kind "Ssh")).Count
         local_target_ok = Test-TcpEndpoint -HostName $TargetHost -Port $TargetPort

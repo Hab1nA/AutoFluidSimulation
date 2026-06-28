@@ -374,7 +374,8 @@ def status_workstation_tunnel(
                 payload = json.loads(out.strip() or "{}")
             except json.JSONDecodeError:
                 payload = {"raw": out.strip()}
-            ok = bool(payload.get("task_exists")) and bool(payload.get("remote_tunnel_ok"))
+            installed = bool(payload.get("task_exists")) or bool(payload.get("registry_run_exists"))
+            ok = installed and bool(payload.get("remote_tunnel_ok"))
             result = _result(spec, ok, "ok" if ok else "not_ready", "")
             result["install_dir"] = candidate_dir
             result["status_payload"] = payload

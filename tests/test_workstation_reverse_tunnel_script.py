@@ -197,6 +197,9 @@ def test_workstation_owned_tunnel_install_falls_back_to_non_elevated_task_regist
 
     assert "-RunLevel Highest" in body
     assert "Register with RunLevel Highest failed; retrying as current user task" in body
+    assert "Register current user task failed; installing HKCU Run fallback" in body
+    assert "Set-ItemProperty -Path $runKey -Name $taskName" in body
+    assert "Start-Process -FilePath $powerShellExe" in body
     assert body.count("Register-ScheduledTask") == 2
     fallback_start = body.index("catch {")
     fallback_body = body[fallback_start:]
@@ -214,3 +217,26 @@ def test_workstation_owned_tunnel_ssh_cleanup_matches_forwarded_port_not_target_
 
     assert "$commandLine -match $portPattern" in ssh_branch
     assert "[regex]::Escape($TunnelTarget)" not in ssh_branch
+
+
+def test_workstation_owned_tunnel_uninstall_removes_hkcu_run_fallback() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Uninstall-OwnedTunnelTask")
+    fn_end = source.index("function Get-OwnedTunnelStatus")
+    body = source[fn_start:fn_end]
+
+    assert "Remove-ItemProperty -Path (Get-OwnedTunnelRunKeyPath) -Name $taskName" in body
+
+
+def test_workstation_owned_tunnel_status_reports_hkcu_run_fallback() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Get-OwnedTunnelStatus")
+    fn_end = source.index("if ($Uninstall)")
+    body = source[fn_start:fn_end]
+
+    assert "registry_run_exists" in body
+    assert "Get-OwnedTunnelRunKeyPath" in body

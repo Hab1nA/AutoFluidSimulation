@@ -56,6 +56,12 @@ class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
         return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
 
 
+class RegistryRunStatusRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
 class BothDirsDeniedRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
@@ -316,6 +322,29 @@ def test_status_falls_back_to_user_install_dir_when_programdata_script_is_missin
     all_commands = "\n".join(remote.commands)
     assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
     assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
+
+
+def test_status_accepts_registry_run_fallback_without_scheduled_task() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=RegistryRunStatusRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
 
 
 def test_uninstall_attempts_programdata_and_user_install_dirs() -> None:
