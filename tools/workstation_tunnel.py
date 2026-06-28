@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -51,12 +52,7 @@ def specs_from_workstations(
     *,
     tunnel_target: str | None = None,
 ) -> list[WorkstationTunnelSpec]:
-    target = (
-        tunnel_target
-        or os.environ.get("AUTOFLUID_WORKSTATION_TUNNEL_TARGET")
-        or os.environ.get("AUTOFLUID_WORKSTATION_TUNNEL_HOST")
-        or DEFAULT_TUNNEL_TARGET
-    )
+    target = _workstation_tunnel_target(tunnel_target)
     specs: list[WorkstationTunnelSpec] = []
     for index, workstation in enumerate(workstations):
         ws_id = str(workstation.get("id") or f"WS-{index + 1}")
@@ -81,6 +77,45 @@ def specs_from_workstations(
             )
         )
     return specs
+
+
+def _workstation_tunnel_target(tunnel_target: str | None = None) -> str:
+    target = tunnel_target or os.environ.get("AUTOFLUID_WORKSTATION_TUNNEL_TARGET")
+    if target:
+        return target
+    legacy_target = os.environ.get("AUTOFLUID_WORKSTATION_TUNNEL_HOST")
+    if legacy_target:
+        return legacy_target
+    return _resolve_ssh_config_target(DEFAULT_TUNNEL_TARGET) or DEFAULT_TUNNEL_TARGET
+
+
+def _resolve_ssh_config_target(alias: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ssh", "-G", alias],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        key = key.strip().lower()
+        value = value.strip()
+        if key in {"hostname", "user"} and value:
+            values[key] = value
+    hostname = values.get("hostname", "")
+    if not hostname or hostname == alias:
+        return None
+    user = values.get("user", "")
+    if user:
+        return f"{user}@{hostname}"
+    return hostname
 
 
 def configured_workstation_specs(*, tunnel_target: str | None = None) -> list[WorkstationTunnelSpec]:

@@ -157,8 +157,7 @@ function Get-OwnedTunnelProcesses {
         if ($Kind -eq "Ssh") {
             return $_.Name -ieq "ssh.exe" -and
                 $commandLine -match '-R' -and
-                $commandLine -match $portPattern -and
-                $commandLine -match [regex]::Escape($TunnelTarget)
+                $commandLine -match $portPattern
         }
         return $commandLine -match $taskPattern
     }
@@ -270,6 +269,10 @@ function Install-OwnedTunnelTask {
 
     $taskName = Get-OwnedTunnelTaskName
     $powerShellExe = Resolve-PowerShellExe
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Stop-OwnedTunnelProcesses
+    Start-Sleep -Seconds 1
+    Stop-OwnedTunnelProcesses
     $args = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",

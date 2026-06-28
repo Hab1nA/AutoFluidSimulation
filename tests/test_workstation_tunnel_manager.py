@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from tools import workstation_tunnel
@@ -312,3 +313,155 @@ def test_workstation_tunnel_target_prefers_new_target_env(monkeypatch) -> None:
     )
 
     assert specs[0].tunnel_target == "ocar-tunnel"
+
+
+def test_default_workstation_tunnel_target_resolves_ssh_alias(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", raising=False)
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", raising=False)
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        assert args[0] == ["ssh", "-G", "ocar"]
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="user root\nhostname 39.98.196.94\nport 22\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ]
+    )
+
+    assert specs[0].tunnel_target == "root@39.98.196.94"
+
+
+def test_default_workstation_tunnel_target_ignores_nonstandard_ssh_config_port(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", raising=False)
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", raising=False)
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="user root\nhostname 203.0.113.10\nport 22222\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ]
+    )
+
+    assert specs[0].tunnel_target == "root@203.0.113.10"
+
+
+def test_default_workstation_tunnel_target_falls_back_when_ssh_config_lookup_fails(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", raising=False)
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", raising=False)
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args[0], returncode=255, stdout="", stderr="no host")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ]
+    )
+
+    assert specs[0].tunnel_target == "ocar"
+
+
+def test_default_workstation_tunnel_target_falls_back_when_hostname_is_alias(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", raising=False)
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", raising=False)
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="user ps\nhostname ocar\nport 22\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ]
+    )
+
+    assert specs[0].tunnel_target == "ocar"
+
+
+def test_default_workstation_tunnel_target_falls_back_when_ssh_is_unavailable(monkeypatch) -> None:
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", raising=False)
+    monkeypatch.delenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", raising=False)
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        raise OSError("ssh unavailable")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ]
+    )
+
+    assert specs[0].tunnel_target == "ocar"
+
+
+def test_explicit_workstation_tunnel_target_is_not_resolved(monkeypatch) -> None:
+    def fail_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("explicit tunnel target should not call ssh -G")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fail_run)
+
+    specs = workstation_tunnel.specs_from_workstations(
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+            }
+        ],
+        tunnel_target="root@198.51.100.10",
+    )
+
+    assert specs[0].tunnel_target == "root@198.51.100.10"

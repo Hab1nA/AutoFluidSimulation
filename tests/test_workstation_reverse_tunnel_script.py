@@ -165,3 +165,30 @@ def test_workstation_owned_tunnel_task_does_not_double_quote_file_argument() -> 
 
     assert '"-File", $scriptPath' in source
     assert '"-File", "`"$scriptPath`""' not in source
+
+
+def test_workstation_owned_tunnel_install_stops_existing_instance_before_registering() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Install-OwnedTunnelTask")
+    fn_end = source.index("function Uninstall-OwnedTunnelTask")
+    body = source[fn_start:fn_end]
+
+    assert body.count("Stop-OwnedTunnelProcesses") == 2
+    assert body.index("Stop-ScheduledTask") < body.index("Register-ScheduledTask")
+    assert body.index("Stop-OwnedTunnelProcesses") < body.index("Register-ScheduledTask")
+    assert body.index("Start-Sleep -Seconds 1") < body.index("Register-ScheduledTask")
+
+
+def test_workstation_owned_tunnel_ssh_cleanup_matches_forwarded_port_not_target_alias() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Get-OwnedTunnelProcesses")
+    fn_end = source.index("function Stop-OwnedTunnelProcesses")
+    body = source[fn_start:fn_end]
+    ssh_branch = body[body.index('if ($Kind -eq "Ssh")') : body.index('return $commandLine -match $taskPattern')]
+
+    assert "$commandLine -match $portPattern" in ssh_branch
+    assert "[regex]::Escape($TunnelTarget)" not in ssh_branch
