@@ -467,7 +467,7 @@ function Test-RemoteTunnelEndpoint {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = "Continue"
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 2>&1 | Out-Null
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 $TunnelTarget $remoteCommand 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {

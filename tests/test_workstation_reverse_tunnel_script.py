@@ -139,6 +139,9 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
     assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
     assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
+    assert "function Wait-RemoteTunnelEndpoint" in source
+    assert 'Register-TunnelFailure -Reason $startupStatus' in source
+    assert "startup-probe-timeout" in source
 
 
 def test_workstation_owned_remote_probe_passes_single_remote_command(
@@ -175,6 +178,7 @@ if (-not $match.Success) {{
 $functionSource = $match.Value -replace '\r?\nfunction Get-OwnedTunnelProcesses\z', ''
 Invoke-Expression $functionSource
 $script:TunnelTarget = "root@example.invalid"
+$script:RemoteBindHost = "127.0.0.1"
 $script:RemoteBindPort = 2222
 $script:TunnelIdentityFile = "C:\Users\example\.ssh\autofluid_tunnel_ed25519"
 $result = Test-RemoteTunnelEndpoint -SshExe "{fake_ssh}"
@@ -206,7 +210,94 @@ if ($result -ne $true) {{
     assert "autofluid_tunnel_ed25519" in captured
     assert "root@example.invalid" in captured
     assert "python3 -c 'import socket;" in captured
-    assert 's.connect(("127.0.0.1",2222))' in captured
+    assert "s.connect((bytes([49,50,55,46,48,46,48,46,49]).decode(),2222))" in captured
+
+
+def test_workstation_owned_wait_probe_reports_ready_timeout_and_exit(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        msg = "Windows PowerShell is required for this regression test"
+        raise AssertionError(msg)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    success_ssh = tmp_path / "success-ssh.cmd"
+    success_ssh.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
+    fail_ssh = tmp_path / "fail-ssh.cmd"
+    fail_ssh.write_text("@echo off\nexit /b 1\n", encoding="utf-8")
+
+    probe_script = tmp_path / "owned-wait-probe.ps1"
+    probe_script.write_text(
+        rf"""
+$ErrorActionPreference = "Stop"
+$source = Get-Content -LiteralPath "{script_path}" -Raw
+$match = [regex]::Match(
+    $source,
+    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
+)
+if (-not $match.Success) {{
+    throw "Could not extract probe functions"
+}}
+$functionSource = $match.Value -replace '\r?\nfunction Get-OwnedTunnelProcesses\z', ''
+Invoke-Expression $functionSource
+$script:TunnelTarget = "root@example.invalid"
+$script:RemoteBindHost = "127.0.0.1"
+$script:RemoteBindPort = 2222
+$script:TunnelIdentityFile = ""
+$script:ProbeIntervalSeconds = 1
+
+$ready = Wait-RemoteTunnelEndpoint `
+    -SshExe "{success_ssh}" `
+    -SshProcess $null `
+    -TimeoutSeconds 2
+if ($ready -ne "ready") {{
+    throw "Expected ready, got $ready"
+}}
+
+$timeout = Wait-RemoteTunnelEndpoint `
+    -SshExe "{fail_ssh}" `
+    -SshProcess $null `
+    -TimeoutSeconds 1
+if ($timeout -ne "startup-probe-timeout") {{
+    throw "Expected startup-probe-timeout, got $timeout"
+}}
+
+$dead = Start-Process -FilePath "cmd.exe" `
+    -ArgumentList "/d", "/c", "exit /b 7" `
+    -WindowStyle Hidden `
+    -PassThru
+Wait-Process -Id $dead.Id
+$exited = Wait-RemoteTunnelEndpoint `
+    -SshExe "{fail_ssh}" `
+    -SshProcess $dead `
+    -TimeoutSeconds 2
+if ($exited -ne "ssh-exited-7") {{
+    throw "Expected ssh-exited-7, got $exited"
+}}
+Write-Output "wait probe paths passed"
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe_script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "wait probe paths passed" in result.stdout
 
 
 def test_workstation_owned_tunnel_uninstall_stops_processes_before_and_after_task_removal() -> None:

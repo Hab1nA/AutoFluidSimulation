@@ -137,18 +137,38 @@ function Test-RemoteTunnelEndpoint {
     param(
         [string]$SshExe
     )
-    $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((`"127.0.0.1`",$RemoteBindPort)); s.close()'"
+    $hostBytes = (($RemoteBindHost.ToCharArray() | ForEach-Object { [int][char]$_ }) -join ",")
+    $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((bytes([$hostBytes]).decode(),$RemoteBindPort)); s.close()'"
     $identityArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
         $identityArgs = @("-i", $TunnelIdentityFile)
     }
     try {
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 2>&1 | Out-Null
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 1>$null 2>$null
         return $LASTEXITCODE -eq 0
     }
     catch {
         return $false
     }
+}
+
+function Wait-RemoteTunnelEndpoint {
+    param(
+        [string]$SshExe,
+        [System.Diagnostics.Process]$SshProcess,
+        [int]$TimeoutSeconds
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ($null -ne $SshProcess -and $SshProcess.HasExited) {
+            return "ssh-exited-$($SshProcess.ExitCode)"
+        }
+        if (Test-RemoteTunnelEndpoint -SshExe $SshExe) {
+            return "ready"
+        }
+        Start-Sleep -Seconds $ProbeIntervalSeconds
+    }
+    return "startup-probe-timeout"
 }
 
 function Get-OwnedTunnelProcesses {
@@ -262,7 +282,20 @@ function Start-OwnedTunnelMonitor {
                 -RedirectStandardOutput $logs.Stdout `
                 -RedirectStandardError $logs.Stderr `
                 -PassThru
-            Start-Sleep -Seconds $RestartDelaySeconds
+            $startupStatus = Wait-RemoteTunnelEndpoint `
+                -SshExe $sshExe `
+                -SshProcess $sshProcess `
+                -TimeoutSeconds ([Math]::Max(30, $RestartDelaySeconds * 6))
+            if ($startupStatus -eq "ready") {
+                Reset-TunnelFailureBudget -FailureState $failureState
+                continue
+            }
+            if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
+                Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
+            }
+            $sshProcess = $null
+            $delay = Register-TunnelFailure -Reason $startupStatus -FailureState $failureState -LogState $logState
+            Start-Sleep -Seconds $delay
         }
     }
     finally {
