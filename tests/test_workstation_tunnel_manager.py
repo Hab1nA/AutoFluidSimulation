@@ -62,6 +62,14 @@ class BothDirsDeniedRemoteWorkstation(FakeRemoteWorkstation):
         return "", "拒绝访问。", 1
 
 
+class KeyProvisioningRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if "type" in command and "autofluid_tunnel_ed25519.pub" in command:
+            return "ssh-ed25519 AAAATEST autofluid-test-tunnel\r\n", "", 0
+        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
 def test_repair_deploys_workstation_owned_tunnel_to_raw_workstation_host(tmp_path: Path) -> None:
     script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
     script.write_text("script", encoding="utf-8")
@@ -139,6 +147,86 @@ def test_repair_falls_back_to_user_install_dir_when_programdata_is_denied(tmp_pa
     assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
     assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
     assert "-Install" in all_commands
+
+
+def test_repair_generates_and_authorizes_workstation_tunnel_key(tmp_path: Path, monkeypatch) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    auth_calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        auth_calls.append((args[0], kwargs.get("input")))
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-B",
+        host="172.17.135.89",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2224,
+        tunnel_target="root@39.98.196.94",
+        tunnel_identity_file="C:/Users/ps/.ssh/autofluid_tunnel_ed25519",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=KeyProvisioningRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    remote = FakeRemoteWorkstation.instances[0]
+    all_commands = "\n".join(remote.commands)
+    assert "ssh-keygen.exe -t ed25519" in all_commands
+    assert "autofluid_tunnel_ed25519.pub" in all_commands
+    assert "-TunnelIdentityFile C:\\Users\\ps\\.ssh\\autofluid_tunnel_ed25519" in all_commands
+    assert auth_calls
+    assert auth_calls[0][0][:4] == ["ssh", "-o", "StrictHostKeyChecking=accept-new", "root@39.98.196.94"]
+    assert auth_calls[0][1] == "ssh-ed25519 AAAATEST autofluid-test-tunnel"
+
+
+def test_uninstall_deauthorizes_and_deletes_workstation_tunnel_key(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+    auth_calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        auth_calls.append((args[0], kwargs.get("input")))
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-B",
+        host="172.17.135.89",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2224,
+        tunnel_target="root@39.98.196.94",
+        tunnel_identity_file="C:/Users/ps/.ssh/autofluid_tunnel_ed25519",
+    )
+
+    result = workstation_tunnel.uninstall_workstation_tunnel(
+        spec,
+        ssh_factory=KeyProvisioningRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert result["key_cleanup"] == {"ok": True, "deauthorized": True}
+    remote = FakeRemoteWorkstation.instances[0]
+    all_commands = "\n".join(remote.commands)
+    assert "autofluid_tunnel_ed25519.pub" in all_commands
+    assert "del /q" in all_commands
+    assert auth_calls[0][0][:4] == ["ssh", "-o", "StrictHostKeyChecking=accept-new", "root@39.98.196.94"]
+    assert auth_calls[0][1] == "ssh-ed25519 AAAATEST autofluid-test-tunnel"
 
 
 def test_repair_reports_mkdir_failed_when_programdata_and_user_dir_are_denied(tmp_path: Path) -> None:
@@ -312,6 +400,7 @@ def test_workstation_tunnel_specs_use_reachable_port_but_raw_host_for_bootstrap(
     assert specs[0].remote_bind_host == "127.0.0.1"
     assert specs[0].remote_bind_port == 2222
     assert specs[0].auth_method == "none"
+    assert specs[0].tunnel_identity_file == "C:/Users/ps/.ssh/autofluid_tunnel_ed25519"
 
 
 def test_workstation_tunnel_target_prefers_new_target_env(monkeypatch) -> None:

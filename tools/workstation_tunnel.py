@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -39,6 +39,7 @@ class WorkstationTunnelSpec:
     remote_bind_host: str
     remote_bind_port: int
     tunnel_target: str = DEFAULT_TUNNEL_TARGET
+    tunnel_identity_file: str = ""
 
 
 def default_workstation_tunnel_port(index: int) -> int:
@@ -74,6 +75,7 @@ def specs_from_workstations(
                 remote_bind_host=reachable_host,
                 remote_bind_port=reachable_port,
                 tunnel_target=target,
+                tunnel_identity_file=_default_tunnel_identity_file(str(workstation.get("username") or "")),
             )
         )
     return specs
@@ -87,6 +89,13 @@ def _workstation_tunnel_target(tunnel_target: str | None = None) -> str:
     if legacy_target:
         return legacy_target
     return _resolve_ssh_config_target(DEFAULT_TUNNEL_TARGET) or DEFAULT_TUNNEL_TARGET
+
+
+def _default_tunnel_identity_file(username: str) -> str:
+    username = username.strip()
+    if not username:
+        return ""
+    return f"C:/Users/{username}/.ssh/autofluid_tunnel_ed25519"
 
 
 def _resolve_ssh_config_target(alias: str) -> str | None:
@@ -178,6 +187,8 @@ def _ps_file_command(script_path: str, action: str, spec: WorkstationTunnelSpec,
         "22",
         "-TunnelTarget",
         _quote_ps_value(spec.tunnel_target),
+        "-TunnelIdentityFile",
+        _quote_ps_value(spec.tunnel_identity_file.replace("/", "\\")) if spec.tunnel_identity_file else '""',
         "-InstallDir",
         _quote_ps_value(install_dir.replace("/", "\\")),
     ]
@@ -223,6 +234,12 @@ def repair_workstation_tunnel(
                 return _result(spec, False, "mkdir_failed", fallback_err or mkdir_err)
             install_dir = fallback_dir
             remote_script = _remote_script_path(install_dir)
+        try:
+            identity_file = _ensure_workstation_tunnel_key(ssh, spec)
+        except RuntimeError as exc:
+            return _result(spec, False, "key_failed", str(exc))
+        if identity_file:
+            spec = replace(spec, tunnel_identity_file=identity_file)
         if not ssh.upload_file(str(local_script), remote_script):
             return _result(spec, False, "upload_failed", "")
         install_cmd = _ps_file_command(remote_script, "-Install", spec, install_dir)
@@ -242,6 +259,85 @@ def repair_workstation_tunnel(
 def _mkdir_command(install_dir: str) -> str:
     escaped_dir = _quote_cmd_value(install_dir.replace("/", "\\"))
     return f"cmd.exe /d /c if not exist {escaped_dir} mkdir {escaped_dir}"
+
+
+def _ensure_workstation_tunnel_key(ssh: WorkstationSsh, spec: WorkstationTunnelSpec) -> str:
+    identity_file = spec.tunnel_identity_file
+    if not identity_file:
+        return ""
+    key_path = identity_file.replace("/", "\\")
+    key_dir = "\\".join(key_path.split("\\")[:-1])
+    mkdir_cmd = f"cmd.exe /d /c if not exist {_quote_cmd_value(key_dir)} mkdir {_quote_cmd_value(key_dir)}"
+    _, mkdir_err, mkdir_code = ssh.exec_command(mkdir_cmd, timeout=30)
+    if mkdir_code != 0:
+        raise RuntimeError(f"failed to create workstation ssh key directory: {mkdir_err}")
+    keygen_cmd = (
+        "cmd.exe /d /c "
+        f"if not exist {_quote_cmd_value(key_path)} "
+        f"ssh-keygen.exe -t ed25519 -N {_quote_cmd_value('')} "
+        f"-C {_quote_cmd_value(f'autofluid-{spec.id}-tunnel')} -f {_quote_cmd_value(key_path)}"
+    )
+    _, keygen_err, keygen_code = ssh.exec_command(keygen_cmd, timeout=60)
+    if keygen_code != 0:
+        raise RuntimeError(f"failed to create workstation ssh tunnel key: {keygen_err}")
+    pub_cmd = f"cmd.exe /d /c type {_quote_cmd_value(key_path + '.pub')}"
+    public_key, pub_err, pub_code = ssh.exec_command(pub_cmd, timeout=30)
+    if pub_code != 0 or not public_key.strip():
+        raise RuntimeError(f"failed to read workstation ssh tunnel public key: {pub_err}")
+    _authorize_tunnel_public_key(public_key.strip(), auth_target=spec.tunnel_target)
+    return identity_file
+
+
+def _authorize_tunnel_public_key(public_key: str, *, auth_target: str = DEFAULT_TUNNEL_TARGET) -> None:
+    script = (
+        "import fcntl,os,sys\n"
+        "key=sys.stdin.read().strip()\n"
+        "path=os.path.expanduser('~/.ssh/authorized_keys')\n"
+        "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+        "with open(path, 'a+', encoding='utf-8') as fh:\n"
+        "    fcntl.flock(fh, fcntl.LOCK_EX)\n"
+        "    fh.seek(0)\n"
+        "    existing=fh.read().splitlines()\n"
+        "    if key and key not in existing:\n"
+        "        fh.write(key+'\\n')\n"
+    )
+    result = subprocess.run(
+        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, "python3", "-c", script],
+        input=public_key,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or "failed to authorize workstation tunnel key")
+
+
+def _deauthorize_tunnel_public_key(public_key: str, *, auth_target: str) -> None:
+    script = (
+        "import fcntl,os,sys\n"
+        "key=sys.stdin.read().strip()\n"
+        "path=os.path.expanduser('~/.ssh/authorized_keys')\n"
+        "if not key or not os.path.exists(path):\n"
+        "    raise SystemExit(0)\n"
+        "with open(path, 'r+', encoding='utf-8') as fh:\n"
+        "    fcntl.flock(fh, fcntl.LOCK_EX)\n"
+        "    lines=[line for line in fh.read().splitlines() if line.strip() != key]\n"
+        "    fh.seek(0)\n"
+        "    fh.truncate()\n"
+        "    if lines:\n"
+        "        fh.write('\\n'.join(lines)+'\\n')\n"
+    )
+    result = subprocess.run(
+        ["ssh", "-o", "StrictHostKeyChecking=accept-new", auth_target, "python3", "-c", script],
+        input=public_key,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or "failed to deauthorize workstation tunnel key")
 
 
 def _quote_cmd_value(value: str) -> str:
@@ -322,9 +418,36 @@ def uninstall_workstation_tunnel(
         result = _result(spec, ok, "ok" if ok else "uninstall_failed", detail or str(attempts[-1]["detail"]))
         result["install_dir"] = install_dir
         result["attempts"] = attempts
+        result["key_cleanup"] = _cleanup_workstation_tunnel_key(ssh, spec)
         return result
     finally:
         ssh.disconnect()
+
+
+def _cleanup_workstation_tunnel_key(ssh: WorkstationSsh, spec: WorkstationTunnelSpec) -> dict[str, Any]:
+    if not spec.tunnel_identity_file:
+        return {"ok": True, "skipped": True}
+    key_path = spec.tunnel_identity_file.replace("/", "\\")
+    pub_cmd = f"cmd.exe /d /c if exist {_quote_cmd_value(key_path + '.pub')} type {_quote_cmd_value(key_path + '.pub')}"
+    public_key, pub_err, pub_code = ssh.exec_command(pub_cmd, timeout=30)
+    deauthorized = False
+    if pub_code == 0 and public_key.strip():
+        try:
+            _deauthorize_tunnel_public_key(public_key.strip(), auth_target=spec.tunnel_target)
+            deauthorized = True
+        except RuntimeError as exc:
+            return {"ok": False, "stage": "deauthorize", "detail": str(exc)}
+    elif pub_err:
+        return {"ok": False, "stage": "read_public_key", "detail": pub_err}
+    del_cmd = (
+        "cmd.exe /d /c "
+        f"if exist {_quote_cmd_value(key_path)} del /q {_quote_cmd_value(key_path)} "
+        f"& if exist {_quote_cmd_value(key_path + '.pub')} del /q {_quote_cmd_value(key_path + '.pub')}"
+    )
+    _, del_err, del_code = ssh.exec_command(del_cmd, timeout=30)
+    if del_code != 0:
+        return {"ok": False, "stage": "delete_key", "detail": del_err}
+    return {"ok": True, "deauthorized": deauthorized}
 
 
 def _result(spec: WorkstationTunnelSpec, ok: bool, status: str, detail: str) -> dict[str, Any]:

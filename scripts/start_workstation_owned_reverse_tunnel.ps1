@@ -9,6 +9,7 @@ param(
     [string]$TargetHost = "127.0.0.1",
     [int]$TargetPort = 22,
     [string]$TunnelTarget = "ocar",
+    [string]$TunnelIdentityFile = "",
     [string]$InstallDir = "C:\ProgramData\AutoFluid\tunnel",
     [int]$RestartDelaySeconds = 5,
     [int]$ProbeIntervalSeconds = 5,
@@ -133,8 +134,12 @@ function Test-RemoteTunnelEndpoint {
         [string]$SshExe
     )
     $remoteCommand = "python3 -c `"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',$RemoteBindPort)); s.close()`""
+    $identityArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
+        $identityArgs = @("-i", $TunnelIdentityFile)
+    }
     try {
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TunnelTarget $remoteCommand 2>&1 | Out-Null
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 2>&1 | Out-Null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -176,7 +181,7 @@ function Stop-OwnedTunnelProcesses {
 
 function Get-ReverseTunnelArguments {
     $forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"
-    return @(
+    $args = @(
         "-o", "BatchMode=yes",
         "-o", "ExitOnForwardFailure=yes",
         "-o", "ServerAliveInterval=5",
@@ -187,6 +192,10 @@ function Get-ReverseTunnelArguments {
         "-R", $forwardSpec,
         $TunnelTarget
     )
+    if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
+        $args = @("-i", $TunnelIdentityFile) + $args
+    }
+    return $args
 }
 
 function Start-OwnedTunnelMonitor {
@@ -285,6 +294,7 @@ function Install-OwnedTunnelTask {
         "-TargetHost", $TargetHost,
         "-TargetPort", ([string]$TargetPort),
         "-TunnelTarget", $TunnelTarget,
+        "-TunnelIdentityFile", $TunnelIdentityFile,
         "-InstallDir", $InstallDir,
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-ProbeIntervalSeconds", ([string]$ProbeIntervalSeconds),
@@ -307,7 +317,13 @@ function Install-OwnedTunnelTask {
         -MultipleInstances IgnoreNew `
         -RestartCount 10 `
         -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -RunLevel Highest -Force | Out-Null
+    try {
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-OwnedTunnelLog -Message "Register with RunLevel Highest failed; retrying as current user task. $($_.Exception.Message)"
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $triggers -Settings $settings -Force -ErrorAction Stop | Out-Null
+    }
     Start-ScheduledTask -TaskName $taskName
     Write-Output "Installed workstation-owned AutoFluid tunnel task: $taskName"
 }

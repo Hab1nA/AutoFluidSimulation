@@ -130,7 +130,12 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert '"ServerAliveInterval=5"' in source
     assert '"ServerAliveCountMax=3"' in source
     assert '"StrictHostKeyChecking=accept-new"' in source
+    assert '"-i", $TunnelIdentityFile' in source
     assert '$forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"' in source
+    fn_start = source.index("function Get-ReverseTunnelArguments")
+    fn_end = source.index("function Start-OwnedTunnelMonitor")
+    body = source[fn_start:fn_end]
+    assert body.index('"-i", $TunnelIdentityFile') < body.rindex("return $args")
     assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
     assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
     assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
@@ -180,6 +185,22 @@ def test_workstation_owned_tunnel_install_stops_existing_instance_before_registe
     assert body.index("Stop-ScheduledTask") < body.index("Register-ScheduledTask")
     assert body.index("Stop-OwnedTunnelProcesses") < body.index("Register-ScheduledTask")
     assert body.index("Start-Sleep -Seconds 1") < body.index("Register-ScheduledTask")
+
+
+def test_workstation_owned_tunnel_install_falls_back_to_non_elevated_task_registration() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Install-OwnedTunnelTask")
+    fn_end = source.index("function Uninstall-OwnedTunnelTask")
+    body = source[fn_start:fn_end]
+
+    assert "-RunLevel Highest" in body
+    assert "Register with RunLevel Highest failed; retrying as current user task" in body
+    assert body.count("Register-ScheduledTask") == 2
+    fallback_start = body.index("catch {")
+    fallback_body = body[fallback_start:]
+    assert "-RunLevel Highest" not in fallback_body
 
 
 def test_workstation_owned_tunnel_ssh_cleanup_matches_forwarded_port_not_target_alias() -> None:
