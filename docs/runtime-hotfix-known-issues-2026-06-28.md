@@ -147,9 +147,44 @@ WS-C 构型 `1006` 的计划任务 `AutoFluid_e930510e3117` 正在运行，Fluen
 - 明确 tunnel supervisor 的所有权、重启策略、PID/日志证据和失败上报方式。
 - 将可证明有效的部分整理为独立提交。
 
+### 6. WS-C Windows 计划内重启后触发 Fluent/MPI 进程风暴
+
+**现象**
+
+WS-C 在凌晨 Windows 计划内重启后，`1008`、`1013`、`1014`、`1015` 等 solver 连续失败。远端 Fluent 日志显示后续任务启动时已有其他 Fluent 并行进程存在，工作站上曾残留多组 `cx2410.exe`、`ansyscl.exe`、`mpiexec.exe`、`hydra_pmi_proxy.exe`、`fl_mpi2410.exe`。
+
+**已确认触发点**
+
+WS-C 系统事件显示 `2026-06-29 00:26:44` 由 `NT AUTHORITY\SYSTEM` 发起计划内重启，`00:29:49` 事件日志服务重新启动。该重启导致前序 Fluent / scheduled task 状态进入不干净状态。
+
+**当前处理**
+
+- 已人工清理 WS-C 残留 Fluent/MPI 进程，并将失败构型重新置回可调度状态。
+- 已热修 `executor.remote_executor.RemoteExecutor.wait_solver_completion()`：solver `.error`、输出缺失、startup `lost/failed/running` 无进度分支都会进入 `_kill_remote_task_for_config()`，从而触发远程任务终止和 Fluent/MPI 清理。
+- 在不停止 daemon 的前提下，已在 ocar 启动运行态 sidecar 兜底守护：`/tmp/autofluid_solver_hotfix_guard.py`，日志 `/tmp/autofluid_solver_hotfix_guard.log`。它监控当前 `remote_tasks` 中的 solver 异常，发现 `.error` 或 startup 无进度异常时补做远程清理。
+- 已将修复后的 `executor/remote_executor.py` 同步到 ocar 磁盘，但当前 daemon 进程未重启，内存中仍依赖 sidecar 兜底。
+
+**未彻底修复的原因**
+
+当前 daemon 不能无中断热加载 Python 模块。源码已修复并同步到服务器，但运行中的 daemon 只有在下次重启后才会自然加载新逻辑。sidecar 是本次不中断运行的临时保护层，不应长期替代 daemon 内部生命周期管理。
+
+**风险**
+
+- sidecar 只覆盖 solver 异常清理兜底，不负责调度状态机修复。
+- 如果 sidecar 被误停，而 daemon 尚未重启加载新源码，旧内存逻辑仍可能在相同失败分支只清任务记录、不杀 Fluent/MPI。
+- 调度器仍可能在单个工作站连续 solver 失败后继续派发后续构型，缺少工作站隔离 / backoff 策略。
+
+**彻底修复方向**
+
+- 在合适窗口受控重启 daemon，使 ocar 上已同步的 `executor/remote_executor.py` 生效，然后停止 sidecar。
+- 为 solver 失败后工作站级 quarantine / backoff 增加调度策略，避免单机进程残留放大为队列级连锁失败。
+- 扩展 Fluent/MPI 清理覆盖面，确保 evidence cleanup 能处理 MPI 子进程命令行证据不足的场景。
+- 将本次新增回归测试纳入常规验证：solver `.error` 和 startup `lost` 都必须调用 `_kill_remote_task_for_config()`。
+
 ## 建议后续工作
 
 1. 优先修复 daemon restart / stop 生命周期边界，防止下次受控重启再次影响 remote task。
 2. 调整 dashboard 工作站 SSH 健康展示，避免把被动快照老化误报为未知故障。
 3. 等当前四个 solver 自然完成后，观察后续新任务是否全部使用新 wrapper 并具备可靠 PID 文件。
 4. 将 tunnel supervisor / watchdog 改动单独整理、审查、测试后再合并。
+5. 在当前 solver 安全窗口内受控重启 daemon，让 WS-C Fluent/MPI 进程风暴修复从 sidecar 兜底切换为 daemon 内建逻辑。

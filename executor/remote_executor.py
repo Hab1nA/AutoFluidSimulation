@@ -1865,10 +1865,9 @@ class RemoteExecutor:
                         )
                         ssh.delete_remote_file(error_flag)
                         self._clear_solver_progress(progress_file, ssh, config_name)
-                        self._cleanup_completed_remote_task(
+                        self._kill_remote_task_for_config(
                             config_name,
                             "solver",
-                            ssh,
                             workstation_id,
                         )
                         return False
@@ -1923,10 +1922,9 @@ class RemoteExecutor:
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
                             self._clear_solver_progress(progress_file, ssh, config_name)
-                            self._cleanup_completed_remote_task(
+                            self._kill_remote_task_for_config(
                                 config_name,
                                 "solver",
-                                ssh,
                                 workstation_id,
                             )
                             return False
@@ -1947,8 +1945,7 @@ class RemoteExecutor:
                         "启动窗口内未产生进度"
                     )
                     logger.error("[Solver] 构型%s %s", config_name, self.last_solver_error)
-                    if status == "running":
-                        self._kill_remote_task_for_config(config_name, "solver", workstation_id)
+                    self._kill_remote_task_for_config(config_name, "solver", workstation_id)
                     self._clear_solver_progress(progress_file, config_name=config_name)
                     return False
 

@@ -899,6 +899,22 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
     state = _StateRecorder()
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor._remote_tasks[4] = "AutoFluid_solver"
+    killed: list[tuple[int, str, str]] = []
+
+    def _kill(
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        killed.append((config_name, step_name, workstation_id))
+        executor._remote_tasks.pop(config_name, None)
+        return True
+
+    monkeypatch.setattr(
+        executor,
+        "_kill_remote_task_for_config",
+        _kill,
+    )
     monkeypatch.setattr(
         "executor.remote_executor.time.sleep",
         lambda _: (_ for _ in ()).throw(
@@ -909,6 +925,7 @@ def test_wait_solver_completion_returns_false_immediately_on_error_flag(monkeypa
     assert executor.wait_solver_completion(4) is False
     assert checked == [error_flag]
     assert deleted == [error_flag, "D:/flags/solver_progress_4.json"]
+    assert killed == [(4, "solver", DEFAULT_WORKSTATION_ID)]
     assert 4 not in executor._remote_tasks
     assert state.solver_progress_by_config_clears == [4]
     assert state.solver_progress_clears == 0
@@ -1688,6 +1705,21 @@ def test_wait_solver_completion_fails_fast_when_remote_task_lost_during_startup(
 
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor._remote_tasks[5] = "AutoFluid_lost"
+    killed: list[tuple[int, str, str]] = []
+
+    def _kill(
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
+        killed.append((config_name, step_name, workstation_id))
+        return True
+
+    monkeypatch.setattr(
+        executor,
+        "_kill_remote_task_for_config",
+        _kill,
+    )
     times = iter([1_360.0, 1_360.0, 1_360.0, 1_360.0])
     monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
     monkeypatch.setattr(
@@ -1700,6 +1732,7 @@ def test_wait_solver_completion_fails_fast_when_remote_task_lost_during_startup(
 
     assert executor.wait_solver_completion(5) is False
     assert "启动" in executor.last_solver_error
+    assert killed == [(5, "solver", DEFAULT_WORKSTATION_ID)]
 
 
 def test_wait_solver_completion_fails_fast_when_task_running_without_startup_progress(monkeypatch):
