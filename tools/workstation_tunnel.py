@@ -496,7 +496,7 @@ def _install_cmd_lifecycle_fallback(
         "cmd.exe /d /c "
         f"schtasks.exe /Create /SC MINUTE /MO 1 /TN {_quote_cmd_value(task_name)} "
         f"/TR {_quote_cmd_value(monitor_command)} /F "
-        f"&& schtasks.exe /Run /TN {_quote_cmd_value(task_name)}"
+        f"&& (schtasks.exe /Run /TN {_quote_cmd_value(task_name)} & exit /b 0)"
     )
     out, err, code = ssh.exec_command(scheduled_cmd, timeout=60)
     if code == 0:
