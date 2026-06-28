@@ -102,3 +102,57 @@ def test_tunnel_script_prefers_structured_log_dir_with_temp_fallback() -> None:
 
     assert "logs/local/tunnels/$tunnelName" in source
     assert "[System.IO.Path]::GetTempPath()" in source
+
+
+def test_workstation_owned_tunnel_script_is_independent_of_local_owner() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "AutoFluidWorkstationTunnel-" in source
+    assert "$TargetHost = \"127.0.0.1\"" in source
+    assert "$TargetPort = 22" in source
+    assert 'Test-RemoteTunnelEndpoint' in source
+    assert 'Stop-OwnedTunnelProcesses' in source
+    assert "System.Threading.Mutex" in source
+    assert "OwnerMarkerPath" not in source
+    assert "OwnerPid" not in source
+    assert "5242880" in source
+    assert 'Move-Item -LiteralPath $logs.Supervisor' in source
+
+
+def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert '"ExitOnForwardFailure=yes"' in source
+    assert '"ServerAliveInterval=5"' in source
+    assert '"ServerAliveCountMax=3"' in source
+    assert '$forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"' in source
+    assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
+    assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
+    assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
+
+
+def test_workstation_owned_tunnel_uninstall_stops_processes_before_and_after_task_removal() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+    fn_start = source.index("function Uninstall-OwnedTunnelTask")
+    fn_end = source.index("function Get-OwnedTunnelStatus")
+    body = source[fn_start:fn_end]
+
+    assert body.count("Stop-OwnedTunnelProcesses") == 2
+    assert body.index("Disable-ScheduledTask") < body.index("Unregister-ScheduledTask")
+    assert body.index("Unregister-ScheduledTask") < body.index("Stop-OwnedTunnelProcesses")
+    assert "Start-Sleep -Seconds 1" in body
+
+
+def test_workstation_owned_tunnel_task_uses_bounded_scheduler_restart_count() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "-RestartCount 10" in source
+    assert "-RestartCount 999" not in source

@@ -29,6 +29,7 @@ from ipc.protocol import (
     create_request,
     serialize,
 )
+from tools import workstation_tunnel
 from utils import process_utils
 
 DEFAULT_IPC_HOST = "127.0.0.1"
@@ -387,6 +388,12 @@ def _build_parser() -> argparse.ArgumentParser:
     worker = sub.add_parser("worker")
     worker.add_argument("action", choices=["start", "stop", "restart", "status"])
 
+    workstation_tunnel_parser = sub.add_parser("workstation-tunnel")
+    workstation_tunnel_parser.add_argument("action", choices=["repair", "status", "uninstall"])
+    workstation_tunnel_parser.add_argument("--all", action="store_true")
+    workstation_tunnel_parser.add_argument("--install-dir", default=workstation_tunnel.DEFAULT_INSTALL_DIR)
+    workstation_tunnel_parser.add_argument("--tunnel-target", default=None)
+
     alerts = sub.add_parser("alerts")
     alerts_sub = alerts.add_subparsers(
         dest="alerts_command",
@@ -417,6 +424,29 @@ def run_cli(
         args = parser.parse_args(argv)
     except CliParseError as exc:
         return _json_result(ok=False, command="parse", message=str(exc).strip(), exit_code=2)
+    if args.command == "workstation-tunnel":
+        try:
+            specs = workstation_tunnel.configured_workstation_specs(tunnel_target=args.tunnel_target)
+            results = workstation_tunnel.run_for_specs(
+                args.action,
+                specs,
+                install_dir=args.install_dir,
+            )
+            ok = bool(results) and any(item.get("ok") for item in results)
+            return _json_result(
+                ok=ok,
+                command=f"workstation-tunnel {args.action}",
+                message="ok" if ok else "工作站隧道未就绪",
+                data={"results": results},
+                exit_code=0 if ok else 1,
+            )
+        except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+            return _json_result(
+                ok=False,
+                command=f"workstation-tunnel {getattr(args, 'action', '')}".strip(),
+                message=str(exc),
+                exit_code=1,
+            )
     settings = CliSettings.from_env()
     client = (client_factory or IpcClient)(settings)
 

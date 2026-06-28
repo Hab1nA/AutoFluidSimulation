@@ -17,13 +17,19 @@ from engine.config import LOCAL_PATHS
 
 
 MIN_VALID_PID = 2
-WORKER_PID_KINDS = (
+ALL_WORKER_PID_KINDS = (
     "local_worker",
     "tunnel_workstation",
     "tunnel_localworker",
     "server_ipc_tunnel",
 )
-TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
+WORKER_PID_KINDS = (
+    "local_worker",
+    "tunnel_localworker",
+    "server_ipc_tunnel",
+)
+TUNNEL_WATCHDOG_KINDS = ("LocalWorker",)
+ALL_TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
 logger = logging.getLogger(__name__)
 
 
@@ -211,13 +217,17 @@ def worker_process_is_owned(kind: str, pid: int) -> bool:
 
 def worker_pid_file(kind: str) -> str:
     """Return the stable PID file path for worker and SSH tunnel helpers."""
-    if kind not in WORKER_PID_KINDS:
+    if kind not in ALL_WORKER_PID_KINDS:
         raise ValueError(f"未知 Worker PID 类型: {kind}")
     data_dir = str(LOCAL_PATHS.get("data_dir") or "data")
     return os.path.join(data_dir, f"{kind}.pid")
 
 
-def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[str, int | str]]:
+def cleanup_worker_processes_from_pid_files(
+    timeout: int = 5,
+    *,
+    include_workstation: bool = False,
+) -> dict[str, dict[str, int | str]]:
     """Terminate worker/tunnel processes recorded in stable PID files.
 
     This is intentionally PID-file based so `worker stop`, `quit full`, and
@@ -225,7 +235,8 @@ def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[
     or daemon process whose in-memory `Popen`/`Child` handles are gone.
     """
     results: dict[str, dict[str, int | str]] = {}
-    for kind in WORKER_PID_KINDS:
+    kinds = ALL_WORKER_PID_KINDS if include_workstation else WORKER_PID_KINDS
+    for kind in kinds:
         pid_file = worker_pid_file(kind)
         pid = read_pid_file(pid_file)
         if pid is None:
@@ -243,8 +254,12 @@ def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[
     return results
 
 
-def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, dict[str, str] | str]:
-    """Uninstall Windows Task Scheduler watchdogs for reverse SSH tunnels."""
+def cleanup_tunnel_watchdog_tasks(
+    project_dir: str | None = None,
+    *,
+    include_workstation: bool = False,
+) -> dict[str, dict[str, str] | str]:
+    """Uninstall local Windows watchdogs for locally owned reverse SSH tunnels."""
     if sys.platform != "win32":
         return {"status": "skipped", "reason": "non_windows"}
 
@@ -255,7 +270,8 @@ def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, d
 
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
     results: dict[str, dict[str, str] | str] = {}
-    for tunnel_kind in TUNNEL_WATCHDOG_KINDS:
+    tunnel_kinds = ALL_TUNNEL_WATCHDOG_KINDS if include_workstation else TUNNEL_WATCHDOG_KINDS
+    for tunnel_kind in tunnel_kinds:
         try:
             completed = subprocess.run(
                 [

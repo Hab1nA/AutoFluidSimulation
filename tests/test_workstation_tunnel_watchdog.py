@@ -325,7 +325,7 @@ def test_tunnel_watchdog_process_enumeration_tolerates_cim_access_denied() -> No
     assert "Get-CimInstance Win32_Process |" not in source
     assert "Get-TunnelWin32Processes |" in source
 
-def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_both_tunnel_kinds(
+def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_localworker_by_default(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -348,6 +348,42 @@ def test_cleanup_tunnel_watchdog_tasks_invokes_uninstall_for_both_tunnel_kinds(
     monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
 
     result = process_utils.cleanup_tunnel_watchdog_tasks(str(tmp_path))
+
+    assert result == {
+        "LocalWorker": {"status": "uninstalled"},
+    }
+    assert len(calls) == 1
+    assert [call[-2:] for call in calls] == [
+        ["LocalWorker", "-UninstallWatchdog"],
+    ]
+
+
+def test_cleanup_tunnel_watchdog_tasks_can_explicitly_uninstall_legacy_workstation_relay(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    script = tmp_path / "scripts" / "start_workstation_reverse_tunnel.ps1"
+    script.parent.mkdir()
+    script.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(process_utils.sys, "platform", "win32")
+    monkeypatch.setattr(process_utils.shutil, "which", lambda name: f"C:/Windows/System32/{name}")
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(process_utils.subprocess, "run", fake_run)
+
+    result = process_utils.cleanup_tunnel_watchdog_tasks(
+        str(tmp_path),
+        include_workstation=True,
+    )
 
     assert result == {
         "Workstation": {"status": "uninstalled"},

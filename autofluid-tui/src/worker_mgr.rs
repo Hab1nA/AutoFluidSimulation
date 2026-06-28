@@ -37,6 +37,12 @@ enum WorkerPidKind {
     TunnelLocalWorker,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkstationTunnelOwner {
+    Workstation,
+    LocalRelay,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WorkstationTunnelSpec {
     id: String,
@@ -190,7 +196,9 @@ impl WorkerManager {
                 success = false;
             }
         }
-        if !Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir) {
+        if workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay
+            && !Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir)
+        {
             log_buffer.push_info("⚠️ 工作站 SSH 隧道 PID 文件清理失败".to_string());
             success = false;
         }
@@ -209,7 +217,9 @@ impl WorkerManager {
         for kind in [WorkerPidKind::LocalWorker, WorkerPidKind::TunnelLocalWorker] {
             let _ = Self::cleanup_pid_file_for_path(&self.project_dir, kind);
         }
-        let _ = Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir);
+        if workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay {
+            let _ = Self::cleanup_workstation_tunnel_pid_files_for_path(&self.project_dir);
+        }
     }
     /// 本地 LocalWorker 是否正在运行。
     pub fn is_worker_running(&mut self) -> bool {
@@ -219,7 +229,8 @@ impl WorkerManager {
     /// Return true when a managed process handle exists and has exited unexpectedly.
     pub fn has_exited_managed_process(&mut self) -> bool {
         Self::process_exited(&mut self.worker_process)
-            || Self::process_exited(&mut self.workstation_tunnel_process)
+            || (workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay
+                && Self::process_exited(&mut self.workstation_tunnel_process))
             || Self::process_exited(&mut self.local_worker_tunnel_process)
     }
 
@@ -234,6 +245,79 @@ impl WorkerManager {
     }
 
     fn start_workstation_tunnels(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
+        if workstation_tunnel_owner_mode() != WorkstationTunnelOwner::LocalRelay {
+            return self.repair_workstation_owned_tunnels(project_dir, log_buffer);
+        }
+        self.start_local_relay_workstation_tunnels(project_dir, log_buffer)
+    }
+
+    fn repair_workstation_owned_tunnels(
+        &mut self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+    ) -> bool {
+        let python = resolve_python_exe(project_dir);
+        let mut cmd = Command::new(&python);
+        cmd.args([
+            "-m",
+            "tools.workstation_tunnel",
+            "repair",
+            "--all",
+            "--project-dir",
+            project_dir,
+        ])
+        .current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match run_command_with_timeout(&mut cmd, Duration::from_secs(180)) {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    log_buffer.push_info("✅ 工作站自持有 SSH 隧道已部署/修复完成".to_string());
+                } else {
+                    log_buffer.push_info(format!(
+                        "✅ 工作站自持有 SSH 隧道已部署/修复完成: {}",
+                        stdout
+                    ));
+                }
+                true
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if stderr.is_empty() { stdout } else { stderr };
+                log::error!("工作站自持有 SSH 隧道部署/修复失败: {}", detail);
+                log_buffer.push_info(format!(
+                    "⚠️ 工作站自持有 SSH 隧道部署/修复失败: {}",
+                    if detail.is_empty() {
+                        output.status.to_string()
+                    } else {
+                        detail
+                    }
+                ));
+                false
+            }
+            Err(e) => {
+                log::error!("工作站自持有 SSH 隧道部署/修复失败: {}", e);
+                log_buffer.push_info(format!("⚠️ 工作站自持有 SSH 隧道部署/修复失败: {}", e));
+                false
+            }
+        }
+    }
+
+    fn start_local_relay_workstation_tunnels(
+        &mut self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+    ) -> bool {
         let specs = workstation_tunnel_specs_for_project(project_dir);
         if specs.is_empty() {
             log_buffer.push_info("❌ 未找到可用的工作站 SSH 隧道配置".to_string());
@@ -781,28 +865,30 @@ impl WorkerManager {
             return;
         }
 
-        for spec in workstation_tunnel_specs_for_path(project_dir) {
-            let mut cmd = watchdog_uninstall_command(&tunnel_script, "Workstation");
-            cmd.env("AUTOFLUID_SSH_REACHABLE_HOST", &spec.remote_host)
-                .env("AUTOFLUID_SSH_REACHABLE_PORT", spec.remote_port.to_string());
-            cmd.current_dir(project_dir);
-            match run_command_with_timeout(&mut cmd, Duration::from_secs(10)) {
-                Ok(output) if output.status.success() => {}
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let detail = if stderr.is_empty() { stdout } else { stderr };
-                    log::warn!(
-                        "Workstation {} watchdog 卸载失败: status={}, detail={}",
-                        spec.id,
-                        output.status,
-                        detail
-                    );
-                    log_buffer.push_info(format!("⚠️ 工作站 {} watchdog 卸载失败", spec.id));
-                }
-                Err(err) => {
-                    log::warn!("Workstation {} watchdog 卸载失败: {}", spec.id, err);
-                    log_buffer.push_info(format!("⚠️ 工作站 {} watchdog 卸载失败", spec.id));
+        if workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay {
+            for spec in workstation_tunnel_specs_for_path(project_dir) {
+                let mut cmd = watchdog_uninstall_command(&tunnel_script, "Workstation");
+                cmd.env("AUTOFLUID_SSH_REACHABLE_HOST", &spec.remote_host)
+                    .env("AUTOFLUID_SSH_REACHABLE_PORT", spec.remote_port.to_string());
+                cmd.current_dir(project_dir);
+                match run_command_with_timeout(&mut cmd, Duration::from_secs(10)) {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        let detail = if stderr.is_empty() { stdout } else { stderr };
+                        log::warn!(
+                            "Workstation {} watchdog 卸载失败: status={}, detail={}",
+                            spec.id,
+                            output.status,
+                            detail
+                        );
+                        log_buffer.push_info(format!("⚠️ 工作站 {} watchdog 卸载失败", spec.id));
+                    }
+                    Err(err) => {
+                        log::warn!("Workstation {} watchdog 卸载失败: {}", spec.id, err);
+                        log_buffer.push_info(format!("⚠️ 工作站 {} watchdog 卸载失败", spec.id));
+                    }
                 }
             }
         }
@@ -1163,6 +1249,18 @@ fn is_server_mode() -> bool {
         .unwrap_or(false)
 }
 
+fn workstation_tunnel_owner_mode() -> WorkstationTunnelOwner {
+    match std::env::var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER")
+        .unwrap_or_else(|_| "workstation".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "local_relay" | "local-relay" | "local" => WorkstationTunnelOwner::LocalRelay,
+        _ => WorkstationTunnelOwner::Workstation,
+    }
+}
+
 fn server_ssh_exe() -> String {
     env_str("AUTOFLUID_SSH_EXE").unwrap_or_else(|| "ssh".to_string())
 }
@@ -1316,7 +1414,10 @@ impl Drop for WorkerManager {
             return;
         }
         let _ = Self::stop_child_process(&mut self.worker_process, "本地 Worker");
-        let _ = Self::stop_child_process(&mut self.workstation_tunnel_process, "工作站 SSH 隧道");
+        if workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay {
+            let _ =
+                Self::stop_child_process(&mut self.workstation_tunnel_process, "工作站 SSH 隧道");
+        }
         let _ = Self::stop_child_process(&mut self.local_worker_tunnel_process, "本机 SSH 隧道");
     }
 }
@@ -1574,8 +1675,8 @@ mod tests {
 
         assert!(result);
         let calls = std::fs::read_to_string(&marker).expect("read marker");
-        assert!(calls.contains("-TunnelKind Workstation -UninstallWatchdog"));
         assert!(calls.contains("-TunnelKind LocalWorker -UninstallWatchdog"));
+        assert!(!calls.contains("-TunnelKind Workstation -UninstallWatchdog"));
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         let _ = std::fs::remove_dir_all(project_dir);
     }
@@ -1698,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workers_rolls_back_tunnels_when_prepare_fails() {
+    fn start_workers_rolls_back_local_tunnels_when_prepare_fails() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-owner-fail-{}",
@@ -1735,12 +1836,12 @@ mod tests {
         assert!(!owner_marker.exists());
         let calls = std::fs::read_to_string(&marker_log).expect("read marker log");
         assert!(
-            calls.contains("-TunnelKind Workstation -UninstallWatchdog"),
-            "failed worker start should uninstall workstation watchdogs: {calls}"
-        );
-        assert!(
             calls.contains("-TunnelKind LocalWorker -UninstallWatchdog"),
             "failed worker start should clean local-worker tunnel watchdog state: {calls}"
+        );
+        assert!(
+            !calls.contains("-TunnelKind Workstation -UninstallWatchdog"),
+            "failed worker start must not manage workstation-owned tunnel watchdogs: {calls}"
         );
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         let _ = std::fs::remove_dir_all(project_dir);
@@ -1844,6 +1945,29 @@ mod tests {
     }
 
     #[test]
+    fn workstation_local_relay_process_checks_are_gated_by_owner_mode() {
+        let source = include_str!("worker_mgr.rs");
+        let health_start = source
+            .find("pub fn has_exited_managed_process")
+            .expect("health helper should exist");
+        let health_body = &source[health_start
+            ..source[health_start..]
+                .find("    // ------------------------------------------------------------------")
+                .expect("helper end")
+                + health_start];
+        let drop_start = source
+            .find("impl Drop for WorkerManager")
+            .expect("drop impl should exist");
+        let drop_body = source[drop_start..]
+            .split("#[cfg(test)]")
+            .next()
+            .expect("drop impl should appear before tests");
+
+        assert!(health_body.contains("WorkstationTunnelOwner::LocalRelay"));
+        assert!(drop_body.contains("WorkstationTunnelOwner::LocalRelay"));
+    }
+
+    #[test]
     fn drop_preserves_tui_started_tunnel_handles_when_worker_is_detached() {
         #[cfg(target_os = "windows")]
         let workstation_tunnel = Command::new("cmd")
@@ -1935,7 +2059,8 @@ mod tests {
     }
 
     #[test]
-    fn start_workers_with_prepare_runs_both_tunnels_then_daemon_prepare_then_local_worker() {
+    fn start_workers_with_prepare_repairs_workstation_owned_tunnels_then_daemon_prepare_then_local_worker(
+    ) {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-test-{}",
@@ -1985,51 +2110,24 @@ mod tests {
         );
 
         assert!(result);
-        let order = wait_for_marker_lines(&marker, 6);
+        let order = wait_for_marker_lines(&marker, 4);
         let lines: Vec<&str> = order.lines().collect();
-        let workstation_tunnel_lines: Vec<&&str> = lines
+        let workstation_repair_lines: Vec<&&str> = lines
             .iter()
-            .filter(|line| line.contains("-TunnelKind Workstation"))
+            .filter(|line| line.contains("-m tools.workstation_tunnel repair --all"))
             .collect();
-        assert_eq!(workstation_tunnel_lines.len(), 3);
-        assert!(workstation_tunnel_lines
-            .iter()
-            .any(|line| line.contains("AUTOFLUID_SSH_REACHABLE_PORT=2222")));
-        assert!(workstation_tunnel_lines
-            .iter()
-            .any(|line| line.contains("AUTOFLUID_SSH_REACHABLE_PORT=2224")));
-        assert!(workstation_tunnel_lines
-            .iter()
-            .any(|line| line.contains("AUTOFLUID_SSH_REACHABLE_PORT=2225")));
-        let ws_b_tunnel_line = workstation_tunnel_lines
-            .iter()
-            .find(|line| {
-                line.contains("-RemoteBindPort 2224")
-                    || line.contains("\"-RemoteBindPort\" \"2224\"")
-            })
-            .expect("WS-B tunnel command should carry explicit remote port");
-        assert!(
-            ws_b_tunnel_line.contains("-RemoteBindHost 127.0.0.1")
-                || ws_b_tunnel_line.contains("\"-RemoteBindHost\" \"127.0.0.1\"")
-        );
-        assert!(
-            ws_b_tunnel_line.contains("-TargetHost 172.17.135.89")
-                || ws_b_tunnel_line.contains("\"-TargetHost\" \"172.17.135.89\"")
-        );
-        assert!(
-            ws_b_tunnel_line.contains("-TargetPort 22")
-                || ws_b_tunnel_line.contains("\"-TargetPort\" \"22\"")
-        );
+        assert_eq!(workstation_repair_lines.len(), 1);
+        assert!(workstation_repair_lines[0].contains("--project-dir"));
         let local_worker_tunnel_line = lines
             .iter()
             .find(|line| line.contains("-TunnelKind LocalWorker"))
             .expect("local worker tunnel command");
-        assert!(workstation_tunnel_lines
+        assert!(workstation_repair_lines
             .iter()
-            .all(|line| !line.contains("-NoWatchdog")));
-        assert!(workstation_tunnel_lines
+            .all(|line| !line.contains("-TunnelKind Workstation")));
+        assert!(workstation_repair_lines
             .iter()
-            .all(|line| line.contains("-OwnerMarkerPath")));
+            .all(|line| !line.contains("-OwnerMarkerPath")));
         assert!(!local_worker_tunnel_line.contains("-NoWatchdog"));
         assert!(local_worker_tunnel_line.contains("-OwnerPid"));
         let owner_marker = WorkerManager::worker_tunnel_owner_marker_for(&project_dir);
@@ -2041,6 +2139,10 @@ mod tests {
             .iter()
             .position(|line| *line == "daemon")
             .expect("daemon prepare marker");
+        let workstation_repair_idx = lines
+            .iter()
+            .position(|line| line.contains("-m tools.workstation_tunnel repair --all"))
+            .expect("workstation repair marker");
         let worker_idx = lines
             .iter()
             .position(|line| *line == "worker 127.0.0.1 2223 reverse_tunnel")
@@ -2049,8 +2151,9 @@ mod tests {
             .iter()
             .position(|line| line.contains("-TunnelKind LocalWorker"))
             .expect("local worker tunnel marker");
-        assert!(daemon_idx < worker_idx);
-        assert!(worker_idx < local_tunnel_idx);
+        assert!(workstation_repair_idx < daemon_idx);
+        assert!(daemon_idx < local_tunnel_idx);
+        assert!(worker_idx > workstation_repair_idx);
         assert!(
             log_buffer
                 .info_messages
@@ -2073,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workers_with_prepare_continues_when_some_workstation_tunnels_fail() {
+    fn explicit_local_relay_mode_continues_when_some_workstation_tunnels_fail() {
         let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
         let project_dir = std::env::temp_dir().join(format!(
             "autofluid-tui-worker-partial-tunnel-{}",
@@ -2102,6 +2205,7 @@ mod tests {
         std::env::set_var("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1");
         std::env::set_var("AUTOFLUID_WORKER_SSH_PORT", "2223");
         std::env::set_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel");
+        std::env::set_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER", "local_relay");
 
         let mut wm = WorkerManager::new();
         let mut log_buffer = LogBuffer::new();
@@ -2140,11 +2244,17 @@ mod tests {
             .any(|message| message.contains("部分工作站 SSH 隧道启动失败")));
 
         let _ = wm.stop_workers_for_project(None, &mut log_buffer);
+        let cleanup_order = wait_for_marker_lines(&marker, 10);
+        assert!(
+            cleanup_order.contains("-TunnelKind Workstation -UninstallWatchdog"),
+            "local_relay mode should clean locally owned workstation watchdogs: {cleanup_order}"
+        );
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         std::env::remove_var("PYTHON");
         std::env::remove_var("AUTOFLUID_WORKER_REACHABLE_HOST");
         std::env::remove_var("AUTOFLUID_WORKER_SSH_PORT");
         std::env::remove_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
@@ -2323,7 +2433,8 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "@echo off\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display(),
                     marker.display()
                 ),
             )
@@ -2337,7 +2448,8 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel\"*) exit 0;; esac\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    marker.display(),
                     marker.display()
                 ),
             )

@@ -147,12 +147,12 @@ def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
     monkeypatch.setattr(
         autofluid_cli.process_utils,
         "cleanup_tunnel_watchdog_tasks",
-        lambda: {"Workstation": {"status": "uninstalled"}},
+        lambda: {"LocalWorker": {"status": "uninstalled"}},
     )
     monkeypatch.setattr(
         autofluid_cli.process_utils,
         "cleanup_worker_processes_from_pid_files",
-        lambda: {"tunnel_workstation": {"pid": 1234, "status": "terminated"}},
+        lambda: {"tunnel_localworker": {"pid": 1234, "status": "terminated"}},
     )
 
     result, payload = _run(["worker", "stop"], client=client)
@@ -162,10 +162,10 @@ def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
     assert client.calls == [("worker_stop", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
     assert payload["data"]["remote"] == "stopped"
     assert payload["data"]["local_watchdog_cleanup"] == {
-        "Workstation": {"status": "uninstalled"},
+        "LocalWorker": {"status": "uninstalled"},
     }
     assert payload["data"]["local_process_cleanup"] == {
-        "tunnel_workstation": {"pid": 1234, "status": "terminated"},
+        "tunnel_localworker": {"pid": 1234, "status": "terminated"},
     }
 
 
@@ -197,6 +197,42 @@ def test_worker_stop_still_cleans_local_resources_when_ipc_is_down(monkeypatch):
     assert payload["data"]["local_process_cleanup"] == {
         "tunnel_localworker": {"pid": 5678, "status": "terminated"},
     }
+
+
+def test_workstation_tunnel_command_runs_without_ipc_client(monkeypatch):
+    specs_seen = []
+    specs = [object(), object()]
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        lambda tunnel_target=None: specs,
+    )
+    def fake_run_for_specs(action, specs_arg, install_dir):
+        specs_seen.extend(specs_arg)
+        return [
+            {
+                "id": "WS-A",
+                "ok": True,
+                "status": "installed",
+            }
+        ]
+
+    monkeypatch.setattr(autofluid_cli.workstation_tunnel, "run_for_specs", fake_run_for_specs)
+
+    class _UnexpectedClient:
+        def __init__(self, _settings):
+            raise AssertionError("workstation-tunnel command must not create IPC client")
+
+    result, payload = _run(
+        ["workstation-tunnel", "repair"],
+        client=_UnexpectedClient,
+    )
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert payload["command"] == "workstation-tunnel repair"
+    assert payload["data"]["results"][0]["status"] == "installed"
+    assert specs_seen == specs
 
 
 def test_daemon_systemctl_actions_use_expected_arguments(monkeypatch):

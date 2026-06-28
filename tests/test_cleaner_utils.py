@@ -1444,7 +1444,9 @@ class TestProcessUtils:
             lambda pid, timeout=5: killed.append(pid) or True,
         )
 
-        result = process_utils.cleanup_worker_processes_from_pid_files()
+        result = process_utils.cleanup_worker_processes_from_pid_files(
+            include_workstation=True,
+        )
 
         assert result == {
             "local_worker": {"pid": 2222, "status": "stale"},
@@ -1453,6 +1455,37 @@ class TestProcessUtils:
         assert killed == [3333]
         assert not stale_pid.exists()
         assert not live_pid.exists()
+
+    def test_cleanup_worker_pid_files_skips_workstation_tunnel_by_default(
+        self, tmp_path, monkeypatch
+    ):
+        """工作站自持有隧道不应被本机/服务器默认 worker stop 清理。"""
+        from utils import process_utils
+
+        live_pid = tmp_path / "tunnel_workstation.pid"
+        live_pid.write_text("3333", encoding="utf-8")
+
+        monkeypatch.setattr(
+            process_utils,
+            "worker_pid_file",
+            lambda kind: str(tmp_path / f"{kind}.pid"),
+        )
+        monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 3333)
+        monkeypatch.setattr(
+            process_utils,
+            "worker_process_is_owned",
+            lambda kind, pid: kind == "tunnel_workstation" and pid == 3333,
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "run_taskkill",
+            lambda pid, timeout=5: pytest.fail("workstation tunnel should not be killed"),
+        )
+
+        result = process_utils.cleanup_worker_processes_from_pid_files()
+
+        assert "tunnel_workstation" not in result
+        assert live_pid.exists()
 
     def test_cleanup_worker_pid_files_skips_live_processes_without_owner_evidence(
         self, tmp_path, monkeypatch
