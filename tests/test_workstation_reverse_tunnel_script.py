@@ -141,6 +141,74 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
 
 
+def test_workstation_owned_remote_probe_passes_single_remote_command(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        msg = "Windows PowerShell is required for this regression test"
+        raise AssertionError(msg)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    args_file = tmp_path / "ssh-args.txt"
+    fake_ssh = tmp_path / "fake-ssh.cmd"
+    fake_ssh.write_text(
+        "@echo off\n"
+        f"echo %* > \"{args_file}\"\n"
+        "exit /b 0\n",
+        encoding="utf-8",
+    )
+
+    probe_script = tmp_path / "owned-probe.ps1"
+    probe_script.write_text(
+        rf"""
+$ErrorActionPreference = "Stop"
+$source = Get-Content -LiteralPath "{script_path}" -Raw
+$match = [regex]::Match(
+    $source,
+    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
+)
+if (-not $match.Success) {{
+    throw "Could not extract Test-RemoteTunnelEndpoint"
+}}
+$functionSource = $match.Value -replace '\r?\nfunction Get-OwnedTunnelProcesses\z', ''
+Invoke-Expression $functionSource
+$script:TunnelTarget = "root@example.invalid"
+$script:RemoteBindPort = 2222
+$script:TunnelIdentityFile = "C:\Users\example\.ssh\autofluid_tunnel_ed25519"
+$result = Test-RemoteTunnelEndpoint -SshExe "{fake_ssh}"
+if ($result -ne $true) {{
+    throw "Expected probe to return true, got $result"
+}}
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe_script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    captured = args_file.read_text(encoding="utf-8")
+    assert "-i" in captured
+    assert "autofluid_tunnel_ed25519" in captured
+    assert "root@example.invalid" in captured
+    assert "python3 -c 'import socket;" in captured
+    assert 's.connect(("127.0.0.1",2222))' in captured
+
+
 def test_workstation_owned_tunnel_uninstall_stops_processes_before_and_after_task_removal() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"

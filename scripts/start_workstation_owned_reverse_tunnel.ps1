@@ -137,7 +137,7 @@ function Test-RemoteTunnelEndpoint {
     param(
         [string]$SshExe
     )
-    $remoteCommand = "python3 -c `"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',$RemoteBindPort)); s.close()`""
+    $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((`"127.0.0.1`",$RemoteBindPort)); s.close()'"
     $identityArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
         $identityArgs = @("-i", $TunnelIdentityFile)
