@@ -396,13 +396,25 @@ class RemoteExecutor:
                 _raise_infra_on_ssh_error(e)
 
             try:
+                pid_running = self._remote_task_pid_running(ssh, task)
+                if pid_running is True:
+                    return "running"
                 query_cmd = f'schtasks /Query /TN "{task_name}" /FO CSV /NH'
                 _, _, exit_code = ssh.exec_command(query_cmd, timeout=30)
                 if exit_code == 0:
-                    pid_running = self._remote_task_pid_running(ssh, task)
                     if pid_running is False:
                         return "lost"
                     return "running"
+                if (
+                    step_name == "solver"
+                    and self._solver_progress_file_matches(
+                        ssh,
+                        config_name,
+                        workstation_id,
+                    )
+                    and self._workstation_has_fluent_process(ssh)
+                ):
+                    return "unknown"
                 return "lost"
             except (OSError, ConnectionError) as e:
                 _raise_infra_on_ssh_error(e)
@@ -463,6 +475,46 @@ class RemoteExecutor:
         if exit_code != 0:
             return None
         return re.search(rf"\b{pid}\b", out) is not None
+
+    def _solver_progress_file_matches(
+        self,
+        ssh: "RemoteWorkstation",
+        config_name: int,
+        workstation_id: str,
+    ) -> bool:
+        read_remote_text_file = getattr(ssh, "read_remote_text_file", None)
+        if not callable(read_remote_text_file):
+            return False
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+            progress_file = self._solver_progress_file(config_name, remote_config)
+        except ValueError:
+            return False
+        raw = read_remote_text_file(progress_file, timeout=5)
+        if not raw:
+            return False
+        try:
+            progress = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(progress, dict):
+            return False
+        return progress.get("config_name") == config_name
+
+    def _workstation_has_fluent_process(self, ssh: "RemoteWorkstation") -> bool:
+        command = (
+            'tasklist /FI "IMAGENAME eq cx2410.exe" /FO CSV /NH & '
+            'tasklist /FI "IMAGENAME eq fluent.exe" /FO CSV /NH & '
+            'tasklist /FI "IMAGENAME eq mpiexec.exe" /FO CSV /NH'
+        )
+        out, _, exit_code = ssh.exec_command(command, timeout=30)
+        if exit_code != 0:
+            return False
+        lowered = out.lower()
+        return any(
+            process_name in lowered
+            for process_name in ("cx2410.exe", "fluent.exe", "mpiexec.exe")
+        )
 
     def _remote_task_start_time(
         self,

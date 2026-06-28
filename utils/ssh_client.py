@@ -949,17 +949,8 @@ class RemoteWorkstation:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
-            pid_capture_line = (
-                "set \"AF_WRAPPER_PID=\"\r\n"
-                "for /f \"tokens=2 delims==\" %%P in ('wmic process where "
-                "\"Name='cmd.exe' and CommandLine like '%%%~nx0%%' "
-                "and not CommandLine like '%%wmic process%%'\" "
-                "get ProcessId /value 2^>nul ^| find \"=\"') do "
-                "if not defined AF_WRAPPER_PID set \"AF_WRAPPER_PID=%%P\"\r\n"
-                "if defined AF_WRAPPER_PID > \"%AF_PID_FILE%\" echo %AF_WRAPPER_PID%\r\n"
-            )
+            # Avoid WMIC-based PID probing here: if WMI stalls, the solver never starts.
             command_runner = (
-                f"{pid_capture_line}"
                 f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
             )
         else:

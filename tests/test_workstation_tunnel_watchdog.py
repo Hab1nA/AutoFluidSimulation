@@ -291,11 +291,17 @@ def test_reverse_tunnel_monitor_lookup_matches_quoted_file_arguments() -> None:
     assert '"?-MonitorRemotePort"?' in lookup_source
 
 
-def test_tunnel_watchdog_replaces_monitor_when_endpoint_is_down() -> None:
+def test_tunnel_watchdog_preserves_monitor_when_endpoint_is_down() -> None:
     source = SCRIPT_PATH.read_text(encoding="utf-8")
+    down_endpoint_start = source.index("if ($Check) {")
+    down_endpoint_source = source[down_endpoint_start:]
 
-    assert "Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort" in source
-    assert "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable." in source
+    assert "$existingMonitor = Get-ExistingTunnelMonitorProcess -RemotePort $remotePort" in down_endpoint_source
+    assert "if ($null -ne $existingMonitor)" in down_endpoint_source
+    assert "Write-TunnelSupervisorPid -Process $existingMonitor" in down_endpoint_source
+    assert "exit 0" in down_endpoint_source
+    assert "Existing $tunnelLabel supervisor monitor is still running while the endpoint is not reachable" in source
+    assert "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable." not in source
 
 
 def test_tunnel_watchdog_uninstall_stops_orphan_reverse_ssh_processes() -> None:

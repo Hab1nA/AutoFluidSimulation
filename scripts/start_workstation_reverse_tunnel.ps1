@@ -897,8 +897,11 @@ if ($Check) {
     throw "AutoFluid $tunnelLabel reverse SSH tunnel is not reachable on ${remoteHost}:${remotePort}."
 }
 
-if (Stop-ExistingTunnelMonitorProcess -RemotePort $remotePort) {
-    Write-Host "Existing $tunnelLabel supervisor monitor was stopped because the endpoint is not reachable."
+$existingMonitor = Get-ExistingTunnelMonitorProcess -RemotePort $remotePort
+if ($null -ne $existingMonitor) {
+    Write-Host "Existing $tunnelLabel supervisor monitor is still running while the endpoint is not reachable; leaving recovery to the monitor."
+    Write-TunnelSupervisorPid -Process $existingMonitor
+    exit 0
 }
 
 $process = Start-ReverseTunnelSupervisor -RemotePort $remotePort

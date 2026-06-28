@@ -1223,9 +1223,85 @@ def test_query_remote_task_status_uses_pid_file_when_available():
 
     assert executor.query_remote_task_status(2, "meshing") == "running"
     assert commands == [
-        'schtasks /Query /TN "AutoFluid_running" /FO CSV /NH',
         'tasklist /FI "PID eq 4321" /FO CSV /NH',
     ]
+
+
+def test_query_remote_task_status_returns_running_when_task_entry_missing_but_pid_alive():
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_detached",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_detached.pid",
+        "started_at": 100.0,
+    }
+    commands: list[str] = []
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def read_remote_pid_file(self, pid_file: str) -> int:
+            assert pid_file == "D:/flags/autofluid_bg_detached.pid"
+            return 4321
+
+        def exec_command(self, command: str, timeout: int = 30):
+            commands.append(command)
+            if command.startswith("tasklist"):
+                return '"python.exe","4321","Console","1","10,000 K"\r\n', "", 0
+            if command.startswith("schtasks"):
+                return "", "ERROR: The system cannot find the file specified.", 1
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(2, "solver") == "running"
+    assert commands == ['tasklist /FI "PID eq 4321" /FO CSV /NH']
+
+
+def test_query_remote_task_status_returns_unknown_for_orphaned_solver_progress(monkeypatch):
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_orphaned",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_orphaned.pid",
+        "started_at": 100.0,
+    }
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            return False
+
+        def read_remote_pid_file(self, pid_file: str) -> int:
+            return 9876
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            assert remote_path == "D:/flags/solver_progress_2.json"
+            return '{"config_name": 2, "current_iter": 10, "total_iter": 1000}'
+
+        def exec_command(self, command: str, timeout: int = 30):
+            if command.startswith("tasklist") and "PID eq 9876" in command:
+                return "INFO: No tasks are running which match the specified criteria.\r\n", "", 0
+            if command.startswith("schtasks"):
+                return "", "ERROR: The system cannot find the file specified.", 1
+            if "cx2410.exe" in command and "fluent.exe" in command:
+                return '"cx2410.exe","1234","Console","1","10,000 K"\r\n', "", 0
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    monkeypatch.setattr(
+        executor,
+        "_solver_progress_file",
+        lambda _config_name, _remote_config: "D:/flags/solver_progress_2.json",
+    )
+
+    assert executor.query_remote_task_status(2, "solver") == "unknown"
 
 
 def test_query_remote_task_status_returns_lost_when_persisted_pid_is_not_running():
