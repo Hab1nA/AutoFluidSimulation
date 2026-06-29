@@ -872,9 +872,36 @@ class PipelineDaemon:
 
         reload_config_from_toml()
         results = dict(self.runner.run_system_check())
+        self._sync_workstation_ssh_checks_from_system_check(results)
         results["health"] = self._build_health_snapshot()
         self._refresh_check_summary_from_health(results)
         return True, results, "系统自检完成"
+
+    def _sync_workstation_ssh_checks_from_system_check(self, results: Mapping[str, Any]) -> None:
+        """Promote active system-check SSH results into the start readiness cache."""
+        remote_checks = results.get("remote_checks")
+        if not isinstance(remote_checks, Mapping):
+            return
+        workstations = remote_checks.get("workstations")
+        if not isinstance(workstations, Mapping):
+            return
+        ssh_checks: dict[str, str] = {}
+        for workstation_id, checks in workstations.items():
+            if not isinstance(checks, Mapping):
+                continue
+            ssh_connected = checks.get("ssh_connected")
+            ssh_status = str(checks.get("ssh") or "")
+            if ssh_connected is True or "成功" in ssh_status:
+                ssh_checks[str(workstation_id)] = "ok"
+            elif ssh_connected is False or "失败" in ssh_status:
+                ssh_checks[str(workstation_id)] = "disconnected"
+            elif ssh_status.startswith("错误"):
+                ssh_checks[str(workstation_id)] = f"error: {ssh_status}"
+        if not ssh_checks:
+            return
+        self._last_worker_ssh_checks = ssh_checks
+        now = time.time()
+        self._last_worker_ssh_check_times = {workstation_id: now for workstation_id in ssh_checks}
 
     @staticmethod
     def _refresh_check_summary_from_health(results: dict[str, Any]) -> None:

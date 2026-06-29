@@ -3966,6 +3966,45 @@ class TestPipelineDaemonCleanStep:
         assert events == ["reload", "check"]
         assert data["local_checks"]["SW可执行文件"]["path"] == r"C:\new\SLDWORKS.exe"
 
+    def test_check_refreshes_workstation_ssh_readiness_cache(self):
+        from engine.daemon import PipelineDaemon
+
+        class _Runner:
+            def run_system_check(self) -> dict[str, object]:
+                return {
+                    "local_checks": {},
+                    "remote_checks": {
+                        "workstations": {
+                            "WS-A": {"ssh_connected": True, "ssh": "连接成功"},
+                            "WS-B": {"ssh_connected": False, "ssh": "连接失败"},
+                            "WS-C": {"ssh": "错误: timed out"},
+                        }
+                    },
+                    "daemon_checks": {},
+                    "workstation_checks": {},
+                }
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+        daemon._last_worker_ssh_check_times = {}
+        daemon._build_health_snapshot = lambda: {
+            "workstation_ssh_details": daemon._last_worker_ssh_checks,
+            "config_warnings": [],
+        }
+
+        ok, data, message = daemon.handle_check({})
+
+        assert ok is True
+        assert message == "系统自检完成"
+        assert daemon._last_worker_ssh_checks == {
+            "WS-A": "ok",
+            "WS-B": "disconnected",
+            "WS-C": "error: 错误: timed out",
+        }
+        assert set(daemon._last_worker_ssh_check_times) == {"WS-A", "WS-B", "WS-C"}
+        assert data["health"]["workstation_ssh_details"]["WS-A"] == "ok"
+
     def test_check_summary_includes_health_warnings_and_failures(self):
         from engine.daemon import PipelineDaemon
 
