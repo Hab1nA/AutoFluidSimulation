@@ -525,11 +525,12 @@ def _install_cmd_lifecycle_fallback(
     if credentialed_code == 0:
         return credentialed_out, credentialed_err, credentialed_code
     run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    cmd_path_win = cmd_path.replace("/", "\\")
     run_cmd = (
         "cmd.exe /d /c "
         f"reg.exe add {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} "
-        f"/t REG_SZ /d {_quote_cmd_value(cmd_path.replace('/', '\\'))} /f "
-        f"&& start {_quote_cmd_value(task_name)} {_quote_cmd_value(cmd_path.replace('/', '\\'))}"
+        f"/t REG_SZ /d {_quote_cmd_value(cmd_path_win)} /f "
+        f"&& start {_quote_cmd_value(task_name)} {_quote_cmd_value(cmd_path_win)}"
     )
     return ssh.exec_command(run_cmd, timeout=60)
 
