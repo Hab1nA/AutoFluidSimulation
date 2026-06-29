@@ -72,6 +72,8 @@ function Get-AutoFluidServerDaemonStartCommand {
         return $env:AUTOFLUID_SERVER_DAEMON_START_CMD
     }
     $serverPort = Get-AutoFluidServerDaemonIpcPort
+    $probeCode = "import json,socket; s=socket.create_connection((`"127.0.0.1`", $serverPort), 1); s.settimeout(2); s.sendall((json.dumps(dict(command=`"get_engine_status`", params=dict(), request_id=`"daemon-start-probe`"))+chr(10)).encode()); data=s.recv(4096); s.close(); resp=json.loads(data.decode().strip()); raise SystemExit(0 if resp.get(`"status`") == `"ok`" else 1)"
+    $probeArg = Quote-RemoteShellArg -Value $probeCode
     $serverProjectDir = $env:AUTOFLUID_SERVER_DAEMON_PROJECT_DIR
     if ([string]::IsNullOrWhiteSpace($serverProjectDir)) {
         $serverProjectDir = $env:AUTOFLUID_SERVER_PROJECT_DIR
@@ -82,7 +84,7 @@ function Get-AutoFluidServerDaemonStartCommand {
     else {
         $serverProjectDir = Quote-RemoteShellArg -Value $serverProjectDir
     }
-    return "cd $serverProjectDir && mkdir -p logs/server/services/daemon-bootstrap && { env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/server/services/daemon-bootstrap/autofluid-daemon.out 2>&1 < /dev/null & daemon_pid=`$!; }; ready_count=0; for i in `$(seq 1 60); do if .venv/bin/python -c `"import json,socket; s=socket.create_connection(('127.0.0.1', $serverPort), 1); s.settimeout(2); s.sendall((json.dumps(dict(command='get_engine_status', params=dict(), request_id='daemon-start-probe'))+'\n').encode()); data=s.recv(4096); s.close(); resp=json.loads(data.decode().strip()); raise SystemExit(0 if resp.get('status') == 'ok' else 1)`" >/dev/null 2>&1; then ready_count=`$((ready_count + 1)); if [ `"`$ready_count`" -ge 3 ]; then echo `"AutoFluid daemon IPC ready (pid=`$daemon_pid)`"; exit 0; fi; else ready_count=0; fi; if ! kill -0 `"`$daemon_pid`" 2>/dev/null && [ `"`$ready_count`" -eq 0 ]; then echo 'AutoFluid daemon exited before IPC became ready' >&2; tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; exit 1; fi; sleep 1; done; echo 'AutoFluid daemon IPC readiness timeout' >&2; tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; exit 1"
+    return "cd $serverProjectDir && mkdir -p logs/server/services/daemon-bootstrap && started_pid=; if ! .venv/bin/python -c $probeArg >/dev/null 2>&1; then env AUTOFLUID_SERVER_MODE=server nohup .venv/bin/python start_daemon.py > logs/server/services/daemon-bootstrap/autofluid-daemon.out 2>&1 < /dev/null & started_pid=`$!; fi; ready_count=0; for i in `$(seq 1 60); do daemon_pid=`$(cat data/daemon.pid 2>/dev/null || true); if .venv/bin/python -c $probeArg >/dev/null 2>&1; then ready_count=`$((ready_count + 1)); if [ `"`$ready_count`" -ge 3 ]; then if [ -z `"`$daemon_pid`" ]; then daemon_pid=`"`$started_pid`"; fi; if [ -z `"`$daemon_pid`" ]; then daemon_pid=unknown; fi; echo `"AutoFluid daemon IPC ready pid=`$daemon_pid`"; exit 0; fi; else ready_count=0; if [ -n `"`$daemon_pid`" ] && kill -0 `"`$daemon_pid`" 2>/dev/null; then sleep 1; continue; fi; if [ -n `"`$started_pid`" ] && kill -0 `"`$started_pid`" 2>/dev/null; then sleep 1; continue; fi; if [ -n `"`$started_pid`" ] || [ -n `"`$daemon_pid`" ]; then echo 'AutoFluid daemon exited before IPC became ready' >&2; tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; exit 1; fi; fi; sleep 1; done; echo 'AutoFluid daemon IPC readiness timeout' >&2; tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out >&2 2>/dev/null || true; exit 1"
 }
 
 function Start-AutoFluidServerDaemon {
@@ -90,7 +92,7 @@ function Start-AutoFluidServerDaemon {
     $target = Get-AutoFluidServerDaemonTarget
     $remoteCommand = Get-AutoFluidServerDaemonStartCommand
     Write-Host "Starting AutoFluid server daemon on ${target}..."
-    & $sshExe -o BatchMode=yes -o ConnectTimeout=10 $target $remoteCommand
+    $remoteCommand | & $sshExe -o BatchMode=yes -o ConnectTimeout=10 $target bash -s
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to start AutoFluid server daemon on '$target'."
     }

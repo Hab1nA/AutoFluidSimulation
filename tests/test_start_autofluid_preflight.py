@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 
@@ -10,9 +12,18 @@ def test_preflight_default_server_daemon_command_waits_for_ipc_readiness() -> No
 
     assert "setsid -f" not in function_body
     assert "nohup .venv/bin/python start_daemon.py" in function_body
-    assert "&& { env AUTOFLUID_SERVER_MODE=server nohup" in function_body
-    assert "daemon_pid=`$!" in function_body
+    assert "started_pid=`$!" in function_body
+    assert "kill -0" in function_body
+    assert "daemon_pid=`$(cat data/daemon.pid 2>/dev/null || true)" in function_body
+    assert "kill -0 `\"`$daemon_pid`\"" in function_body
+    assert "kill -0 `\"`$started_pid`\"" in function_body
+    assert "daemon_pid=unknown" in function_body
+    assert "AutoFluid daemon exited before IPC became ready" in function_body
+    assert "if ! .venv/bin/python -c $probeArg" in function_body
     assert "Get-AutoFluidServerDaemonIpcPort" in content
+    assert "$probeCode =" in function_body
+    assert "$probeArg = Quote-RemoteShellArg -Value $probeCode" in function_body
+    assert ".venv/bin/python -c $probeArg" in function_body
     assert "AUTOFLUID_SERVER_TUNNEL_REMOTE_PORT" in content
     assert "Get-AutoFluidServerPort" not in function_body
     assert "get_engine_status" in function_body
@@ -20,6 +31,33 @@ def test_preflight_default_server_daemon_command_waits_for_ipc_readiness() -> No
     assert "AutoFluid daemon IPC ready" in function_body
     assert "logs/server/services/daemon-bootstrap/autofluid-daemon.out" in function_body
     assert "tail -n 80 logs/server/services/daemon-bootstrap/autofluid-daemon.out" in function_body
+    assert ".venv/bin/python -c import json,socket" not in function_body
+
+
+def test_preflight_remote_shell_arg_escapes_single_quotes(tmp_path: Path) -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+    quote_fn = content[
+        content.index("function Quote-RemoteShellArg"):
+        content.index("function Get-AutoFluidServerDaemonIpcPort")
+    ]
+    harness = tmp_path / "quote-remote-shell-arg.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{quote_fn}\n"
+        'Quote-RemoteShellArg -Value "it\'s ready"\n',
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "'it'\\''s ready'"
 
 
 def test_preflight_does_not_touch_worker_owned_reverse_tunnels_by_default() -> None:
@@ -36,11 +74,103 @@ def test_preflight_does_not_touch_worker_owned_reverse_tunnels_by_default() -> N
 def test_preflight_remote_daemon_start_is_explicit_opt_in() -> None:
     content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
     execution_block = content[content.index("if (-not (Test-Path -LiteralPath $PythonExe"):]
+    start_fn = content[
+        content.index("function Start-AutoFluidServerDaemon"):
+        content.index("if (-not (Test-Path -LiteralPath $PythonExe")
+    ]
 
     assert "[switch]$StartDaemon" in content
     assert "if ($StartDaemon)" in execution_block
     assert execution_block.index("if ($StartDaemon)") < execution_block.index("Start-AutoFluidServerDaemon")
     assert "if (-not $tcpReady)" not in execution_block
+    assert "$remoteCommand | & $sshExe" in start_fn
+    assert "$target bash -s" in start_fn
+    assert "$target $remoteCommand" not in start_fn
+
+
+def test_preflight_start_daemon_pipes_remote_command_to_ssh_stdin(tmp_path: Path) -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+    start_fn = content[
+        content.index("function Start-AutoFluidServerDaemon"):
+        content.index("if (-not (Test-Path -LiteralPath $PythonExe")
+    ]
+    stdin_capture = tmp_path / "ssh-stdin.txt"
+    fake_ssh = tmp_path / "fake-ssh.cmd"
+    fake_ssh.write_text(
+        "@echo off\r\n"
+        "more > \"%FAKE_SSH_STDIN%\"\r\n"
+        "exit /b %FAKE_SSH_EXIT%\r\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "invoke-start.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Resolve-AutoFluidSshExe { return $env:FAKE_SSH_EXE }\n"
+        "function Get-AutoFluidServerDaemonTarget { return 'fake-target' }\n"
+        "function Get-AutoFluidServerDaemonStartCommand { return 'echo remote-ok' }\n"
+        f"{start_fn}\n"
+        "Start-AutoFluidServerDaemon\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["FAKE_SSH_EXE"] = str(fake_ssh)
+    env["FAKE_SSH_STDIN"] = str(stdin_capture)
+    env["FAKE_SSH_EXIT"] = "0"
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert stdin_capture.read_text(encoding="utf-8").strip() == "echo remote-ok"
+
+
+def test_preflight_start_daemon_fails_when_ssh_fails(tmp_path: Path) -> None:
+    content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
+    start_fn = content[
+        content.index("function Start-AutoFluidServerDaemon"):
+        content.index("if (-not (Test-Path -LiteralPath $PythonExe")
+    ]
+    stdin_capture = tmp_path / "ssh-stdin.txt"
+    fake_ssh = tmp_path / "fake-ssh.cmd"
+    fake_ssh.write_text(
+        "@echo off\r\n"
+        "more > \"%FAKE_SSH_STDIN%\"\r\n"
+        "exit /b %FAKE_SSH_EXIT%\r\n",
+        encoding="utf-8",
+    )
+    harness = tmp_path / "invoke-start.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Resolve-AutoFluidSshExe { return $env:FAKE_SSH_EXE }\n"
+        "function Get-AutoFluidServerDaemonTarget { return 'fake-target' }\n"
+        "function Get-AutoFluidServerDaemonStartCommand { return 'echo remote-ok' }\n"
+        f"{start_fn}\n"
+        "Start-AutoFluidServerDaemon\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["FAKE_SSH_EXE"] = str(fake_ssh)
+    env["FAKE_SSH_STDIN"] = str(stdin_capture)
+    env["FAKE_SSH_EXIT"] = "7"
+
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+        cwd=Path.cwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "Failed to start AutoFluid server daemon" in (result.stderr + result.stdout)
+
 
 def test_preflight_has_no_dead_local_ipc_wait_loop() -> None:
     content = Path("scripts/start_autofluid_preflight.ps1").read_text(encoding="utf-8")
