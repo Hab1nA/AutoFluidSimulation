@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import subprocess
+import time
 from pathlib import Path
 
 from tools import workstation_tunnel
@@ -1350,3 +1352,221 @@ def test_explicit_workstation_tunnel_target_is_not_resolved(monkeypatch) -> None
     )
 
     assert specs[0].tunnel_target == "root@198.51.100.10"
+
+
+def _test_tunnel_spec(ws_id: str, port: int) -> workstation_tunnel.WorkstationTunnelSpec:
+    return workstation_tunnel.WorkstationTunnelSpec(
+        id=ws_id,
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=port,
+        tunnel_target="ocar",
+    )
+
+
+def test_ensure_skips_repair_when_status_is_ready(monkeypatch) -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    repair_calls: list[str] = []
+
+    monkeypatch.setattr(
+        workstation_tunnel,
+        "status_workstation_tunnel",
+        lambda spec, install_dir=workstation_tunnel.DEFAULT_INSTALL_DIR: {
+            "id": spec.id,
+            "ok": True,
+            "status": "ok",
+        },
+    )
+    monkeypatch.setattr(
+        workstation_tunnel,
+        "repair_workstation_tunnel",
+        lambda spec, install_dir=workstation_tunnel.DEFAULT_INSTALL_DIR: repair_calls.append(spec.id),
+    )
+
+    result = workstation_tunnel.ensure_workstation_tunnel(spec)
+
+    assert result["ok"] is True
+    assert result["ensure_action"] == "skipped"
+    assert repair_calls == []
+
+
+def test_ensure_repairs_only_not_ready_workstations(monkeypatch) -> None:
+    specs = [_test_tunnel_spec("WS-A", 2222), _test_tunnel_spec("WS-B", 2224)]
+    status_calls: list[str] = []
+    repair_calls: list[str] = []
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        status_calls.append(spec.id)
+        if spec.id == "WS-A":
+            return {"id": spec.id, "ok": True, "status": "ok"}
+        return {
+            "id": spec.id,
+            "ok": status_calls.count(spec.id) > 1,
+            "status": "ok" if status_calls.count(spec.id) > 1 else "not_ready",
+        }
+
+    def fake_repair(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        repair_calls.append(spec.id)
+        return {"id": spec.id, "ok": True, "status": "installed"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+    monkeypatch.setattr(workstation_tunnel, "repair_workstation_tunnel", fake_repair)
+
+    results = workstation_tunnel.run_for_specs("ensure", specs, jobs=2)
+
+    assert [result["ensure_action"] for result in results] == ["skipped", "repaired"]
+    assert repair_calls == ["WS-B"]
+
+
+def test_ensure_reports_repair_failed_with_initial_status(monkeypatch) -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+
+    monkeypatch.setattr(
+        workstation_tunnel,
+        "status_workstation_tunnel",
+        lambda spec, install_dir=workstation_tunnel.DEFAULT_INSTALL_DIR: {
+            "id": spec.id,
+            "ok": False,
+            "status": "not_ready",
+        },
+    )
+    monkeypatch.setattr(
+        workstation_tunnel,
+        "repair_workstation_tunnel",
+        lambda spec, install_dir=workstation_tunnel.DEFAULT_INSTALL_DIR: {
+            "id": spec.id,
+            "ok": False,
+            "status": "repair_failed",
+        },
+    )
+
+    result = workstation_tunnel.ensure_workstation_tunnel(spec)
+
+    assert result["ok"] is False
+    assert result["ensure_action"] == "repair_failed"
+    assert result["initial_status"]["status"] == "not_ready"
+
+
+def test_ensure_reports_repair_not_ready_after_final_status_failure(monkeypatch) -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    status_calls = 0
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        nonlocal status_calls
+        status_calls += 1
+        return {
+            "id": spec.id,
+            "ok": False,
+            "status": "not_ready" if status_calls == 1 else "status_failed",
+        }
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+    monkeypatch.setattr(
+        workstation_tunnel,
+        "repair_workstation_tunnel",
+        lambda spec, install_dir=workstation_tunnel.DEFAULT_INSTALL_DIR: {
+            "id": spec.id,
+            "ok": True,
+            "status": "installed",
+        },
+    )
+
+    result = workstation_tunnel.ensure_workstation_tunnel(spec)
+
+    assert result["ok"] is False
+    assert result["ensure_action"] == "repair_not_ready"
+    assert result["initial_status"]["status"] == "not_ready"
+    assert result["repair_result"]["status"] == "installed"
+
+
+def test_parallel_run_for_specs_preserves_configured_order(monkeypatch) -> None:
+    specs = [
+        _test_tunnel_spec("WS-A", 2222),
+        _test_tunnel_spec("WS-B", 2224),
+        _test_tunnel_spec("WS-C", 2225),
+        _test_tunnel_spec("WS-D", 2226),
+    ]
+    delays = {"WS-A": 0.04, "WS-B": 0.03, "WS-C": 0.02, "WS-D": 0.01}
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        time.sleep(delays[spec.id])
+        return {"id": spec.id, "ok": True, "status": "ok"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+
+    results = workstation_tunnel.run_for_specs("status", specs, jobs=4)
+
+    assert [result["id"] for result in results] == ["WS-A", "WS-B", "WS-C", "WS-D"]
+
+
+def test_parallel_run_for_specs_preserves_results_when_one_worker_raises(monkeypatch) -> None:
+    specs = [
+        _test_tunnel_spec("WS-A", 2222),
+        _test_tunnel_spec("WS-B", 2224),
+        _test_tunnel_spec("WS-C", 2225),
+    ]
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        if spec.id == "WS-B":
+            raise KeyError("ssh state missing")
+        return {"id": spec.id, "ok": True, "status": "ok"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+
+    results = workstation_tunnel.run_for_specs("status", specs, jobs=3)
+
+    assert [result["id"] for result in results] == ["WS-A", "WS-B", "WS-C"]
+    assert [result["ok"] for result in results] == [True, False, True]
+    assert results[1]["status"] == "exception"
+    assert "ssh state missing" in results[1]["detail"]
+
+
+def test_sequential_run_for_specs_preserves_results_when_one_worker_raises(monkeypatch) -> None:
+    specs = [_test_tunnel_spec("WS-A", 2222), _test_tunnel_spec("WS-B", 2224)]
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        if spec.id == "WS-A":
+            raise RuntimeError("host offline")
+        return {"id": spec.id, "ok": True, "status": "ok"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+
+    results = workstation_tunnel.run_for_specs("status", specs, jobs=1)
+
+    assert [result["id"] for result in results] == ["WS-A", "WS-B"]
+    assert results[0]["ok"] is False
+    assert results[0]["status"] == "exception"
+    assert results[1]["ok"] is True
+
+
+def test_progress_jsonl_writer_writes_only_stderr(capsys) -> None:
+    writer = workstation_tunnel.jsonl_progress_writer()
+
+    writer({"stage": "status_start", "id": "WS-A"})
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"stage": "status_start", "id": "WS-A"}

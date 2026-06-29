@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import shutil
 import shlex
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -38,6 +41,7 @@ class WorkstationSsh(Protocol):
 
 
 SshFactory = Callable[..., WorkstationSsh]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -444,6 +448,63 @@ def status_workstation_tunnel(
         return result
     finally:
         ssh.disconnect()
+
+
+def ensure_workstation_tunnel(
+    spec: WorkstationTunnelSpec,
+    *,
+    install_dir: str = DEFAULT_INSTALL_DIR,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    _emit_progress(progress, "status_start", spec)
+    initial_status = status_workstation_tunnel(spec, install_dir=install_dir)
+    _emit_progress(progress, "status_done", spec, result=initial_status)
+    if initial_status.get("ok"):
+        result = dict(initial_status)
+        result["ensure_action"] = "skipped"
+        _emit_progress(progress, "ensure_skipped", spec, result=result)
+        return result
+
+    _emit_progress(progress, "repair_start", spec, result=initial_status)
+    repair_result = repair_workstation_tunnel(spec, install_dir=install_dir)
+    _emit_progress(progress, "repair_done", spec, result=repair_result)
+    if not repair_result.get("ok"):
+        result = dict(repair_result)
+        result["ensure_action"] = "repair_failed"
+        result["initial_status"] = initial_status
+        return result
+
+    _emit_progress(progress, "final_status_start", spec)
+    final_status = status_workstation_tunnel(spec, install_dir=install_dir)
+    _emit_progress(progress, "final_status_done", spec, result=final_status)
+    result = dict(final_status)
+    result["ensure_action"] = "repaired" if result.get("ok") else "repair_not_ready"
+    result["initial_status"] = initial_status
+    result["repair_result"] = repair_result
+    return result
+
+
+def _emit_progress(
+    progress: ProgressCallback | None,
+    stage: str,
+    spec: WorkstationTunnelSpec,
+    *,
+    result: Mapping[str, Any] | None = None,
+) -> None:
+    if progress is None:
+        return
+    event: dict[str, Any] = {
+        "stage": stage,
+        "id": spec.id,
+        "remote_endpoint": f"{spec.remote_bind_host}:{spec.remote_bind_port}",
+    }
+    if result is not None:
+        event["ok"] = bool(result.get("ok"))
+        event["status"] = str(result.get("status") or "")
+        detail = str(result.get("detail") or "").strip()
+        if detail:
+            event["detail"] = detail
+    progress(event)
 
 
 def uninstall_workstation_tunnel(
@@ -940,33 +1001,116 @@ def run_for_specs(
     specs: list[WorkstationTunnelSpec],
     *,
     install_dir: str = DEFAULT_INSTALL_DIR,
+    jobs: int = 1,
+    progress: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for spec in specs:
-        if action == "repair":
-            results.append(repair_workstation_tunnel(spec, install_dir=install_dir))
-        elif action == "status":
-            results.append(status_workstation_tunnel(spec, install_dir=install_dir))
-        elif action == "uninstall":
-            results.append(uninstall_workstation_tunnel(spec, install_dir=install_dir))
-        else:
-            raise ValueError(f"unsupported action: {action}")
-    return results
+    if action not in {"ensure", "repair", "status", "uninstall"}:
+        raise ValueError(f"unsupported action: {action}")
+    if action == "uninstall" or jobs <= 1 or len(specs) <= 1:
+        return [
+            _run_for_spec_safely(action, spec, install_dir=install_dir, progress=progress)
+            for spec in specs
+        ]
+
+    max_workers = max(1, min(jobs, len(specs)))
+    results: list[dict[str, Any] | None] = [None] * len(specs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_index = {
+            executor.submit(
+                _run_for_spec,
+                action,
+                spec,
+                install_dir=install_dir,
+                progress=progress,
+            ): index
+            for index, spec in enumerate(specs)
+        }
+        for future in concurrent.futures.as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                results[index] = _exception_result(specs[index], exc)
+    return [result for result in results if result is not None]
+
+
+def _run_for_spec_safely(
+    action: str,
+    spec: WorkstationTunnelSpec,
+    *,
+    install_dir: str,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    try:
+        return _run_for_spec(action, spec, install_dir=install_dir, progress=progress)
+    except Exception as exc:
+        return _exception_result(spec, exc)
+
+
+def _run_for_spec(
+    action: str,
+    spec: WorkstationTunnelSpec,
+    *,
+    install_dir: str,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    if action == "repair":
+        _emit_progress(progress, "repair_start", spec)
+        result = repair_workstation_tunnel(spec, install_dir=install_dir)
+        _emit_progress(progress, "repair_done", spec, result=result)
+        return result
+    if action == "status":
+        _emit_progress(progress, "status_start", spec)
+        result = status_workstation_tunnel(spec, install_dir=install_dir)
+        _emit_progress(progress, "status_done", spec, result=result)
+        return result
+    if action == "ensure":
+        return ensure_workstation_tunnel(spec, install_dir=install_dir, progress=progress)
+    if action == "uninstall":
+        return uninstall_workstation_tunnel(spec, install_dir=install_dir)
+    raise ValueError(f"unsupported action: {action}")
+
+
+def _exception_result(spec: WorkstationTunnelSpec, exc: Exception) -> dict[str, Any]:
+    return _result(spec, False, "exception", str(exc))
+
+
+def all_results_ok(results: list[dict[str, Any]]) -> bool:
+    return bool(results) and all(bool(item.get("ok")) for item in results)
+
+
+def jsonl_progress_writer() -> ProgressCallback:
+    lock = threading.Lock()
+
+    def write_event(event: dict[str, Any]) -> None:
+        with lock:
+            print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
+
+    return write_event
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m tools.workstation_tunnel")
-    parser.add_argument("action", choices=["repair", "status", "uninstall"])
+    parser.add_argument("action", choices=["ensure", "repair", "status", "uninstall"])
     parser.add_argument("--all", action="store_true", help="accepted for compatibility; all workstations are always used")
     parser.add_argument("--project-dir", default="", help="project directory for TUI callers")
     parser.add_argument("--install-dir", default=DEFAULT_INSTALL_DIR)
     parser.add_argument("--tunnel-target", default=None)
+    parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--progress-jsonl", action="store_true")
     args = parser.parse_args(argv)
     if args.project_dir:
         os.chdir(args.project_dir)
     specs = configured_workstation_specs(tunnel_target=args.tunnel_target)
-    results = run_for_specs(args.action, specs, install_dir=args.install_dir)
-    payload = {"ok": bool(results) and any(item["ok"] for item in results), "results": results}
+    progress = jsonl_progress_writer() if args.progress_jsonl else None
+    results = run_for_specs(
+        args.action,
+        specs,
+        install_dir=args.install_dir,
+        jobs=args.jobs,
+        progress=progress,
+    )
+    payload = {"ok": all_results_ok(results), "results": results}
     print(json.dumps(payload, ensure_ascii=False))
     return 0 if payload["ok"] else 1
 

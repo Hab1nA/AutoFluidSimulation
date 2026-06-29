@@ -3,9 +3,11 @@
 //! 管理本地 LocalWorker 子进程和工作站 SSH 反向隧道进程的生命周期。
 //! 与 `DaemonManager` 类似，通过子进程方式启动/停止 worker 相关进程。
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
@@ -17,8 +19,9 @@ use crate::utils::{
 };
 
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "/root/AutoFluidSimulation";
-const WORKSTATION_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(300);
-const WORKSTATION_TUNNEL_READY_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const WORKSTATION_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const WORKSTATION_TUNNEL_READY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const WORKSTATION_TUNNEL_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVER_ENV_SYNC_MAX_ATTEMPTS: usize = 3;
 const SERVER_ENV_SYNC_RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -252,12 +255,12 @@ impl WorkerManager {
 
     fn start_workstation_tunnels(&mut self, project_dir: &str, log_buffer: &mut LogBuffer) -> bool {
         if workstation_tunnel_owner_mode() != WorkstationTunnelOwner::LocalRelay {
-            return self.repair_workstation_owned_tunnels(project_dir, log_buffer);
+            return self.ensure_workstation_owned_tunnels(project_dir, log_buffer);
         }
         self.start_local_relay_workstation_tunnels(project_dir, log_buffer)
     }
 
-    fn repair_workstation_owned_tunnels(
+    fn ensure_workstation_owned_tunnels(
         &mut self,
         project_dir: &str,
         log_buffer: &mut LogBuffer,
@@ -267,14 +270,15 @@ impl WorkerManager {
         cmd.args([
             "-m",
             "tools.workstation_tunnel",
-            "repair",
+            "ensure",
             "--all",
+            "--jobs",
+            "4",
+            "--progress-jsonl",
             "--project-dir",
             project_dir,
         ])
-        .current_dir(project_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .current_dir(project_dir);
 
         #[cfg(target_os = "windows")]
         {
@@ -283,14 +287,18 @@ impl WorkerManager {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        match run_command_with_timeout(&mut cmd, Duration::from_secs(180)) {
+        match run_workstation_tunnel_command_with_progress(
+            &mut cmd,
+            Duration::from_secs(180),
+            log_buffer,
+        ) {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if stdout.is_empty() {
-                    log_buffer.push_info("✅ 工作站自持有 SSH 隧道部署/修复命令已完成".to_string());
+                    log_buffer.push_info("✅ 工作站自持有 SSH 隧道检查/修复命令已完成".to_string());
                 } else {
                     log_buffer.push_info(format!(
-                        "✅ 工作站自持有 SSH 隧道部署/修复命令已完成: {}",
+                        "✅ 工作站自持有 SSH 隧道检查/修复命令已完成: {}",
                         stdout
                     ));
                 }
@@ -300,9 +308,9 @@ impl WorkerManager {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 let detail = if stderr.is_empty() { stdout } else { stderr };
-                log::error!("工作站自持有 SSH 隧道部署/修复失败: {}", detail);
+                log::error!("工作站自持有 SSH 隧道检查/修复失败: {}", detail);
                 log_buffer.push_info(format!(
-                    "⚠️ 工作站自持有 SSH 隧道部署/修复失败: {}",
+                    "⚠️ 工作站自持有 SSH 隧道检查/修复失败: {}",
                     if detail.is_empty() {
                         output.status.to_string()
                     } else {
@@ -312,8 +320,8 @@ impl WorkerManager {
                 false
             }
             Err(e) => {
-                log::error!("工作站自持有 SSH 隧道部署/修复失败: {}", e);
-                log_buffer.push_info(format!("⚠️ 工作站自持有 SSH 隧道部署/修复失败: {}", e));
+                log::error!("工作站自持有 SSH 隧道检查/修复失败: {}", e);
+                log_buffer.push_info(format!("⚠️ 工作站自持有 SSH 隧道检查/修复失败: {}", e));
                 false
             }
         }
@@ -355,6 +363,8 @@ impl WorkerManager {
                 "tools.workstation_tunnel",
                 "status",
                 "--all",
+                "--jobs",
+                "4",
                 "--project-dir",
                 project_dir,
             ])
@@ -369,7 +379,10 @@ impl WorkerManager {
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
 
-            match run_command_with_timeout(&mut cmd, Duration::from_secs(90)) {
+            log_buffer.push_info(format!(
+                "⏳ 工作站自持有 SSH 隧道状态检查第 {attempt} 次..."
+            ));
+            match run_command_with_timeout(&mut cmd, WORKSTATION_TUNNEL_STATUS_TIMEOUT) {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -394,16 +407,17 @@ impl WorkerManager {
                 }
             }
 
-            if attempt == 1 {
-                log_buffer.push_info(
-                    "⏳ 工作站自持有 SSH 隧道尚未全部就绪，继续等待自动重连...".to_string(),
-                );
-            }
+            log_buffer.push_info(format!(
+                "⏳ 工作站自持有 SSH 隧道尚未全部就绪，{} 秒后继续等待自动重连: {}",
+                poll_interval.as_secs(),
+                truncate_detail(&last_detail, 300)
+            ));
             std::thread::sleep(poll_interval);
         }
 
         log_buffer.push_info(format!(
-            "❌ 工作站自持有 SSH 隧道未全部就绪: {}",
+            "❌ 工作站自持有 SSH 隧道在 {} 秒内未全部就绪: {}",
+            ready_timeout.as_secs(),
             truncate_detail(&last_detail, 800)
         ));
         false
@@ -1185,6 +1199,165 @@ fn default_workstation_tunnel_port(index: usize) -> u16 {
         // 2223 is reserved for the local-worker SSH tunnel; workstation tunnels continue at 2224.
         2224u16.saturating_add(index.saturating_sub(1) as u16)
     }
+}
+
+fn run_workstation_tunnel_command_with_progress(
+    command: &mut Command,
+    timeout: Duration,
+    log_buffer: &mut LogBuffer,
+) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动命令失败: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "无法捕获 workstation tunnel stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "无法捕获 workstation tunnel stderr".to_string())?;
+
+    let stdout_handle = thread::spawn(move || {
+        let mut reader = stdout;
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+            .map_err(|error| format!("读取 stdout 失败: {error}"))
+    });
+    let (stderr_line_sender, stderr_line_receiver) = mpsc::channel();
+    let stderr_handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut bytes = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    bytes.extend_from_slice(&line);
+                    let text = String::from_utf8_lossy(&line)
+                        .trim_end_matches(['\r', '\n'])
+                        .to_string();
+                    if !text.is_empty() {
+                        let _ = stderr_line_sender.send(text);
+                    }
+                }
+                Err(error) => return Err(format!("读取 stderr 失败: {error}")),
+            }
+        }
+        Ok(bytes)
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        drain_workstation_tunnel_progress(&stderr_line_receiver, log_buffer);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                drain_workstation_tunnel_progress(&stderr_line_receiver, log_buffer);
+                let stdout = join_output_reader(stdout_handle, "stdout")?;
+                let stderr = join_output_reader(stderr_handle, "stderr")?;
+                drain_workstation_tunnel_progress(&stderr_line_receiver, log_buffer);
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_output_reader(stdout_handle, "stdout");
+                let _ = join_output_reader(stderr_handle, "stderr");
+                return Err(format!("命令执行超时 ({}s)", timeout.as_secs()));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = join_output_reader(stdout_handle, "stdout");
+                let _ = join_output_reader(stderr_handle, "stderr");
+                return Err(format!("检查命令状态失败: {error}"));
+            }
+        }
+    }
+}
+
+fn drain_workstation_tunnel_progress(
+    receiver: &mpsc::Receiver<String>,
+    log_buffer: &mut LogBuffer,
+) {
+    while let Ok(line) = receiver.try_recv() {
+        if let Some(message) = workstation_tunnel_progress_message(&line) {
+            log_buffer.push_info(message);
+        }
+    }
+}
+
+fn join_output_reader(
+    handle: thread::JoinHandle<Result<Vec<u8>, String>>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    handle
+        .join()
+        .map_err(|_| format!("读取 {label} 线程异常结束"))?
+}
+
+fn workstation_tunnel_progress_message(line: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(line).ok()?;
+    let stage = payload.get("stage")?.as_str()?;
+    let id = payload
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("?");
+    let endpoint = payload
+        .get("remote_endpoint")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let status = payload
+        .get("status")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let detail = payload
+        .get("detail")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let ok = payload.get("ok").and_then(|value| value.as_bool());
+    let endpoint_text = if endpoint.is_empty() {
+        String::new()
+    } else {
+        format!(" ({endpoint})")
+    };
+    let detail_text = if detail.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", truncate_detail(detail, 240))
+    };
+    let message = match stage {
+        "status_start" => format!("⏳ 工作站 {id}{endpoint_text}: 检查 SSH 隧道状态"),
+        "status_done" => match ok {
+            Some(true) => format!("✅ 工作站 {id}{endpoint_text}: SSH 隧道已就绪"),
+            _ => format!("⏳ 工作站 {id}{endpoint_text}: SSH 隧道状态 {status}{detail_text}"),
+        },
+        "ensure_skipped" => {
+            format!("✅ 工作站 {id}{endpoint_text}: SSH 隧道已就绪，跳过修复")
+        }
+        "repair_start" => format!("🔧 工作站 {id}{endpoint_text}: 开始修复 SSH 隧道"),
+        "repair_done" => match ok {
+            Some(true) => format!("✅ 工作站 {id}{endpoint_text}: SSH 隧道修复命令完成"),
+            _ => format!("⚠️ 工作站 {id}{endpoint_text}: SSH 隧道修复失败 {status}{detail_text}"),
+        },
+        "final_status_start" => format!("⏳ 工作站 {id}{endpoint_text}: 复查 SSH 隧道状态"),
+        "final_status_done" => match ok {
+            Some(true) => format!("✅ 工作站 {id}{endpoint_text}: SSH 隧道复查通过"),
+            _ => {
+                format!("⚠️ 工作站 {id}{endpoint_text}: SSH 隧道复查仍未就绪 {status}{detail_text}")
+            }
+        },
+        _ => format!("⏳ 工作站 {id}{endpoint_text}: {stage} {status}{detail_text}"),
+    };
+    Some(message)
 }
 
 fn workstation_tunnel_results_all_ok(stdout: &str) -> Result<(), String> {
@@ -2198,12 +2371,13 @@ mod tests {
         assert!(!result);
         assert!(!owner_marker.exists());
         let calls = wait_for_marker_lines(&marker, 1);
-        assert!(calls.contains("-m tools.workstation_tunnel repair --all"));
+        assert!(calls.contains("-m tools.workstation_tunnel ensure --all"));
+        assert!(calls.contains("--jobs 4 --progress-jsonl"));
         assert!(!calls.contains("daemon"));
         assert!(!calls.contains("-TunnelKind LocalWorker"));
         assert!(!calls.contains("tools.workstation_tunnel uninstall"));
         assert!(log_buffer.info_messages.iter().any(|message| {
-            message.contains("工作站自持有 SSH 隧道部署/修复失败")
+            message.contains("工作站自持有 SSH 隧道检查/修复失败")
                 || message.contains("工作站 SSH 隧道全部启动失败")
         }));
 
@@ -2481,10 +2655,11 @@ mod tests {
         let lines: Vec<&str> = order.lines().collect();
         let workstation_repair_lines: Vec<&&str> = lines
             .iter()
-            .filter(|line| line.contains("-m tools.workstation_tunnel repair --all"))
+            .filter(|line| line.contains("-m tools.workstation_tunnel ensure --all"))
             .collect();
         assert_eq!(workstation_repair_lines.len(), 1);
         assert!(workstation_repair_lines[0].contains("--project-dir"));
+        assert!(workstation_repair_lines[0].contains("--jobs 4 --progress-jsonl"));
         let local_worker_tunnel_line = lines
             .iter()
             .find(|line| line.contains("-TunnelKind LocalWorker"))
@@ -2508,7 +2683,7 @@ mod tests {
             .expect("daemon prepare marker");
         let workstation_repair_idx = lines
             .iter()
-            .position(|line| line.contains("-m tools.workstation_tunnel repair --all"))
+            .position(|line| line.contains("-m tools.workstation_tunnel ensure --all"))
             .expect("workstation repair marker");
         let workstation_status_idx = lines
             .iter()
@@ -2783,7 +2958,7 @@ mod tests {
         assert!(log_buffer
             .info_messages
             .iter()
-            .any(|message| message.contains("工作站自持有 SSH 隧道未全部就绪")));
+            .any(|message| message.contains("未全部就绪")));
         std::env::remove_var("PYTHON");
         let _ = std::fs::remove_dir_all(project_dir);
     }
@@ -2810,6 +2985,30 @@ mod tests {
                 "payload should be rejected: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn workstation_tunnel_start_uses_bounded_readiness_timeouts() {
+        assert_eq!(WORKSTATION_TUNNEL_READY_TIMEOUT, Duration::from_secs(120));
+        assert_eq!(
+            WORKSTATION_TUNNEL_READY_POLL_INTERVAL,
+            Duration::from_secs(5)
+        );
+        assert_eq!(WORKSTATION_TUNNEL_STATUS_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn workstation_tunnel_progress_jsonl_formats_visible_messages() {
+        let skipped = r#"{"stage":"ensure_skipped","id":"WS-A","remote_endpoint":"127.0.0.1:2222","ok":true,"status":"ok"}"#;
+        let repair = r#"{"stage":"repair_start","id":"WS-B","remote_endpoint":"127.0.0.1:2224"}"#;
+
+        assert!(workstation_tunnel_progress_message(skipped)
+            .expect("progress message")
+            .contains("跳过修复"));
+        assert!(workstation_tunnel_progress_message(repair)
+            .expect("progress message")
+            .contains("开始修复"));
+        assert!(workstation_tunnel_progress_message("not json").is_none());
     }
 
     #[test]

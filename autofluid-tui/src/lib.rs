@@ -24,6 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 
 use event_handler::command;
@@ -551,12 +552,16 @@ impl WorkerLifecycleAction {
 struct WorkerLifecycleResult {
     action: WorkerLifecycleAction,
     success: bool,
-    logs: Vec<String>,
 }
 
 pub(crate) struct WorkerLifecycleTask {
-    receiver: Receiver<WorkerLifecycleResult>,
+    receiver: Receiver<WorkerLifecycleMessage>,
     handle: Option<thread::JoinHandle<()>>,
+}
+
+pub(crate) enum WorkerLifecycleMessage {
+    Progress(String),
+    Finished(WorkerLifecycleResult),
 }
 
 pub(crate) fn apply_check_response(
@@ -1052,6 +1057,10 @@ fn spawn_worker_lifecycle_task(
     let handle = thread::spawn(move || {
         let mut worker = worker_mgr::WorkerManager::new();
         let mut log_buffer = LogBuffer::new();
+        let progress_sender = sender.clone();
+        log_buffer.set_info_tap(Arc::new(move |message| {
+            let _ = progress_sender.send(WorkerLifecycleMessage::Progress(message.to_string()));
+        }));
         let success = run_worker_lifecycle_action(
             action,
             &project_dir,
@@ -1060,12 +1069,10 @@ fn spawn_worker_lifecycle_task(
             &mut worker,
             &mut log_buffer,
         );
-        let logs = log_buffer.info_messages.iter().cloned().collect();
-        let _ = sender.send(WorkerLifecycleResult {
+        let _ = sender.send(WorkerLifecycleMessage::Finished(WorkerLifecycleResult {
             action,
             success,
-            logs,
-        });
+        }));
     });
     WorkerLifecycleTask {
         receiver,
@@ -1178,9 +1185,6 @@ fn finish_worker_lifecycle_result(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) {
-    for message in result.logs {
-        log_buffer.push_info(message);
-    }
     if !result.success {
         log_buffer.push_info(result.action.failure_message().to_string());
     }
@@ -1192,28 +1196,41 @@ fn poll_worker_lifecycle_task(
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
 ) {
-    let Some(task) = worker_task.as_ref() else {
-        return;
-    };
-    match task.receiver.try_recv() {
-        Ok(result) => {
-            if let Some(mut task) = worker_task.take() {
-                if let Some(handle) = task.handle.take() {
-                    let _ = handle.join();
-                }
+    let mut finished = None;
+    loop {
+        let Some(task) = worker_task.as_ref() else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(WorkerLifecycleMessage::Progress(message)) => {
+                log_buffer.push_info(message);
+                state.needs_redraw = true;
             }
-            finish_worker_lifecycle_result(result, state, log_buffer);
-        }
-        Err(mpsc::TryRecvError::Empty) => {}
-        Err(mpsc::TryRecvError::Disconnected) => {
-            if let Some(mut task) = worker_task.take() {
-                if let Some(handle) = task.handle.take() {
-                    let _ = handle.join();
-                }
+            Ok(WorkerLifecycleMessage::Finished(result)) => {
+                finished = Some(result);
+                break;
             }
-            log_buffer.push_info("❌ Worker 后台任务异常结束".to_string());
-            state.needs_redraw = true;
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(mut task) = worker_task.take() {
+                    if let Some(handle) = task.handle.take() {
+                        let _ = handle.join();
+                    }
+                }
+                log_buffer.push_info("❌ Worker 后台任务异常结束".to_string());
+                state.needs_redraw = true;
+                return;
+            }
         }
+    }
+
+    if let Some(result) = finished {
+        if let Some(mut task) = worker_task.take() {
+            if let Some(handle) = task.handle.take() {
+                let _ = handle.join();
+            }
+        }
+        finish_worker_lifecycle_result(result, state, log_buffer);
     }
 }
 
@@ -1229,9 +1246,19 @@ fn finish_pending_worker_lifecycle_task(
     if let Some(handle) = task.handle.take() {
         let _ = handle.join();
     }
-    match task.receiver.try_recv() {
-        Ok(result) => finish_worker_lifecycle_result(result, state, log_buffer),
-        Err(_) => {
+    let mut finished = None;
+    while let Ok(message) = task.receiver.try_recv() {
+        match message {
+            WorkerLifecycleMessage::Progress(message) => {
+                log_buffer.push_info(message);
+                state.needs_redraw = true;
+            }
+            WorkerLifecycleMessage::Finished(result) => finished = Some(result),
+        }
+    }
+    match finished {
+        Some(result) => finish_worker_lifecycle_result(result, state, log_buffer),
+        None => {
             log_buffer.push_info("❌ Worker 后台任务未返回结果".to_string());
             state.needs_redraw = true;
         }
@@ -2318,6 +2345,31 @@ mod tests {
             .info_messages
             .iter()
             .any(|message| message.contains("生命周期任务正在运行")));
+    }
+
+    #[test]
+    fn poll_worker_lifecycle_task_displays_progress_before_finished() {
+        let (sender, receiver) = mpsc::channel();
+        let mut worker_task = Some(WorkerLifecycleTask {
+            receiver,
+            handle: None,
+        });
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        sender
+            .send(WorkerLifecycleMessage::Progress(
+                "工作站 WS-A: SSH 隧道已就绪，跳过修复".to_string(),
+            ))
+            .expect("send progress");
+        poll_worker_lifecycle_task(&mut worker_task, &mut state, &mut log_buffer);
+
+        assert!(worker_task.is_some());
+        assert!(state.needs_redraw);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("跳过修复")));
     }
 
     #[test]

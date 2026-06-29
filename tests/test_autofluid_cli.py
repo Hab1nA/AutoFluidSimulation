@@ -201,19 +201,23 @@ def test_worker_stop_still_cleans_local_resources_when_ipc_is_down(monkeypatch):
 
 def test_workstation_tunnel_command_runs_without_ipc_client(monkeypatch):
     specs_seen = []
+    kwargs_seen = {}
     specs = [object(), object()]
     monkeypatch.setattr(
         autofluid_cli.workstation_tunnel,
         "configured_workstation_specs",
         lambda tunnel_target=None: specs,
     )
-    def fake_run_for_specs(action, specs_arg, install_dir):
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        kwargs_seen["action"] = action
+        kwargs_seen.update(kwargs)
         specs_seen.extend(specs_arg)
         return [
             {
                 "id": "WS-A",
                 "ok": True,
-                "status": "installed",
+                "status": "ok",
             }
         ]
 
@@ -224,15 +228,42 @@ def test_workstation_tunnel_command_runs_without_ipc_client(monkeypatch):
             raise AssertionError("workstation-tunnel command must not create IPC client")
 
     result, payload = _run(
-        ["workstation-tunnel", "repair"],
+        ["workstation-tunnel", "ensure", "--all", "--jobs", "4", "--progress-jsonl"],
         client=_UnexpectedClient,
     )
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert payload["command"] == "workstation-tunnel repair"
-    assert payload["data"]["results"][0]["status"] == "installed"
+    assert payload["command"] == "workstation-tunnel ensure"
+    assert payload["data"]["results"][0]["status"] == "ok"
     assert specs_seen == specs
+    assert kwargs_seen["action"] == "ensure"
+    assert kwargs_seen["install_dir"] == autofluid_cli.workstation_tunnel.DEFAULT_INSTALL_DIR
+    assert kwargs_seen["jobs"] == 4
+    assert kwargs_seen["progress"] is not None
+
+
+def test_workstation_tunnel_command_requires_all_specs_ok(monkeypatch):
+    specs = [object(), object()]
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        lambda tunnel_target=None: specs,
+    )
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        return [
+            {"id": "WS-A", "ok": True, "status": "ok"},
+            {"id": "WS-B", "ok": False, "status": "not_ready"},
+        ]
+
+    monkeypatch.setattr(autofluid_cli.workstation_tunnel, "run_for_specs", fake_run_for_specs)
+
+    result, payload = _run(["workstation-tunnel", "ensure", "--all"])
+
+    assert result.exit_code == 1
+    assert payload["ok"] is False
+    assert payload["message"] == "工作站隧道未就绪"
 
 
 def test_daemon_systemctl_actions_use_expected_arguments(monkeypatch):

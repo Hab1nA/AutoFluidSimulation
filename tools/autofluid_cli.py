@@ -389,10 +389,12 @@ def _build_parser() -> argparse.ArgumentParser:
     worker.add_argument("action", choices=["start", "stop", "restart", "status"])
 
     workstation_tunnel_parser = sub.add_parser("workstation-tunnel")
-    workstation_tunnel_parser.add_argument("action", choices=["repair", "status", "uninstall"])
+    workstation_tunnel_parser.add_argument("action", choices=["ensure", "repair", "status", "uninstall"])
     workstation_tunnel_parser.add_argument("--all", action="store_true")
     workstation_tunnel_parser.add_argument("--install-dir", default=workstation_tunnel.DEFAULT_INSTALL_DIR)
     workstation_tunnel_parser.add_argument("--tunnel-target", default=None)
+    workstation_tunnel_parser.add_argument("--jobs", type=int, default=4)
+    workstation_tunnel_parser.add_argument("--progress-jsonl", action="store_true")
 
     alerts = sub.add_parser("alerts")
     alerts_sub = alerts.add_subparsers(
@@ -427,12 +429,19 @@ def run_cli(
     if args.command == "workstation-tunnel":
         try:
             specs = workstation_tunnel.configured_workstation_specs(tunnel_target=args.tunnel_target)
+            progress = (
+                workstation_tunnel.jsonl_progress_writer()
+                if args.progress_jsonl
+                else None
+            )
             results = workstation_tunnel.run_for_specs(
                 args.action,
                 specs,
                 install_dir=args.install_dir,
+                jobs=args.jobs,
+                progress=progress,
             )
-            ok = bool(results) and any(item.get("ok") for item in results)
+            ok = workstation_tunnel.all_results_ok(results)
             return _json_result(
                 ok=ok,
                 command=f"workstation-tunnel {args.action}",
