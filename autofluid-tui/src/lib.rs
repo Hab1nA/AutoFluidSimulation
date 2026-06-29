@@ -1424,6 +1424,16 @@ fn finish_app_shutdown(ctx: &mut EventContext) {
         }
         ctx.worker
             .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+        if !worker_mgr::WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            ctx.project_dir,
+            ctx.log_buffer,
+        ) {
+            log::warn!("完全退出时工作站自持有 SSH 隧道卸载不完整");
+            ctx.log_buffer.push_info(
+                "⚠️ 完全退出时工作站自持有 SSH 隧道卸载不完整，请检查工作站计划任务和 SSH 进程"
+                    .to_string(),
+            );
+        }
         let result = if *ctx.full_quit_stop_sent {
             ctx.daemon.finish_after_successful_ipc_stop(ctx.project_dir)
         } else {
@@ -2015,6 +2025,88 @@ mod tests {
         stream
             .write_all(format!("{response}\n").as_bytes())
             .expect("write ipc response");
+    }
+
+    fn fake_tunnel_uninstall_python(
+        project_dir: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_python_uninstall.cmd");
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_python_uninstall");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake python metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake python");
+            path
+        }
+    }
+
+    fn fake_failing_tunnel_uninstall_python(
+        project_dir: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_python_uninstall_fail.cmd");
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_removed\"}}]}}\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_python_uninstall_fail");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_removed\"}}]}}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake python metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake python");
+            path
+        }
+    }
+
+    fn read_marker(marker: &std::path::Path) -> String {
+        std::fs::read_to_string(marker).expect("read marker")
     }
 
     #[test]
@@ -2686,6 +2778,169 @@ mod tests {
                 || (killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2)))
         );
         std::fs::remove_dir_all(project_dir).ok();
+    }
+
+    #[test]
+    fn full_quit_shutdown_uninstalls_workstation_owned_tunnels() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-full-quit-uninstalls-workstation-tunnels-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = true;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        let marker_text = read_marker(&marker);
+        assert!(marker_text.contains("-m tools.workstation_tunnel uninstall --all"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("工作站自持有 SSH 隧道计划任务和进程已全部卸载")
+        }));
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn normal_quit_shutdown_does_not_uninstall_workstation_owned_tunnels() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-normal-quit-keeps-workstation-tunnels-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = false;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(
+            !marker.exists(),
+            "normal quit must not uninstall workstation-owned tunnels"
+        );
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn full_quit_shutdown_warns_when_workstation_tunnel_uninstall_fails() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-full-quit-uninstall-warning-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_failing_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = true;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(read_marker(&marker).contains("-m tools.workstation_tunnel uninstall --all"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("完全退出时工作站自持有 SSH 隧道卸载不完整")
+        }));
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
     }
 
     #[test]

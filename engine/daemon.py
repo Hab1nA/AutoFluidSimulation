@@ -365,7 +365,7 @@ class PipelineDaemon:
                 self.scheduler.stop()
             except Exception as e:
                 logger.warning(f"调度器停止异常: {e}")
-                self._cancel_tracked_remote_tasks_on_shutdown()
+            self._cancel_tracked_remote_tasks_on_shutdown()
 
         # 调度器不存在时才需要单独断开 SSH
         elif self.runner:

@@ -455,6 +455,7 @@ def uninstall_workstation_tunnel(
         attempts: list[dict[str, str | int]] = []
         ok = False
         detail = ""
+        cleanup_install_dir = install_dir
         for candidate_dir in _candidate_install_dirs(install_dir, spec.username):
             remote_script = _remote_script_path(candidate_dir)
             command = _ps_file_command(remote_script, "-Uninstall", spec, candidate_dir)
@@ -463,11 +464,31 @@ def uninstall_workstation_tunnel(
             if code == 0:
                 ok = True
                 detail = err or out
-        result = _result(spec, ok, "ok" if ok else "uninstall_failed", detail or str(attempts[-1]["detail"]))
+                cleanup_install_dir = candidate_dir
+        lifecycle_cleanup = _cleanup_cmd_lifecycle_fallback(ssh, spec, install_dir=cleanup_install_dir)
+        key_cleanup = _cleanup_workstation_tunnel_key(ssh, spec)
+        cleanup_failures = [
+            f"{name}:{cleanup.get('stage', 'cleanup')}:{cleanup.get('detail', '')}"
+            for name, cleanup in (
+                ("lifecycle_cleanup", lifecycle_cleanup),
+                ("key_cleanup", key_cleanup),
+            )
+            if not cleanup.get("ok")
+        ]
+        ok = ok and not cleanup_failures
+        if cleanup_failures:
+            cleanup_detail = "; ".join(cleanup_failures)
+            detail = f"{detail}; {cleanup_detail}" if detail else cleanup_detail
+        result = _result(
+            spec,
+            ok,
+            "ok" if ok else "uninstall_failed",
+            detail or str(attempts[-1]["detail"]),
+        )
         result["install_dir"] = install_dir
         result["attempts"] = attempts
-        result["lifecycle_cleanup"] = _cleanup_cmd_lifecycle_fallback(ssh, spec, install_dir=install_dir)
-        result["key_cleanup"] = _cleanup_workstation_tunnel_key(ssh, spec)
+        result["lifecycle_cleanup"] = lifecycle_cleanup
+        result["key_cleanup"] = key_cleanup
         return result
     finally:
         ssh.disconnect()

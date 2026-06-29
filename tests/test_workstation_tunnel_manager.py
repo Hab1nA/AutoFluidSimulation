@@ -150,6 +150,26 @@ class CleanupDeniedRemoteWorkstation(FakeRemoteWorkstation):
         return "", "cleanup denied", 1
 
 
+class UninstallOkCleanupDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if " -Uninstall " in command:
+            return "uninstalled", "", 0
+        if "schtasks.exe /Delete" in command:
+            return "", "cleanup denied", 1
+        return '{"task_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
+
+
+class UninstallOkKeyCleanupDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if " -Uninstall " in command:
+            return "uninstalled", "", 0
+        if "type" in command and "autofluid_tunnel_ed25519.pub" in command:
+            return "", "public key read denied", 1
+        return '{"task_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
+
+
 class KeyProvisioningRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
@@ -828,6 +848,59 @@ def test_uninstall_attempts_programdata_and_user_install_dirs() -> None:
     assert all_commands.count("-Uninstall") == 2
     assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
     assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
+
+
+def test_uninstall_reports_failure_when_lifecycle_cleanup_fails() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+    )
+
+    result = workstation_tunnel.uninstall_workstation_tunnel(
+        spec,
+        ssh_factory=UninstallOkCleanupDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "uninstall_failed"
+    assert "lifecycle_cleanup" in result["detail"]
+    assert "cleanup denied" in result["detail"]
+
+
+def test_uninstall_reports_failure_when_key_cleanup_fails() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="ocar",
+        tunnel_identity_file="C:\\Users\\ps\\.ssh\\autofluid_tunnel_ed25519",
+    )
+
+    result = workstation_tunnel.uninstall_workstation_tunnel(
+        spec,
+        ssh_factory=UninstallOkKeyCleanupDeniedRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "uninstall_failed"
+    assert "key_cleanup" in result["detail"]
+    assert "public key read denied" in result["detail"]
 
 
 def test_cmd_lifecycle_cleanup_removes_tasks_run_key_processes_and_scripts() -> None:

@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ipc::client::IpcClient;
 use crate::settings::{SettingsConfig, WorkstationConfig};
@@ -17,6 +17,8 @@ use crate::utils::{
 };
 
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "/root/AutoFluidSimulation";
+const WORKSTATION_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(300);
+const WORKSTATION_TUNNEL_READY_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// 进程终止结果
 enum StopResult {
@@ -105,6 +107,8 @@ impl WorkerManager {
     }
 
     /// 启动所有 worker：建立 SSH 隧道 + 执行 daemon 端准备 + 启动本地 LocalWorker。
+    ///
+    /// 该函数会同步等待工作站自维护隧道连通性，必须从后台 worker 任务调用。
     pub fn start_workers_with_prepare<F>(
         &mut self,
         project_dir: &str,
@@ -281,14 +285,14 @@ impl WorkerManager {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if stdout.is_empty() {
-                    log_buffer.push_info("✅ 工作站自持有 SSH 隧道已部署/修复完成".to_string());
+                    log_buffer.push_info("✅ 工作站自持有 SSH 隧道部署/修复命令已完成".to_string());
                 } else {
                     log_buffer.push_info(format!(
-                        "✅ 工作站自持有 SSH 隧道已部署/修复完成: {}",
+                        "✅ 工作站自持有 SSH 隧道部署/修复命令已完成: {}",
                         stdout
                     ));
                 }
-                true
+                self.wait_for_workstation_owned_tunnels_ready(project_dir, log_buffer)
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -308,6 +312,172 @@ impl WorkerManager {
             Err(e) => {
                 log::error!("工作站自持有 SSH 隧道部署/修复失败: {}", e);
                 log_buffer.push_info(format!("⚠️ 工作站自持有 SSH 隧道部署/修复失败: {}", e));
+                false
+            }
+        }
+    }
+
+    fn wait_for_workstation_owned_tunnels_ready(
+        &self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+    ) -> bool {
+        self.wait_for_workstation_owned_tunnels_ready_with_timeout(
+            project_dir,
+            log_buffer,
+            WORKSTATION_TUNNEL_READY_TIMEOUT,
+            WORKSTATION_TUNNEL_READY_POLL_INTERVAL,
+        )
+    }
+
+    fn wait_for_workstation_owned_tunnels_ready_with_timeout(
+        &self,
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+        ready_timeout: Duration,
+        poll_interval: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + ready_timeout;
+        let python = resolve_python_exe(project_dir);
+        let mut last_detail = "等待超时，未获得工作站隧道状态".to_string();
+        let mut attempt = 0usize;
+
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+            attempt += 1;
+            let mut cmd = Command::new(&python);
+            cmd.args([
+                "-m",
+                "tools.workstation_tunnel",
+                "status",
+                "--all",
+                "--project-dir",
+                project_dir,
+            ])
+            .current_dir(project_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+
+            match run_command_with_timeout(&mut cmd, Duration::from_secs(90)) {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    match workstation_tunnel_results_all_ok(&stdout) {
+                        Ok(()) => {
+                            log_buffer.push_info(
+                                "✅ 工作站自持有 SSH 隧道全部通过连通性检查".to_string(),
+                            );
+                            return true;
+                        }
+                        Err(detail) => {
+                            last_detail = if stderr.is_empty() {
+                                detail
+                            } else {
+                                format!("{detail}; stderr={stderr}")
+                            };
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_detail = error;
+                }
+            }
+
+            if attempt == 1 {
+                log_buffer.push_info(
+                    "⏳ 工作站自持有 SSH 隧道尚未全部就绪，继续等待自动重连...".to_string(),
+                );
+            }
+            std::thread::sleep(poll_interval);
+        }
+
+        log_buffer.push_info(format!(
+            "❌ 工作站自持有 SSH 隧道未全部就绪: {}",
+            truncate_detail(&last_detail, 800)
+        ));
+        false
+    }
+
+    pub fn uninstall_workstation_owned_tunnels_for_project(
+        project_dir: &str,
+        log_buffer: &mut LogBuffer,
+    ) -> bool {
+        if workstation_tunnel_owner_mode() == WorkstationTunnelOwner::LocalRelay {
+            return true;
+        }
+
+        let python = resolve_python_exe(project_dir);
+        let mut cmd = Command::new(&python);
+        cmd.args([
+            "-m",
+            "tools.workstation_tunnel",
+            "uninstall",
+            "--all",
+            "--project-dir",
+            project_dir,
+        ])
+        .current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match run_command_with_timeout(&mut cmd, Duration::from_secs(180)) {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if !output.status.success() {
+                    let detail = if stderr.is_empty() { stdout } else { stderr };
+                    log_buffer.push_info(format!(
+                        "⚠️ 工作站自持有 SSH 隧道卸载失败: {}",
+                        if detail.is_empty() {
+                            output.status.to_string()
+                        } else {
+                            truncate_detail(&detail, 800)
+                        }
+                    ));
+                    return false;
+                }
+                match workstation_tunnel_results_all_ok(&stdout) {
+                    Ok(()) => {
+                        log_buffer.push_info(
+                            "✅ 工作站自持有 SSH 隧道计划任务和进程已全部卸载".to_string(),
+                        );
+                        true
+                    }
+                    Err(detail) => {
+                        let detail = if stderr.is_empty() {
+                            detail
+                        } else {
+                            format!("{detail}; stderr={stderr}")
+                        };
+                        log_buffer.push_info(format!(
+                            "⚠️ 工作站自持有 SSH 隧道卸载不完整: {}",
+                            truncate_detail(&detail, 800)
+                        ));
+                        false
+                    }
+                }
+            }
+            Err(error) => {
+                log_buffer.push_info(format!(
+                    "⚠️ 工作站自持有 SSH 隧道卸载失败: {}",
+                    truncate_detail(&error, 800)
+                ));
                 false
             }
         }
@@ -1015,6 +1185,56 @@ fn default_workstation_tunnel_port(index: usize) -> u16 {
     }
 }
 
+fn workstation_tunnel_results_all_ok(stdout: &str) -> Result<(), String> {
+    let payload: serde_json::Value = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("无法解析工作站隧道结果 JSON: {error}; stdout={stdout}"))?;
+    let Some(results) = payload.get("results").and_then(|value| value.as_array()) else {
+        return Err(format!("工作站隧道结果缺少 results: {stdout}"));
+    };
+    if results.is_empty() {
+        return Err("工作站隧道结果 results 为空".to_string());
+    }
+
+    let not_ready: Vec<String> = results
+        .iter()
+        .filter(|item| item.get("ok").and_then(|value| value.as_bool()) != Some(true))
+        .map(|item| {
+            let id = item
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let status = item
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let detail = item
+                .get("detail")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if detail.is_empty() {
+                format!("{id}:{status}")
+            } else {
+                format!("{id}:{status}:{detail}")
+            }
+        })
+        .collect();
+    if not_ready.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("未成功工作站: {}", not_ready.join(", ")))
+    }
+}
+
+fn truncate_detail(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
 fn env_str(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -1324,12 +1544,14 @@ fn watchdog_uninstall_command(tunnel_script: &std::path::Path, tunnel_kind: &str
 }
 
 fn resolve_python_exe(project_dir: &str) -> String {
-    let project_python = PathBuf::from(project_dir)
-        .join(".venv")
-        .join("Scripts")
-        .join("python.exe");
-    if project_python.exists() {
-        return project_python.to_string_lossy().to_string();
+    let venv_dir = PathBuf::from(project_dir).join(".venv");
+    for project_python in [
+        venv_dir.join("Scripts").join("python.exe"),
+        venv_dir.join("bin").join("python"),
+    ] {
+        if project_python.exists() {
+            return project_python.to_string_lossy().to_string();
+        }
     }
     std::env::var("PYTHON").unwrap_or_else(|_| "python".to_string())
 }
@@ -1846,6 +2068,62 @@ mod tests {
         std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
         let _ = std::fs::remove_dir_all(project_dir);
     }
+
+    #[test]
+    fn workstation_owned_repair_failure_rolls_back_worker_start() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-owned-repair-fail-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(project_dir.join("main.py"), "print('worker')").expect("write main.py");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            three_workstation_toml(),
+        )
+        .expect("write config");
+        let marker = project_dir.join("worker-owned-repair-fail.log");
+        let powershell_exe =
+            fake_argument_marker_exe(&project_dir, "fake_pwsh_owned_repair_fail", &marker);
+        let python_exe = fake_python_result_marker_exe(
+            &project_dir,
+            "fake_python_owned_repair_fail",
+            &marker,
+            r#"{"ok":false,"results":[{"id":"WS-A","ok":false,"status":"repair_failed"}]}"#,
+            2,
+        );
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let owner_marker = WorkerManager::worker_tunnel_owner_marker_for(&project_dir);
+
+        let result = wm.start_workers_with_prepare(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            |_| panic!("daemon prepare must not run after repair failure"),
+        );
+
+        assert!(!result);
+        assert!(!owner_marker.exists());
+        let calls = wait_for_marker_lines(&marker, 1);
+        assert!(calls.contains("-m tools.workstation_tunnel repair --all"));
+        assert!(!calls.contains("daemon"));
+        assert!(!calls.contains("-TunnelKind LocalWorker"));
+        assert!(!calls.contains("tools.workstation_tunnel uninstall"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("工作站自持有 SSH 隧道部署/修复失败")
+                || message.contains("工作站 SSH 隧道全部启动失败")
+        }));
+
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("PYTHON");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
     #[test]
     fn worker_ssh_check_log_includes_effective_target() {
         let mut log_buffer = LogBuffer::new();
@@ -2110,7 +2388,7 @@ mod tests {
         );
 
         assert!(result);
-        let order = wait_for_marker_lines(&marker, 4);
+        let order = wait_for_marker_lines(&marker, 5);
         let lines: Vec<&str> = order.lines().collect();
         let workstation_repair_lines: Vec<&&str> = lines
             .iter()
@@ -2143,6 +2421,10 @@ mod tests {
             .iter()
             .position(|line| line.contains("-m tools.workstation_tunnel repair --all"))
             .expect("workstation repair marker");
+        let workstation_status_idx = lines
+            .iter()
+            .position(|line| line.contains("-m tools.workstation_tunnel status --all"))
+            .expect("workstation status marker");
         let worker_idx = lines
             .iter()
             .position(|line| *line == "worker 127.0.0.1 2223 reverse_tunnel")
@@ -2152,6 +2434,8 @@ mod tests {
             .position(|line| line.contains("-TunnelKind LocalWorker"))
             .expect("local worker tunnel marker");
         assert!(workstation_repair_idx < daemon_idx);
+        assert!(workstation_repair_idx < workstation_status_idx);
+        assert!(workstation_status_idx < daemon_idx);
         assert!(daemon_idx < local_tunnel_idx);
         assert!(worker_idx > workstation_repair_idx);
         assert!(
@@ -2173,6 +2457,270 @@ mod tests {
         std::env::remove_var("AUTOFLUID_WORKER_SSH_PORT");
         std::env::remove_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE");
         let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn start_workers_waits_until_workstation_owned_tunnel_status_recovers() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-retry-test-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("scripts")).expect("create scripts dir");
+        std::fs::write(
+            project_dir
+                .join("scripts")
+                .join("start_workstation_reverse_tunnel.ps1"),
+            "Write-Host tunnel",
+        )
+        .expect("write tunnel script");
+        std::fs::write(project_dir.join("main.py"), "print('worker')").expect("write main.py");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            three_workstation_toml(),
+        )
+        .expect("write config");
+        let marker = project_dir.join("worker-retry.log");
+        let powershell_exe = fake_argument_marker_exe(&project_dir, "fake_pwsh_retry", &marker);
+        let python_exe = fake_worker_retry_marker_exe(&project_dir, "fake_python_retry", &marker);
+        std::env::set_var("AUTOFLUID_POWERSHELL_EXE", &powershell_exe);
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::set_var("AUTOFLUID_WORKER_REACHABLE_HOST", "127.0.0.1");
+        std::env::set_var("AUTOFLUID_WORKER_SSH_PORT", "2223");
+        std::env::set_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE", "reverse_tunnel");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let result = wm.start_workers_with_prepare(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            |buffer| {
+                buffer.push_info("daemon prepare".to_string());
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&marker)
+                    .and_then(|mut file| {
+                        use std::io::Write;
+                        writeln!(file, "daemon")
+                    })
+                    .expect("write daemon marker");
+                true
+            },
+        );
+
+        assert!(result);
+        let order = wait_for_marker_lines(&marker, 6);
+        let lines: Vec<&str> = order.lines().collect();
+        let first_status_idx = lines
+            .iter()
+            .position(|line| line.contains("-m tools.workstation_tunnel status --all"))
+            .expect("first status marker");
+        let second_status_idx = lines
+            .iter()
+            .enumerate()
+            .skip(first_status_idx + 1)
+            .find_map(|(idx, line)| {
+                line.contains("-m tools.workstation_tunnel status --all")
+                    .then_some(idx)
+            })
+            .expect("second status marker");
+        let daemon_idx = lines
+            .iter()
+            .position(|line| *line == "daemon")
+            .expect("daemon prepare marker");
+        assert!(second_status_idx < daemon_idx);
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("工作站自持有 SSH 隧道尚未全部就绪")
+        }));
+
+        let _ = wm.stop_workers_for_project(None, &mut log_buffer);
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        std::env::remove_var("PYTHON");
+        std::env::remove_var("AUTOFLUID_WORKER_REACHABLE_HOST");
+        std::env::remove_var("AUTOFLUID_WORKER_SSH_PORT");
+        std::env::remove_var("AUTOFLUID_WORKER_CONNECTIVITY_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn full_quit_cleanup_uninstalls_workstation_owned_tunnels() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-uninstall-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("worker-uninstall.log");
+        let python_exe = fake_worker_env_marker_exe(&project_dir, "fake_python_uninstall", &marker);
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+
+        let mut log_buffer = LogBuffer::new();
+        let result = WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+        );
+
+        assert!(result);
+        let marker_text = wait_for_marker_lines(&marker, 1);
+        assert!(marker_text.contains("-m tools.workstation_tunnel uninstall --all"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("工作站自持有 SSH 隧道计划任务和进程已全部卸载")
+        }));
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn local_relay_mode_skips_workstation_owned_tunnel_uninstall() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-local-relay-uninstall-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("worker-uninstall.log");
+        let python_exe = fake_worker_env_marker_exe(&project_dir, "fake_python_uninstall", &marker);
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::set_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER", "local_relay");
+
+        let mut log_buffer = LogBuffer::new();
+        let result = WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+        );
+
+        assert!(result);
+        assert!(
+            !marker.exists(),
+            "local_relay mode must not call workstation-owned uninstall"
+        );
+        std::env::remove_var("PYTHON");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn workstation_owned_tunnel_uninstall_reports_result_failures() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-uninstall-result-failure-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("worker-uninstall-failure.log");
+        let python_exe = fake_python_result_marker_exe(
+            &project_dir,
+            "fake_python_uninstall_result_failure",
+            &marker,
+            r#"{"ok":true,"results":[{"id":"WS-A","ok":false,"status":"not_removed","detail":"still running"}]}"#,
+            0,
+        );
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+
+        let mut log_buffer = LogBuffer::new();
+        let result = WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+        );
+
+        assert!(!result);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| { message.contains("工作站自持有 SSH 隧道卸载不完整") }));
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn workstation_owned_tunnel_uninstall_reports_process_start_failure() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-uninstall-spawn-failure-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::env::set_var("PYTHON", project_dir.join("missing-python"));
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+
+        let mut log_buffer = LogBuffer::new();
+        let result = WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+        );
+
+        assert!(!result);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| { message.contains("工作站自持有 SSH 隧道卸载失败") }));
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn workstation_owned_tunnel_readiness_timeout_returns_false() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-readiness-timeout-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("worker-status-timeout.log");
+        let python_exe = fake_python_result_marker_exe(
+            &project_dir,
+            "fake_python_status_timeout",
+            &marker,
+            r#"{"ok":true,"results":[{"id":"WS-A","ok":false,"status":"not_ready","detail":"still booting"}]}"#,
+            0,
+        );
+        std::env::set_var("PYTHON", &python_exe);
+
+        let wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let result = wm.wait_for_workstation_owned_tunnels_ready_with_timeout(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+            Duration::from_millis(30),
+            Duration::from_millis(1),
+        );
+
+        assert!(!result);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("工作站自持有 SSH 隧道未全部就绪")));
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn workstation_tunnel_results_all_ok_requires_every_result_ok() {
+        let partial = r#"{"ok":true,"results":[{"id":"WS-A","ok":true},{"id":"WS-B","ok":false,"status":"not_ready"}]}"#;
+        let ready = r#"{"ok":true,"results":[{"id":"WS-A","ok":true},{"id":"WS-B","ok":true}]}"#;
+
+        assert!(workstation_tunnel_results_all_ok(partial).is_err());
+        assert!(workstation_tunnel_results_all_ok(ready).is_ok());
+    }
+
+    #[test]
+    fn workstation_tunnel_results_all_ok_rejects_malformed_payloads() {
+        for payload in [
+            "{not-json",
+            r#"{"ok":true}"#,
+            r#"{"ok":true,"results":[]}"#,
+            r#"{"ok":true,"results":[{"id":"WS-A"}]}"#,
+        ] {
+            assert!(
+                workstation_tunnel_results_all_ok(payload).is_err(),
+                "payload should be rejected: {payload}"
+            );
+        }
     }
 
     #[test]
@@ -2271,6 +2819,17 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[cfg(not(windows))]
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path)
+            .expect("fake executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod fake executable");
     }
 
     fn fake_argument_marker_exe(
@@ -2433,7 +2992,7 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel status\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel uninstall\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
                     marker.display(),
                     marker.display()
                 ),
@@ -2448,12 +3007,95 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel\"*) exit 0;; esac\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel status\"*|*\"tools.workstation_tunnel uninstall\"*) printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'; exit 0;; *\"tools.workstation_tunnel\"*) exit 0;; esac\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
                     marker.display(),
                     marker.display()
                 ),
             )
             .expect("write fake worker env marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_python_result_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+        result_json: &str,
+        exit_code: i32,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho {}\r\nexit /b {}\r\n",
+                    marker.display(),
+                    result_json,
+                    exit_code
+                ),
+            )
+            .expect("write fake python result marker exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{}'\nexit {}\n",
+                    marker.display(),
+                    result_json,
+                    exit_code
+                ),
+            )
+            .expect("write fake python result marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_worker_retry_marker_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+    ) -> PathBuf {
+        let attempts = project_dir.join(format!("{name}.status-count"));
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel status\" >nul && (\r\n  if not exist \"{}\" (echo 1>\"{}\" & echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_ready\",\"detail\":\"booting\"}}]}}& exit /b 0)\r\n  echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}\r\n  exit /b 0\r\n)\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    marker.display(),
+                    attempts.display(),
+                    attempts.display(),
+                    marker.display()
+                ),
+            )
+            .expect("write fake retry marker exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel status\"*) if [ ! -f '{}' ]; then printf '1\\n' > '{}'; printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_ready\",\"detail\":\"booting\"}}]}}'; exit 0; fi; printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'; exit 0;; *\"tools.workstation_tunnel\"*) exit 0;; esac\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    marker.display(),
+                    attempts.display(),
+                    attempts.display(),
+                    marker.display()
+                ),
+            )
+            .expect("write fake retry marker exe");
             make_executable(&path);
             path
         }

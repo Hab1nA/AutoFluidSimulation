@@ -285,6 +285,47 @@ def test_shutdown_cancels_remote_tasks_when_scheduler_stop_fails() -> None:
     assert remote_executor.cancel_calls == 1
 
 
+def test_shutdown_cancels_remote_tasks_after_scheduler_stop_succeeds() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+            self.cancel_calls += 1
+            return {"cancelled": 1, "failed": 0}
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    scheduler = _Scheduler()
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.scheduler = scheduler
+    daemon.runner = _Runner(remote_executor)
+    daemon.ipc_server = None
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = None
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
+
+    daemon.shutdown()
+
+    assert scheduler.stop_calls == 1
+    assert remote_executor.cancel_calls == 1
+
+
 def test_child_health_restarts_exited_alert_watcher(monkeypatch) -> None:
     from engine.daemon import PipelineDaemon
 
