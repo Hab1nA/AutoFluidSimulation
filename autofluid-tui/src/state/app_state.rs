@@ -12,6 +12,7 @@ pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
 pub const STATUS_PAUSED: &str = "Paused";
 pub const STATUS_RETRYING: &str = "Retrying";
+pub const STATUS_UNKNOWN_REMOTE: &str = "UnknownRemote";
 pub const STATUS_COMPLETED: &str = "Completed";
 pub const STATUS_ERROR: &str = "Error";
 pub const SETTINGS_LOCKED_MESSAGE: &str =
@@ -42,6 +43,7 @@ pub fn status_icon(status: &str) -> &str {
         STATUS_RUNNING => "⏳",
         STATUS_PAUSED => "⏸️",
         STATUS_RETRYING => "🔄",
+        STATUS_UNKNOWN_REMOTE => "❔",
         STATUS_COMPLETED => "✅",
         STATUS_ERROR => "❌",
         _ => "?",
@@ -54,6 +56,7 @@ pub fn status_color(status: &str) -> ratatui::style::Color {
         STATUS_RUNNING => ratatui::style::Color::Yellow,
         STATUS_PAUSED => ratatui::style::Color::Gray,
         STATUS_RETRYING => ratatui::style::Color::Rgb(255, 136, 0),
+        STATUS_UNKNOWN_REMOTE => ratatui::style::Color::Yellow,
         STATUS_COMPLETED => ratatui::style::Color::Green,
         STATUS_ERROR => ratatui::style::Color::Red,
         _ => ratatui::style::Color::White,
@@ -784,6 +787,7 @@ fn ok_label(value: Option<bool>) -> &'static str {
 fn status_label(value: Option<&str>) -> &'static str {
     match value {
         Some("ok") => "OK",
+        Some("stale") => "旧",
         Some("disconnected") => "断",
         Some(status) if status.starts_with("error:") => "断",
         Some("unknown") | None => "未知",
@@ -893,6 +897,17 @@ mod tests {
         assert!(text.contains("引擎:运行中"));
         assert!(text.contains("构型:3"));
         assert!(text.contains("屏障:已通过"));
+    }
+
+    #[test]
+    fn info_bar_text_labels_stale_workstation_ssh_as_old() {
+        let mut state = AppState::default();
+        state.health_info.server_to_workstation_ssh = Some("stale".to_string());
+
+        assert_eq!(
+            status_label(state.health_info.server_to_workstation_ssh.as_deref()),
+            "旧"
+        );
     }
 
     #[test]

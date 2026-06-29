@@ -554,7 +554,7 @@ fn build_check_content_lines(
                 };
                 items.push(CheckItem {
                     label: "S→W工作站SSH".to_string(),
-                    value: status.to_string(),
+                    value: health_status_display(status),
                     exists,
                 });
             }
@@ -574,7 +574,7 @@ fn build_check_content_lines(
                         };
                         items.push(CheckItem {
                             label: format!("{workstation_id} SSH详情"),
-                            value: status.to_string(),
+                            value: health_status_display(status),
                             exists,
                         });
                     }
@@ -1253,5 +1253,34 @@ mod tests {
         assert!(!text.contains("solver.py"));
         assert!(!text.contains("udf.c"));
         assert!(text.contains("fluent.exe"));
+    }
+
+    #[test]
+    fn check_content_lines_renders_stale_workstation_ssh_as_expired_check() {
+        let theme = AppTheme::default();
+        let data = json!({
+            "health": {
+                "server_to_workstation_ssh": "stale",
+                "workstation_ssh_details": {
+                    "WS-A": "stale"
+                },
+                "workstation_ssh_checked_at": {
+                    "WS-A": 1710000000.0
+                }
+            }
+        });
+
+        let text = line_text(&build_check_content_lines(&data, 80, &theme));
+
+        assert!(text.contains("S→W工作站SSH"));
+        assert!(text.contains("上次主动检查已过期"));
+        assert!(text.contains("WS-A SSH详情"));
+    }
+}
+
+fn health_status_display(status: &str) -> String {
+    match status {
+        "stale" => "上次主动检查已过期".to_string(),
+        _ => status.to_string(),
     }
 }

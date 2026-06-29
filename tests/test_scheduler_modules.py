@@ -20,7 +20,7 @@ import pytest
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
+    STATUS_UNKNOWN_REMOTE, DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
 )
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
@@ -1215,6 +1215,7 @@ class _MockRemoteExecutor:
         self._remote_task_events: list[tuple[str, int, str, str]] = []
         self._meshing_waits: list[tuple[int, str]] = []
         self._cancel_all_calls = 0
+        self._kill_remote_task_calls: list[tuple[int, str, str]] = []
 
     def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         self._meshing_started.append((config_name, workstation_id))
@@ -1267,6 +1268,15 @@ class _MockRemoteExecutor:
         delete_remote_task = getattr(self.state, "delete_remote_task", None)
         if callable(delete_remote_task):
             delete_remote_task(config_name, step_name, workstation_id=workstation_id)
+
+    def _kill_remote_task_for_config(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> bool:
+        self._kill_remote_task_calls.append((config_name, step_name, workstation_id))
+        return True
 
     def register_postprocess_from_solver(
         self,
@@ -1694,7 +1704,7 @@ class TestPipelineSchedulerStartRecovery:
         ]
 
     def test_resume_scan_keeps_running_solver_when_remote_task_unknown(self):
-        """启动扫描无法确认远程 Solver 状态时保留 Running，避免重启。"""
+        """启动扫描无法确认远程 Solver 状态时标记 UnknownRemote，避免重启。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -1705,11 +1715,11 @@ class TestPipelineSchedulerStartRecovery:
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
-        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.state.get_step_status(1, "solver") == STATUS_UNKNOWN_REMOTE
 
     def test_resume_scan_unknown_remote_solver_surfaces_after_retry_budget(self, monkeypatch):
         """远程 unknown 连续达到重试上限后应暴露 Error，不能无限保留 Running。"""
-        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        monkeypatch.setitem(ENGINE_CONFIG, "remote_unknown_max_retries", 1)
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -1721,6 +1731,7 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.runner._remote_executor._kill_remote_task_calls == [(1, "solver", "default")]
 
     def test_completed_postprocess_without_durable_output_resets_to_waiting(self):
         """恢复扫描应复核 PostProcess 输出，不能只相信 Completed 状态。"""
@@ -5173,6 +5184,86 @@ class TestBarrierCoordinator:
         assert self.runner._postprocess_dispatched == []
         assert self.solver_terminal_outcomes == ["failed"]
 
+    def test_consecutive_solver_failures_quarantine_workstation(self, monkeypatch):
+        """同一工作站连续 Solver 失败应进入隔离，避免继续派发。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 2]
+        assert self.state.get_step_status(3, "solver") == STATUS_WAITING
+        assert self.coordinator.solver_quarantine_snapshot()["WS-A"]["remaining_seconds"] == 1800
+
+    def test_solver_quarantine_survives_coordinator_restart(self, monkeypatch):
+        """Daemon 重启后仍应保留工作站隔离状态，避免立即继续派发。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+        self._use_multi_workstation_barrier()
+
+        assert self.coordinator.solver_quarantine_snapshot()["WS-A"]["remaining_seconds"] == 1800
+        assert self.coordinator._next_solver_config({"WS-A"}) is None
+
+    def test_successful_solver_resets_workstation_failure_count(self, monkeypatch):
+        """一次成功的 Solver 应清除同工作站连续失败计数。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        outcomes = iter([False, True, False])
+
+        def wait_solver_completion(config_name: int, paused_event=None, stopped_event=None) -> bool:
+            self.runner._solver_wait_count += 1
+            return next(outcomes)
+
+        self.runner.wait_solver_completion = wait_solver_completion
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 2, 3]
+        assert self.coordinator.solver_quarantine_snapshot() == {}
+
     def test_running_solver_with_remote_task_recovers_wait_without_restart(self):
         """Daemon 重启后远程 Solver 仍运行时应恢复等待，不重复启动。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -5255,7 +5346,7 @@ class TestBarrierCoordinator:
         )
 
     def test_running_solver_unknown_remote_state_does_not_restart(self):
-        """远程 Solver 状态未知时保守保持 Running，不重复启动。"""
+        """远程 Solver 状态未知时标记 UnknownRemote，不重复启动。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -5267,11 +5358,11 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 0
-        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.state.get_step_status(1, "solver") == STATUS_UNKNOWN_REMOTE
 
     def test_running_solver_unknown_remote_state_errors_after_retry_budget(self, monkeypatch):
         """远程 unknown 达到重试上限后应标 Error，避免调度循环永久空转。"""
-        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        monkeypatch.setitem(ENGINE_CONFIG, "remote_unknown_max_retries", 1)
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -5284,6 +5375,7 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 0
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.runner._remote_executor._kill_remote_task_calls == [(1, "solver", "default")]
         assert self.solver_terminal_outcomes == ["failed"]
 
     def test_running_solver_lost_remote_task_restarts_once_and_forgets_task(self):

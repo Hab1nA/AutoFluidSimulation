@@ -7,12 +7,13 @@ from __future__ import annotations
 """
 
 import threading
+import time
 from typing import Callable
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    STATUS_RETRYING, ENGINE_CONFIG, WORKSTATIONS,
+    STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, ENGINE_CONFIG, WORKSTATIONS,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
@@ -71,6 +72,9 @@ class BarrierCoordinator:
         self._solver_dispatch_lock = threading.Lock()
         self._solver_active_config: int | None = None
         self._solver_active_by_workstation: dict[str, int] = {}
+        self._workstation_solver_failures: dict[str, int] = {}
+        self._workstation_quarantine_until: dict[str, float] = {}
+        self._restore_solver_quarantine_state()
         self._workstation_barriers_passed: set[str] = set()
         self._configured_workstation_ids = {
             str(workstation.get("id"))
@@ -193,8 +197,13 @@ class BarrierCoordinator:
         Returns True when the step has been marked Error.
         """
         retry_count = self.state.increment_retry(config_name, step_name)
-        max_retries = int(ENGINE_CONFIG["max_retries"])
+        max_retries = int(ENGINE_CONFIG.get("remote_unknown_max_retries", 3))
+        workstation_id = self._workstation_for_config(config_name)
         if retry_count >= max_retries:
+            remote_executor = self.runner.get_remote_executor()
+            kill_remote_task = getattr(remote_executor, "_kill_remote_task_for_config", None)
+            if callable(kill_remote_task):
+                kill_remote_task(config_name, step_name, workstation_id)
             self.state.set_step_status(
                 config_name,
                 step_name,
@@ -206,14 +215,115 @@ class BarrierCoordinator:
                 config_name,
             )
             return True
+        self.state.set_step_status(
+            config_name,
+            step_name,
+            STATUS_UNKNOWN_REMOTE,
+            f"远程 {step_name} 状态未知，等待恢复探测 ({retry_count}/{max_retries})",
+        )
         logger.warning(
-            "[Solver] 构型%s 远程状态未知，保留 Running 状态等待后续重试 "
+            "[Solver] 构型%s 远程状态未知，标记 UnknownRemote 等待后续重试 "
             "(%s/%s)",
             config_name,
             retry_count,
             max_retries,
         )
         return False
+
+    def _restore_solver_quarantine_state(self) -> None:
+        get_solver_quarantine = getattr(self.state, "get_solver_quarantine", None)
+        if not callable(get_solver_quarantine):
+            return
+        restored = get_solver_quarantine()
+        now = time.time()
+        for workstation_id, data in restored.items():
+            until = data.get("until")
+            failure_count = data.get("failure_count")
+            if not isinstance(until, int | float) or not isinstance(failure_count, int | float):
+                continue
+            if int(failure_count) > 0 and (float(until) <= 0.0 or float(until) >= now):
+                self._workstation_solver_failures[workstation_id] = int(failure_count)
+            if float(until) > now:
+                self._workstation_quarantine_until[workstation_id] = float(until)
+        if self._workstation_quarantine_until:
+            logger.warning(
+                "[Solver] 已恢复工作站 Solver 隔离状态: %s",
+                self.solver_quarantine_snapshot(),
+            )
+        else:
+            self._persist_solver_quarantine_state()
+
+    def _persist_solver_quarantine_state(self) -> None:
+        set_solver_quarantine = getattr(self.state, "set_solver_quarantine", None)
+        if not callable(set_solver_quarantine):
+            return
+        workstation_ids = set(self._workstation_solver_failures) | set(
+            self._workstation_quarantine_until
+        )
+        snapshot = {
+            workstation_id: {
+                "failure_count": self._workstation_solver_failures.get(workstation_id, 0),
+                "until": self._workstation_quarantine_until.get(workstation_id, 0.0),
+            }
+            for workstation_id in workstation_ids
+            if self._workstation_solver_failures.get(workstation_id, 0) > 0
+            or workstation_id in self._workstation_quarantine_until
+        }
+        set_solver_quarantine(snapshot)
+
+    def _is_workstation_quarantined(self, workstation_id: str) -> bool:
+        until = self._workstation_quarantine_until.get(workstation_id)
+        if until is None:
+            return False
+        if time.time() >= until:
+            self._workstation_quarantine_until.pop(workstation_id, None)
+            self._workstation_solver_failures.pop(workstation_id, None)
+            self._persist_solver_quarantine_state()
+            logger.info("[Solver] 工作站 %s Solver 隔离已到期，恢复调度", workstation_id)
+            return False
+        return True
+
+    def _record_solver_failure_for_workstation(self, workstation_id: str) -> None:
+        failures = self._workstation_solver_failures.get(workstation_id, 0) + 1
+        self._workstation_solver_failures[workstation_id] = failures
+        max_failures = int(ENGINE_CONFIG.get("solver_workstation_max_consecutive_failures", 2))
+        if max_failures <= 0 or failures < max_failures:
+            self._persist_solver_quarantine_state()
+            return
+        quarantine_seconds = float(
+            ENGINE_CONFIG.get("solver_workstation_quarantine_minutes", 30)
+        ) * 60.0
+        until = time.time() + quarantine_seconds
+        self._workstation_quarantine_until[workstation_id] = until
+        self._persist_solver_quarantine_state()
+        logger.error(
+            "[Solver] 工作站 %s 连续 Solver 失败 %s 次，隔离 %.0f 秒",
+            workstation_id,
+            failures,
+            quarantine_seconds,
+        )
+
+    def _clear_solver_failures_for_workstation(self, workstation_id: str) -> None:
+        self._workstation_solver_failures.pop(workstation_id, None)
+        self._workstation_quarantine_until.pop(workstation_id, None)
+        self._persist_solver_quarantine_state()
+
+    def solver_quarantine_snapshot(self) -> dict[str, dict[str, int | float]]:
+        now = time.time()
+        snapshot: dict[str, dict[str, int | float]] = {}
+        for workstation_id, until in list(self._workstation_quarantine_until.items()):
+            remaining = int(max(0.0, until - now))
+            if remaining <= 0:
+                self._workstation_quarantine_until.pop(workstation_id, None)
+                self._workstation_solver_failures.pop(workstation_id, None)
+                self._persist_solver_quarantine_state()
+                continue
+            snapshot[workstation_id] = {
+                "remaining_seconds": remaining,
+                "failure_count": self._workstation_solver_failures.get(workstation_id, 0),
+                "until": until,
+            }
+        return snapshot
 
     def join_solver_threads(self, timeout: float = 3.0) -> None:
         """等待所有 Solver 线程退出并清空列表。
@@ -433,6 +543,7 @@ class BarrierCoordinator:
             STATUS_RUNNING,
             STATUS_PAUSED,
             STATUS_RETRYING,
+            STATUS_UNKNOWN_REMOTE,
         )
 
         # Daemon 重启后内存中的工作站调度线程列表为空，但远程 Fluent
@@ -448,7 +559,7 @@ class BarrierCoordinator:
                 continue
             solver_status = self.state.get_step_status(cn, "solver")
             postprocess_status = self.state.get_step_status(cn, "postprocess")
-            if solver_status == STATUS_RUNNING:
+            if solver_status in {STATUS_RUNNING, STATUS_UNKNOWN_REMOTE}:
                 return cn
             if solver_status == STATUS_COMPLETED and postprocess_status == STATUS_RUNNING:
                 return cn
@@ -462,6 +573,9 @@ class BarrierCoordinator:
                 allowed_workstations is not None
                 and self._workstation_for_config(cn) not in allowed_workstations
             ):
+                continue
+            workstation_id = self._workstation_for_config(cn)
+            if self._is_workstation_quarantined(workstation_id):
                 continue
             solver_status = self.state.get_step_status(cn, "solver")
             postprocess_status = self.state.get_step_status(cn, "postprocess")
@@ -478,6 +592,9 @@ class BarrierCoordinator:
                 allowed_workstations is not None
                 and self._workstation_for_config(cn) not in allowed_workstations
             ):
+                continue
+            workstation_id = self._workstation_for_config(cn)
+            if self._is_workstation_quarantined(workstation_id):
                 continue
             solver_status = self.state.get_step_status(cn, "solver")
             if solver_status in schedulable_statuses:
@@ -544,6 +661,7 @@ class BarrierCoordinator:
             STATUS_RUNNING,
             STATUS_PAUSED,
             STATUS_RETRYING,
+            STATUS_UNKNOWN_REMOTE,
         ):
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
@@ -567,6 +685,7 @@ class BarrierCoordinator:
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
+                self._clear_solver_failures_for_workstation(workstation_id)
                 if not self.runner.register_postprocess_from_solver(config_name):
                     self.state.set_step_status(
                         config_name,
@@ -591,6 +710,7 @@ class BarrierCoordinator:
                     STATUS_ERROR,
                     "远程求解任务失败",
                 )
+                self._record_solver_failure_for_workstation(workstation_id)
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
@@ -607,6 +727,7 @@ class BarrierCoordinator:
                     self._discard_stale_step_result(config_name, "solver")
                     return False
                 if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                    self._clear_solver_failures_for_workstation(workstation_id)
                     if self.runner.register_postprocess_from_solver(config_name):
                         self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                         remote_executor.forget_remote_task(
@@ -624,7 +745,8 @@ class BarrierCoordinator:
                         )
                 return True
             if remote_status == "unknown":
-                self._record_unknown_remote_status(config_name, "solver")
+                if self._record_unknown_remote_status(config_name, "solver"):
+                    self._record_solver_failure_for_workstation(workstation_id)
                 return False
             self.state.set_step_status(config_name, "solver", STATUS_WAITING)
             remote_executor.forget_remote_task(
@@ -650,6 +772,9 @@ class BarrierCoordinator:
                 self._discard_stale_step_result(config_name, "solver")
                 return False
             if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                self._clear_solver_failures_for_workstation(
+                    self._workstation_for_config(config_name)
+                )
                 if self.runner.register_postprocess_from_solver(config_name):
                     self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                     remote_executor = self.runner.get_remote_executor()
@@ -666,6 +791,10 @@ class BarrierCoordinator:
                         STATUS_ERROR,
                         "无法接管远程 Solver 任务进行后处理",
                     )
+            elif self.state.get_step_status(config_name, "solver") == STATUS_ERROR:
+                self._record_solver_failure_for_workstation(
+                    self._workstation_for_config(config_name)
+                )
         return True
 
     def _execute_or_recover_postprocess_for_config(self, config_name: int) -> None:

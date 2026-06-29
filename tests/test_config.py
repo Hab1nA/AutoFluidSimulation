@@ -252,7 +252,15 @@ class TestConstants:
 
     def test_all_statuses_complete(self):
         from engine.config import ALL_STATUSES
-        expected = ["Waiting", "Running", "Paused", "Retrying", "Completed", "Error"]
+        expected = [
+            "Waiting",
+            "Running",
+            "Paused",
+            "Retrying",
+            "UnknownRemote",
+            "Completed",
+            "Error",
+        ]
         assert ALL_STATUSES == expected
 
     def test_step_index_consistent_with_step_names(self):
@@ -263,10 +271,10 @@ class TestConstants:
     def test_status_constants_are_strings(self):
         from engine.config import (
             STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED,
-            STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+            STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, STATUS_COMPLETED, STATUS_ERROR,
         )
         for s in [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED,
-                  STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]:
+                  STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, STATUS_COMPLETED, STATUS_ERROR]:
             assert isinstance(s, str) and s
 
 

@@ -168,8 +168,10 @@ class _Scheduler:
 class _RefreshRunner:
     def __init__(self, ssh_by_id):
         self._ssh_by_id = ssh_by_id
+        self.get_ssh_calls: list[str] = []
 
-    def get_ssh(self, workstation_id="default"):
+    def get_ssh(self, workstation_id="default", log_failure=True):
+        self.get_ssh_calls.append(workstation_id)
         return self._ssh_by_id[workstation_id]
 
 
@@ -217,6 +219,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
         "sw_macro_started": True,
         "barrier_passed": False,
         "workstation_barriers": {},
+        "solver_quarantine": {},
         "pipeline_started": True,
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
@@ -419,6 +422,7 @@ def test_handle_get_dashboard_after_pipeline_completed(monkeypatch):
         "sw_macro_started": True,
         "barrier_passed": False,
         "workstation_barriers": {},
+        "solver_quarantine": {},
         "pipeline_started": True,
         "daemon_started_at": 1_000.0,
         "daemon_started_at_display": "1970-01-01 00:16:40",
@@ -540,6 +544,7 @@ def test_dashboard_works_before_server_mode_configs_are_loaded(monkeypatch):
         "sw_macro_started": False,
         "barrier_passed": False,
         "workstation_barriers": {},
+        "solver_quarantine": {},
         "pipeline_started": False,
         "daemon_started_at": 2_000.0,
         "daemon_started_at_display": "1970-01-01 00:33:20",
@@ -792,11 +797,12 @@ def test_dashboard_marks_stale_workstation_ssh_check_non_ok(monkeypatch):
 
     health = daemon._build_health_snapshot()
 
-    assert health["server_to_workstation_ssh"] == "unknown"
+    assert health["server_to_workstation_ssh"] == "stale"
     assert health["workstation_ssh_details"] == {"WS-A": "stale"}
+    assert health["workstation_ssh_checked_at"] == {"WS-A": 800.0}
 
 
-def test_dashboard_treats_stale_mixed_with_disconnected_as_unknown(monkeypatch):
+def test_dashboard_treats_stale_mixed_with_disconnected_as_stale(monkeypatch):
     monkeypatch.setattr(
         daemon_module,
         "WORKSTATIONS",
@@ -815,11 +821,12 @@ def test_dashboard_treats_stale_mixed_with_disconnected_as_unknown(monkeypatch):
 
     health = daemon._build_health_snapshot()
 
-    assert health["server_to_workstation_ssh"] == "unknown"
+    assert health["server_to_workstation_ssh"] == "stale"
     assert health["workstation_ssh_details"] == {
         "WS-A": "stale",
         "WS-B": "disconnected",
     }
+    assert health["workstation_ssh_checked_at"] == {"WS-A": 800.0, "WS-B": 995.0}
 
 
 def test_background_ssh_health_does_not_refresh_cached_ok_timestamp(monkeypatch):
@@ -838,3 +845,27 @@ def test_background_ssh_health_does_not_refresh_cached_ok_timestamp(monkeypatch)
 
     assert result["ssh_checks"] == {"WS-A": "ok"}
     assert daemon._last_worker_ssh_check_times == {"WS-A": 800.0}
+
+
+def test_background_ssh_health_runs_low_frequency_active_probe(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "WS-A", "host": "172.17.135.240", "port": 22}],
+    )
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_000.0)
+    runner = _RefreshRunner({"WS-A": _Ssh(True)})
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = runner
+    daemon._last_worker_ssh_checks = {"WS-A": "stale"}
+    daemon._last_worker_ssh_check_times = {"WS-A": 600.0}
+    daemon._last_worker_ssh_check_sources = {"WS-A": "worker_start"}
+    daemon._last_worker_ssh_active_probe_time = 600.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+    result = daemon._run_workstation_ssh_health_check_once()
+
+    assert runner.get_ssh_calls == ["WS-A"]
+    assert result["ssh_checks"] == {"WS-A": "ok"}
+    assert daemon._last_worker_ssh_check_times == {"WS-A": 1_000.0}
+    assert daemon._last_worker_ssh_check_sources == {"WS-A": "active_probe"}

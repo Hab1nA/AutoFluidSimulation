@@ -186,6 +186,9 @@ class EngineConfig(TypedDict):
     postprocess_exit_to_throat_area_ratio: float
     postprocess_cstar_reference: float
     max_retries: int
+    remote_unknown_max_retries: int
+    solver_workstation_max_consecutive_failures: int
+    solver_workstation_quarantine_minutes: int
     state_refresh_interval: float
     sc_max_slots: int
     sc_persistent_enabled: bool
@@ -479,10 +482,19 @@ STATUS_WAITING   = "Waiting"       # 等待中
 STATUS_RUNNING   = "Running"       # 运行中
 STATUS_PAUSED    = "Paused"        # 已暂停（用户手动暂停）
 STATUS_RETRYING  = "Retrying"      # 重试中
+STATUS_UNKNOWN_REMOTE = "UnknownRemote"  # 远程任务状态未知，等待受控恢复/清理
 STATUS_COMPLETED = "Completed"     # 已完成
 STATUS_ERROR     = "Error"         # 出错
 
-ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]
+ALL_STATUSES = [
+    STATUS_WAITING,
+    STATUS_RUNNING,
+    STATUS_PAUSED,
+    STATUS_RETRYING,
+    STATUS_UNKNOWN_REMOTE,
+    STATUS_COMPLETED,
+    STATUS_ERROR,
+]
 
 # ============================================================================
 # 步骤对应的文件扩展名（用于 clean 命令）
@@ -613,6 +625,19 @@ ENGINE_CONFIG: EngineConfig = {
     ),
     # 最大重试次数
     "max_retries": _toml_or_default("global_settings", "max_retries", 3),
+    # 远程任务 unknown/orphan 探测的独立预算，不消耗执行重试次数。
+    "remote_unknown_max_retries": _toml_or_default("global_settings", "remote_unknown_max_retries", 3),
+    # 同一工作站 Solver 连续失败后隔离，防止 Fluent/MPI 进程风暴放大。
+    "solver_workstation_max_consecutive_failures": _toml_or_default(
+        "solver",
+        "workstation_max_consecutive_failures",
+        2,
+    ),
+    "solver_workstation_quarantine_minutes": _toml_or_default(
+        "solver",
+        "workstation_quarantine_minutes",
+        30,
+    ),
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": _toml_or_default("global_settings", "state_refresh_interval", 0.5),
     # 日志轮转配置。环境变量 AUTOFLUID_LOG_MAX_BYTES / AUTOFLUID_LOG_BACKUP_COUNT 仍可覆盖。

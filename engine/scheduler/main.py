@@ -25,6 +25,7 @@ from typing import Any
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
+    STATUS_UNKNOWN_REMOTE,
     LOCAL_PATHS, WORKSTATIONS, get_step_filename, get_workstation_config, is_server_mode,
 )
 from engine.state_manager import StateManager
@@ -556,6 +557,7 @@ class PipelineScheduler:
         - PAUSED    → 检查输出文件是否存在，存在则标记完成继续，否则优先入队
         - WAITING   → 普通入队
         - ERROR/RETRYING → 检查重试次数，未达上限则重置为 WAITING 并入队，否则保留 ERROR
+        - UnknownRemote → 跳过（由远程任务轮询恢复或清理）
         """
         step_dir = LOCAL_PATHS.get("step_dir", "")
         scdoc_dir = LOCAL_PATHS.get("scdoc_dir", "")
@@ -766,8 +768,13 @@ class PipelineScheduler:
         Returns True when the step has been marked Error.
         """
         retry_count = self.state.increment_retry(config_name, step_name)
-        max_retries = int(ENGINE_CONFIG["max_retries"])
+        max_retries = int(ENGINE_CONFIG.get("remote_unknown_max_retries", 3))
+        workstation_id = self._workstation_for_config(config_name)
         if retry_count >= max_retries:
+            remote_executor = self.runner.get_remote_executor()
+            kill_remote_task = getattr(remote_executor, "_kill_remote_task_for_config", None)
+            if callable(kill_remote_task):
+                kill_remote_task(config_name, step_name, workstation_id)
             self.state.set_step_status(
                 config_name,
                 step_name,
@@ -781,8 +788,14 @@ class PipelineScheduler:
                 step_name,
             )
             return True
+        self.state.set_step_status(
+            config_name,
+            step_name,
+            STATUS_UNKNOWN_REMOTE,
+            f"远程 {step_name} 状态 unknown，等待恢复探测 ({retry_count}/{max_retries})",
+        )
         logger.warning(
-            "%s 构型%s [%s] 远程状态 unknown，保留 Running 等待后续重试 (%s/%s)",
+            "%s 构型%s [%s] 远程状态 unknown，标记 UnknownRemote 等待后续重试 (%s/%s)",
             log_prefix,
             config_name,
             step_name,
@@ -1066,7 +1079,7 @@ class PipelineScheduler:
 
         logger.info("流水线已恢复运行")
 
-    def stop(self) -> None:
+    def stop(self, *, cancel_remote_tasks: bool = True) -> None:
         """停止流水线。"""
         logger.info("收到停止指令")
         self._control.stop()
@@ -1075,10 +1088,12 @@ class PipelineScheduler:
         #   防止重启后孤立 RUNNING 步骤导致构型卡死。
         #   注意：pause() 不再调用此方法（允许 running 步骤自然完成），
         #   但 stop() 仍需调用，因为停止意味着强制终止所有活动。
-        self.state.set_all_running_to_paused()
+        if cancel_remote_tasks:
+            self.state.set_all_running_to_paused()
 
         # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
-        self.state.set_engine_status("stopped")
+        if cancel_remote_tasks:
+            self.state.set_engine_status("stopped")
 
         # 清理本地 CAD 进程（容错：任何清理步骤失败不阻断整体停止流程）
         shutdown_sw_processes = getattr(self.runner, "shutdown_sw_processes", None)
@@ -1095,9 +1110,9 @@ class PipelineScheduler:
 
         try:
             remote_executor = self.runner.get_remote_executor()
-            cancel_remote_tasks = getattr(remote_executor, "cancel_all_tracked_remote_tasks", None)
-            if callable(cancel_remote_tasks):
-                results = cancel_remote_tasks()
+            cancel_all_remote_tasks = getattr(remote_executor, "cancel_all_tracked_remote_tasks", None)
+            if cancel_remote_tasks and callable(cancel_all_remote_tasks):
+                results = cancel_all_remote_tasks()
                 if results.get("cancelled") or results.get("failed"):
                     logger.info("[Scheduler] 停止时远程任务清理结果: %s", results)
         except Exception as e:

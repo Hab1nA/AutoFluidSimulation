@@ -249,11 +249,12 @@ def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
     assert daemon._alert_watcher_process is None
 
 
-def test_shutdown_cancels_remote_tasks_when_scheduler_stop_fails() -> None:
+def test_shutdown_preserves_remote_tasks_by_default_when_scheduler_stop_fails() -> None:
     from engine.daemon import PipelineDaemon
 
     class _Scheduler:
-        def stop(self) -> None:
+        def stop(self, *, cancel_remote_tasks: bool = True) -> None:
+            assert cancel_remote_tasks is False
             raise RuntimeError("stop failed before remote cleanup")
 
     class _RemoteExecutor:
@@ -282,18 +283,20 @@ def test_shutdown_cancels_remote_tasks_when_scheduler_stop_fails() -> None:
 
     daemon.shutdown()
 
-    assert remote_executor.cancel_calls == 1
+    assert remote_executor.cancel_calls == 0
 
 
-def test_shutdown_cancels_remote_tasks_after_scheduler_stop_succeeds() -> None:
+def test_shutdown_cancels_remote_tasks_only_for_full_stop_after_scheduler_stop_succeeds() -> None:
     from engine.daemon import PipelineDaemon
 
     class _Scheduler:
         def __init__(self) -> None:
             self.stop_calls = 0
+            self.cancel_remote_tasks_args: list[bool] = []
 
-        def stop(self) -> None:
+        def stop(self, *, cancel_remote_tasks: bool = True) -> None:
             self.stop_calls += 1
+            self.cancel_remote_tasks_args.append(cancel_remote_tasks)
 
     class _RemoteExecutor:
         def __init__(self) -> None:
@@ -320,10 +323,81 @@ def test_shutdown_cancels_remote_tasks_after_scheduler_stop_succeeds() -> None:
     daemon._local_worker_process = None
     daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
 
-    daemon.shutdown()
+    daemon.shutdown(preserve_pipeline=False)
 
     assert scheduler.stop_calls == 1
+    assert scheduler.cancel_remote_tasks_args == [True]
     assert remote_executor.cancel_calls == 1
+
+
+def test_worker_restart_preserves_remote_tasks() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.disconnect_calls = 0
+
+        def disconnect_ssh(self) -> None:
+            self.disconnect_calls += 1
+
+    class _State:
+        def __init__(self) -> None:
+            self.delete_all_remote_tasks_calls = 0
+
+        def delete_all_remote_tasks(self) -> None:
+            self.delete_all_remote_tasks_calls += 1
+
+    runner = _Runner()
+    state = _State()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = runner
+    daemon.state = state
+    daemon.local_worker_registry = type(
+        "_Registry",
+        (),
+        {
+            "clear_online_workers": lambda self: None,
+            "clear_pending_tasks": lambda self: None,
+        },
+    )()
+    daemon._last_worker_ssh_checks = {"WS-A": "ok"}
+    daemon._stop_workstation_ssh_health_monitor = lambda: None
+    daemon._start_workstation_ssh_health_monitor = lambda: None
+    daemon.handle_worker_start = lambda params=None: (True, {"started": True}, "started")
+
+    ok, data, message = daemon.handle_worker_restart()
+
+    assert ok is True
+    assert message == "所有 Worker 已重启"
+    assert runner.disconnect_calls == 1
+    assert state.delete_all_remote_tasks_calls == 0
+    assert data["stop"]["remote_tasks_cleared"] is False
+
+
+def test_daemon_restores_remote_tasks_from_db_when_components_created() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.restore_calls = 0
+
+        def restore_remote_tasks_from_db(self) -> None:
+            self.restore_calls += 1
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = _Runner(remote_executor)
+
+    daemon._restore_remote_tasks_from_db()
+
+    assert remote_executor.restore_calls == 1
 
 
 def test_child_health_restarts_exited_alert_watcher(monkeypatch) -> None:
@@ -595,6 +669,26 @@ def test_check_summary_does_not_fail_when_local_worker_not_required() -> None:
     assert results["summary"] == {"passed": 2, "failed": 0, "warnings": 0}
     assert results["overall_ok"] is True
     assert results["status"] == "passed"
+
+
+def test_check_summary_treats_stale_workstation_ssh_as_warning() -> None:
+    from engine.daemon import PipelineDaemon
+
+    results = {
+        "summary": {"passed": 1, "failed": 0, "warnings": 0},
+        "health": {
+            "local_worker_online": False,
+            "local_worker_required": False,
+            "server_to_local_ssh": "unknown",
+            "workstation_ssh_details": {"WS-A": "stale"},
+        },
+    }
+
+    PipelineDaemon._refresh_check_summary_from_health(results)
+
+    assert results["summary"] == {"passed": 1, "failed": 0, "warnings": 1}
+    assert results["overall_ok"] is True
+    assert results["status"] == "warning"
 
 
 def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch, tmp_path) -> None:

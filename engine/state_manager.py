@@ -19,7 +19,8 @@ from contextlib import contextmanager
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_UNKNOWN_REMOTE,
+    STATUS_COMPLETED, STATUS_ERROR,
     ALL_STATUSES, IPC_CONFIG,
     DEFAULT_WORKSTATION_ID,
 )
@@ -873,6 +874,51 @@ class StateManager:
                 )
         logger.info(f"引擎状态变更: -> {status}")
 
+    def set_solver_quarantine(
+        self,
+        quarantine: dict[str, dict[str, int | float]],
+    ) -> None:
+        """持久化 Solver 工作站隔离状态。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                if quarantine:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                        ("solver_quarantine", json.dumps(quarantine, ensure_ascii=False)),
+                    )
+                else:
+                    conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_quarantine",))
+
+    def get_solver_quarantine(self) -> dict[str, dict[str, int | float]]:
+        """读取 Solver 工作站隔离状态；不存在或损坏时返回空字典。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM engine_state WHERE key = ?",
+                ("solver_quarantine",),
+            ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning("[State] solver_quarantine JSON 损坏，已忽略")
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        restored: dict[str, dict[str, int | float]] = {}
+        for workstation_id, data in value.items():
+            if not isinstance(workstation_id, str) or not isinstance(data, dict):
+                continue
+            failure_count = data.get("failure_count")
+            until = data.get("until")
+            if not isinstance(failure_count, int | float) or not isinstance(until, int | float):
+                continue
+            restored[workstation_id] = {
+                "failure_count": int(failure_count),
+                "until": float(until),
+            }
+        return restored
+
     def set_solver_progress(self, progress: dict[str, object]) -> None:
         """存储当前 Solver 剩余时间进度。"""
         payload = json.dumps(progress, ensure_ascii=False)
@@ -1042,15 +1088,15 @@ class StateManager:
         return None
 
     def set_all_running_to_paused(self):
-        """将所有 Running 和 Retrying 状态的步骤批量切换为 Paused。"""
+        """将所有 Running、Retrying 和 UnknownRemote 状态的步骤批量切换为 Paused。"""
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute(
                     "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                    "WHERE status IN (?, ?)",
-                    (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING)
+                    "WHERE status IN (?, ?, ?)",
+                    (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING, STATUS_UNKNOWN_REMOTE)
                 )
-        logger.info("已将所有运行中/重试中步骤切换为 Paused")
+        logger.info("已将所有运行中/重试中/远程未知步骤切换为 Paused")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""

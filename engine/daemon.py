@@ -206,12 +206,16 @@ class PipelineDaemon:
         self._ssh_health_thread: threading.Thread | None = None
         self._ssh_health_stop_event = threading.Event()
         self._ssh_health_interval_seconds = get_workstation_ssh_health_interval()
+        self._ssh_health_active_probe_interval_seconds = 300.0
+        self._last_worker_ssh_active_probe_time = time.time()
+        self._last_worker_ssh_check_sources: dict[str, str] = {}
         self._config_warnings: list[str] = []
 
         # 运行标志
         self._running = False
         self._stop_event = threading.Event()  # 主循环阻塞用，set() 唤醒
         self._pipeline_ever_started = False  # 一旦流水线启动过即置 True，锁定配置
+        self._preserve_pipeline_on_shutdown = True
 
         logger.info("PipelineDaemon 基础环境就绪")
 
@@ -302,12 +306,14 @@ class PipelineDaemon:
 
             self.runner = TaskRunner(self.state, local_worker_adapter=self.local_worker_adapter)
             self.scheduler = PipelineScheduler(self.state, self.runner)
+            self._restore_remote_tasks_from_db()
 
             # ---- 2.5 启动时状态一致性检查 ----
             # 新进程没有调度器线程，残留的 paused/running 状态一定是不一致的
             # （stop() 挂起或进程被杀导致 set_engine_status("stopped") 未执行）
             stale_status = self.state.get_engine_status()
-            if stale_status in ("paused", "running"):
+            remote_tasks = self.state.get_all_remote_tasks()
+            if stale_status in ("paused", "running") and not remote_tasks:
                 logger.warning(
                     f"检测到残留引擎状态 '{stale_status}'（可能是上次退出时 stop() 未完成），"
                     f"重置为 stopped"
@@ -349,11 +355,13 @@ class PipelineDaemon:
         finally:
             self.shutdown()
 
-    def shutdown(self):
+    def shutdown(self, *, preserve_pipeline: bool | None = None):
         """优雅关闭守护进程。
 
         每个清理步骤独立 try-except，确保任何一步失败都不阻断后续清理。
         """
+        if preserve_pipeline is None:
+            preserve_pipeline = bool(getattr(self, "_preserve_pipeline_on_shutdown", True))
         logger.info("PipelineDaemon 正在关闭...")
         self._running = False
         self._stop_event.set()
@@ -362,10 +370,11 @@ class PipelineDaemon:
         # 停止调度器（内部已包含 disconnect_ssh）
         if self.scheduler:
             try:
-                self.scheduler.stop()
+                self.scheduler.stop(cancel_remote_tasks=not preserve_pipeline)
             except Exception as e:
                 logger.warning(f"调度器停止异常: {e}")
-            self._cancel_tracked_remote_tasks_on_shutdown()
+            if not preserve_pipeline:
+                self._cancel_tracked_remote_tasks_on_shutdown()
 
         # 调度器不存在时才需要单独断开 SSH
         elif self.runner:
@@ -406,6 +415,19 @@ class PipelineDaemon:
             logger.warning(f"进程锁释放异常: {e}")
 
         logger.info("PipelineDaemon 已关闭")
+
+    def _restore_remote_tasks_from_db(self) -> None:
+        """Rebuild in-memory remote-task tracking after daemon restart."""
+        runner = getattr(self, "runner", None)
+        if runner is None:
+            return
+        get_remote_executor = getattr(runner, "get_remote_executor", None)
+        if not callable(get_remote_executor):
+            return
+        remote_executor = get_remote_executor()
+        restore_remote_tasks = getattr(remote_executor, "restore_remote_tasks_from_db", None)
+        if callable(restore_remote_tasks):
+            restore_remote_tasks()
 
     def _cancel_tracked_remote_tasks_on_shutdown(self) -> None:
         """Best-effort remote task cleanup if scheduler.stop() exits early."""
@@ -860,6 +882,7 @@ class PipelineDaemon:
     def handle_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """处理 full_quit 命令。"""
         logger.info("收到 full_quit 命令，准备完全退出...")
+        self._preserve_pipeline_on_shutdown = False
         # 统一退出路径：仅设置 _stop_event，由 run() 的 finally 块执行 shutdown()
         self._stop_event.set()
         return True, None, "后台引擎正在安全退出..."
@@ -902,6 +925,9 @@ class PipelineDaemon:
         self._last_worker_ssh_checks = ssh_checks
         now = time.time()
         self._last_worker_ssh_check_times = {workstation_id: now for workstation_id in ssh_checks}
+        self._last_worker_ssh_check_sources = {
+            workstation_id: "system_check" for workstation_id in ssh_checks
+        }
 
     @staticmethod
     def _refresh_check_summary_from_health(results: dict[str, Any]) -> None:
@@ -929,6 +955,8 @@ class PipelineDaemon:
             for status in details.values():
                 if status == "ok":
                     passed += 1
+                elif status == "stale":
+                    warnings += 1
                 elif status == "disconnected" or str(status).startswith("error:"):
                     failed += 1
         config_warnings = health.get("config_warnings")
@@ -1230,7 +1258,7 @@ class PipelineDaemon:
                     logger.warning("[Worker] 刷新工作站槽位异常: %s", e)
                     return False, None, f"刷新工作站槽位失败: {e}"
 
-        results.update(self._refresh_workstation_ssh_checks())
+        results.update(self._refresh_workstation_ssh_checks(source="worker_start"))
         results["registry_ready"] = False
 
         ssh_checks = results["ssh_checks"]
@@ -1261,7 +1289,12 @@ class PipelineDaemon:
             return True, results, f"部分工作站 SSH 连通检查失败: {failed_ssh_checks}"
         return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
 
-    def _refresh_workstation_ssh_checks(self, *, connect: bool = True) -> dict[str, Any]:
+    def _refresh_workstation_ssh_checks(
+        self,
+        *,
+        connect: bool = True,
+        source: str = "active_probe",
+    ) -> dict[str, Any]:
         """Refresh workstation SSH readiness using the current runner.
 
         Args:
@@ -1275,6 +1308,9 @@ class PipelineDaemon:
             return results
 
         previous_checks = dict(getattr(self, "_last_worker_ssh_checks", {}))
+        previous_sources = getattr(self, "_last_worker_ssh_check_sources", {})
+        if not isinstance(previous_sources, dict):
+            previous_sources = {}
         ssh_pool = getattr(self.runner, "_ssh_pool", {})
         if not isinstance(ssh_pool, dict):
             ssh_pool = {}
@@ -1330,6 +1366,9 @@ class PipelineDaemon:
             self._last_worker_ssh_check_times = {
                 ws_id: now for ws_id in results["ssh_checks"]
             }
+            self._last_worker_ssh_check_sources = {
+                ws_id: source for ws_id in results["ssh_checks"]
+            }
         else:
             # Passive background checks intentionally do not prove fresh
             # connectivity. Preserve the last active-check timestamp so a
@@ -1338,6 +1377,7 @@ class PipelineDaemon:
             self._last_worker_ssh_check_times = (
                 dict(previous_times) if isinstance(previous_times, dict) else {}
             )
+            self._last_worker_ssh_check_sources = dict(previous_sources)
         return results
 
     def _start_workstation_ssh_health_monitor(self) -> None:
@@ -1371,6 +1411,17 @@ class PipelineDaemon:
         if self.runner is None:
             return {"ssh_checks": {}, "ssh_targets": {}}
         try:
+            now = time.time()
+            interval = float(
+                getattr(self, "_ssh_health_active_probe_interval_seconds", 300.0)
+            )
+            last_active = float(getattr(self, "_last_worker_ssh_active_probe_time", now))
+            if interval > 0 and now - last_active >= interval:
+                self._last_worker_ssh_active_probe_time = now
+                return self._refresh_workstation_ssh_checks(
+                    connect=True,
+                    source="active_probe",
+                )
             return self._refresh_workstation_ssh_checks(connect=False)
         except Exception as exc:
             logger.warning("[ServerMode] 后台工作站 SSH 健康检查失败: %s", exc)
@@ -1388,6 +1439,7 @@ class PipelineDaemon:
     def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """停止所有 worker：断开工作站 SSH 连接，清理 Registry 任务队列。"""
         params = params or {}
+        preserve_remote_tasks = bool(params.get("preserve_remote_tasks", False))
         results: dict[str, Any] = {
             "ssh_disconnected": [],
             "registry_cleared": False,
@@ -1409,7 +1461,7 @@ class PipelineDaemon:
         results["registry_cleared"] = True
         state = getattr(self, "state", None)
         delete_all_remote_tasks = getattr(state, "delete_all_remote_tasks", None)
-        if callable(delete_all_remote_tasks):
+        if not preserve_remote_tasks and callable(delete_all_remote_tasks):
             delete_all_remote_tasks()
             results["remote_tasks_cleared"] = True
         self._last_worker_ssh_checks = {}
@@ -1425,7 +1477,9 @@ class PipelineDaemon:
 
     def handle_worker_restart(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """重启所有 worker：先停止再启动。"""
-        ok_stop, data_stop, msg_stop = self.handle_worker_stop(params)
+        stop_params = dict(params or {})
+        stop_params["preserve_remote_tasks"] = True
+        ok_stop, data_stop, msg_stop = self.handle_worker_stop(stop_params)
         if not ok_stop:
             return False, data_stop, f"Worker 重启失败（停止阶段）: {msg_stop}"
         ok_start, data_start, msg_start = self.handle_worker_start(params)
@@ -1463,6 +1517,16 @@ class PipelineDaemon:
             return {}
         return {str(key): bool(value) for key, value in snapshot_data.items()}
 
+    def _solver_quarantine_snapshot(self) -> dict[str, Any]:
+        """Return current solver workstation quarantine data for dashboard consumers."""
+        scheduler = getattr(self, "scheduler", None)
+        barrier_coordinator = getattr(scheduler, "barrier_coordinator", None)
+        snapshot = getattr(barrier_coordinator, "solver_quarantine_snapshot", None)
+        if not callable(snapshot):
+            return {}
+        snapshot_data = snapshot()
+        return dict(snapshot_data) if isinstance(snapshot_data, Mapping) else {}
+
     def handle_get_engine_status(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """获取引擎状态。"""
         started_at = getattr(self, "_started_at_epoch", None)
@@ -1480,6 +1544,7 @@ class PipelineDaemon:
                 "sw_macro_started": False,
                 "barrier_passed": False,
                 "workstation_barriers": {},
+                "solver_quarantine": {},
                 "pipeline_started": self._pipeline_ever_started,
                 "daemon_started_at": started_at,
                 "daemon_started_at_display": started_at_display,
@@ -1500,6 +1565,7 @@ class PipelineDaemon:
             "sw_macro_started": self.state.is_sw_macro_started(),
             "barrier_passed": self.state.is_global_barrier_met(),
             "workstation_barriers": self._workstation_barrier_snapshot(),
+            "solver_quarantine": self._solver_quarantine_snapshot(),
             "pipeline_started": self._pipeline_ever_started,
             "daemon_started_at": started_at,
             "daemon_started_at_display": started_at_display,
@@ -1542,8 +1608,13 @@ class PipelineDaemon:
         last_check_times = getattr(self, "_last_worker_ssh_check_times", {})
         if not isinstance(last_check_times, dict):
             last_check_times = {}
+        last_check_sources = getattr(self, "_last_worker_ssh_check_sources", {})
+        if not isinstance(last_check_sources, dict):
+            last_check_sources = {}
         stale_after = max(120.0, float(getattr(self, "_ssh_health_interval_seconds", 30.0)) * 3)
         now = time.time()
+        workstation_checked_at: dict[str, float] = {}
+        workstation_sources: dict[str, str] = {}
         workstation_configs: list[Mapping[str, Any]] = list(WORKSTATIONS) or [{"id": "default"}]
         for workstation in workstation_configs:
             workstation_id = str(workstation.get("id", "default"))
@@ -1552,6 +1623,11 @@ class PipelineDaemon:
             # instead of trusting cached Paramiko transport state.
             status = str(last_worker_checks.get(workstation_id, "unknown"))
             checked_at = last_check_times.get(workstation_id)
+            if isinstance(checked_at, int | float):
+                workstation_checked_at[workstation_id] = float(checked_at)
+            source = last_check_sources.get(workstation_id)
+            if isinstance(source, str) and source:
+                workstation_sources[workstation_id] = source
             if status == "ok" and isinstance(checked_at, int | float):
                 if now - float(checked_at) > stale_after:
                     status = "stale"
@@ -1559,14 +1635,14 @@ class PipelineDaemon:
         detail_values = set(workstation_details.values())
         if any(value == "ok" for value in detail_values):
             server_to_workstation_ssh = "ok"
-        elif any(value == "unknown" for value in detail_values):
-            server_to_workstation_ssh = "unknown"
         elif any(value == "stale" for value in detail_values):
+            server_to_workstation_ssh = "stale"
+        elif any(value == "unknown" for value in detail_values):
             server_to_workstation_ssh = "unknown"
         else:
             server_to_workstation_ssh = "disconnected"
 
-        return {
+        health = {
             "local_worker_online": bool(online_workers),
             "local_worker_required": self._server_mode_requires_worker(),
             "server_to_local_ssh": server_to_local_ssh,
@@ -1575,6 +1651,11 @@ class PipelineDaemon:
             "workstation_ssh_targets": workstation_targets,
             "config_warnings": list(getattr(self, "_config_warnings", [])),
         }
+        if workstation_checked_at:
+            health["workstation_ssh_checked_at"] = workstation_checked_at
+        if workstation_sources:
+            health["workstation_ssh_source"] = workstation_sources
+        return health
 
     @staticmethod
     def _workstation_ssh_target(workstation: Mapping[str, Any]) -> dict[str, Any]:
