@@ -177,6 +177,7 @@ class EngineConfig(TypedDict):
     meshing_timeout: int
     meshing_processor_count: int
     solver_timeout: int
+    solver_startup_timeout: int
     solver_processor_count: int
     solver_iteration_count: int
     postprocess_timeout: int
@@ -591,6 +592,8 @@ ENGINE_CONFIG: EngineConfig = {
     "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）
     "solver_timeout": _toml_or_default("solver", "solver_timeout", 28800),
+    # Fluent Solver 启动无进度容忍窗口（秒）。慢工作站首次加载 Fluent/MPI 可能超过 5 分钟。
+    "solver_startup_timeout": _toml_or_default("solver", "solver_startup_timeout", 900),
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
     "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。

@@ -115,6 +115,7 @@ print(json.dumps({
     "engine_config": {
         "meshing_timeout": cfg.ENGINE_CONFIG["meshing_timeout"],
         "solver_timeout": cfg.ENGINE_CONFIG["solver_timeout"],
+        "solver_startup_timeout": cfg.ENGINE_CONFIG["solver_startup_timeout"],
         "postprocess_timeout": cfg.ENGINE_CONFIG["postprocess_timeout"],
     },
 }, ensure_ascii=False))
@@ -141,6 +142,7 @@ print(json.dumps({
         assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
         assert snapshot["engine_config"]["meshing_timeout"] == 7200
         assert snapshot["engine_config"]["solver_timeout"] == 28800
+        assert snapshot["engine_config"]["solver_startup_timeout"] == 900
         assert snapshot["engine_config"]["postprocess_timeout"] == 14400
 
 
@@ -1277,8 +1279,8 @@ class TestConfigDictCompleteness:
     _ENGINE_REQUIRED_KEYS = {
         "watchdog_interval", "sw_macro_timeout", "max_retries",
         "sc_timeout", "transfer_timeout", "meshing_timeout",
-        "meshing_processor_count", "solver_timeout", "solver_processor_count",
-        "solver_iteration_count", "log_max_bytes", "log_backup_count",
+        "meshing_processor_count", "solver_timeout", "solver_startup_timeout",
+        "solver_processor_count", "solver_iteration_count", "log_max_bytes", "log_backup_count",
     }
 
     def test_remote_config_keys(self):
