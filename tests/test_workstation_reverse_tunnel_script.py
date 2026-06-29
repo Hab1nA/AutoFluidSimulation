@@ -170,7 +170,7 @@ $ErrorActionPreference = "Stop"
 $source = Get-Content -LiteralPath "{script_path}" -Raw
 $match = [regex]::Match(
     $source,
-    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
+    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward.*?\r?\n\}}\r?\n\r?\nfunction Wait-RemoteTunnelEndpoint.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
 )
 if (-not $match.Success) {{
     throw "Could not extract Test-RemoteTunnelEndpoint"
@@ -237,7 +237,7 @@ $ErrorActionPreference = "Stop"
 $source = Get-Content -LiteralPath "{script_path}" -Raw
 $match = [regex]::Match(
     $source,
-    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
+    '(?s)function Test-RemoteTunnelEndpoint \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward.*?\r?\n\}}\r?\n\r?\nfunction Wait-RemoteTunnelEndpoint.*?\r?\n\}}\r?\n\r?\nfunction Get-OwnedTunnelProcesses'
 )
 if (-not $match.Success) {{
     throw "Could not extract probe functions"

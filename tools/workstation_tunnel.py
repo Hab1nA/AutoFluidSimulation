@@ -660,6 +660,12 @@ def _render_cmd_supervisor(spec: WorkstationTunnelSpec, install_dir: str) -> str
     log_dir = install_dir.rstrip("/").replace("/", "\\") + "\\logs"
     forward_spec = f"{spec.remote_bind_host}:{spec.remote_bind_port}:127.0.0.1:22"
     identity = spec.tunnel_identity_file.replace("/", "\\")
+    remote_probe = (
+        "python3 -c 'import socket,sys; s=socket.socket(); s.settimeout(3); "
+        f"s.connect((bytes([49,50,55,46,48,46,48,46,49]).decode(),{spec.remote_bind_port})); "
+        "data=s.recv(4); s.close(); sys.exit(0 if data==bytes([83,83,72,45]) else 1)'"
+    )
+    stale_cleanup = f"bash -lc 'fuser -k {spec.remote_bind_port}/tcp >/dev/null 2>&1 || true'"
     return f"""@echo off
 setlocal EnableExtensions
 title AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}
@@ -677,15 +683,55 @@ if not exist "%SSH_EXE%" (
   timeout /t 30 /nobreak >nul
   goto loop
 )
+call :clear_remote_forward
 echo [%date% %time%] starting ssh reverse tunnel %FORWARD_SPEC% via %TUNNEL_TARGET%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
 if defined IDENTITY (
-  "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
+  start "AutoFluidTunnelSsh-{spec.id}-{spec.remote_bind_port}" /B "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
 ) else (
-  "%SSH_EXE%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
+  start "AutoFluidTunnelSsh-{spec.id}-{spec.remote_bind_port}" /B "%SSH_EXE%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
 )
-echo [%date% %time%] ssh exited with %ERRORLEVEL%; restarting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
 timeout /t 5 /nobreak >nul
-goto loop
+:probe
+call :has_ssh
+if errorlevel 1 (
+  echo [%date% %time%] ssh process exited; restarting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+  timeout /t 5 /nobreak >nul
+  goto loop
+)
+call :probe_remote
+if errorlevel 1 (
+  echo [%date% %time%] remote tunnel probe failed; restarting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+  call :kill_ssh
+  call :clear_remote_forward
+  timeout /t 5 /nobreak >nul
+  goto loop
+)
+timeout /t 5 /nobreak >nul
+goto probe
+
+:probe_remote
+if defined IDENTITY (
+  "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "%TUNNEL_TARGET%" "{remote_probe}" >nul 2>nul
+) else (
+  "%SSH_EXE%" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "%TUNNEL_TARGET%" "{remote_probe}" >nul 2>nul
+)
+exit /b %ERRORLEVEL%
+
+:clear_remote_forward
+if defined IDENTITY (
+  "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "%TUNNEL_TARGET%" "{stale_cleanup}" >nul 2>nul
+) else (
+  "%SSH_EXE%" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "%TUNNEL_TARGET%" "{stale_cleanup}" >nul 2>nul
+)
+exit /b 0
+
+:has_ssh
+wmic process where "name='ssh.exe' and CommandLine like '%%{forward_spec}%%'" get ProcessId /value | findstr /R "^ProcessId=" >nul
+exit /b %ERRORLEVEL%
+
+:kill_ssh
+wmic process where "name='ssh.exe' and CommandLine like '%%{forward_spec}%%'" call terminate >nul 2>nul
+exit /b 0
 """
 
 
@@ -734,7 +780,8 @@ def _status_cmd_lifecycle_fallback(
         "install_dir": install_dir,
         "cmd_supervisor_exists": False,
         "registry_run_exists": False,
-        "remote_tunnel_ok": _probe_remote_tunnel_endpoint(spec),
+        "ssh_processes": 0,
+        "remote_tunnel_ok": False,
         "installed": False,
     }
 

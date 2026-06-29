@@ -152,6 +152,25 @@ function Test-RemoteTunnelEndpoint {
     }
 }
 
+function Clear-StaleRemoteForward {
+    param(
+        [string]$SshExe
+    )
+    $remoteCommand = "bash -lc 'fuser -k ${RemoteBindPort}/tcp >/dev/null 2>&1 || true'"
+    $identityArgs = @()
+    if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
+        $identityArgs = @("-i", $TunnelIdentityFile)
+    }
+    try {
+        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 1>$null 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        Write-OwnedTunnelLog -Message "Failed to clear stale remote forward on ${RemoteBindPort}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Wait-RemoteTunnelEndpoint {
     param(
         [string]$SshExe,
@@ -278,11 +297,13 @@ function Start-OwnedTunnelMonitor {
                 foreach ($process in $ownedSshProcesses) {
                     Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
                 }
+                Clear-StaleRemoteForward -SshExe $sshExe | Out-Null
                 $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
                 Start-Sleep -Seconds $delay
                 continue
             }
 
+            Clear-StaleRemoteForward -SshExe $sshExe | Out-Null
             $argumentList = Get-ReverseTunnelArguments
             Write-RateLimitedOwnedTunnelLog `
                 -Message "Starting ssh reverse tunnel: $sshExe $($argumentList -join ' ')" `
