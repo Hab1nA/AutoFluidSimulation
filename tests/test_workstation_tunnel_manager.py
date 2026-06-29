@@ -66,6 +66,18 @@ class SchTasksDeniedRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkstation)
         return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
 
 
+class CredentialedSchTasksRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if " -Install " in command:
+            return "", "拒绝访问。", 1
+        if command == "cmd.exe /d /c whoami":
+            return "DESKTOP-TD0FQ8U\\ps\r\n", "", 0
+        if "schtasks.exe /Create" in command and " /RU " not in command:
+            return "", "拒绝访问。", 1
+        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
 class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
@@ -78,6 +90,34 @@ class RegistryRunStatusRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
         return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+
+
+class PowerShellStatusDeniedCmdInstalledRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if " -Status " in command:
+            return "", "拒绝访问。", 1
+        if "script_exists" in command:
+            return (
+                "script_exists=1\r\n"
+                "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n"
+                "    AutoFluidWorkstationTunnel-WS-A-2222    REG_SZ    C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel\\AutoFluidWorkstationTunnel-WS-A-2222.cmd\r\n",
+                "",
+                0,
+            )
+        return "{}", "", 0
+
+
+class UserDirCmdInstalledRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        if " -Status " in command:
+            return "", "拒绝访问。", 1
+        if "script_exists" in command and "C:\\ProgramData\\AutoFluid\\tunnel" in command:
+            return "script_exists=0\r\n", "错误: 系统找不到指定的注册表项或值。\r\n", 0
+        if "script_exists" in command and "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in command:
+            return "script_exists=1\r\n", "", 0
+        return "{}", "", 0
 
 
 class BothDirsDeniedRemoteWorkstation(FakeRemoteWorkstation):
@@ -238,7 +278,44 @@ def test_repair_uses_registry_run_when_schtasks_lifecycle_fallback_is_denied(tmp
     all_commands = "\n".join(FakeRemoteWorkstation.instances[0].commands)
     assert "schtasks.exe /Create" in all_commands
     assert "reg.exe add" in all_commands
-    assert 'start "" powershell.exe' in all_commands
+    assert "AutoFluidWorkstationTunnel-WS-A-2222.cmd" in all_commands
+    assert 'start "AutoFluidWorkstationTunnel-WS-A-2222"' in all_commands
+    assert any(
+        remote_path.endswith("AutoFluidWorkstationTunnel-WS-A-2222.cmd")
+        for _, remote_path in FakeRemoteWorkstation.instances[0].uploads
+    )
+
+
+def test_repair_uses_credentialed_scheduled_cmd_fallback(tmp_path: Path) -> None:
+    script = tmp_path / "start_workstation_owned_reverse_tunnel.ps1"
+    script.write_text("script", encoding="utf-8")
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.repair_workstation_tunnel(
+        spec,
+        script_path=script,
+        ssh_factory=CredentialedSchTasksRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert result["lifecycle_fallback"] is True
+    all_commands = "\n".join(FakeRemoteWorkstation.instances[0].commands)
+    assert "cmd.exe /d /c whoami" in all_commands
+    assert "/RU \"DESKTOP-TD0FQ8U\\ps\"" in all_commands
+    assert "/RP \"secret\"" in all_commands
+    assert "AutoFluidWorkstationTunnel-WS-A-2222.cmd" in all_commands
 
 
 def test_monitor_command_quotes_script_paths_with_spaces() -> None:
@@ -264,6 +341,125 @@ def test_monitor_command_quotes_script_paths_with_spaces() -> None:
 
     assert '-File "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel\\start workstation tunnel.ps1"' in command
     assert "-TunnelIdentityFile C:\\Users\\ps\\.ssh\\autofluid_tunnel_ed25519" in command
+
+
+def test_cmd_supervisor_prefers_colocated_ssh_client() -> None:
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+        tunnel_identity_file="C:/Users/ps/.ssh/autofluid_tunnel_ed25519",
+    )
+
+    script = workstation_tunnel._render_cmd_supervisor(  # noqa: SLF001
+        spec,
+        "C:/Users/ps/AppData/Local/AutoFluid/tunnel",
+    )
+
+    assert 'set "SSH_EXE=%~dp0ssh.exe"' in script
+    assert 'set "SSH_EXE=C:\\Windows\\System32\\OpenSSH\\ssh.exe"' in script
+    assert '-R "%FORWARD_SPEC%" "%TUNNEL_TARGET%"' in script
+
+
+def test_cmd_supervisor_ssh_source_env_forces_upload(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "ssh.exe"
+    source.write_bytes(b"MZ" + (b"\0" * 100_001))
+    FakeRemoteWorkstation.instances.clear()
+    remote = FakeRemoteWorkstation(
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+    )
+    monkeypatch.setenv("AUTOFLUID_WORKSTATION_TUNNEL_SSH_EXE_SOURCE", str(source))
+
+    ok = workstation_tunnel._ensure_cmd_supervisor_ssh_client(  # noqa: SLF001
+        remote,
+        "C:/Users/ps/AppData/Local/AutoFluid/tunnel",
+    )
+
+    assert ok is True
+    assert remote.uploads == [
+        (
+            str(source),
+            "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel\\ssh.exe",
+        )
+    ]
+    assert remote.commands == []
+
+
+def test_status_uses_cmd_fallback_when_powershell_status_is_denied(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    payload = result["status_payload"]
+    assert payload["cmd_supervisor_exists"] is True
+    assert payload["registry_run_exists"] is True
+    assert payload["remote_tunnel_ok"] is True
+    all_commands = "\n".join(FakeRemoteWorkstation.instances[0].commands)
+    assert "-Status" in all_commands
+    assert "script_exists=1" in all_commands
+
+
+def test_status_checks_user_dir_when_programdata_cmd_is_missing(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=UserDirCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert result["install_dir"] == "C:/Users/ps/AppData/Local/AutoFluid/tunnel"
+    all_commands = "\n".join(FakeRemoteWorkstation.instances[0].commands)
+    assert "C:\\ProgramData\\AutoFluid\\tunnel" in all_commands
+    assert "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in all_commands
 
 
 def test_repair_generates_and_authorizes_workstation_tunnel_key(tmp_path: Path, monkeypatch) -> None:
@@ -345,6 +541,9 @@ def test_uninstall_deauthorizes_and_deletes_workstation_tunnel_key(monkeypatch) 
     all_commands = "\n".join(remote.commands)
     assert "schtasks.exe /Delete" in all_commands
     assert "reg.exe delete" in all_commands
+    assert "taskkill /F" in all_commands
+    assert "WINDOWTITLE eq AutoFluidWorkstationTunnel-WS-B-2224" in all_commands
+    assert "CommandLine like '%%127.0.0.1:2224:127.0.0.1:22%%'" in all_commands
     assert "autofluid_tunnel_ed25519.pub" in all_commands
     assert "del /q" in all_commands
     assert auth_calls[0][0][:4] == ["ssh", "-o", "StrictHostKeyChecking=accept-new", "root@39.98.196.94"]

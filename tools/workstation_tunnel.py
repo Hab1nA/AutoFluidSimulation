@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import shlex
 import subprocess
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -413,6 +415,14 @@ def status_workstation_tunnel(
             if failed_attempts:
                 result["failed_attempts"] = failed_attempts
             return result
+        cmd_status = _status_cmd_lifecycle_fallback(ssh, spec, install_dir)
+        if cmd_status["installed"] or cmd_status["remote_tunnel_ok"]:
+            ok = bool(cmd_status["installed"]) and bool(cmd_status["remote_tunnel_ok"])
+            result = _result(spec, ok, "ok" if ok else "not_ready", "")
+            result["install_dir"] = cmd_status["install_dir"]
+            result["status_payload"] = cmd_status
+            result["failed_attempts"] = failed_attempts
+            return result
         result = _result(spec, False, "status_failed", failed_attempts[-1]["detail"] if failed_attempts else "")
         result["install_dir"] = install_dir
         result["failed_attempts"] = failed_attempts
@@ -451,7 +461,7 @@ def uninstall_workstation_tunnel(
         result = _result(spec, ok, "ok" if ok else "uninstall_failed", detail or str(attempts[-1]["detail"]))
         result["install_dir"] = install_dir
         result["attempts"] = attempts
-        result["lifecycle_cleanup"] = _cleanup_cmd_lifecycle_fallback(ssh, spec)
+        result["lifecycle_cleanup"] = _cleanup_cmd_lifecycle_fallback(ssh, spec, install_dir=install_dir)
         result["key_cleanup"] = _cleanup_workstation_tunnel_key(ssh, spec)
         return result
     finally:
@@ -501,27 +511,239 @@ def _install_cmd_lifecycle_fallback(
     out, err, code = ssh.exec_command(scheduled_cmd, timeout=60)
     if code == 0:
         return out, err, code
+    cmd_path = _cmd_supervisor_remote_path(install_dir, spec)
+    _cleanup_cmd_lifecycle_fallback(ssh, spec, install_dir=install_dir)
+    if not _ensure_cmd_supervisor_ssh_client(ssh, install_dir):
+        return "", "failed to provision ssh.exe for cmd supervisor", 1
+    if not _upload_cmd_supervisor(ssh, cmd_path, spec, install_dir):
+        return "", "failed to upload cmd supervisor", 1
+    credentialed_out, credentialed_err, credentialed_code = _install_credentialed_scheduled_cmd_supervisor(
+        ssh,
+        cmd_path,
+        spec,
+    )
+    if credentialed_code == 0:
+        return credentialed_out, credentialed_err, credentialed_code
     run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
     run_cmd = (
         "cmd.exe /d /c "
         f"reg.exe add {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} "
-        f"/t REG_SZ /d {_quote_cmd_value(monitor_command)} /f "
-        f"&& start \"\" {monitor_command}"
+        f"/t REG_SZ /d {_quote_cmd_value(cmd_path.replace('/', '\\'))} /f "
+        f"&& start {_quote_cmd_value(task_name)} {_quote_cmd_value(cmd_path.replace('/', '\\'))}"
     )
     return ssh.exec_command(run_cmd, timeout=60)
 
 
-def _cleanup_cmd_lifecycle_fallback(ssh: WorkstationSsh, spec: WorkstationTunnelSpec) -> dict[str, Any]:
+def _cleanup_cmd_lifecycle_fallback(
+    ssh: WorkstationSsh,
+    spec: WorkstationTunnelSpec,
+    *,
+    install_dir: str = DEFAULT_INSTALL_DIR,
+) -> dict[str, Any]:
     task_name = f"AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}"
     run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    cmd_names = [
+        _cmd_supervisor_remote_path(path, spec).replace("/", "\\")
+        for path in _candidate_install_dirs(install_dir, spec.username)
+    ]
+    forward_spec = f"{spec.remote_bind_host}:{spec.remote_bind_port}:127.0.0.1:22"
+    cmd_cleanup = " & ".join(
+        [
+            f'taskkill /F /FI "IMAGENAME eq cmd.exe" /FI "WINDOWTITLE eq {task_name}" 2>nul',
+            f'wmic process where "name=\'ssh.exe\' and CommandLine like \'%%{forward_spec}%%\'" call terminate 2>nul',
+            *[f"if exist {_quote_cmd_value(path)} del /q {_quote_cmd_value(path)}" for path in cmd_names],
+        ]
+    )
+    verify_cmd = (
+        f'tasklist /FI "IMAGENAME eq cmd.exe" /FI "WINDOWTITLE eq {task_name}" | findstr /I "cmd.exe" >nul '
+        f'&& exit /b 1 || wmic process where "name=\'ssh.exe\' and CommandLine like \'%%{forward_spec}%%\'" '
+        'get ProcessId /value | findstr /R "^ProcessId=" >nul && exit /b 1 || exit /b 0'
+    )
     cleanup_cmd = (
         "cmd.exe /d /c "
         f"schtasks.exe /Delete /TN {_quote_cmd_value(task_name)} /F 2>nul "
         f"& reg.exe delete {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} /f 2>nul "
-        "& exit /b 0"
+        f"& {cmd_cleanup} "
+        f"& {verify_cmd}"
     )
     out, err, code = ssh.exec_command(cleanup_cmd, timeout=30)
     return {"ok": code == 0, "detail": err or out}
+
+
+def _cmd_supervisor_remote_path(install_dir: str, spec: WorkstationTunnelSpec) -> str:
+    return f"{install_dir.rstrip('/')}/AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}.cmd"
+
+
+def _ensure_cmd_supervisor_ssh_client(ssh: WorkstationSsh, install_dir: str) -> bool:
+    remote_ssh = f"{install_dir.rstrip('/')}/ssh.exe".replace("/", "\\")
+    local_ssh = os.environ.get("AUTOFLUID_WORKSTATION_TUNNEL_SSH_EXE_SOURCE", "").strip()
+    if local_ssh:
+        return _is_plausible_windows_executable(Path(local_ssh)) and ssh.upload_file(local_ssh, remote_ssh)
+    check_cmd = (
+        "cmd.exe /d /c "
+        "if exist C:\\Windows\\System32\\OpenSSH\\ssh.exe (exit /b 0) "
+        f"else if exist {_quote_cmd_value(remote_ssh)} (exit /b 0) "
+        "else (exit /b 1)"
+    )
+    _, _, code = ssh.exec_command(check_cmd, timeout=30)
+    if code == 0:
+        return True
+    discovered_ssh = shutil.which("ssh.exe") or shutil.which("ssh")
+    if not discovered_ssh:
+        candidate = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh.exe"
+        if candidate.exists():
+            discovered_ssh = str(candidate)
+    if not discovered_ssh:
+        return False
+    return ssh.upload_file(discovered_ssh, remote_ssh)
+
+
+def _is_plausible_windows_executable(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(2)
+        return header == b"MZ" and path.stat().st_size > 100_000
+    except OSError:
+        return False
+
+
+def _install_credentialed_scheduled_cmd_supervisor(
+    ssh: WorkstationSsh,
+    cmd_path: str,
+    spec: WorkstationTunnelSpec,
+) -> tuple[str, str, int]:
+    if not spec.password:
+        return "", "workstation password is required for credentialed scheduled task fallback", 1
+    account_out, _, account_code = ssh.exec_command("cmd.exe /d /c whoami", timeout=30)
+    account = account_out.strip() if account_code == 0 and account_out.strip() else spec.username
+    task_name = f"AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}"
+    cmd_path = cmd_path.replace("/", "\\")
+    # Windows schtasks has no secure stdin form for /RP. This fallback is used
+    # only for hosts that reject both remote PowerShell and normal task creation.
+    scheduled_cmd = (
+        "cmd.exe /d /c "
+        f"schtasks.exe /Create /SC MINUTE /MO 1 /TN {_quote_cmd_value(task_name)} "
+        f"/TR {_quote_cmd_value(cmd_path)} /RU {_quote_cmd_value(account)} /RP {_quote_cmd_value(spec.password)} /F "
+        f"&& (schtasks.exe /Run /TN {_quote_cmd_value(task_name)} & exit /b 0)"
+    )
+    return ssh.exec_command(scheduled_cmd, timeout=60)
+
+
+def _upload_cmd_supervisor(
+    ssh: WorkstationSsh,
+    remote_cmd_path: str,
+    spec: WorkstationTunnelSpec,
+    install_dir: str,
+) -> bool:
+    script = _render_cmd_supervisor(spec, install_dir)
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\r\n", suffix=".cmd", delete=False) as handle:
+            handle.write(script)
+            tmp_path = handle.name
+        return ssh.upload_file(tmp_path, remote_cmd_path)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _render_cmd_supervisor(spec: WorkstationTunnelSpec, install_dir: str) -> str:
+    log_dir = install_dir.rstrip("/").replace("/", "\\") + "\\logs"
+    forward_spec = f"{spec.remote_bind_host}:{spec.remote_bind_port}:127.0.0.1:22"
+    identity = spec.tunnel_identity_file.replace("/", "\\")
+    return f"""@echo off
+setlocal EnableExtensions
+title AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}
+set "SSH_EXE=%~dp0ssh.exe"
+if not exist "%SSH_EXE%" set "SSH_EXE=C:\\Windows\\System32\\OpenSSH\\ssh.exe"
+if not exist "%SSH_EXE%" set "SSH_EXE=ssh.exe"
+set "IDENTITY={identity}"
+set "FORWARD_SPEC={forward_spec}"
+set "TUNNEL_TARGET={spec.tunnel_target}"
+set "LOG_DIR={log_dir}"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
+:loop
+if not exist "%SSH_EXE%" (
+  echo [%date% %time%] ssh.exe not found at %SSH_EXE%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+  timeout /t 30 /nobreak >nul
+  goto loop
+)
+echo [%date% %time%] starting ssh reverse tunnel %FORWARD_SPEC% via %TUNNEL_TARGET%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+if defined IDENTITY (
+  "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
+) else (
+  "%SSH_EXE%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
+)
+echo [%date% %time%] ssh exited with %ERRORLEVEL%; restarting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+timeout /t 5 /nobreak >nul
+goto loop
+"""
+
+
+def _status_cmd_lifecycle_fallback(
+    ssh: WorkstationSsh,
+    spec: WorkstationTunnelSpec,
+    install_dir: str,
+) -> dict[str, Any]:
+    task_name = f"AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}"
+    run_key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
+    for candidate_dir in _candidate_install_dirs(install_dir, spec.username):
+        cmd_path = _cmd_supervisor_remote_path(candidate_dir, spec).replace("/", "\\")
+        status_cmd = (
+            "cmd.exe /d /c "
+            f"if exist {_quote_cmd_value(cmd_path)} (echo script_exists=1) else (echo script_exists=0) "
+            f"& reg.exe query {_quote_cmd_value(run_key)} /v {_quote_cmd_value(task_name)} "
+            "& exit /b 0"
+        )
+        out, err, code = ssh.exec_command(status_cmd, timeout=30)
+        if code != 0:
+            continue
+        installed = "script_exists=1" in out or task_name in out
+        if installed:
+            remote_ok = _probe_remote_tunnel_endpoint(spec)
+            return {
+                "workstation_id": spec.id,
+                "task_name": task_name,
+                "install_dir": candidate_dir,
+                "cmd_supervisor_exists": "script_exists=1" in out,
+                "registry_run_exists": task_name in out,
+                "remote_tunnel_ok": remote_ok,
+                "detail": err or out,
+                "installed": installed,
+            }
+    return {
+        "workstation_id": spec.id,
+        "task_name": task_name,
+        "install_dir": install_dir,
+        "cmd_supervisor_exists": False,
+        "registry_run_exists": False,
+        "remote_tunnel_ok": _probe_remote_tunnel_endpoint(spec),
+        "installed": False,
+    }
+
+
+def _probe_remote_tunnel_endpoint(spec: WorkstationTunnelSpec) -> bool:
+    script = (
+        "import socket\n"
+        "s=socket.socket()\n"
+        "s.settimeout(2)\n"
+        f"s.connect(({spec.remote_bind_host!r},{spec.remote_bind_port}))\n"
+        "s.close()\n"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", spec.tunnel_target, f"python3 -c {shlex.quote(script)}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _monitor_command(remote_script: str, spec: WorkstationTunnelSpec, install_dir: str) -> str:
