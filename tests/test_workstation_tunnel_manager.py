@@ -144,6 +144,12 @@ class BothDirsDeniedRemoteWorkstation(FakeRemoteWorkstation):
         return "", "拒绝访问。", 1
 
 
+class CleanupDeniedRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        return "", "cleanup denied", 1
+
+
 class KeyProvisioningRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
@@ -383,11 +389,14 @@ def test_cmd_supervisor_prefers_colocated_ssh_client() -> None:
 
     assert 'set "SSH_EXE=%~dp0ssh.exe"' in script
     assert 'set "SSH_EXE=C:\\Windows\\System32\\OpenSSH\\ssh.exe"' in script
+    assert 'set "LOCK_FILE=%LOG_DIR%\\workstation-WS-A-2222-cmd-supervisor.lock"' in script
+    assert "another supervisor instance already owns" in script
     assert 'call :probe_remote' in script
     assert 'call :clear_remote_forward' in script
     assert "s.recv(4)" in script
     assert "fuser -k 2222/tcp" in script
     assert "call :kill_ssh" in script
+    assert "goto restart_ssh" in script
     assert '-R "%FORWARD_SPEC%" "%TUNNEL_TARGET%"' in script
 
 
@@ -481,6 +490,37 @@ def test_status_rejects_cmd_fallback_without_owned_ssh_process(monkeypatch) -> N
     assert result["ok"] is False
     assert result["status"] == "not_ready"
     assert result["status_payload"]["ssh_processes"] == 0
+
+
+def test_status_rejects_cmd_fallback_when_banner_probe_fails(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=args[0], returncode=1, stdout="", stderr="probe failed")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "not_ready"
+    assert result["status_payload"]["ssh_processes"] == 1
+    assert result["status_payload"]["remote_tunnel_ok"] is False
 
 
 def test_status_checks_user_dir_when_programdata_cmd_is_missing(monkeypatch) -> None:
@@ -825,6 +865,36 @@ def test_cmd_lifecycle_cleanup_removes_tasks_run_key_processes_and_scripts() -> 
     assert "CommandLine like '%%127.0.0.1:2222:127.0.0.1:22%%'" in all_commands
     assert "AutoFluidWorkstationTunnel-WS-A-2222.cmd" in all_commands
     assert "del /q" in all_commands
+
+
+def test_cmd_lifecycle_cleanup_reports_failure() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    remote = CleanupDeniedRemoteWorkstation(
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+    )
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel._cleanup_cmd_lifecycle_fallback(  # noqa: SLF001
+        remote,
+        spec,
+        install_dir="C:/ProgramData/AutoFluid/tunnel",
+    )
+
+    assert result == {"ok": False, "detail": "cleanup denied"}
 
 
 def test_candidate_install_dirs_deduplicates_backslash_fallback_path() -> None:

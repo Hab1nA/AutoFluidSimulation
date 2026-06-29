@@ -676,7 +676,22 @@ set "IDENTITY={identity}"
 set "FORWARD_SPEC={forward_spec}"
 set "TUNNEL_TARGET={spec.tunnel_target}"
 set "LOG_DIR={log_dir}"
+set "LOCK_FILE=%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.lock"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
+if exist "%LOCK_FILE%" (
+  call :has_ssh
+  if not errorlevel 1 (
+    echo [%date% %time%] another supervisor instance already owns %FORWARD_SPEC%; exiting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+    exit /b 0
+  )
+  call :probe_remote
+  if not errorlevel 1 (
+    echo [%date% %time%] tunnel is already healthy; exiting duplicate supervisor>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+    exit /b 0
+  )
+  del /q "%LOCK_FILE%" >nul 2>nul
+)
+echo %date% %time%>%LOCK_FILE%
 :loop
 if not exist "%SSH_EXE%" (
   echo [%date% %time%] ssh.exe not found at %SSH_EXE%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
@@ -684,6 +699,7 @@ if not exist "%SSH_EXE%" (
   goto loop
 )
 call :clear_remote_forward
+:restart_ssh
 echo [%date% %time%] starting ssh reverse tunnel %FORWARD_SPEC% via %TUNNEL_TARGET%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
 if defined IDENTITY (
   start "AutoFluidTunnelSsh-{spec.id}-{spec.remote_bind_port}" /B "%SSH_EXE%" -i "%IDENTITY%" -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -o StrictHostKeyChecking=accept-new -N -R "%FORWARD_SPEC%" "%TUNNEL_TARGET%" 1>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stdout.log" 2>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-ssh.stderr.log"
@@ -704,7 +720,7 @@ if errorlevel 1 (
   call :kill_ssh
   call :clear_remote_forward
   timeout /t 5 /nobreak >nul
-  goto loop
+  goto restart_ssh
 )
 timeout /t 5 /nobreak >nul
 goto probe
@@ -755,7 +771,6 @@ def _status_cmd_lifecycle_fallback(
             continue
         installed = "script_exists=1" in out or task_name in out
         if installed:
-            remote_ok = _probe_remote_tunnel_endpoint(spec)
             forward_spec = f"{spec.remote_bind_host}:{spec.remote_bind_port}:127.0.0.1:22"
             process_cmd = (
                 "cmd.exe /d /c "
@@ -763,13 +778,15 @@ def _status_cmd_lifecycle_fallback(
                 'get ProcessId /value'
             )
             process_out, _, _ = ssh.exec_command(process_cmd, timeout=30)
+            ssh_processes = process_out.count("ProcessId=")
+            remote_ok = ssh_processes > 0 and _probe_remote_tunnel_endpoint(spec)
             return {
                 "workstation_id": spec.id,
                 "task_name": task_name,
                 "install_dir": candidate_dir,
                 "cmd_supervisor_exists": "script_exists=1" in out,
                 "registry_run_exists": task_name in out,
-                "ssh_processes": process_out.count("ProcessId="),
+                "ssh_processes": ssh_processes,
                 "remote_tunnel_ok": remote_ok,
                 "detail": err or out,
                 "installed": installed,
