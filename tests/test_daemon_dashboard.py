@@ -227,6 +227,7 @@ def test_handle_get_dashboard_combines_status_engine_and_logs(monkeypatch):
     }
     assert data["health"] == {
         "local_worker_online": False,
+        "local_worker_required": True,
         "server_to_local_ssh": "unknown",
         "server_to_workstation_ssh": "unknown",
         "workstation_ssh_details": {

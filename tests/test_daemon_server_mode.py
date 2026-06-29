@@ -249,6 +249,42 @@ def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
     assert daemon._alert_watcher_process is None
 
 
+def test_shutdown_cancels_remote_tasks_when_scheduler_stop_fails() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Scheduler:
+        def stop(self) -> None:
+            raise RuntimeError("stop failed before remote cleanup")
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+            self.cancel_calls += 1
+            return {"cancelled": 1, "failed": 0}
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.scheduler = _Scheduler()
+    daemon.runner = _Runner(remote_executor)
+    daemon.ipc_server = None
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = None
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
+
+    daemon.shutdown()
+
+    assert remote_executor.cancel_calls == 1
+
+
 def test_child_health_restarts_exited_alert_watcher(monkeypatch) -> None:
     from engine.daemon import PipelineDaemon
 
@@ -498,6 +534,26 @@ def test_server_mode_does_not_require_worker_after_local_steps_completed(monkeyp
     daemon.local_worker_adapter = None
 
     assert daemon._server_mode_requires_worker() is False
+
+
+def test_check_summary_does_not_fail_when_local_worker_not_required() -> None:
+    from engine.daemon import PipelineDaemon
+
+    results = {
+        "summary": {"passed": 1, "failed": 0, "warnings": 0},
+        "health": {
+            "local_worker_online": False,
+            "local_worker_required": False,
+            "server_to_local_ssh": "unknown",
+            "workstation_ssh_details": {"WS-A": "ok"},
+        },
+    }
+
+    PipelineDaemon._refresh_check_summary_from_health(results)
+
+    assert results["summary"] == {"passed": 2, "failed": 0, "warnings": 0}
+    assert results["overall_ok"] is True
+    assert results["status"] == "passed"
 
 
 def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch, tmp_path) -> None:

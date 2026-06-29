@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 from engine import config as config_module
 from engine.config import (
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
-    STATUS_ERROR, get_step_filename,
+    STATUS_COMPLETED, STATUS_ERROR, get_step_filename,
     get_workstation_config,
     is_server_mode,
 )
@@ -545,24 +545,50 @@ class TaskRunner:
         """执行系统自检（委托给 FileCleaner）。"""
         result = self._cleaner.run_system_check()
         if self._should_delegate_local_steps():
-            local_worker_result = self._local_worker_adapter.check_local_environment()
-            if local_worker_result is None:
-                message = str(
-                    getattr(self._local_worker_adapter, "last_error", "")
-                    or "LocalWorker 主动自检未完成或失败"
-                )
+            if self._local_worker_required_for_system_check():
+                local_worker_result = self._local_worker_adapter.check_local_environment()
+                if local_worker_result is None:
+                    message = str(
+                        getattr(self._local_worker_adapter, "last_error", "")
+                        or "LocalWorker 主动自检未完成或失败"
+                    )
+                    result["local_worker_checks"] = {
+                        "active_check": {
+                            "exists": False,
+                            "message": message,
+                        }
+                    }
+                else:
+                    result["local_worker_checks"] = dict(
+                        local_worker_result.get("local_checks", local_worker_result)
+                    )
+                self._refresh_system_check_summary(result)
+            else:
                 result["local_worker_checks"] = {
                     "active_check": {
-                        "exists": False,
-                        "message": message,
-                    }
+                        "status": "skipped",
+                        "message": "所有 SW/SC 步骤已完成，LocalWorker 非必需",
+                    },
+                    "ok": True,
+                    "status": "skipped",
+                    "summary": {"passed": 0, "failed": 0, "warnings": 0},
                 }
-            else:
-                result["local_worker_checks"] = dict(
-                    local_worker_result.get("local_checks", local_worker_result)
-                )
-            self._refresh_system_check_summary(result)
         return result
+
+    def _local_worker_required_for_system_check(self) -> bool:
+        try:
+            config_names = list(self.state.get_all_configs())
+            if not config_names:
+                return True
+            for config_name in config_names:
+                if self.state.get_step_status(config_name, "sw") != STATUS_COMPLETED:
+                    return True
+                if self.state.get_step_status(config_name, "sc") != STATUS_COMPLETED:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug("[LocalWorker] 判断自检需求失败，保守执行主动自检: %s", e)
+            return True
 
     @staticmethod
     def _refresh_system_check_summary(result: dict) -> None:

@@ -365,6 +365,7 @@ class PipelineDaemon:
                 self.scheduler.stop()
             except Exception as e:
                 logger.warning(f"调度器停止异常: {e}")
+                self._cancel_tracked_remote_tasks_on_shutdown()
 
         # 调度器不存在时才需要单独断开 SSH
         elif self.runner:
@@ -405,6 +406,21 @@ class PipelineDaemon:
             logger.warning(f"进程锁释放异常: {e}")
 
         logger.info("PipelineDaemon 已关闭")
+
+    def _cancel_tracked_remote_tasks_on_shutdown(self) -> None:
+        """Best-effort remote task cleanup if scheduler.stop() exits early."""
+        runner = getattr(self, "runner", None)
+        if runner is None:
+            return
+        try:
+            remote_executor = runner.get_remote_executor()
+            cancel_remote_tasks = getattr(remote_executor, "cancel_all_tracked_remote_tasks", None)
+            if callable(cancel_remote_tasks):
+                results = cancel_remote_tasks()
+                if results.get("cancelled") or results.get("failed"):
+                    logger.info("[Daemon] shutdown 兜底远程任务清理结果: %s", results)
+        except Exception as e:
+            logger.warning("[Daemon] shutdown 兜底远程任务清理异常: %s", e)
 
     def _stop_local_worker_process(self) -> None:
         """Stop the LocalWorker child process owned by this daemon instance."""
@@ -874,7 +890,7 @@ class PipelineDaemon:
         if isinstance(local_worker_online, bool):
             if local_worker_online:
                 passed += 1
-            else:
+            elif health.get("local_worker_required") is not False:
                 failed += 1
         status = health.get("server_to_local_ssh")
         if status == "ok":
@@ -1525,6 +1541,7 @@ class PipelineDaemon:
 
         return {
             "local_worker_online": bool(online_workers),
+            "local_worker_required": self._server_mode_requires_worker(),
             "server_to_local_ssh": server_to_local_ssh,
             "server_to_workstation_ssh": server_to_workstation_ssh,
             "workstation_ssh_details": workstation_details,

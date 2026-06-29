@@ -2428,6 +2428,48 @@ def test_task_runner_server_mode_reports_active_local_worker_check_failure(monke
     assert result["local_worker_checks"]["status"] == "failed"
     assert result["overall_ok"] is False
 
+
+def test_task_runner_server_mode_skips_local_worker_check_after_local_steps_complete(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def run_system_check(self):
+            return {
+                "local_checks": {},
+                "remote_checks": {},
+                "daemon_checks": {},
+                "workstation_checks": {},
+                "summary": {"passed": 1, "failed": 0, "warnings": 0},
+                "overall_ok": True,
+                "status": "passed",
+            }
+
+    class _State:
+        def get_all_configs(self):
+            return [1006, 1009]
+
+        def get_step_status(self, _config_name, step_name):
+            if step_name in {"sw", "sc"}:
+                return "Completed"
+            return "Waiting"
+
+    class _LocalWorkerAdapter:
+        def check_local_environment(self):
+            raise AssertionError("LocalWorker check should be skipped")
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    runner = TaskRunner.__new__(TaskRunner)
+    runner.state = _State()
+    runner._cleaner = _Cleaner()
+    runner._local_worker_adapter = _LocalWorkerAdapter()
+
+    result = runner.run_system_check()
+
+    assert result["local_worker_checks"]["status"] == "skipped"
+    assert result["local_worker_checks"]["ok"] is True
+    assert result["overall_ok"] is True
+
+
 def test_task_runner_server_mode_delegates_local_file_clean(monkeypatch):
     from engine.task_runner import TaskRunner
 
