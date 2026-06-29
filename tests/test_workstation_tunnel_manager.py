@@ -658,7 +658,7 @@ def test_status_does_not_retry_remote_port_connection_refused(monkeypatch) -> No
     assert attempts["count"] == 1
 
 
-def test_status_probe_uses_tunnel_identity_file(monkeypatch) -> None:
+def test_status_probe_does_not_use_workstation_local_tunnel_identity_file(monkeypatch) -> None:
     FakeRemoteWorkstation.instances.clear()
     calls: list[list[str]] = []
 
@@ -687,7 +687,7 @@ def test_status_probe_uses_tunnel_identity_file(monkeypatch) -> None:
     )
 
     assert result["ok"] is True
-    assert calls[0][calls[0].index("-i") + 1] == "C:/Users/ps/.ssh/autofluid_tunnel_ed25519"
+    assert "-i" not in calls[0]
 
 
 def test_status_checks_user_dir_when_programdata_cmd_is_missing(monkeypatch) -> None:

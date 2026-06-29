@@ -851,8 +851,6 @@ def _probe_remote_tunnel_endpoint(spec: WorkstationTunnelSpec) -> bool:
         "-o",
         "ConnectTimeout=10",
     ]
-    if spec.tunnel_identity_file:
-        command.extend(["-i", spec.tunnel_identity_file])
     command.extend([spec.tunnel_target, f"python3 -c {shlex.quote(script)}"])
     for attempt in range(REMOTE_TUNNEL_PROBE_ATTEMPTS):
         try:
