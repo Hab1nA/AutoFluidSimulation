@@ -19,6 +19,8 @@ use crate::utils::{
 const SERVER_DAEMON_DEFAULT_PROJECT_DIR: &str = "/root/AutoFluidSimulation";
 const WORKSTATION_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const WORKSTATION_TUNNEL_READY_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const SERVER_ENV_SYNC_MAX_ATTEMPTS: usize = 3;
+const SERVER_ENV_SYNC_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// 进程终止结果
 enum StopResult {
@@ -1418,6 +1420,34 @@ fn run_server_env_sync_command(
     remote_command: &str,
     payload: &[u8],
 ) -> Result<(), String> {
+    // This function deliberately uses blocking retries. Keep it on the worker
+    // startup OS thread and do not move it directly into a Tokio task.
+    let mut errors = Vec::new();
+    for attempt in 1..=SERVER_ENV_SYNC_MAX_ATTEMPTS {
+        match run_server_env_sync_command_once(ssh_exe, target, remote_command, payload) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                errors.push(format!("第 {attempt} 次: {error}"));
+                if attempt < SERVER_ENV_SYNC_MAX_ATTEMPTS {
+                    std::thread::sleep(SERVER_ENV_SYNC_RETRY_DELAY);
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "服务器 .env 同步命令尝试 {} 次后仍失败: {}",
+        SERVER_ENV_SYNC_MAX_ATTEMPTS,
+        errors.join("; ")
+    ))
+}
+
+fn run_server_env_sync_command_once(
+    ssh_exe: &str,
+    target: &str,
+    remote_command: &str,
+    payload: &[u8],
+) -> Result<(), String> {
     let mut command = Command::new(ssh_exe);
     command
         .args([
@@ -2017,6 +2047,65 @@ mod tests {
         assert!(payload.contains("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE=reverse_tunnel\n"));
         assert!(payload.contains("AUTOFLUID_WS_D_SSH_PASSWORD=\n"));
         assert!(!payload.contains("secret-a"));
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn server_env_sync_retries_transient_ssh_failure() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-server-env-sync-retry-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("ssh-sync-calls.txt");
+        let fake_ssh = fake_server_env_sync_exe(&project_dir, "fake_ssh_sync_retry", &marker, 1);
+
+        let result = run_server_env_sync_command(
+            fake_ssh.to_str().expect("utf8 exe"),
+            "ocar",
+            "true",
+            b"x=1\n",
+        );
+
+        assert!(result.is_ok(), "expected retry to recover: {result:?}");
+        let calls = wait_for_marker_lines(&marker, 2);
+        assert_eq!(calls.lines().count(), 2, "unexpected retry count: {calls}");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn server_env_sync_reports_attempts_after_retries_exhausted() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-server-env-sync-exhausted-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("ssh-sync-calls.txt");
+        let fake_ssh = fake_server_env_sync_exe(
+            &project_dir,
+            "fake_ssh_sync_exhausted",
+            &marker,
+            SERVER_ENV_SYNC_MAX_ATTEMPTS + 1,
+        );
+
+        let result = run_server_env_sync_command(
+            fake_ssh.to_str().expect("utf8 exe"),
+            "ocar",
+            "true",
+            b"x=1\n",
+        );
+
+        let err = result.expect_err("persistent ssh failure should be reported");
+        assert!(
+            err.contains("尝试 3 次"),
+            "error should include retry count: {err}"
+        );
+        assert!(
+            err.contains("Connection closed"),
+            "error should preserve ssh detail: {err}"
+        );
+        let calls = wait_for_marker_lines(&marker, 3);
+        assert_eq!(calls.lines().count(), 3, "unexpected retry count: {calls}");
         let _ = std::fs::remove_dir_all(project_dir);
     }
 
@@ -2807,7 +2896,7 @@ mod tests {
     }
 
     fn wait_for_marker_lines(marker: &std::path::Path, expected_lines: usize) -> String {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if let Ok(order) = std::fs::read_to_string(marker) {
                 if order.lines().count() >= expected_lines {
@@ -3096,6 +3185,51 @@ mpi_bin_dir = "/tmp/mpi"
                 ),
             )
             .expect("write fake retry marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_server_env_sync_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+        failures_before_success: usize,
+    ) -> PathBuf {
+        let attempts = project_dir.join(format!("{name}.count"));
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\nsetlocal EnableDelayedExpansion\r\nset count=0\r\nif exist \"{}\" set /p count=<\"{}\"\r\nset /a count+=1\r\n(echo !count!)>>\"{}\"\r\n(echo !count!)>\"{}\"\r\nif !count! LEQ {} (\r\n  echo Connection closed by 39.98.196.94 port 22 1>&2\r\n  exit /b 255\r\n)\r\nexit /b 0\r\n",
+                    attempts.display(),
+                    attempts.display(),
+                    marker.display(),
+                    attempts.display(),
+                    failures_before_success
+                ),
+            )
+            .expect("write fake server env sync exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\ncount=0\n[ -f '{}' ] && count=$(cat '{}')\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" >> '{}'\nprintf '%s\\n' \"$count\" > '{}'\nif [ \"$count\" -le {} ]; then printf '%s\\n' 'Connection closed by 39.98.196.94 port 22' >&2; exit 255; fi\nexit 0\n",
+                    attempts.display(),
+                    attempts.display(),
+                    marker.display(),
+                    attempts.display(),
+                    failures_before_success
+                ),
+            )
+            .expect("write fake server env sync exe");
             make_executable(&path);
             path
         }
