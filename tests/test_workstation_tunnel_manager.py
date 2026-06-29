@@ -514,8 +514,10 @@ def test_status_rejects_cmd_fallback_without_owned_ssh_process(monkeypatch) -> N
 
 def test_status_rejects_cmd_fallback_when_banner_probe_fails(monkeypatch) -> None:
     FakeRemoteWorkstation.instances.clear()
+    attempts = {"count": 0}
 
     def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        attempts["count"] += 1
         return subprocess.CompletedProcess(args=args[0], returncode=1, stdout="", stderr="probe failed")
 
     monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
@@ -541,6 +543,151 @@ def test_status_rejects_cmd_fallback_when_banner_probe_fails(monkeypatch) -> Non
     assert result["status"] == "not_ready"
     assert result["status_payload"]["ssh_processes"] == 1
     assert result["status_payload"]["remote_tunnel_ok"] is False
+    assert attempts["count"] == 1
+
+
+def test_status_retries_transient_banner_probe_reset(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+    attempts = {"count": 0}
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return subprocess.CompletedProcess(
+                args=args[0],
+                returncode=255,
+                stdout="",
+                stderr="kex_exchange_identification: read: Connection reset",
+            )
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert attempts["count"] == 2
+
+
+def test_status_fails_after_transient_banner_probe_retries_exhausted(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+    attempts = {"count": 0}
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        attempts["count"] += 1
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=255,
+            stdout="",
+            stderr="kex_exchange_identification: read: Connection reset",
+        )
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status_payload"]["remote_tunnel_ok"] is False
+    assert attempts["count"] == 2
+
+
+def test_status_does_not_retry_remote_port_connection_refused(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+    attempts = {"count": 0}
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        attempts["count"] += 1
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=1,
+            stdout="",
+            stderr="ConnectionRefusedError: [Errno 111] Connection refused",
+        )
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status_payload"]["remote_tunnel_ok"] is False
+    assert attempts["count"] == 1
+
+
+def test_status_probe_uses_tunnel_identity_file(monkeypatch) -> None:
+    FakeRemoteWorkstation.instances.clear()
+    calls: list[list[str]] = []
+
+    def fake_run(*args, **kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args[0]))
+        return subprocess.CompletedProcess(args=args[0], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(workstation_tunnel.subprocess, "run", fake_run)
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+        tunnel_identity_file="C:/Users/ps/.ssh/autofluid_tunnel_ed25519",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=PowerShellStatusDeniedCmdInstalledRemoteWorkstation,
+    )
+
+    assert result["ok"] is True
+    assert calls[0][calls[0].index("-i") + 1] == "C:/Users/ps/.ssh/autofluid_tunnel_ed25519"
 
 
 def test_status_checks_user_dir_when_programdata_cmd_is_missing(monkeypatch) -> None:

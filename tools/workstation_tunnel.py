@@ -9,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -17,6 +18,15 @@ from typing import Any, Callable, Mapping, Protocol
 DEFAULT_INSTALL_DIR = "C:/ProgramData/AutoFluid/tunnel"
 DEFAULT_TUNNEL_TARGET = "ocar"
 SCRIPT_NAME = "start_workstation_owned_reverse_tunnel.ps1"
+REMOTE_TUNNEL_PROBE_ATTEMPTS = 2
+REMOTE_TUNNEL_PROBE_RETRY_DELAY_SECONDS = 0.25
+TRANSIENT_REMOTE_TUNNEL_PROBE_ERRORS = (
+    "connection reset",
+    "connection closed",
+    "kex_exchange_identification",
+    "banner exchange",
+    "broken pipe",
+)
 
 
 class WorkstationSsh(Protocol):
@@ -834,17 +844,38 @@ def _probe_remote_tunnel_endpoint(spec: WorkstationTunnelSpec) -> bool:
         "s.close()\n"
         "raise SystemExit(0 if data == b'SSH-' else 1)\n"
     )
-    try:
-        result = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", spec.tunnel_target, f"python3 -c {shlex.quote(script)}"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0
+    command = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+    ]
+    if spec.tunnel_identity_file:
+        command.extend(["-i", spec.tunnel_identity_file])
+    command.extend([spec.tunnel_target, f"python3 -c {shlex.quote(script)}"])
+    for attempt in range(REMOTE_TUNNEL_PROBE_ATTEMPTS):
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if result.returncode == 0:
+            return True
+        if attempt + 1 >= REMOTE_TUNNEL_PROBE_ATTEMPTS or not _is_transient_remote_probe_failure(result):
+            return False
+        time.sleep(REMOTE_TUNNEL_PROBE_RETRY_DELAY_SECONDS)
+    return False
+
+
+def _is_transient_remote_probe_failure(result: subprocess.CompletedProcess[str]) -> bool:
+    output = result.stderr.lower()
+    return any(marker in output for marker in TRANSIENT_REMOTE_TUNNEL_PROBE_ERRORS)
 
 
 def _monitor_command(remote_script: str, spec: WorkstationTunnelSpec, install_dir: str) -> str:
