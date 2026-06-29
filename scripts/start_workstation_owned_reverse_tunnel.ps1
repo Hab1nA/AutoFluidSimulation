@@ -138,7 +138,7 @@ function Test-RemoteTunnelEndpoint {
         [string]$SshExe
     )
     $hostBytes = (($RemoteBindHost.ToCharArray() | ForEach-Object { [int][char]$_ }) -join ",")
-    $remoteCommand = "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((bytes([$hostBytes]).decode(),$RemoteBindPort)); s.close()'"
+    $remoteCommand = "python3 -c 'import socket,sys; s=socket.socket(); s.settimeout(3); s.connect((bytes([$hostBytes]).decode(),$RemoteBindPort)); data=s.recv(4); s.close(); sys.exit(0 if data==bytes([83,83,72,45]) else 1)'"
     $identityArgs = @()
     if (-not [string]::IsNullOrWhiteSpace($TunnelIdentityFile)) {
         $identityArgs = @("-i", $TunnelIdentityFile)
@@ -252,12 +252,16 @@ function Start-OwnedTunnelMonitor {
                     Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
                     $sshProcess = $null
                 }
+                foreach ($process in @(Get-OwnedTunnelProcesses -Kind "Ssh")) {
+                    Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+                }
                 $delay = Register-TunnelFailure -Reason "local-target-unreachable" -FailureState $failureState -LogState $logState
                 Start-Sleep -Seconds $delay
                 continue
             }
 
-            if (Test-RemoteTunnelEndpoint -SshExe $sshExe) {
+            $ownedSshProcesses = @(Get-OwnedTunnelProcesses -Kind "Ssh")
+            if ($ownedSshProcesses.Count -gt 0 -and (Test-RemoteTunnelEndpoint -SshExe $sshExe)) {
                 Reset-TunnelFailureBudget -FailureState $failureState
                 Start-Sleep -Seconds $ProbeIntervalSeconds
                 continue
@@ -266,6 +270,14 @@ function Start-OwnedTunnelMonitor {
             if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
                 Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
                 $sshProcess = $null
+                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
+                Start-Sleep -Seconds $delay
+                continue
+            }
+            if ($ownedSshProcesses.Count -gt 0) {
+                foreach ($process in $ownedSshProcesses) {
+                    Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+                }
                 $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
                 Start-Sleep -Seconds $delay
                 continue

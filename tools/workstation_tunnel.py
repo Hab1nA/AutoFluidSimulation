@@ -408,7 +408,8 @@ def status_workstation_tunnel(
             except json.JSONDecodeError:
                 payload = {"raw": out.strip()}
             installed = bool(payload.get("task_exists")) or bool(payload.get("registry_run_exists"))
-            ok = installed and bool(payload.get("remote_tunnel_ok"))
+            ssh_processes = int(payload.get("ssh_processes") or 0)
+            ok = installed and ssh_processes > 0 and bool(payload.get("remote_tunnel_ok"))
             result = _result(spec, ok, "ok" if ok else "not_ready", "")
             result["install_dir"] = candidate_dir
             result["status_payload"] = payload
@@ -417,7 +418,11 @@ def status_workstation_tunnel(
             return result
         cmd_status = _status_cmd_lifecycle_fallback(ssh, spec, install_dir)
         if cmd_status["installed"] or cmd_status["remote_tunnel_ok"]:
-            ok = bool(cmd_status["installed"]) and bool(cmd_status["remote_tunnel_ok"])
+            ok = (
+                bool(cmd_status["installed"])
+                and int(cmd_status.get("ssh_processes") or 0) > 0
+                and bool(cmd_status["remote_tunnel_ok"])
+            )
             result = _result(spec, ok, "ok" if ok else "not_ready", "")
             result["install_dir"] = cmd_status["install_dir"]
             result["status_payload"] = cmd_status
@@ -705,12 +710,20 @@ def _status_cmd_lifecycle_fallback(
         installed = "script_exists=1" in out or task_name in out
         if installed:
             remote_ok = _probe_remote_tunnel_endpoint(spec)
+            forward_spec = f"{spec.remote_bind_host}:{spec.remote_bind_port}:127.0.0.1:22"
+            process_cmd = (
+                "cmd.exe /d /c "
+                f'wmic process where "name=\'ssh.exe\' and CommandLine like \'%%{forward_spec}%%\'" '
+                'get ProcessId /value'
+            )
+            process_out, _, _ = ssh.exec_command(process_cmd, timeout=30)
             return {
                 "workstation_id": spec.id,
                 "task_name": task_name,
                 "install_dir": candidate_dir,
                 "cmd_supervisor_exists": "script_exists=1" in out,
                 "registry_run_exists": task_name in out,
+                "ssh_processes": process_out.count("ProcessId="),
                 "remote_tunnel_ok": remote_ok,
                 "detail": err or out,
                 "installed": installed,
@@ -730,9 +743,11 @@ def _probe_remote_tunnel_endpoint(spec: WorkstationTunnelSpec) -> bool:
     script = (
         "import socket\n"
         "s=socket.socket()\n"
-        "s.settimeout(2)\n"
+        "s.settimeout(3)\n"
         f"s.connect(({spec.remote_bind_host!r},{spec.remote_bind_port}))\n"
+        "data=s.recv(4)\n"
         "s.close()\n"
+        "raise SystemExit(0 if data == b'SSH-' else 1)\n"
     )
     try:
         result = subprocess.run(

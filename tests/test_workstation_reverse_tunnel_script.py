@@ -209,8 +209,10 @@ if ($result -ne $true) {{
     assert "-i" in captured
     assert "autofluid_tunnel_ed25519" in captured
     assert "root@example.invalid" in captured
-    assert "python3 -c 'import socket;" in captured
+    assert "python3 -c 'import socket,sys;" in captured
     assert "s.connect((bytes([49,50,55,46,48,46,48,46,49]).decode(),2222))" in captured
+    assert "s.recv(4)" in captured
+    assert "bytes([83,83,72,45])" in captured
 
 
 def test_workstation_owned_wait_probe_reports_ready_timeout_and_exit(

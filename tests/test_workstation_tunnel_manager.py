@@ -53,7 +53,7 @@ class ProgramDataInstallDeniedRemoteWorkstation(FakeRemoteWorkstation):
         self.commands.append(command)
         if " -Install " in command:
             return "", "拒绝访问。", 1
-        return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": false, "registry_run_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
 
 
 class SchTasksDeniedRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkstation):
@@ -63,7 +63,7 @@ class SchTasksDeniedRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkstation)
             return "", "拒绝访问。", 1
         if "schtasks.exe /Create" in command:
             return "", "schtasks denied", 1
-        return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": false, "registry_run_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
 
 
 class CredentialedSchTasksRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkstation):
@@ -75,7 +75,7 @@ class CredentialedSchTasksRemoteWorkstation(ProgramDataInstallDeniedRemoteWorkst
             return "DESKTOP-TD0FQ8U\\ps\r\n", "", 0
         if "schtasks.exe /Create" in command and " /RU " not in command:
             return "", "拒绝访问。", 1
-        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
 
 
 class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
@@ -83,13 +83,19 @@ class ProgramDataMissingRemoteWorkstation(FakeRemoteWorkstation):
         self.commands.append(command)
         if "C:\\ProgramData\\AutoFluid\\tunnel" in command:
             return "", "script not found", 1
-        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
 
 
 class RegistryRunStatusRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
-        return '{"task_exists": false, "registry_run_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": false, "registry_run_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
+
+
+class RegistryRunWithoutSshProcessRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        return '{"task_exists": false, "registry_run_exists": true, "ssh_processes": 0, "remote_tunnel_ok": true}', "", 0
 
 
 class PowerShellStatusDeniedCmdInstalledRemoteWorkstation(FakeRemoteWorkstation):
@@ -105,6 +111,8 @@ class PowerShellStatusDeniedCmdInstalledRemoteWorkstation(FakeRemoteWorkstation)
                 "",
                 0,
             )
+        if "CommandLine like" in command:
+            return "ProcessId=1234\r\n", "", 0
         return "{}", "", 0
 
 
@@ -117,6 +125,8 @@ class UserDirCmdInstalledRemoteWorkstation(FakeRemoteWorkstation):
             return "script_exists=0\r\n", "错误: 系统找不到指定的注册表项或值。\r\n", 0
         if "script_exists" in command and "C:\\Users\\ps\\AppData\\Local\\AutoFluid\\tunnel" in command:
             return "script_exists=1\r\n", "", 0
+        if "CommandLine like" in command:
+            return "ProcessId=1234\r\n", "", 0
         return "{}", "", 0
 
 
@@ -131,7 +141,7 @@ class KeyProvisioningRemoteWorkstation(FakeRemoteWorkstation):
         self.commands.append(command)
         if "type" in command and "autofluid_tunnel_ed25519.pub" in command:
             return "ssh-ed25519 AAAATEST autofluid-test-tunnel\r\n", "", 0
-        return '{"task_exists": true, "remote_tunnel_ok": true}', "", 0
+        return '{"task_exists": true, "ssh_processes": 1, "remote_tunnel_ok": true}', "", 0
 
 
 def test_repair_deploys_workstation_owned_tunnel_to_raw_workstation_host(tmp_path: Path) -> None:
@@ -658,6 +668,30 @@ def test_status_accepts_registry_run_fallback_without_scheduled_task() -> None:
     )
 
     assert result["ok"] is True
+
+
+def test_status_rejects_remote_port_without_owned_ssh_process() -> None:
+    FakeRemoteWorkstation.instances.clear()
+    spec = workstation_tunnel.WorkstationTunnelSpec(
+        id="WS-A",
+        host="172.17.135.240",
+        port=22,
+        username="ps",
+        password="secret",
+        auth_method="password",
+        key_filename=None,
+        remote_bind_host="127.0.0.1",
+        remote_bind_port=2222,
+        tunnel_target="root@39.98.196.94",
+    )
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=RegistryRunWithoutSshProcessRemoteWorkstation,
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "not_ready"
 
 
 def test_uninstall_attempts_programdata_and_user_install_dirs() -> None:
