@@ -13,6 +13,7 @@ param(
     [string]$InstallDir = "C:\ProgramData\AutoFluid\tunnel",
     [int]$RestartDelaySeconds = 5,
     [int]$ProbeIntervalSeconds = 5,
+    [int]$RemoteProbeFailureThreshold = 3,
     [int]$LogRepeatSeconds = 60
 )
 
@@ -287,18 +288,26 @@ function Start-OwnedTunnelMonitor {
             }
 
             if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
+                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
+                if ([int]$failureState.Count -lt $RemoteProbeFailureThreshold) {
+                    Start-Sleep -Seconds $ProbeIntervalSeconds
+                    continue
+                }
                 Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
                 $sshProcess = $null
-                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
                 Start-Sleep -Seconds $delay
                 continue
             }
             if ($ownedSshProcesses.Count -gt 0) {
+                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
+                if ([int]$failureState.Count -lt $RemoteProbeFailureThreshold) {
+                    Start-Sleep -Seconds $ProbeIntervalSeconds
+                    continue
+                }
                 foreach ($process in $ownedSshProcesses) {
                     Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
                 }
                 Clear-StaleRemoteForward -SshExe $sshExe | Out-Null
-                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
                 Start-Sleep -Seconds $delay
                 continue
             }
@@ -368,6 +377,7 @@ function Install-OwnedTunnelTask {
         "-InstallDir", $InstallDir,
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-ProbeIntervalSeconds", ([string]$ProbeIntervalSeconds),
+        "-RemoteProbeFailureThreshold", ([string]$RemoteProbeFailureThreshold),
         "-LogRepeatSeconds", ([string]$LogRepeatSeconds)
     )
     $argumentText = ($args | ForEach-Object {

@@ -131,6 +131,8 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert '"ServerAliveCountMax=3"' in source
     assert '"StrictHostKeyChecking=accept-new"' in source
     assert '"-i", $TunnelIdentityFile' in source
+    assert "[int]$RemoteProbeFailureThreshold = 3" in source
+    assert "-RemoteProbeFailureThreshold" in source
     assert '$forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"' in source
     fn_start = source.index("function Get-ReverseTunnelArguments")
     fn_end = source.index("function Start-OwnedTunnelMonitor")
@@ -138,6 +140,7 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert body.index('"-i", $TunnelIdentityFile') < body.rindex("return $args")
     assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
     assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
+    assert "[int]$failureState.Count -lt $RemoteProbeFailureThreshold" in source
     assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
     assert "function Wait-RemoteTunnelEndpoint" in source
     assert 'Register-TunnelFailure -Reason $startupStatus' in source

@@ -698,7 +698,7 @@ def _render_cmd_supervisor(spec: WorkstationTunnelSpec, install_dir: str) -> str
     )
     stale_cleanup = f"bash -lc 'fuser -k {spec.remote_bind_port}/tcp >/dev/null 2>&1 || true'"
     return f"""@echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 title AutoFluidWorkstationTunnel-{spec.id}-{spec.remote_bind_port}
 set "SSH_EXE=%~dp0ssh.exe"
 if not exist "%SSH_EXE%" set "SSH_EXE=C:\\Windows\\System32\\OpenSSH\\ssh.exe"
@@ -708,6 +708,8 @@ set "FORWARD_SPEC={forward_spec}"
 set "TUNNEL_TARGET={spec.tunnel_target}"
 set "LOG_DIR={log_dir}"
 set "LOCK_FILE=%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.lock"
+set "REMOTE_PROBE_FAILURES=0"
+set "REMOTE_PROBE_FAILURE_THRESHOLD=3"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
 if exist "%LOCK_FILE%" (
   call :has_ssh
@@ -747,12 +749,20 @@ if errorlevel 1 (
 )
 call :probe_remote
 if errorlevel 1 (
+  set /a REMOTE_PROBE_FAILURES+=1
+  echo [%date% %time%] remote tunnel probe failed !REMOTE_PROBE_FAILURES!/%REMOTE_PROBE_FAILURE_THRESHOLD%>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
+  if !REMOTE_PROBE_FAILURES! lss %REMOTE_PROBE_FAILURE_THRESHOLD% (
+    timeout /t 5 /nobreak >nul
+    goto probe
+  )
   echo [%date% %time%] remote tunnel probe failed; restarting>>"%LOG_DIR%\\workstation-{spec.id}-{spec.remote_bind_port}-cmd-supervisor.log"
   call :kill_ssh
   call :clear_remote_forward
+  set "REMOTE_PROBE_FAILURES=0"
   timeout /t 5 /nobreak >nul
   goto restart_ssh
 )
+set "REMOTE_PROBE_FAILURES=0"
 timeout /t 5 /nobreak >nul
 goto probe
 

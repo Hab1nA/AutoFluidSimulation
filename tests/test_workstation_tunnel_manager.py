@@ -408,13 +408,17 @@ def test_cmd_supervisor_prefers_colocated_ssh_client() -> None:
     )
 
     assert 'set "SSH_EXE=%~dp0ssh.exe"' in script
+    assert "setlocal EnableExtensions EnableDelayedExpansion" in script
     assert 'set "SSH_EXE=C:\\Windows\\System32\\OpenSSH\\ssh.exe"' in script
     assert 'set "LOCK_FILE=%LOG_DIR%\\workstation-WS-A-2222-cmd-supervisor.lock"' in script
+    assert 'set "REMOTE_PROBE_FAILURE_THRESHOLD=3"' in script
     assert "another supervisor instance already owns" in script
     assert 'call :probe_remote' in script
     assert 'call :clear_remote_forward' in script
     assert "s.recv(4)" in script
     assert "fuser -k 2222/tcp" in script
+    assert "remote tunnel probe failed !REMOTE_PROBE_FAILURES!/%REMOTE_PROBE_FAILURE_THRESHOLD%" in script
+    assert "if !REMOTE_PROBE_FAILURES! lss %REMOTE_PROBE_FAILURE_THRESHOLD%" in script
     assert "call :kill_ssh" in script
     assert "goto restart_ssh" in script
     assert '-R "%FORWARD_SPEC%" "%TUNNEL_TARGET%"' in script
