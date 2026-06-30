@@ -14,7 +14,8 @@ param(
     [int]$RestartDelaySeconds = 5,
     [int]$ProbeIntervalSeconds = 5,
     [int]$RemoteProbeFailureThreshold = 3,
-    [int]$LogRepeatSeconds = 60
+    [int]$LogRepeatSeconds = 60,
+    [int]$SshCommandTimeoutSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,6 +154,43 @@ function Test-RemoteTunnelEndpoint {
     }
 }
 
+function Invoke-OwnedTunnelSshCommand {
+    param(
+        [string]$SshExe,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = $SshCommandTimeoutSeconds
+    )
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $process = $null
+    try {
+        $process = Start-Process -FilePath $SshExe `
+            -ArgumentList $Arguments `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -PassThru
+        if (-not $process.WaitForExit([Math]::Max(1, $TimeoutSeconds) * 1000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            return @{
+                ExitCode = 124
+                TimedOut = $true
+                Stdout = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+                Stderr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+            }
+        }
+        return @{
+            ExitCode = $process.ExitCode
+            TimedOut = $false
+            Stdout = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
+            Stderr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Clear-StaleRemoteForward {
     param(
         [string]$SshExe
@@ -163,8 +201,20 @@ function Clear-StaleRemoteForward {
         $identityArgs = @("-i", $TunnelIdentityFile)
     }
     try {
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 1>$null 2>$null
-        return $LASTEXITCODE -eq 0
+        $arguments = @(
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new"
+        ) + $identityArgs + @($TunnelTarget, $remoteCommand)
+        $result = Invoke-OwnedTunnelSshCommand `
+            -SshExe $SshExe `
+            -Arguments $arguments `
+            -TimeoutSeconds $SshCommandTimeoutSeconds
+        if ($result.TimedOut) {
+            Write-OwnedTunnelLog -Message "Timed out clearing stale remote forward on ${RemoteBindPort}; continuing with tunnel restart."
+            return $false
+        }
+        return $result.ExitCode -eq 0
     }
     catch {
         Write-OwnedTunnelLog -Message "Failed to clear stale remote forward on ${RemoteBindPort}: $($_.Exception.Message)"

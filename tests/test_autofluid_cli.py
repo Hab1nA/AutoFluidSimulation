@@ -266,6 +266,34 @@ def test_workstation_tunnel_command_requires_all_specs_ok(monkeypatch):
     assert payload["message"] == "工作站隧道未就绪"
 
 
+def test_workstation_tunnel_command_can_target_one_workstation(monkeypatch):
+    kwargs_seen = {}
+    specs = [object()]
+
+    def fake_configured_specs(**kwargs):
+        kwargs_seen.update(kwargs)
+        return specs
+
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        fake_configured_specs,
+    )
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "run_for_specs",
+        lambda _action, _specs_arg, **_kwargs: [
+            {"id": "WS-C", "ok": True, "status": "ok"},
+        ],
+    )
+
+    result, payload = _run(["workstation-tunnel", "ensure", "--workstation", "WS-C"])
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert kwargs_seen == {"tunnel_target": None, "workstation_id": "WS-C"}
+
+
 def test_daemon_systemctl_actions_use_expected_arguments(monkeypatch):
     monkeypatch.delenv("AUTOFLUID_DAEMON_SERVICE", raising=False)
     calls = []

@@ -393,6 +393,7 @@ def _build_parser() -> argparse.ArgumentParser:
     workstation_tunnel_parser.add_argument("--all", action="store_true")
     workstation_tunnel_parser.add_argument("--install-dir", default=workstation_tunnel.DEFAULT_INSTALL_DIR)
     workstation_tunnel_parser.add_argument("--tunnel-target", default=None)
+    workstation_tunnel_parser.add_argument("--workstation", default=None)
     workstation_tunnel_parser.add_argument("--jobs", type=int, default=4)
     workstation_tunnel_parser.add_argument("--progress-jsonl", action="store_true")
 
@@ -428,7 +429,10 @@ def run_cli(
         return _json_result(ok=False, command="parse", message=str(exc).strip(), exit_code=2)
     if args.command == "workstation-tunnel":
         try:
-            specs = workstation_tunnel.configured_workstation_specs(tunnel_target=args.tunnel_target)
+            spec_kwargs = {"tunnel_target": args.tunnel_target}
+            if args.workstation:
+                spec_kwargs["workstation_id"] = args.workstation
+            specs = workstation_tunnel.configured_workstation_specs(**spec_kwargs)
             progress = (
                 workstation_tunnel.jsonl_progress_writer()
                 if args.progress_jsonl

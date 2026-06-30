@@ -218,6 +218,78 @@ if ($result -ne $true) {{
     assert "bytes([83,83,72,45])" in captured
 
 
+def test_workstation_owned_stale_forward_cleanup_is_bounded(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        msg = "Windows PowerShell is required for this regression test"
+        raise AssertionError(msg)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    probe_script = tmp_path / "owned-clear-stale.ps1"
+    probe_script.write_text(
+        rf"""
+$ErrorActionPreference = "Stop"
+$source = Get-Content -LiteralPath "{script_path}" -Raw
+$match = [regex]::Match(
+    $source,
+    '(?s)function Invoke-OwnedTunnelSshCommand \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward.*?\r?\n\}}\r?\n\r?\nfunction Wait-RemoteTunnelEndpoint'
+)
+if (-not $match.Success) {{
+    throw "Could not extract stale cleanup functions"
+}}
+$functionSource = $match.Value -replace '\r?\nfunction Wait-RemoteTunnelEndpoint\z', ''
+Invoke-Expression $functionSource
+$helperResult = Invoke-OwnedTunnelSshCommand `
+    -SshExe "{powershell}" `
+    -Arguments @("-NoProfile", "-Command", "Start-Sleep -Seconds 5") `
+    -TimeoutSeconds 1
+if (-not $helperResult.TimedOut) {{
+    throw "Expected helper timeout, got $($helperResult | ConvertTo-Json -Compress)"
+}}
+
+$source = Get-Content -LiteralPath "{script_path}" -Raw
+if ($source -notmatch "Invoke-OwnedTunnelSshCommand") {{
+    throw "Expected Clear-StaleRemoteForward to call Invoke-OwnedTunnelSshCommand"
+}}
+if ($source -notmatch "Timed out clearing stale remote forward") {{
+    throw "Expected timeout log message"
+}}
+if (-not $source.Contains('Remove-Item -LiteralPath $stdoutPath, $stderrPath')) {{
+    throw "Expected temp stdout/stderr cleanup"
+}}
+
+$start = Get-Date
+$elapsed = ((Get-Date) - $start).TotalSeconds
+if ($elapsed -gt 1) {{
+    throw "Expected bounded cleanup, elapsed=$elapsed"
+}}
+Write-Output "bounded stale cleanup passed"
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe_script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "bounded stale cleanup passed" in result.stdout
+
+
 def test_workstation_owned_wait_probe_reports_ready_timeout_and_exit(
     tmp_path: Path,
 ) -> None:

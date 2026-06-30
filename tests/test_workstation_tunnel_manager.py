@@ -1184,6 +1184,22 @@ def test_workstation_tunnel_specs_use_reachable_port_but_raw_host_for_bootstrap(
     assert specs[0].tunnel_identity_file == "C:/Users/ps/.ssh/autofluid_tunnel_ed25519"
 
 
+def test_workstation_tunnel_specs_can_filter_one_workstation() -> None:
+    workstations = [
+        {"id": "WS-A", "host": "172.17.135.240", "port": 22},
+        {"id": "WS-C", "host": "172.17.135.115", "port": 22, "reachable_port": 2225},
+    ]
+
+    specs = workstation_tunnel.specs_from_workstations(
+        workstations,
+        workstation_id="ws-c",
+    )
+
+    assert [spec.id for spec in specs] == ["WS-C"]
+    assert specs[0].host == "172.17.135.115"
+    assert specs[0].remote_bind_port == 2225
+
+
 def test_workstation_tunnel_target_prefers_new_target_env(monkeypatch) -> None:
     monkeypatch.setenv("AUTOFLUID_WORKSTATION_TUNNEL_TARGET", "ocar-tunnel")
     monkeypatch.setenv("AUTOFLUID_WORKSTATION_TUNNEL_HOST", "legacy-ocar")

@@ -969,6 +969,37 @@ def test_local_worker_default_handlers_support_stage_cleanup(monkeypatch) -> Non
     assert calls == ["sw_final", "sc_final", "sw_shutdown", "sc_shutdown"]
 
 
+def test_local_worker_default_handler_runs_targeted_workstation_tunnel_ensure(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    specs = [object()]
+    configured_calls = []
+    run_calls = []
+
+    def fake_configured_specs(**kwargs):
+        configured_calls.append(kwargs)
+        return specs
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        run_calls.append({"action": action, "specs": specs_arg, **kwargs})
+        return [{"id": "WS-C", "ok": True, "status": "ok"}]
+
+    monkeypatch.setattr(
+        "tools.workstation_tunnel.configured_workstation_specs",
+        fake_configured_specs,
+    )
+    monkeypatch.setattr("tools.workstation_tunnel.run_for_specs", fake_run_for_specs)
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    assert worker._execute_task("workstation_tunnel_ensure", {"workstation_id": "WS-C"}) == {
+        "ok": True,
+        "results": [{"id": "WS-C", "ok": True, "status": "ok"}],
+    }
+    assert configured_calls == [{"workstation_id": "WS-C"}]
+    assert run_calls == [{"action": "ensure", "specs": specs, "jobs": 1}]
+
+
 def test_local_worker_sc_timeout_task_runs_in_process_to_reuse_pool(monkeypatch) -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 

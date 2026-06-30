@@ -69,11 +69,15 @@ def specs_from_workstations(
     workstations: list[Mapping[str, Any]],
     *,
     tunnel_target: str | None = None,
+    workstation_id: str | None = None,
 ) -> list[WorkstationTunnelSpec]:
     target = _workstation_tunnel_target(tunnel_target)
+    selected_id = workstation_id.strip().lower() if workstation_id else ""
     specs: list[WorkstationTunnelSpec] = []
     for index, workstation in enumerate(workstations):
         ws_id = str(workstation.get("id") or f"WS-{index + 1}")
+        if selected_id and ws_id.lower() != selected_id:
+            continue
         raw_host = str(workstation.get("host") or "").strip()
         if not raw_host:
             continue
@@ -144,11 +148,19 @@ def _resolve_ssh_config_target(alias: str) -> str | None:
     return hostname
 
 
-def configured_workstation_specs(*, tunnel_target: str | None = None) -> list[WorkstationTunnelSpec]:
+def configured_workstation_specs(
+    *,
+    tunnel_target: str | None = None,
+    workstation_id: str | None = None,
+) -> list[WorkstationTunnelSpec]:
     from engine.config import WORKSTATIONS, reload_config_from_toml
 
     reload_config_from_toml()
-    return specs_from_workstations(list(WORKSTATIONS), tunnel_target=tunnel_target)
+    return specs_from_workstations(
+        list(WORKSTATIONS),
+        tunnel_target=tunnel_target,
+        workstation_id=workstation_id,
+    )
 
 
 def _quote_ps_value(value: str) -> str:
@@ -1096,12 +1108,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", default="", help="project directory for TUI callers")
     parser.add_argument("--install-dir", default=DEFAULT_INSTALL_DIR)
     parser.add_argument("--tunnel-target", default=None)
+    parser.add_argument("--workstation", default=None)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--progress-jsonl", action="store_true")
     args = parser.parse_args(argv)
     if args.project_dir:
         os.chdir(args.project_dir)
-    specs = configured_workstation_specs(tunnel_target=args.tunnel_target)
+    specs = configured_workstation_specs(
+        tunnel_target=args.tunnel_target,
+        workstation_id=args.workstation,
+    )
     progress = jsonl_progress_writer() if args.progress_jsonl else None
     results = run_for_specs(
         args.action,

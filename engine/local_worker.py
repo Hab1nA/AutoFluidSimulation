@@ -98,6 +98,7 @@ class LocalWorker:
             "sc": True,
             "clean": True,
             "check": True,
+            "workstation_tunnel": True,
             "sc_slots": max(1, int(ENGINE_CONFIG.get("sc_max_slots", 1))),
         }
         return cls(
@@ -505,6 +506,8 @@ class LocalWorker:
             return self._run_clean_local_files_task
         if step == "cleanup_stage":
             return self._run_cleanup_stage_task
+        if step == "workstation_tunnel_ensure":
+            return self._run_workstation_tunnel_ensure_task
         raise RuntimeError(f"LocalWorker 尚未配置步骤处理器: {step}")
 
     def _run_sw_task(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -585,6 +588,21 @@ class LocalWorker:
                 raise RuntimeError(f"未知 SC 清理阶段: {phase}")
             return {"ok": True}
         raise RuntimeError(f"未知本地清理步骤: {step_name}")
+
+    def _run_workstation_tunnel_ensure_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        from tools import workstation_tunnel
+
+        workstation_id = str(params.get("workstation_id") or "").strip()
+        if not workstation_id:
+            raise RuntimeError("工作站隧道修复任务缺少 workstation_id")
+        specs = workstation_tunnel.configured_workstation_specs(
+            workstation_id=workstation_id,
+        )
+        results = workstation_tunnel.run_for_specs("ensure", specs, jobs=1)
+        return {
+            "ok": workstation_tunnel.all_results_ok(results),
+            "results": results,
+        }
 
     def _build_scdoc_payload(self, config_name: int) -> dict[str, Any]:
         """Read the generated SCDOC so the server daemon can continue transfer."""

@@ -48,6 +48,7 @@ from engine.local_worker_registry import LocalWorkerRegistry
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler import PipelineScheduler
+from engine.workstation_ssh_recovery import default_recovery_manager
 from ipc.server import IPCServer
 from utils.log_paths import service_log_file
 from utils.infrastructure import InfrastructureUnavailableError
@@ -75,10 +76,26 @@ _LOCAL_WORKER_AUTOSTART_COOLDOWN_SECONDS = 30.0
 _ALERT_WATCHER_STOP_TIMEOUT_SECONDS = 5.0
 _ALERT_WATCHER_RESTART_COOLDOWN_SECONDS = 30.0
 _CHILD_HEALTH_CHECK_INTERVAL_SECONDS = 10.0
+_DEFAULT_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL_SECONDS = 300.0
 
 
 def _json_size_bytes(payload: Any) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _workstation_ssh_active_probe_interval_seconds() -> float:
+    raw_value = os.environ.get("AUTOFLUID_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL")
+    if raw_value is None:
+        return _DEFAULT_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL_SECONDS
+    try:
+        return max(1.0, float(raw_value))
+    except ValueError:
+        logger.warning(
+            "[Worker] AUTOFLUID_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL=%r 无效，使用默认值 %.1f",
+            raw_value,
+            _DEFAULT_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL_SECONDS
 
 
 def _state_db_config_count(db_path: str) -> int:
@@ -206,9 +223,18 @@ class PipelineDaemon:
         self._ssh_health_thread: threading.Thread | None = None
         self._ssh_health_stop_event = threading.Event()
         self._ssh_health_interval_seconds = get_workstation_ssh_health_interval()
-        self._ssh_health_active_probe_interval_seconds = 300.0
+        self._ssh_health_active_probe_interval_seconds = (
+            _workstation_ssh_active_probe_interval_seconds()
+        )
+        self._ssh_health_probe_lock = threading.Lock()
+        self._ssh_health_force_active_probe = threading.Event()
+        self._ssh_health_wake_event = threading.Event()
         self._last_worker_ssh_active_probe_time = time.time()
         self._last_worker_ssh_check_sources: dict[str, str] = {}
+        self._workstation_ssh_recovery = default_recovery_manager(
+            _PROJECT_ROOT,
+            local_worker_adapter=self.local_worker_adapter,
+        )
         self._config_warnings: list[str] = []
 
         # 运行标志
@@ -1258,6 +1284,7 @@ class PipelineDaemon:
                     logger.warning("[Worker] 刷新工作站槽位异常: %s", e)
                     return False, None, f"刷新工作站槽位失败: {e}"
 
+        self._reset_workstation_ssh_recovery_history()
         results.update(self._refresh_workstation_ssh_checks(source="worker_start"))
         results["registry_ready"] = False
 
@@ -1270,6 +1297,8 @@ class PipelineDaemon:
         if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
             self.local_worker_registry.clear_online_workers()
             logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
+            self._request_workstation_ssh_active_probe()
+            self._start_workstation_ssh_health_monitor()
             target_summary = ", ".join(
                 f"{ws_id}={target['host']}:{target['port']}({target['connectivity_mode']})"
                 for ws_id, target in results["ssh_targets"].items()
@@ -1288,6 +1317,63 @@ class PipelineDaemon:
         if failed_ssh_checks:
             return True, results, f"部分工作站 SSH 连通检查失败: {failed_ssh_checks}"
         return True, results, "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+
+    def _get_runner_ssh_for_check(self, ws_id: str):
+        if self.runner is None:
+            raise RuntimeError("TaskRunner 未初始化")
+        try:
+            return self.runner.get_ssh(ws_id, log_failure=False)
+        except TypeError as exc:
+            if "log_failure" not in str(exc):
+                raise
+            return self.runner.get_ssh(ws_id)
+
+    def _reset_workstation_ssh_recovery_history(self) -> None:
+        recovery_manager = getattr(self, "_workstation_ssh_recovery", None)
+        reset_history = getattr(recovery_manager, "reset_history", None)
+        if not callable(reset_history):
+            return
+        try:
+            if reset_history() is False:
+                logger.warning("[Worker] SSH 恢复历史仍有修复进行中，跳过重置")
+        except Exception as exc:
+            logger.warning("[Worker] SSH 恢复历史重置异常: %s", exc)
+
+    def _ensure_ssh_health_probe_controls(self) -> tuple[threading.Lock, threading.Event]:
+        lock = getattr(self, "_ssh_health_probe_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._ssh_health_probe_lock = lock
+        force_event = getattr(self, "_ssh_health_force_active_probe", None)
+        if force_event is None:
+            force_event = threading.Event()
+            self._ssh_health_force_active_probe = force_event
+        return lock, force_event
+
+    def _ensure_ssh_health_wake_event(self) -> threading.Event:
+        wake_event = getattr(self, "_ssh_health_wake_event", None)
+        if wake_event is None:
+            wake_event = threading.Event()
+            self._ssh_health_wake_event = wake_event
+        return wake_event
+
+    def _request_workstation_ssh_active_probe(self) -> None:
+        lock, force_event = self._ensure_ssh_health_probe_controls()
+        with lock:
+            self._last_worker_ssh_active_probe_time = 0.0
+            force_event.set()
+        self._ensure_ssh_health_wake_event().set()
+
+    def _should_run_workstation_ssh_active_probe(self, now: float, interval: float) -> bool:
+        lock, force_event = self._ensure_ssh_health_probe_controls()
+        with lock:
+            force_active = force_event.is_set()
+            last_active = float(getattr(self, "_last_worker_ssh_active_probe_time", now))
+            if force_active or (interval > 0 and now - last_active >= interval):
+                force_event.clear()
+                self._last_worker_ssh_active_probe_time = now
+                return True
+            return False
 
     def _refresh_workstation_ssh_checks(
         self,
@@ -1361,6 +1447,43 @@ class PipelineDaemon:
                 )
 
         self._last_worker_ssh_checks = dict(results["ssh_checks"])
+        recovery_manager = getattr(self, "_workstation_ssh_recovery", None)
+        if connect and recovery_manager is not None:
+            recovery_updates: dict[str, Any] = {}
+            for ws_id, status in results["ssh_checks"].items():
+                target = results["ssh_targets"].get(ws_id, {})
+                record_check = getattr(recovery_manager, "record_check", None)
+                if not callable(record_check):
+                    continue
+                try:
+                    update = record_check(ws_id, status, target, source=source)
+                except Exception as exc:
+                    logger.warning("[Worker] 工作站 %s SSH 恢复协调异常: %s", ws_id, exc)
+                    update = {"status": status, "repair": {"status": "error", "detail": str(exc)}}
+                recovery_updates[ws_id] = update
+                repair_status = str(update.get("repair", {}).get("status", ""))
+                if repair_status == "repair_succeeded" and self.runner is not None:
+                    try:
+                        self.runner.disconnect_ssh(ws_id, lock_timeout=1.0)
+                    except TypeError:
+                        self.runner.disconnect_ssh(ws_id)
+                    except Exception as exc:
+                        logger.debug("[Worker] 工作站 %s SSH 修复后断开旧连接异常: %s", ws_id, exc)
+                    post_repair_status = "disconnected"
+                    try:
+                        ssh = self._get_runner_ssh_for_check(ws_id)
+                        if bool(ssh.is_connected()):
+                            results["ssh_checks"][ws_id] = "ok"
+                            self._last_worker_ssh_checks[ws_id] = "ok"
+                            record_check(ws_id, "ok", target, source="post_repair_probe")
+                            post_repair_status = "ok"
+                    except Exception as exc:
+                        post_repair_status = f"error: {exc}"
+                        logger.debug("[Worker] 工作站 %s SSH 修复后复查仍失败: %s", ws_id, exc)
+                    if post_repair_status != "ok":
+                        record_check(ws_id, post_repair_status, target, source="post_repair_probe")
+            if recovery_updates:
+                results["ssh_recovery"] = recovery_updates
         if connect:
             now = time.time()
             self._last_worker_ssh_check_times = {
@@ -1404,20 +1527,26 @@ class PipelineDaemon:
         self._ssh_health_thread.start()
 
     def _workstation_ssh_health_loop(self) -> None:
-        while not self._ssh_health_stop_event.wait(self._ssh_health_interval_seconds):
+        self._run_workstation_ssh_health_check_once()
+        if self._ssh_health_stop_event.is_set():
+            return
+        wake_event = self._ensure_ssh_health_wake_event()
+        while True:
+            wake_event.wait(self._ssh_health_interval_seconds)
+            wake_event.clear()
+            if self._ssh_health_stop_event.is_set():
+                break
             self._run_workstation_ssh_health_check_once()
 
     def _run_workstation_ssh_health_check_once(self) -> dict[str, Any]:
-        if self.runner is None:
+        if getattr(self, "runner", None) is None:
             return {"ssh_checks": {}, "ssh_targets": {}}
         try:
             now = time.time()
             interval = float(
                 getattr(self, "_ssh_health_active_probe_interval_seconds", 300.0)
             )
-            last_active = float(getattr(self, "_last_worker_ssh_active_probe_time", now))
-            if interval > 0 and now - last_active >= interval:
-                self._last_worker_ssh_active_probe_time = now
+            if self._should_run_workstation_ssh_active_probe(now, interval):
                 return self._refresh_workstation_ssh_checks(
                     connect=True,
                     source="active_probe",
@@ -1431,10 +1560,25 @@ class PipelineDaemon:
         stop_event = getattr(self, "_ssh_health_stop_event", None)
         if stop_event is not None:
             stop_event.set()
+        wake_event = getattr(self, "_ssh_health_wake_event", None)
+        if wake_event is not None:
+            wake_event.set()
         thread = getattr(self, "_ssh_health_thread", None)
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._ssh_health_thread = None
+        self._shutdown_workstation_ssh_recovery()
+
+    def _shutdown_workstation_ssh_recovery(self) -> None:
+        recovery_manager = getattr(self, "_workstation_ssh_recovery", None)
+        shutdown_recovery = getattr(recovery_manager, "shutdown", None)
+        if not callable(shutdown_recovery):
+            return
+        try:
+            if shutdown_recovery() is False:
+                logger.warning("[Worker] SSH 恢复协调器关闭超时")
+        except Exception as e:
+            logger.warning("[Worker] SSH 恢复协调器关闭异常: %s", e)
 
     def handle_worker_stop(self, params: dict[str, Any] | None = None) -> tuple[bool, Any, str]:
         """停止所有 worker：断开工作站 SSH 连接，清理 Registry 任务队列。"""
@@ -1655,6 +1799,12 @@ class PipelineDaemon:
             health["workstation_ssh_checked_at"] = workstation_checked_at
         if workstation_sources:
             health["workstation_ssh_source"] = workstation_sources
+        recovery_manager = getattr(self, "_workstation_ssh_recovery", None)
+        snapshot = getattr(recovery_manager, "snapshot", None)
+        if callable(snapshot):
+            recovery_snapshot = snapshot()
+            if recovery_snapshot:
+                health["workstation_ssh_recovery"] = recovery_snapshot
         return health
 
     @staticmethod
