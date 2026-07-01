@@ -1,7 +1,7 @@
 # Log Directory Structure Design
 
 > **状态：部分已实现**<br>
-> 最后更新：2026-06-24<br>
+> 最后更新：2026-06-30<br>
 > `utils/log_paths.py` 已创建并集成；Rust TUI 已适配新布局发现逻辑；
 > PowerShell 隧道脚本和服务路径迁移仍在进行中。
 
@@ -225,15 +225,16 @@ local and risks breaking recovery code. A later change can add
 
 ## Implementation Plan
 
-1. Add `utils/log_paths.py` with the path helper API.
-2. Route Python session log creation through the helper.
-3. Move fixed daemon service logs to `services/<component>/`.
-4. Update SpaceClaim fallback log directory.
-5. Update TUI log discovery and export path.
-6. Update PowerShell tunnel scripts to prefer `logs/local/tunnels/`.
-7. Update ocar daemon bootstrap command to write
-   `logs/server/services/daemon-bootstrap/autofluid-daemon.out`.
-8. Update tests and documentation that assert old paths.
+| # | 任务 | 状态 |
+|---|------|:---:|
+| 1 | Add `utils/log_paths.py` with the path helper API | ✅ 已实现 |
+| 2 | Route Python session log creation through the helper | ✅ 已实现 |
+| 3 | Move fixed daemon service logs to `services/<component>/` | ✅ 已实现（`logs/local/` 和 `logs/server/` 结构已建立） |
+| 4 | Update SpaceClaim fallback log directory | ⚠️ 部分实现（Bridge 日志写入 session 目录，独立 transit 使用 `services/spaceclaim/`） |
+| 5 | Update TUI log discovery and export path | ✅ 已实现（TUI 已适配新布局发现逻辑，优先检查新路径再回退旧路径） |
+| 6 | Update PowerShell tunnel scripts to prefer `logs/local/tunnels/` | ⚠️ 进行中（本地 tunnel 日志已迁移，PowerShell 脚本迁移仍在进行） |
+| 7 | Update ocar daemon bootstrap command to write `logs/server/services/daemon-bootstrap/autofluid-daemon.out` | ⚠️ 进行中 |
+| 8 | Update tests and documentation that assert old paths | ⚠️ 部分完成
 
 ## Verification
 
@@ -271,3 +272,20 @@ If Python logging internals change substantially, also run:
   Mitigation: keep workstation task files in `flag_dir` for this iteration.
 - Tunnel setup should not fail just because repo logs are not writable.
   Mitigation: preserve temp fallback.
+
+## Remaining Work (2026-06-30)
+
+The following items from the implementation plan are still in progress:
+
+| # | 任务 | 阻塞项 |
+|---|------|--------|
+| 4 | Update SpaceClaim fallback log directory | 独立 transit 路径需确认 `services/spaceclaim/` 写入权限 |
+| 6 | Update PowerShell tunnel scripts to prefer `logs/local/tunnels/` | 需逐一更新 `scripts/start_*_tunnel.ps1` 脚本 |
+| 7 | Update ocar daemon bootstrap to write `logs/server/services/daemon-bootstrap/` | ocar systemd unit 中的 `ExecStart` 和 `StandardOutput` 路径需同步 |
+| 8 | Update tests that assert old paths | 需 grep 全量 `logs/daemon/`、`logs/client/` 旧路径引用并逐一迁移 |
+
+**验证命令**（完成上述迁移后运行）：
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_detail_log.py tests/test_spaceclaim_bridge_source.py
+Push-Location autofluid-tui; cargo test; Pop-Location
+```

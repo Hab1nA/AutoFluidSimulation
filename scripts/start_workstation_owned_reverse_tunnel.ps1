@@ -19,6 +19,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$OwnedTunnelScriptVersion = 2
 
 function Resolve-SshExe {
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOFLUID_SSH_EXE)) {
@@ -57,9 +58,21 @@ function Get-OwnedTunnelScriptPath {
     return Join-Path $InstallDir "start_workstation_owned_reverse_tunnel.ps1"
 }
 
-function Get-OwnedTunnelLogPaths {
+function Get-OwnedTunnelLogDir {
     $logDir = Join-Path $InstallDir "logs"
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    try {
+        New-Item -ItemType Directory -Path $logDir -Force -ErrorAction Stop | Out-Null
+        return $logDir
+    }
+    catch {
+        $fallbackDir = Join-Path ([System.IO.Path]::GetTempPath()) "AutoFluid\tunnel-logs"
+        New-Item -ItemType Directory -Path $fallbackDir -Force -ErrorAction Stop | Out-Null
+        return $fallbackDir
+    }
+}
+
+function Get-OwnedTunnelLogPaths {
+    $logDir = Get-OwnedTunnelLogDir
     $prefix = "workstation-$WorkstationId-$RemoteBindPort"
     return @{
         Supervisor = Join-Path $logDir "$prefix-supervisor.log"
@@ -68,15 +81,24 @@ function Get-OwnedTunnelLogPaths {
     }
 }
 
+function Get-OwnedTunnelStatusPath {
+    $logDir = Get-OwnedTunnelLogDir
+    return Join-Path $logDir "workstation-$WorkstationId-$RemoteBindPort-monitor-status.json"
+}
+
 function Write-OwnedTunnelLog {
     param([string]$Message)
-    $logs = Get-OwnedTunnelLogPaths
-    if ((Test-Path -LiteralPath $logs.Supervisor -PathType Leaf) -and
-        ((Get-Item -LiteralPath $logs.Supervisor).Length -gt 5242880)) {
-        Move-Item -LiteralPath $logs.Supervisor -Destination "$($logs.Supervisor).1" -Force
+    try {
+        $logs = Get-OwnedTunnelLogPaths
+        if ((Test-Path -LiteralPath $logs.Supervisor -PathType Leaf) -and
+            ((Get-Item -LiteralPath $logs.Supervisor -ErrorAction Stop).Length -gt 5242880)) {
+            Move-Item -LiteralPath $logs.Supervisor -Destination "$($logs.Supervisor).1" -Force -ErrorAction Stop
+        }
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -LiteralPath $logs.Supervisor -Value "[$timestamp] $Message" -Encoding UTF8 -ErrorAction Stop
     }
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -LiteralPath $logs.Supervisor -Value "[$timestamp] $Message" -Encoding UTF8
+    catch {
+    }
 }
 
 function Write-RateLimitedOwnedTunnelLog {
@@ -91,6 +113,36 @@ function Write-RateLimitedOwnedTunnelLog {
         Write-OwnedTunnelLog -Message $Message
         $LogState.LastKey = $Key
         $LogState.LastAt = $now
+    }
+}
+
+function Write-OwnedTunnelStatus {
+    param(
+        [string]$State,
+        [string]$LastReason = "",
+        [System.Diagnostics.Process]$SshProcess = $null
+    )
+    $sshPid = $null
+    if ($null -ne $SshProcess -and -not $SshProcess.HasExited) {
+        $sshPid = [int]$SshProcess.Id
+    }
+    $statusObject = [ordered]@{
+        workstation_id = $WorkstationId
+        remote_bind_port = $RemoteBindPort
+        updated_at = (Get-Date).ToUniversalTime().ToString("o")
+        state = $State
+        last_reason = $LastReason
+        ssh_pid = $sshPid
+    }
+    try {
+        $statusObject | ConvertTo-Json -Compress | Set-Content -LiteralPath (Get-OwnedTunnelStatusPath) -Encoding UTF8
+    }
+    catch {
+        try {
+            Write-OwnedTunnelLog -Message "Failed to write monitor status: $($_.Exception.Message)"
+        }
+        catch {
+        }
     }
 }
 
@@ -146,11 +198,25 @@ function Test-RemoteTunnelEndpoint {
         $identityArgs = @("-i", $TunnelIdentityFile)
     }
     try {
-        & $SshExe -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new @identityArgs $TunnelTarget $remoteCommand 1>$null 2>$null
-        return $LASTEXITCODE -eq 0
+        $arguments = @(
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new"
+        ) + $identityArgs + @($TunnelTarget, $remoteCommand)
+        $result = Invoke-OwnedTunnelSshCommand `
+            -SshExe $SshExe `
+            -Arguments $arguments `
+            -TimeoutSeconds $SshCommandTimeoutSeconds
+        if ($result.TimedOut) {
+            return "remote-probe-timeout"
+        }
+        if ($result.ExitCode -eq 0) {
+            return "ready"
+        }
+        return "remote-probe-failed"
     }
     catch {
-        return $false
+        return "remote-probe-failed"
     }
 }
 
@@ -233,8 +299,12 @@ function Wait-RemoteTunnelEndpoint {
         if ($null -ne $SshProcess -and $SshProcess.HasExited) {
             return "ssh-exited-$($SshProcess.ExitCode)"
         }
-        if (Test-RemoteTunnelEndpoint -SshExe $SshExe) {
+        $probeStatus = Test-RemoteTunnelEndpoint -SshExe $SshExe
+        if ($probeStatus -eq "ready") {
             return "ready"
+        }
+        if ($probeStatus -eq "remote-probe-timeout") {
+            return "startup-probe-timeout"
         }
         Start-Sleep -Seconds $ProbeIntervalSeconds
     }
@@ -304,15 +374,39 @@ function Start-OwnedTunnelMonitor {
     $sshProcess = $null
     $failureState = @{ Count = 0 }
     $logState = @{ LastKey = ""; LastAt = $null }
-    $sshExe = Resolve-SshExe
-    $logs = Get-OwnedTunnelLogPaths
-    Write-OwnedTunnelLog -Message "Monitor starting for ${RemoteBindHost}:${RemoteBindPort} -> ${TargetHost}:${TargetPort} via ${TunnelTarget}."
+    $sshExe = $null
+    $logs = $null
     try {
+        Write-OwnedTunnelLog -Message "Monitor starting for ${RemoteBindHost}:${RemoteBindPort} -> ${TargetHost}:${TargetPort} via ${TunnelTarget}."
         while ($true) {
+            Write-OwnedTunnelStatus -State "loop" -LastReason "" -SshProcess $sshProcess
+            if ([string]::IsNullOrWhiteSpace($sshExe)) {
+                try {
+                    $sshExe = Resolve-SshExe
+                }
+                catch {
+                    $delay = Register-TunnelFailure -Reason "ssh-exe-unavailable" -FailureState $failureState -LogState $logState
+                    Write-OwnedTunnelStatus -State "retry_wait" -LastReason "ssh-exe-unavailable"
+                    Start-Sleep -Seconds $delay
+                    continue
+                }
+            }
+            if ($null -eq $logs) {
+                try {
+                    $logs = Get-OwnedTunnelLogPaths
+                }
+                catch {
+                    $delay = Register-TunnelFailure -Reason "log-path-unavailable" -FailureState $failureState -LogState $logState
+                    Write-OwnedTunnelStatus -State "retry_wait" -LastReason "log-path-unavailable"
+                    Start-Sleep -Seconds $delay
+                    continue
+                }
+            }
             if ($null -ne $sshProcess -and $sshProcess.HasExited) {
                 $exitCode = $sshProcess.ExitCode
                 $sshProcess = $null
                 $delay = Register-TunnelFailure -Reason "ssh-exited-$exitCode" -FailureState $failureState -LogState $logState
+                Write-OwnedTunnelStatus -State "retry_wait" -LastReason "ssh-exited-$exitCode"
                 Start-Sleep -Seconds $delay
                 continue
             }
@@ -326,31 +420,40 @@ function Start-OwnedTunnelMonitor {
                     Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
                 }
                 $delay = Register-TunnelFailure -Reason "local-target-unreachable" -FailureState $failureState -LogState $logState
+                Write-OwnedTunnelStatus -State "retry_wait" -LastReason "local-target-unreachable"
                 Start-Sleep -Seconds $delay
                 continue
             }
 
             $ownedSshProcesses = @(Get-OwnedTunnelProcesses -Kind "Ssh")
-            if ($ownedSshProcesses.Count -gt 0 -and (Test-RemoteTunnelEndpoint -SshExe $sshExe)) {
+            $remoteStatus = "remote-probe-failed"
+            if ($ownedSshProcesses.Count -gt 0) {
+                $remoteStatus = Test-RemoteTunnelEndpoint -SshExe $sshExe
+            }
+            if ($ownedSshProcesses.Count -gt 0 -and $remoteStatus -eq "ready") {
                 Reset-TunnelFailureBudget -FailureState $failureState
+                Write-OwnedTunnelStatus -State "ready" -LastReason "" -SshProcess $sshProcess
                 Start-Sleep -Seconds $ProbeIntervalSeconds
                 continue
             }
 
             if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
-                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
+                $delay = Register-TunnelFailure -Reason $remoteStatus -FailureState $failureState -LogState $logState
                 if ([int]$failureState.Count -lt $RemoteProbeFailureThreshold) {
+                    Write-OwnedTunnelStatus -State "probe_failed" -LastReason $remoteStatus -SshProcess $sshProcess
                     Start-Sleep -Seconds $ProbeIntervalSeconds
                     continue
                 }
                 Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
                 $sshProcess = $null
+                Write-OwnedTunnelStatus -State "retry_wait" -LastReason $remoteStatus
                 Start-Sleep -Seconds $delay
                 continue
             }
             if ($ownedSshProcesses.Count -gt 0) {
-                $delay = Register-TunnelFailure -Reason "remote-probe-failed" -FailureState $failureState -LogState $logState
+                $delay = Register-TunnelFailure -Reason $remoteStatus -FailureState $failureState -LogState $logState
                 if ([int]$failureState.Count -lt $RemoteProbeFailureThreshold) {
+                    Write-OwnedTunnelStatus -State "probe_failed" -LastReason $remoteStatus
                     Start-Sleep -Seconds $ProbeIntervalSeconds
                     continue
                 }
@@ -358,28 +461,41 @@ function Start-OwnedTunnelMonitor {
                     Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
                 }
                 Clear-StaleRemoteForward -SshExe $sshExe | Out-Null
+                Write-OwnedTunnelStatus -State "retry_wait" -LastReason $remoteStatus
                 Start-Sleep -Seconds $delay
                 continue
             }
 
             Clear-StaleRemoteForward -SshExe $sshExe | Out-Null
             $argumentList = Get-ReverseTunnelArguments
+            Write-OwnedTunnelStatus -State "starting" -LastReason "" -SshProcess $sshProcess
             Write-RateLimitedOwnedTunnelLog `
                 -Message "Starting ssh reverse tunnel: $sshExe $($argumentList -join ' ')" `
                 -Key "starting" `
                 -LogState $logState
-            $sshProcess = Start-Process -FilePath $sshExe `
-                -ArgumentList $argumentList `
-                -WindowStyle Hidden `
-                -RedirectStandardOutput $logs.Stdout `
-                -RedirectStandardError $logs.Stderr `
-                -PassThru
+            try {
+                $sshProcess = Start-Process -FilePath $sshExe `
+                    -ArgumentList $argumentList `
+                    -WindowStyle Hidden `
+                    -RedirectStandardOutput $logs.Stdout `
+                    -RedirectStandardError $logs.Stderr `
+                    -PassThru
+            }
+            catch {
+                $sshProcess = $null
+                $sshExe = $null
+                $delay = Register-TunnelFailure -Reason "ssh-start-failed" -FailureState $failureState -LogState $logState
+                Write-OwnedTunnelStatus -State "retry_wait" -LastReason "ssh-start-failed"
+                Start-Sleep -Seconds $delay
+                continue
+            }
             $startupStatus = Wait-RemoteTunnelEndpoint `
                 -SshExe $sshExe `
                 -SshProcess $sshProcess `
                 -TimeoutSeconds ([Math]::Max(30, $RestartDelaySeconds * 6))
             if ($startupStatus -eq "ready") {
                 Reset-TunnelFailureBudget -FailureState $failureState
+                Write-OwnedTunnelStatus -State "ready" -LastReason "" -SshProcess $sshProcess
                 continue
             }
             if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
@@ -387,10 +503,12 @@ function Start-OwnedTunnelMonitor {
             }
             $sshProcess = $null
             $delay = Register-TunnelFailure -Reason $startupStatus -FailureState $failureState -LogState $logState
+            Write-OwnedTunnelStatus -State "retry_wait" -LastReason $startupStatus
             Start-Sleep -Seconds $delay
         }
     }
     finally {
+        Write-OwnedTunnelStatus -State "stopped" -LastReason "monitor-exiting" -SshProcess $sshProcess
         if ($null -ne $sshProcess -and -not $sshProcess.HasExited) {
             Stop-Process -Id $sshProcess.Id -Force -ErrorAction SilentlyContinue
         }
@@ -428,7 +546,8 @@ function Install-OwnedTunnelTask {
         "-RestartDelaySeconds", ([string]$RestartDelaySeconds),
         "-ProbeIntervalSeconds", ([string]$ProbeIntervalSeconds),
         "-RemoteProbeFailureThreshold", ([string]$RemoteProbeFailureThreshold),
-        "-LogRepeatSeconds", ([string]$LogRepeatSeconds)
+        "-LogRepeatSeconds", ([string]$LogRepeatSeconds),
+        "-SshCommandTimeoutSeconds", ([string]$SshCommandTimeoutSeconds)
     )
     $argumentText = ($args | ForEach-Object {
         if ($_ -match '\s|"' ) { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
@@ -485,9 +604,27 @@ function Get-OwnedTunnelStatus {
     $taskName = Get-OwnedTunnelTaskName
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     $runValue = (Get-ItemProperty -Path (Get-OwnedTunnelRunKeyPath) -Name $taskName -ErrorAction SilentlyContinue).$taskName
-    $sshExe = Resolve-SshExe
+    $remoteProbeStatus = "ssh-exe-unavailable"
+    try {
+        $sshExe = Resolve-SshExe
+        $remoteProbeStatus = Test-RemoteTunnelEndpoint -SshExe $sshExe
+    }
+    catch {
+        $remoteProbeStatus = "ssh-exe-unavailable"
+    }
+    $monitorStatus = $null
+    $monitorStatusPath = Get-OwnedTunnelStatusPath
+    if (Test-Path -LiteralPath $monitorStatusPath -PathType Leaf) {
+        try {
+            $monitorStatus = Get-Content -LiteralPath $monitorStatusPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        }
+        catch {
+            $monitorStatus = $null
+        }
+    }
     $statusObject = [ordered]@{
         workstation_id = $WorkstationId
+        script_version = $OwnedTunnelScriptVersion
         task_name = $taskName
         task_exists = $null -ne $task
         task_state = if ($null -eq $task) { "missing" } else { [string]$task.State }
@@ -495,7 +632,12 @@ function Get-OwnedTunnelStatus {
         monitor_processes = @((Get-OwnedTunnelProcesses -Kind "Monitor")).Count
         ssh_processes = @((Get-OwnedTunnelProcesses -Kind "Ssh")).Count
         local_target_ok = Test-TcpEndpoint -HostName $TargetHost -Port $TargetPort
-        remote_tunnel_ok = Test-RemoteTunnelEndpoint -SshExe $sshExe
+        remote_tunnel_ok = $remoteProbeStatus -eq "ready"
+        remote_probe_status = $remoteProbeStatus
+        monitor_last_seen_at = if ($null -eq $monitorStatus) { "" } else { [string]$monitorStatus.updated_at }
+        monitor_state = if ($null -eq $monitorStatus) { "" } else { [string]$monitorStatus.state }
+        monitor_last_reason = if ($null -eq $monitorStatus) { "" } else { [string]$monitorStatus.last_reason }
+        monitor_ssh_pid = if ($null -eq $monitorStatus) { $null } else { $monitorStatus.ssh_pid }
     }
     $statusObject | ConvertTo-Json -Compress
 }

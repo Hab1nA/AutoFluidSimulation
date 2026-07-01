@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -23,6 +24,9 @@ DEFAULT_TUNNEL_TARGET = "ocar"
 SCRIPT_NAME = "start_workstation_owned_reverse_tunnel.ps1"
 REMOTE_TUNNEL_PROBE_ATTEMPTS = 2
 REMOTE_TUNNEL_PROBE_RETRY_DELAY_SECONDS = 0.25
+MONITOR_HEARTBEAT_STALE_SECONDS = 120
+OWNED_TUNNEL_SCRIPT_VERSION = 2
+STATUS_COMMAND_TIMEOUT_SECONDS = 45
 TRANSIENT_REMOTE_TUNNEL_PROBE_ERRORS = (
     "connection reset",
     "connection closed",
@@ -405,6 +409,97 @@ def _quote_cmd_value(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_monitor_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    timezone_start = len(raw)
+    for index in range(10, len(raw)):
+        if raw[index] in "+-":
+            timezone_start = index
+            break
+    main = raw[:timezone_start]
+    suffix = raw[timezone_start:]
+    if "." in main:
+        head, fraction = main.split(".", 1)
+        main = f"{head}.{fraction[:6]}"
+    try:
+        parsed = datetime.fromisoformat(f"{main}{suffix}")
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _annotate_monitor_health(payload: dict[str, Any]) -> dict[str, Any]:
+    payload.setdefault("monitor_last_seen_at", "")
+    payload.setdefault("monitor_state", "")
+    payload.setdefault("monitor_last_reason", "")
+    monitor_processes = _as_int(payload.get("monitor_processes"))
+    ssh_processes = _as_int(payload.get("ssh_processes"))
+    remote_tunnel_ok = _as_bool(payload.get("remote_tunnel_ok"))
+    last_seen = _parse_monitor_timestamp(payload.get("monitor_last_seen_at"))
+    heartbeat_stale = True
+    if last_seen is not None:
+        heartbeat_stale = (datetime.now(timezone.utc) - last_seen).total_seconds() > MONITOR_HEARTBEAT_STALE_SECONDS
+    payload["monitor_wedged"] = (
+        monitor_processes > 0
+        and ssh_processes == 0
+        and not remote_tunnel_ok
+        and heartbeat_stale
+    )
+    return payload
+
+
+def _annotate_script_health(payload: dict[str, Any]) -> dict[str, Any]:
+    has_owned_status_fields = any(
+        key in payload
+        for key in (
+            "task_exists",
+            "monitor_processes",
+            "remote_probe_status",
+        )
+    )
+    script_version = _as_int(payload.get("script_version"))
+    if script_version:
+        payload["script_version"] = script_version
+    payload["script_needs_update"] = has_owned_status_fields and script_version < OWNED_TUNNEL_SCRIPT_VERSION
+    return payload
+
+
+def _annotate_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    _annotate_monitor_health(payload)
+    _annotate_script_health(payload)
+    return payload
+
+
+def _status_requires_repair(status: Mapping[str, Any]) -> bool:
+    payload = status.get("status_payload")
+    if not isinstance(payload, Mapping):
+        return False
+    return _as_bool(payload.get("monitor_wedged")) or _as_bool(payload.get("script_needs_update"))
+
+
 def status_workstation_tunnel(
     spec: WorkstationTunnelSpec,
     *,
@@ -425,7 +520,7 @@ def status_workstation_tunnel(
         for candidate_dir in _candidate_install_dirs(install_dir, spec.username):
             remote_script = _remote_script_path(candidate_dir)
             status_cmd = _ps_file_command(remote_script, "-Status", spec, candidate_dir)
-            out, err, code = ssh.exec_command(status_cmd, timeout=30)
+            out, err, code = ssh.exec_command(status_cmd, timeout=STATUS_COMMAND_TIMEOUT_SECONDS)
             if code != 0:
                 failed_attempts.append({"install_dir": candidate_dir, "detail": err or out})
                 continue
@@ -433,9 +528,10 @@ def status_workstation_tunnel(
                 payload = json.loads(out.strip() or "{}")
             except json.JSONDecodeError:
                 payload = {"raw": out.strip()}
-            installed = bool(payload.get("task_exists")) or bool(payload.get("registry_run_exists"))
-            ssh_processes = int(payload.get("ssh_processes") or 0)
-            ok = installed and ssh_processes > 0 and bool(payload.get("remote_tunnel_ok"))
+            payload = _annotate_status_payload(payload)
+            installed = _as_bool(payload.get("task_exists")) or _as_bool(payload.get("registry_run_exists"))
+            ssh_processes = _as_int(payload.get("ssh_processes"))
+            ok = installed and ssh_processes > 0 and _as_bool(payload.get("remote_tunnel_ok"))
             result = _result(spec, ok, "ok" if ok else "not_ready", "")
             result["install_dir"] = candidate_dir
             result["status_payload"] = payload
@@ -444,10 +540,11 @@ def status_workstation_tunnel(
             return result
         cmd_status = _status_cmd_lifecycle_fallback(ssh, spec, install_dir)
         if cmd_status["installed"] or cmd_status["remote_tunnel_ok"]:
+            cmd_status = _annotate_status_payload(cmd_status)
             ok = (
-                bool(cmd_status["installed"])
-                and int(cmd_status.get("ssh_processes") or 0) > 0
-                and bool(cmd_status["remote_tunnel_ok"])
+                _as_bool(cmd_status["installed"])
+                and _as_int(cmd_status.get("ssh_processes")) > 0
+                and _as_bool(cmd_status["remote_tunnel_ok"])
             )
             result = _result(spec, ok, "ok" if ok else "not_ready", "")
             result["install_dir"] = cmd_status["install_dir"]
@@ -471,7 +568,7 @@ def ensure_workstation_tunnel(
     _emit_progress(progress, "status_start", spec)
     initial_status = status_workstation_tunnel(spec, install_dir=install_dir)
     _emit_progress(progress, "status_done", spec, result=initial_status)
-    if initial_status.get("ok"):
+    if initial_status.get("ok") and not _status_requires_repair(initial_status):
         result = dict(initial_status)
         result["ensure_action"] = "skipped"
         _emit_progress(progress, "ensure_skipped", spec, result=result)
@@ -490,7 +587,10 @@ def ensure_workstation_tunnel(
     final_status = status_workstation_tunnel(spec, install_dir=install_dir)
     _emit_progress(progress, "final_status_done", spec, result=final_status)
     result = dict(final_status)
-    result["ensure_action"] = "repaired" if result.get("ok") else "repair_not_ready"
+    repair_ready = bool(result.get("ok")) and not _status_requires_repair(result)
+    if not repair_ready:
+        result["ok"] = False
+    result["ensure_action"] = "repaired" if repair_ready else "repair_not_ready"
     result["initial_status"] = initial_status
     result["repair_result"] = repair_result
     return result

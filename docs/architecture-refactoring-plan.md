@@ -2,8 +2,8 @@
 
 > 文档版本：v1.6<br>
 > 创建日期：2026-05-09<br>
-> 最后更新：2026-06-20<br>
-> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v2.8.3)
+> 最后更新：2026-06-30<br>
+> 适用项目：液氧甲烷火箭发动机仿真流水线系统 (AutoFluid v3.0.0)
 
 ---
 
@@ -87,7 +87,7 @@
 ### 2.2 流水线阶段
 
 ```
-SW → SC → Transfer → Meshing → Solver
+SW → SC → Transfer → Meshing → Solver → PostProcess
 ```
 
 | 阶段 | 执行位置 | 技术手段 | 并发模型 |
@@ -97,6 +97,7 @@ SW → SC → Transfer → Meshing → Solver
 | Transfer | 本地 PC → 工作站 | paramiko SFTP | 流水线并发（Worker 线程池） |
 | Meshing | 远程工作站 | SSH + PowerShell Start-Process | 流水线并发（Worker 线程池）+ MeshingMonitor 串行管理 |
 | Solver | 远程工作站 | SSH + PowerShell Start-Process | 全局屏障后并行启动 |
+| PostProcess | 远程工作站 | SSH + PowerShell Start-Process（由 `BarrierCoordinator` 自动调度） | Solver 完成后逐构型自动执行 |
 
 ### 2.3 关键代码模块清单
 
@@ -122,7 +123,8 @@ SW → SC → Transfer → Meshing → Solver
 | RemoteExecutor | `executor/remote_executor.py` | ~282 | SFTP 传输 + 远程 Meshing/Solver 执行 |
 | SWExecutor | `executor/sw_executor.py` | ~1395 | SolidWorks COM 自动化（直接 API 导出 STEP） |
 | SCScript | `executor/spaceclaim_transit.py` | ~789 | SpaceClaim Python API 转换脚本 |
-| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型到工作站的轮询分配 |
+| WorkstationSlotCoordinator | `engine/scheduler/workstation_slots.py` | ~143 | 动态槽位分配：按工作站空闲槽位实时分配 Transfer→Meshing 构型 |
+| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型到工作站的静态轮询分配（设计稿，未落地） |
 | LocalWorkerRegistry | `engine/local_worker_registry.py` | ~120 | Worker 注册、心跳、任务队列调度 |
 | LocalWorkerAdapter | `engine/local_worker_adapter.py` | ~180 | Daemon 侧 Worker 代理，投递 SW/SC 任务 |
 | LocalWorker | `engine/local_worker.py` | ~350 | 本地 Worker 客户端，执行 SW/SC 任务 |
@@ -272,7 +274,9 @@ LocalWorker 与服务器 A 的 Daemon 之间通过 RPC 通信（复用现有 IPC
 | `collect_results` | LocalWorker → Daemon | 请求拉取暂存结果 | ❌ 未实现 |
 | `collect_ack` | LocalWorker → Daemon | 确认结果已接收 | ❌ 未实现 |
 
-> **2026-06-18 状态更新**：前 5 个命令（`worker_register` ~ `worker_step_error`）已在 `ipc/protocol.py` 中定义并在 daemon 侧注册处理器。`LocalWorker`、`LocalWorkerRegistry`、`LocalWorkerAdapter`、`ConfigAssigner` 均已实现。剩余 5 个命令为远期规划功能，对应 PostProcess/Collect 阶段。
+> **2026-06-18 状态更新**：前 5 个命令（`worker_register` ~ `worker_step_error`）已在 `ipc/protocol.py` 中定义并在 daemon 侧注册处理器。`LocalWorker`、`LocalWorkerRegistry`、`LocalWorkerAdapter` 均已实现。`ConfigAssigner`（静态轮询分配器）**未实现**——当前实际由 `WorkstationSlotCoordinator`（动态槽位分配）替代。剩余 5 个命令为远期规划功能，对应 PostProcess/Collect 阶段。
+>
+> **2026-06-30 状态更新**：`PostProcess` 阶段已完全落地（`STEP_NAMES` 包含 `"postprocess"`，`TaskRunner.execute_postprocess()` 委托 `RemoteExecutor` 执行，`BarrierCoordinator` 在 Solver 完成后自动调度）。
 
 #### 4.1.3 服务器 A 的 Daemon 改造
 
@@ -441,11 +445,14 @@ def get_ssh(self, workstation_id: str) -> RemoteWorkstation:
     ...
 ```
 
-#### 4.2.3 构型分配器 (ConfigAssigner)
+#### 4.2.3 构型分配 — 当前实际实现
 
-**已落地实现**：新增模块，负责将构型分配到工作站。采用轮询取模方案：
+**状态**：原始设计的 `ConfigAssigner`（`engine/config_assigner.py`，静态轮询取模分配）**未实现**。当前实际由 `engine/scheduler/workstation_slots.py` 中的 `WorkstationSlotCoordinator` 采用**动态槽位分配**策略：Transfer→Meshing 阶段按工作站空闲槽位实时 claim，分配结果持久化到 `steps.workstation_id`。
+
+**原始设计方案**（保留供参考，**未落地**）：
 
 ```python
+# 以下代码为设计稿，当前代码库中不存在
 class ConfigAssigner:
     def __init__(self, workstations: list[str], configs: list[int]):
         self._assignment: dict[str, list[int]] = {ws: [] for ws in workstations}
@@ -1051,7 +1058,8 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 | 模块 | 文件 | 预估行数 | 职责 | 状态 |
 |------|------|---------|------|:----:|
 | LocalWorker | `engine/local_worker.py` | ~350 | 本地 PC 侧 Worker 进程：执行 SW/SC、监控 STEP 文件、上传 SCDOC、拉取结果 | ✅ 已实现 |
-| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型分配器：将构型按策略分配到工作站 | ✅ 已实现 |
+| ConfigAssigner | `engine/config_assigner.py` | ~43 | 构型分配器：将构型按策略分配到工作站（设计稿） | ❌ 未实现（由 `WorkstationSlotCoordinator` 替代） |
+| WorkstationSlotCoordinator | `engine/scheduler/workstation_slots.py` | ~143 | 动态槽位分配：按工作站空闲槽位实时分配构型 | ✅ 已实现 |
 | LocalWorkerAdapter | `engine/local_worker_adapter.py` | ~180 | Daemon 侧适配器：替代 TaskRunner 中直接调用 SW/SC 的逻辑 | ✅ 已实现 |
 | LocalWorkerRegistry | `engine/local_worker_registry.py` | ~120 | Worker 注册、心跳、任务队列调度 | ✅ 已实现 |
 | ResultCollector | `engine/result_collector.py` | ~250 | 服务器 A 侧结果收集：从工作站拉取、暂存管理、推送本地 PC | ❌ 远期 |
@@ -1089,7 +1097,7 @@ Collect 不纳入 `steps` 表的常规状态机，而是独立管理：
 
 ```
 P0: 多工作站配置 ──────────────────────────────────────────┐
-(WORKSTATIONS 列表 + SSH 连接池 + ConfigAssigner)           │
+(WORKSTATIONS 列表 + SSH 连接池 + WorkstationSlotCoordinator)           │
     │                                                      │
     ▼                                                      │
 P1: 工作站级屏障 ◄─────────────────────────────────────────┤
@@ -1183,21 +1191,25 @@ P1: 工作站级屏障 ◄──────────────────
 
 ### 8.1 阶段规划
 
-| 阶段 | 内容 | 预估工期 | 前置依赖 | 验证标准 |
-|------|------|:-------:|---------|---------|
-| **P0** | 多工作站配置 | 1-2 周 | 无 | `WORKSTATIONS` 列表可配置；SSH 连接池可建立多连接；`ConfigAssigner` 正确分配构型 |
-| **P1** | 工作站级屏障 | 1-2 周 | P0 | 每工作站独立 Meshing 屏障；屏障通过后仅启动该站 Solver；reset 正确清理对应屏障 |
-| **P2** | PostProcess 阶段 | 1 周 | P1 | 完成检测逻辑：Solver 完成后轮询检测 .cas/.dat 文件出现即为 Solver 完成；后处理输出文件检测逻辑待文件格式确认后补充；TUI 正确显示 PostProcess 状态 |
-| **P3** | Daemon 拆分迁移 | 3-4 周 | P0, P1 | LocalWorker 可独立运行 SW/SC；Daemon 在 Ubuntu 上稳定运行；RPC 通信可靠 |
-| **P4** | 结果暂存与交付 | 2 周 | P2, P3 | PostProcess 完成后自动拉取到暂存区；`result_delivery` 表正确记录状态 |
-| **P5** | 本地 PC 上线收集 | 1-2 周 | P4 | 本地 PC 上线后可拉取暂存结果；交付确认正确更新；离线期间结果不丢失 |
+| 阶段 | 内容 | 预估工期 | 前置依赖 | 验证标准 | 状态 |
+|------|------|:-------:|---------|---------|:---:|
+| **P0** | 多工作站配置 | 1-2 周 | 无 | `WORKSTATIONS` 列表可配置；SSH 连接池可建立多连接；`WorkstationSlotCoordinator` 正确分配构型 | ⚠️ 部分实现（`WORKSTATIONS` 列表 + SSH 连接池 + `WorkstationSlotCoordinator` 均已落地；多工作站生产级调度策略待完善） |
+| **P1** | 工作站级屏障 | 1-2 周 | P0 | 每工作站独立 Meshing 屏障；屏障通过后仅启动该站 Solver；reset 正确清理对应屏障 | ⚠️ 部分实现（`BarrierCoordinator` 已有 per-WS barrier 方法：`_configs_by_workstation`、`_workstation_barriers_passed`；多真实工作站环境验证待完成） |
+| **P2** | PostProcess 阶段 | 1 周 | P1 | `STEP_NAMES` 包含 `"postprocess"`；`TaskRunner.execute_postprocess()` 委托 `RemoteExecutor`；`BarrierCoordinator` 自动调度 | ✅ 已实现（2026-06-20） |
+| **P3** | Daemon 拆分迁移 | 3-4 周 | P0, P1 | LocalWorker 可独立运行 SW/SC；Daemon 在 Ubuntu 上稳定运行；RPC 通信可靠 | ⚠️ 部分实现（`AUTOFLUID_SERVER_MODE=server` 已支持 ocar 远程 daemon；`LocalWorker` 协议完整；本地非 server 模式仍可用） |
+| **P4** | 结果暂存与交付 | 2 周 | P2, P3 | PostProcess 完成后自动拉取到暂存区；`result_delivery` 表正确记录状态 | ❌ 远期 |
+| **P5** | 本地 PC 上线收集 | 1-2 周 | P4 | 本地 PC 上线后可拉取暂存结果；交付确认正确更新；离线期间结果不丢失 | ❌ 远期 |
 
-### 8.2 建议的验证顺序
+### 8.2 当前状态与后续验证
 
-1. **P0 + P1 在当前单工作站架构上验证**：先不迁移 Daemon，仅在本地 PC 上实现多工作站配置和工作站级屏障，用单工作站模拟多工作站行为
-2. **P2 在当前架构上验证**：新增 PostProcess 状态追踪，验证基于结果文件（.cas/.dat）的完成检测逻辑；后处理输出文件检测待格式确认后补充
-3. **P3 独立验证**：搭建 Ubuntu 服务器 A，部署 Daemon，LocalWorker 连接测试
-4. **P4 + P5 集成验证**：完整的三层架构端到端测试
+**已完成**：
+- P2（PostProcess 阶段）：✅ 已实现，`STEP_NAMES` 包含 6 阶段，`BarrierCoordinator` 自动调度
+- P0/P1/P3 核心基础设施：`WORKSTATIONS` 多工作站配置、SSH 连接池、`WorkstationSlotCoordinator` 动态分配、per-WS 屏障方法、server mode daemon 均已落地
+
+**待验证**：
+1. **P0/P1 生产级多工作站验证**：在 2+ 台真实工作站上验证 `WorkstationSlotCoordinator` 动态分配 + per-WS 屏障的完整流程
+2. **P3 server mode 全链路压力测试**：LocalWorker 离线后 daemon 独立推进远程阶段的稳定性
+3. **P4 + P5 集成开发**：结果暂存、交付确认、离线补收机制均为远期规划，尚未开发
 
 ### 8.3 回滚策略
 
@@ -1217,17 +1229,19 @@ P1: 工作站级屏障 ◄──────────────────
 |--------|------|--------|------|
 | SSH 单实例 | `engine/task_runner.py` | `self._ssh` | `Optional[RemoteWorkstation]` |
 | SSH 全局锁 | `engine/task_runner.py` | `self._ssh_lock` | `threading.RLock()` |
-| 单工作站配置 | `engine/config.py` | `REMOTE_CONFIG` | 单字典 SSH 连接信息 |
-| IPC 本地监听 | `engine/config.py` | `IPC_CONFIG` | `"host": "127.0.0.1"` |
-| 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["sw", "sc", "transfer", "meshing", "solver"]` |
+| 工作站配置 | `engine/config.py` | `WORKSTATIONS` | 列表格式，支持多工作站；`REMOTE_CONFIG` 保留为向后兼容默认工作站快捷引用 |
+| IPC 监听地址 | `engine/config.py` | `IPC_CONFIG` | 默认 `"host": "127.0.0.1"`；server mode 通过 `AUTOFLUID_IPC_HOST` 覆盖为 `0.0.0.0` |
+| 步骤枚举 | `engine/config.py` | `STEP_NAMES` | `["sw", "sc", "transfer", "meshing", "solver", "postprocess"]`（6 阶段） |
 | 全局屏障检查 | `engine/scheduler/barrier.py` | `all_configs_completed_at_step` | 检查所有构型某步骤是否完成（已支持按 workstation_id 过滤） |
 | 屏障 Event | `engine/scheduler/barrier.py` | `_barrier_passed` | `threading.Event`（全局）+ `_workstation_barriers_passed` set |
-| Worker 线程数 | `engine/scheduler/worker_pool.py` | `_num_workers` | `= 3` |
-| 动态分配器 | `engine/scheduler/meshing_assigner.py` | `MeshingAssigner` | 动态任务分配核心逻辑 |
-| 工作站 Mesher | `engine/scheduler/workstation_mesher.py` | `WorkstationMesher` | 工作站 Meshing 状态管理 |
+| SC Worker 数 | `engine/scheduler/worker_pool.py` | `_num_sc_workers` | `= max(1, sc_max_slots)`（可通过 `sc_max_slots` 配置扩展） |
+| Transfer Worker 数 | `engine/scheduler/worker_pool.py` | `_num_transfer_workers` | `= 1`（SFTP 单线程保证安全） |
+| 动态槽位分配器 | `engine/scheduler/workstation_slots.py` | `WorkstationSlotCoordinator` | 按工作站空闲槽位实时分配 Transfer→Meshing 构型（已实现，替代原 MeshingAssigner 设计） |
+| 动态分配器（设计稿） | `engine/scheduler/meshing_assigner.py` | `MeshingAssigner` | 动态任务分配核心逻辑（设计稿，未落地，由 WorkstationSlotCoordinator 替代） |
+| 工作站 Mesher（设计稿） | `engine/scheduler/workstation_mesher.py` | `WorkstationMesher` | 工作站 Meshing 状态管理（设计稿，未落地） |
 | 屏障状态持久化 | `engine/scheduler/main.py` | `is_global_barrier_met` | 启动时恢复屏障状态 |
 | 全局屏障查询 | `engine/daemon.py` | `barrier_passed` | IPC 响应中包含屏障状态 |
-| Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | `STEP_NAMES` | `pub const STEP_NAMES: [&str; 5]` |
+| Rust STEP_NAMES | `autofluid-tui/src/state/app_state.rs` | `STEP_NAMES` | `pub const STEP_NAMES: [&str; 6]`（含 postprocess） |
 | Rust IPC 默认地址 | `autofluid-tui/src/ipc/client.rs` | `DEFAULT_HOST` | `"127.0.0.1"` |
 | Rust Daemon 管理 | `autofluid-tui/src/daemon_mgr.rs` | `DaemonManager` | 本地启动 Daemon 子进程 |
 | Python IPC 协议 | `ipc/protocol.py` | `CMD_` | 命令常量定义（20 个，含 Worker 命令和 Worker 生命周期命令） |
@@ -1248,7 +1262,8 @@ P1: 工作站级屏障 ◄──────────────────
 | 全局屏障 | 检查所有构型是否全部完成（当前实现，改造后不再使用） |
 | 暂存区 (Staging) | 服务器 A 上临时存储后处理结果的目录 |
 | 交付确认 (Delivery Ack) | 本地 PC 确认已成功接收结果的机制 |
-| ConfigAssigner | 构型分配器，决定哪些构型分配到哪台工作站（静态分配策略） |
+| ConfigAssigner | 构型分配器（设计稿，未落地），决定哪些构型分配到哪台工作站（静态分配策略）。当前由 `WorkstationSlotCoordinator`（动态槽位分配）替代 |
+| WorkstationSlotCoordinator | 动态槽位分配器（已实现），按工作站空闲槽位实时分配 Transfer→Meshing 构型 |
 | MeshingAssigner | 动态任务分配器，将构型序列动态分配到空闲工作站槽位 |
 | WorkstationMesher | 工作站 Meshing 状态管理器，负责接收任务、处理完成、自感知屏障 |
 | 动态分配 | 构型按序列排队，哪个工作站槽位空闲就分配下一个构型 |

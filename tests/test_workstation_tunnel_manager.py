@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tools import workstation_tunnel
@@ -98,6 +99,53 @@ class RegistryRunWithoutSshProcessRemoteWorkstation(FakeRemoteWorkstation):
     def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
         self.commands.append(command)
         return '{"task_exists": false, "registry_run_exists": true, "ssh_processes": 0, "remote_tunnel_ok": true}', "", 0
+
+
+class WedgedMonitorStatusRemoteWorkstation(FakeRemoteWorkstation):
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        return (
+            json.dumps(
+                {
+                    "task_exists": True,
+                    "task_state": "Running",
+                    "registry_run_exists": False,
+                    "monitor_processes": 1,
+                    "ssh_processes": 0,
+                    "local_target_ok": True,
+                    "remote_tunnel_ok": False,
+                    "monitor_last_seen_at": "2000-01-01T00:00:00Z",
+                    "monitor_state": "loop",
+                    "monitor_last_reason": "remote-probe-timeout",
+                }
+            ),
+            "",
+            0,
+        )
+
+
+class StatusTimeoutRecordingRemoteWorkstation(FakeRemoteWorkstation):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.timeouts: list[int] = []
+
+    def exec_command(self, command: str, timeout: int = 30) -> tuple[str, str, int]:
+        self.commands.append(command)
+        self.timeouts.append(timeout)
+        return (
+            json.dumps(
+                {
+                    "script_version": workstation_tunnel.OWNED_TUNNEL_SCRIPT_VERSION,
+                    "task_exists": True,
+                    "registry_run_exists": False,
+                    "monitor_processes": 1,
+                    "ssh_processes": 1,
+                    "remote_tunnel_ok": True,
+                }
+            ),
+            "",
+            0,
+        )
 
 
 class PowerShellStatusDeniedCmdInstalledRemoteWorkstation(FakeRemoteWorkstation):
@@ -1409,6 +1457,190 @@ def test_ensure_skips_repair_when_status_is_ready(monkeypatch) -> None:
     assert result["ok"] is True
     assert result["ensure_action"] == "skipped"
     assert repair_calls == []
+
+
+def test_status_marks_running_monitor_without_ssh_and_stale_heartbeat_as_wedged() -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    FakeRemoteWorkstation.instances.clear()
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=WedgedMonitorStatusRemoteWorkstation,
+    )
+
+    payload = result["status_payload"]
+    assert result["ok"] is False
+    assert result["status"] == "not_ready"
+    assert payload["monitor_last_seen_at"] == "2000-01-01T00:00:00Z"
+    assert payload["monitor_state"] == "loop"
+    assert payload["monitor_last_reason"] == "remote-probe-timeout"
+    assert payload["monitor_wedged"] is True
+
+
+def test_monitor_health_helpers_handle_fresh_stale_and_invalid_values() -> None:
+    fresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    stale = "2000-01-01T00:00:00.123456789Z"
+
+    assert workstation_tunnel._as_bool(True) is True
+    assert workstation_tunnel._as_bool("true") is True
+    assert workstation_tunnel._as_bool("1") is True
+    assert workstation_tunnel._as_bool(False) is False
+    assert workstation_tunnel._as_bool("false") is False
+    assert workstation_tunnel._as_bool("ready") is False
+    assert workstation_tunnel._as_bool(None) is False
+    assert workstation_tunnel._as_int("5") == 5
+    assert workstation_tunnel._as_int("") == 0
+    assert workstation_tunnel._as_int("not-an-int") == 0
+    assert workstation_tunnel._parse_monitor_timestamp(fresh) is not None
+    assert workstation_tunnel._parse_monitor_timestamp(stale) is not None
+    assert workstation_tunnel._parse_monitor_timestamp("") is None
+    assert workstation_tunnel._parse_monitor_timestamp(None) is None
+    assert workstation_tunnel._parse_monitor_timestamp("not-a-timestamp") is None
+
+
+def test_monitor_health_requires_all_wedged_conditions() -> None:
+    fresh = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    stale = "2000-01-01T00:00:00Z"
+
+    cases = [
+        (
+            {
+                "monitor_processes": 1,
+                "ssh_processes": 0,
+                "remote_tunnel_ok": False,
+                "monitor_last_seen_at": stale,
+            },
+            True,
+        ),
+        (
+            {
+                "monitor_processes": 1,
+                "ssh_processes": 1,
+                "remote_tunnel_ok": False,
+                "monitor_last_seen_at": stale,
+            },
+            False,
+        ),
+        (
+            {
+                "monitor_processes": 1,
+                "ssh_processes": 0,
+                "remote_tunnel_ok": True,
+                "monitor_last_seen_at": stale,
+            },
+            False,
+        ),
+        (
+            {
+                "monitor_processes": 1,
+                "ssh_processes": 0,
+                "remote_tunnel_ok": False,
+                "monitor_last_seen_at": fresh,
+            },
+            False,
+        ),
+    ]
+
+    for payload, expected in cases:
+        assert workstation_tunnel._annotate_monitor_health(payload)["monitor_wedged"] is expected
+
+
+def test_status_uses_timeout_that_covers_remote_probe_budget() -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    StatusTimeoutRecordingRemoteWorkstation.instances.clear()
+
+    result = workstation_tunnel.status_workstation_tunnel(
+        spec,
+        ssh_factory=StatusTimeoutRecordingRemoteWorkstation,
+    )
+
+    remote = StatusTimeoutRecordingRemoteWorkstation.instances[0]
+    assert result["ok"] is True
+    assert remote.timeouts == [workstation_tunnel.STATUS_COMMAND_TIMEOUT_SECONDS]
+
+
+def test_ensure_repairs_when_monitor_is_wedged(monkeypatch) -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    repair_calls: list[str] = []
+    status_calls = 0
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        nonlocal status_calls
+        status_calls += 1
+        if status_calls == 1:
+            return {
+                "id": spec.id,
+                "ok": False,
+                "status": "not_ready",
+                "status_payload": {
+                    "task_exists": True,
+                    "task_state": "Running",
+                    "monitor_processes": 1,
+                    "ssh_processes": 0,
+                    "remote_tunnel_ok": False,
+                    "monitor_wedged": True,
+                },
+            }
+        return {"id": spec.id, "ok": True, "status": "ok"}
+
+    def fake_repair(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        repair_calls.append(spec.id)
+        return {"id": spec.id, "ok": True, "status": "installed"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+    monkeypatch.setattr(workstation_tunnel, "repair_workstation_tunnel", fake_repair)
+
+    result = workstation_tunnel.ensure_workstation_tunnel(spec)
+
+    assert result["ok"] is True
+    assert result["ensure_action"] == "repaired"
+    assert result["initial_status"]["status_payload"]["monitor_wedged"] is True
+    assert repair_calls == ["WS-A"]
+
+
+def test_ensure_repairs_ready_tunnel_when_owned_script_needs_update(monkeypatch) -> None:
+    spec = _test_tunnel_spec("WS-A", 2222)
+    repair_calls: list[str] = []
+    status_calls = 0
+
+    def fake_status(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        nonlocal status_calls
+        status_calls += 1
+        return {
+            "id": spec.id,
+            "ok": True,
+            "status": "ok",
+            "status_payload": {
+                "script_needs_update": status_calls == 1,
+                "monitor_wedged": False,
+            },
+        }
+
+    def fake_repair(
+        spec: workstation_tunnel.WorkstationTunnelSpec,
+        install_dir: str = workstation_tunnel.DEFAULT_INSTALL_DIR,
+    ) -> dict:
+        repair_calls.append(spec.id)
+        return {"id": spec.id, "ok": True, "status": "installed"}
+
+    monkeypatch.setattr(workstation_tunnel, "status_workstation_tunnel", fake_status)
+    monkeypatch.setattr(workstation_tunnel, "repair_workstation_tunnel", fake_repair)
+
+    result = workstation_tunnel.ensure_workstation_tunnel(spec)
+
+    assert result["ok"] is True
+    assert result["ensure_action"] == "repaired"
+    assert result["initial_status"]["status_payload"]["script_needs_update"] is True
+    assert repair_calls == ["WS-A"]
 
 
 def test_ensure_repairs_only_not_ready_workstations(monkeypatch) -> None:

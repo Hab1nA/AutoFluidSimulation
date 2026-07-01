@@ -6,6 +6,9 @@ from utils import process_utils
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "start_workstation_reverse_tunnel.ps1"
+OWNED_SCRIPT_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+)
 SERVER_IPC_SCRIPT_PATH = (
     Path(__file__).resolve().parents[1] / "scripts" / "start_server_ipc_tunnel.ps1"
 )
@@ -35,6 +38,90 @@ def test_tunnel_watchdog_script_defines_watchdog_contract() -> None:
     assert "Unregister-ScheduledTask" in source
     assert "-NoWatchdog" in source
     assert "New-ScheduledTaskAction -Execute $wscriptExe -Argument" in source
+
+
+def test_owned_tunnel_remote_probe_uses_timeout_wrapped_ssh_command() -> None:
+    source = OWNED_SCRIPT_PATH.read_text(encoding="utf-8")
+    probe_source = source[
+        source.index("function Test-RemoteTunnelEndpoint"):
+        source.index("function Invoke-OwnedTunnelSshCommand")
+    ]
+
+    assert "Invoke-OwnedTunnelSshCommand" in probe_source
+    assert "-TimeoutSeconds $SshCommandTimeoutSeconds" in probe_source
+    assert "remote-probe-timeout" in probe_source
+    assert "& $SshExe" not in probe_source
+
+
+def test_owned_tunnel_monitor_writes_heartbeat_status_file() -> None:
+    source = OWNED_SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_source = source[
+        source.index("function Start-OwnedTunnelMonitor"):
+        source.index("function Install-OwnedTunnelTask")
+    ]
+
+    assert "function Get-OwnedTunnelStatusPath" in source
+    assert "function Write-OwnedTunnelStatus" in source
+    assert "monitor-status.json" in source
+    assert "workstation_id" in source
+    assert "remote_bind_port" in source
+    assert "updated_at" in source
+    assert "state" in source
+    assert "last_reason" in source
+    assert "ssh_pid" in source
+    assert 'Write-OwnedTunnelStatus -State "loop"' in monitor_source
+    assert 'Write-OwnedTunnelStatus -State "starting"' in monitor_source
+    assert 'Write-OwnedTunnelStatus -State "ready"' in monitor_source
+    assert 'Write-OwnedTunnelStatus -State "retry_wait"' in monitor_source
+
+
+def test_owned_tunnel_monitor_retries_after_probe_and_process_failures() -> None:
+    source = OWNED_SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_source = source[
+        source.index("function Start-OwnedTunnelMonitor"):
+        source.index("function Install-OwnedTunnelTask")
+    ]
+
+    assert "remote-probe-timeout" in source
+    assert '"ssh-exited-$exitCode"' in monitor_source
+    assert "startup-probe-timeout" in source
+    assert 'Register-TunnelFailure -Reason $remoteStatus' in monitor_source
+    assert 'Register-TunnelFailure -Reason $startupStatus' in monitor_source
+    assert "break" not in monitor_source
+
+
+def test_owned_tunnel_monitor_retries_after_local_startup_failures() -> None:
+    source = OWNED_SCRIPT_PATH.read_text(encoding="utf-8")
+    monitor_source = source[
+        source.index("function Start-OwnedTunnelMonitor"):
+        source.index("function Install-OwnedTunnelTask")
+    ]
+
+    assert 'Register-TunnelFailure -Reason "ssh-exe-unavailable"' in monitor_source
+    assert 'Register-TunnelFailure -Reason "log-path-unavailable"' in monitor_source
+    assert 'Register-TunnelFailure -Reason "ssh-start-failed"' in monitor_source
+    assert 'Write-OwnedTunnelStatus -State "retry_wait" -LastReason "ssh-start-failed"' in monitor_source
+    assert "$sshExe = $null" in monitor_source
+    assert "continue" in monitor_source
+
+
+def test_owned_tunnel_logging_is_best_effort_and_status_reports_script_version() -> None:
+    source = OWNED_SCRIPT_PATH.read_text(encoding="utf-8")
+    log_source = source[
+        source.index("function Write-OwnedTunnelLog"):
+        source.index("function Write-RateLimitedOwnedTunnelLog")
+    ]
+    status_source = source[
+        source.index("function Get-OwnedTunnelStatus"):
+        source.index("if ($Uninstall)")
+    ]
+
+    assert "$OwnedTunnelScriptVersion = 2" in source
+    assert "function Get-OwnedTunnelLogDir" in source
+    assert "try {" in log_source
+    assert "catch {" in log_source
+    assert "Add-Content -LiteralPath $logs.Supervisor" in log_source
+    assert "script_version = $OwnedTunnelScriptVersion" in status_source
 
 
 
