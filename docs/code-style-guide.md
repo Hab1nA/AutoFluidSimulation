@@ -1,7 +1,7 @@
 # AutoFluid 代码写作规范
 
 > 本文档总结了本项目的代码命名和风格约定，适用于所有 Python 和 Rust 代码的编写与审查。
-> 最后更新：2026-06-20
+> 最后更新：2026-07-01
 
 ---
 
@@ -53,14 +53,14 @@ execute_{步骤名}_step()
 
 | 当前方法 | 步骤 |
 |----------|------|
-| `execute_sw_step()` | SolidWorks STEP 导出 |
+| `execute_sw_per_config()` | SolidWorks STEP 导出（逐构型） |
 | `execute_sc_step()` | SpaceClaim 转换 |
 | `execute_transfer()` | 文件传输 |
 | `execute_meshing()` | 网格划分 |
 | `execute_solver()` | 仿真求解 |
 | `execute_postprocess()` | 后处理 |
 
-**注意**：使用 `_step` 后缀而非 `_macro` 或其他历史名称。
+**注意**：SW 步骤使用 `_per_config` 后缀（逐构型导出），SC 步骤使用 `_step` 后缀，其余步骤使用动词直接命名（`_transfer`、`_meshing`、`_solver`、`_postprocess`）。
 
 ### 2.2 私有辅助方法
 
@@ -388,6 +388,7 @@ def _open_sw_model(self, ...): ...  # → doc or None
 
 ```
 Waiting → Running → Retrying → Paused → Running → ... → Completed
+                ↘ UnknownRemote → (恢复) → Running
                                              ↘ Error
                    ↗ Paused (暂停时直接被归档)
 ```
@@ -395,6 +396,7 @@ Waiting → Running → Retrying → Paused → Running → ... → Completed
 - `set_step_status(cn, step, STATUS_RUNNING)` 开始执行
 - 成功 → `STATUS_COMPLETED`
 - 失败且有重试次数 → `STATUS_RETRYING`
+- 远程任务状态无法判定 → `STATUS_UNKNOWN_REMOTE`
 - 暂停 → `STATUS_PAUSED`
 - 最终失败 → `STATUS_ERROR`
 
@@ -429,12 +431,13 @@ def _disconnect_sw(self, sw_app, doc, sw_model: str):
 ### A.1 常用状态常量
 
 ```python
-STATUS_WAITING    = "Waiting"     # 等待执行
-STATUS_RUNNING    = "Running"     # 正在执行
-STATUS_PAUSED     = "Paused"      # 已暂停
-STATUS_RETRYING   = "Retrying"    # 重试中
-STATUS_COMPLETED  = "Completed"   # 已完成
-STATUS_ERROR      = "Error"       # 出错
+STATUS_WAITING         = "Waiting"         # 等待执行
+STATUS_RUNNING         = "Running"         # 正在执行
+STATUS_PAUSED          = "Paused"          # 已暂停
+STATUS_RETRYING        = "Retrying"        # 重试中
+STATUS_COMPLETED       = "Completed"       # 已完成
+STATUS_ERROR           = "Error"           # 出错
+STATUS_UNKNOWN_REMOTE  = "UnknownRemote"   # 远程任务状态未知，等待受控恢复/清理
 ```
 
 ### A.2 超时配置键

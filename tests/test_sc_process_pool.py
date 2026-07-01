@@ -266,6 +266,49 @@ class TestMaxSlots:
         assert slot.bridge_log_path is not None
         assert os.path.dirname(slot.bridge_log_path) == expected_log_dir
 
+    def test_launch_persistent_process_uses_configured_spaceclaim_exe(
+        self, tmp_path, monkeypatch
+    ):
+        """常驻 Bridge 应使用与一次性 Bridge 相同的 SpaceClaim exe 配置。"""
+        data_dir = str(tmp_path / "data")
+        bridge_exe = tmp_path / "SpaceClaimBridge.exe"
+        configured_sc_exe = tmp_path / "SpaceClaim.exe"
+        bridge_exe.write_text("fake bridge", encoding="utf-8")
+        configured_sc_exe.write_text("fake spaceclaim", encoding="utf-8")
+
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "sc_bridge", str(bridge_exe))
+        monkeypatch.setitem(LOCAL_PATHS, "sc_exe", str(configured_sc_exe))
+        monkeypatch.setitem(LOCAL_PATHS, "sc_script", str(tmp_path / "spaceclaim_transit.py"))
+        monkeypatch.setattr(
+            "engine.sc_process_pool.get_session_log_dir",
+            lambda: str(tmp_path / "session_logs"),
+        )
+
+        captured = {}
+
+        class _FakePopen:
+            def __init__(self, cmd, stdout=None, stderr=None, creationflags=0, env=None):
+                captured["cmd"] = cmd
+                captured["env"] = env or {}
+                self.pid = 4242
+
+            def poll(self):
+                return None
+
+        monkeypatch.setattr("engine.sc_process_pool.subprocess.Popen", _FakePopen)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=3, cmd_dir=pool._persistent_cmd_dir)
+
+        assert pool._launch_persistent_process(slot)
+        assert "--sc-exe" in captured["cmd"]
+        sc_exe_index = captured["cmd"].index("--sc-exe") + 1
+        assert captured["cmd"][sc_exe_index] == str(configured_sc_exe)
+        assert captured["env"]["AUTOFLUID_SC_EXE"] == str(configured_sc_exe)
+
     def test_bridge_log_dir_falls_back_to_spaceclaim_service_dir(
         self, tmp_path, monkeypatch
     ):
@@ -591,3 +634,100 @@ class TestCleanupAndReset:
         assert not os.path.exists(
             os.path.join(pool._persistent_cmd_dir, "sc_cmd_4.json")
         )
+
+    def test_persistent_command_timeout_retires_slot(self, tmp_path, monkeypatch):
+        """常驻命令超时后应废弃槽位，避免后续构型复用卡死的 SC。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "step_dir", str(tmp_path / "steps"))
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(tmp_path / "scdoc"))
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_timeout", 0)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=7, cmd_dir=pool._persistent_cmd_dir)
+        slot.status = "busy"
+        slot.current_config = 1
+        slot.pid = 12345
+        slot.spaceclaim_pid = 23456
+        pool._persistent_slots[slot.slot_id] = slot
+
+        cleaned = []
+
+        def fake_cleanup(cleaned_slot):
+            cleaned.append(cleaned_slot.slot_id)
+            pool._persistent_slots.pop(cleaned_slot.slot_id, None)
+            cleaned_slot.status = "idle"
+
+        monkeypatch.setattr(pool, "_cleanup_persistent_slot", fake_cleanup)
+
+        assert pool._send_persistent_command(slot, 1, None, None) is False
+
+        assert cleaned == [7]
+        assert 7 not in pool._persistent_slots
+        assert slot.status == "idle"
+
+    def test_persistent_bridge_exit_retires_slot(self, tmp_path, monkeypatch):
+        """常驻 Bridge 意外退出后应立即废弃槽位，避免后续构型快速失败循环。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(LOCAL_PATHS, "step_dir", str(tmp_path / "steps"))
+        monkeypatch.setitem(LOCAL_PATHS, "scdoc_dir", str(tmp_path / "scdoc"))
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        class DeadProcess:
+            returncode = 5
+
+            def poll(self):
+                return self.returncode
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=9, cmd_dir=pool._persistent_cmd_dir)
+        slot.status = "busy"
+        slot.current_config = 1
+        slot.process = DeadProcess()
+        pool._persistent_slots[slot.slot_id] = slot
+
+        cleaned = []
+
+        def fake_cleanup(cleaned_slot):
+            cleaned.append(cleaned_slot.slot_id)
+            pool._persistent_slots.pop(cleaned_slot.slot_id, None)
+            cleaned_slot.status = "idle"
+
+        monkeypatch.setattr(pool, "_cleanup_persistent_slot", fake_cleanup)
+
+        assert pool._send_persistent_command(slot, 1, None, None) is False
+
+        assert cleaned == [9]
+        assert 9 not in pool._persistent_slots
+        assert slot.status == "idle"
+
+    def test_run_config_does_not_mark_retired_slot_ready(self, tmp_path, monkeypatch):
+        """run_config 的 finally 不应复活已被超时路径废弃的槽位。"""
+        data_dir = str(tmp_path / "data")
+        monkeypatch.setitem(LOCAL_PATHS, "data_dir", data_dir)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_persistent_enabled", True)
+        monkeypatch.setitem(ENGINE_CONFIG, "sc_oneshot_fallback_enabled", False)
+
+        from engine.sc_process_pool import SCProcessPool, PersistentSlot
+
+        pool = SCProcessPool()
+        slot = PersistentSlot(slot_id=8, status="ready", cmd_dir=pool._persistent_cmd_dir)
+        pool._persistent_slots[slot.slot_id] = slot
+
+        monkeypatch.setattr(pool, "_get_or_create_persistent_slot", lambda: slot)
+        monkeypatch.setattr(pool, "_wait_for_slot_ready", lambda _slot: True)
+
+        def fake_send(retired_slot, *_args, **_kwargs):
+            pool._persistent_slots.pop(retired_slot.slot_id, None)
+            retired_slot.status = "idle"
+            return False
+
+        monkeypatch.setattr(pool, "_send_persistent_command", fake_send)
+
+        assert pool.run_config(1) is False
+        assert 8 not in pool._persistent_slots
+        assert slot.status == "idle"

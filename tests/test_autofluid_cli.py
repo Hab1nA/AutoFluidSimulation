@@ -91,6 +91,30 @@ def test_reset_remote_step_sends_reset_step():
     assert client.calls == [("reset_step", {"config_name": "all", "step_name": "solver"}, None)]
 
 
+def test_stop_step_sends_stop_step():
+    client = _FakeClient()
+
+    result, payload = _run([
+        "stop-step",
+        "5",
+        "solver",
+        "--reason",
+        "license startup stuck",
+    ], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [(
+        "stop_step",
+        {
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        },
+        None,
+    )]
+
+
 def test_worker_restart_sends_worker_restart():
     client = _FakeClient()
 
@@ -98,7 +122,17 @@ def test_worker_restart_sends_worker_restart():
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert client.calls == [("worker_restart", {}, None)]
+    assert client.calls == [("worker_restart", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
+
+
+def test_worker_start_uses_longer_timeout():
+    client = _FakeClient()
+
+    result, payload = _run(["worker", "start"], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [("worker_start", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
 
 
 def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
@@ -113,25 +147,25 @@ def test_worker_stop_cleans_local_watchdogs_and_pid_processes(monkeypatch):
     monkeypatch.setattr(
         autofluid_cli.process_utils,
         "cleanup_tunnel_watchdog_tasks",
-        lambda: {"Workstation": {"status": "uninstalled"}},
+        lambda: {"LocalWorker": {"status": "uninstalled"}},
     )
     monkeypatch.setattr(
         autofluid_cli.process_utils,
         "cleanup_worker_processes_from_pid_files",
-        lambda: {"tunnel_workstation": {"pid": 1234, "status": "terminated"}},
+        lambda: {"tunnel_localworker": {"pid": 1234, "status": "terminated"}},
     )
 
     result, payload = _run(["worker", "stop"], client=client)
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert client.calls == [("worker_stop", {}, None)]
+    assert client.calls == [("worker_stop", {}, autofluid_cli.WORKER_TIMEOUT_SECONDS)]
     assert payload["data"]["remote"] == "stopped"
     assert payload["data"]["local_watchdog_cleanup"] == {
-        "Workstation": {"status": "uninstalled"},
+        "LocalWorker": {"status": "uninstalled"},
     }
     assert payload["data"]["local_process_cleanup"] == {
-        "tunnel_workstation": {"pid": 1234, "status": "terminated"},
+        "tunnel_localworker": {"pid": 1234, "status": "terminated"},
     }
 
 
@@ -165,21 +199,135 @@ def test_worker_stop_still_cleans_local_resources_when_ipc_is_down(monkeypatch):
     }
 
 
-def test_daemon_restart_uses_configured_systemd_service():
+def test_workstation_tunnel_command_runs_without_ipc_client(monkeypatch):
+    specs_seen = []
+    kwargs_seen = {}
+    specs = [object(), object()]
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        lambda tunnel_target=None: specs,
+    )
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        kwargs_seen["action"] = action
+        kwargs_seen.update(kwargs)
+        specs_seen.extend(specs_arg)
+        return [
+            {
+                "id": "WS-A",
+                "ok": True,
+                "status": "ok",
+            }
+        ]
+
+    monkeypatch.setattr(autofluid_cli.workstation_tunnel, "run_for_specs", fake_run_for_specs)
+
+    class _UnexpectedClient:
+        def __init__(self, _settings):
+            raise AssertionError("workstation-tunnel command must not create IPC client")
+
+    result, payload = _run(
+        ["workstation-tunnel", "ensure", "--all", "--jobs", "4", "--progress-jsonl"],
+        client=_UnexpectedClient,
+    )
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert payload["command"] == "workstation-tunnel ensure"
+    assert payload["data"]["results"][0]["status"] == "ok"
+    assert specs_seen == specs
+    assert kwargs_seen["action"] == "ensure"
+    assert kwargs_seen["install_dir"] == autofluid_cli.workstation_tunnel.DEFAULT_INSTALL_DIR
+    assert kwargs_seen["jobs"] == 4
+    assert kwargs_seen["progress"] is not None
+
+
+def test_workstation_tunnel_command_requires_all_specs_ok(monkeypatch):
+    specs = [object(), object()]
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        lambda tunnel_target=None: specs,
+    )
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        return [
+            {"id": "WS-A", "ok": True, "status": "ok"},
+            {"id": "WS-B", "ok": False, "status": "not_ready"},
+        ]
+
+    monkeypatch.setattr(autofluid_cli.workstation_tunnel, "run_for_specs", fake_run_for_specs)
+
+    result, payload = _run(["workstation-tunnel", "ensure", "--all"])
+
+    assert result.exit_code == 1
+    assert payload["ok"] is False
+    assert payload["message"] == "工作站隧道未就绪"
+
+
+def test_workstation_tunnel_command_can_target_one_workstation(monkeypatch):
+    kwargs_seen = {}
+    specs = [object()]
+
+    def fake_configured_specs(**kwargs):
+        kwargs_seen.update(kwargs)
+        return specs
+
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "configured_workstation_specs",
+        fake_configured_specs,
+    )
+    monkeypatch.setattr(
+        autofluid_cli.workstation_tunnel,
+        "run_for_specs",
+        lambda _action, _specs_arg, **_kwargs: [
+            {"id": "WS-C", "ok": True, "status": "ok"},
+        ],
+    )
+
+    result, payload = _run(["workstation-tunnel", "ensure", "--workstation", "WS-C"])
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert kwargs_seen == {"tunnel_target": None, "workstation_id": "WS-C"}
+
+
+def test_daemon_systemctl_actions_use_expected_arguments(monkeypatch):
+    monkeypatch.delenv("AUTOFLUID_DAEMON_SERVICE", raising=False)
     calls = []
 
     def runner(args):
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, stdout="done\n", stderr="")
 
-    result, payload = _run(
-        ["daemon", "restart"],
-        runner=runner,
-    )
+    for action in ["start", "stop", "restart", "status"]:
+        result, payload = _run(["daemon", action], runner=runner)
+        assert result.exit_code == 0
+        assert payload["ok"] is True
+
+    assert calls == [
+        ["systemctl", "start", "autofluid-daemon"],
+        ["systemctl", "stop", "autofluid-daemon"],
+        ["systemctl", "restart", "autofluid-daemon"],
+        ["systemctl", "status", "autofluid-daemon", "--no-pager"],
+    ]
+
+
+def test_daemon_systemctl_uses_custom_service_name(monkeypatch):
+    monkeypatch.setenv("AUTOFLUID_DAEMON_SERVICE", "autofluid-daemon-prod")
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="done\n", stderr="")
+
+    result, payload = _run(["daemon", "stop"], runner=runner)
 
     assert result.exit_code == 0
     assert payload["ok"] is True
-    assert calls == [["systemctl", "restart", "autofluid-daemon"]]
+    assert calls == [["systemctl", "stop", "autofluid-daemon-prod"]]
 
 
 def test_alert_watcher_posts_warning_once_per_cooldown(monkeypatch):
@@ -242,6 +390,16 @@ def test_alert_watcher_posts_warning_once_per_cooldown(monkeypatch):
         ("get_log_entries", {"since_id": 0, "limit": 50, "level_filter": "WARNING"}, None),
         ("get_log_entries", {"since_id": 10, "limit": 50, "level_filter": "WARNING"}, None),
     ]
+
+
+def test_prune_expired_alert_fingerprints():
+    from tools.autofluid_cli import _prune_expired_fingerprints
+
+    seen_until = {"old": 10.0, "new": 30.0, "now": 20.0}
+
+    _prune_expired_fingerprints(seen_until, current_time=20.0)
+
+    assert seen_until == {"new": 30.0}
 
 
 def test_ipc_client_reads_env_and_auth(monkeypatch):

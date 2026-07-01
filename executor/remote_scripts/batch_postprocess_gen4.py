@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument("config_id", type=int, help="模型编号")
+    parser.add_argument("--fluent-path", type=str, required=True, help="Fluent 可执行文件完整路径")
     parser.add_argument("--case-dir", type=str, required=True, help="Solver case/data 输出目录")
     parser.add_argument("--post-journal-path", type=str, required=True, help="后处理 Journal 文件")
     parser.add_argument(
@@ -58,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-pressure-reference", type=float, default=101325.0, help="Fluent 表压转绝压参考 Pa")
     parser.add_argument("--metrics-tcomb", type=float, default=1000.0, help="混合比统计温度阈值 K")
     parser.add_argument("--metrics-thrust-axis", choices=("x", "y", "z"), default="x", help="推力轴向")
-    parser.add_argument("--metrics-exit-to-throat-area-ratio", type=float, default=7.427276607, help="出口面积与喉部面积比 Ae/At")
-    parser.add_argument("--metrics-cstar-reference", type=float, default=1830.4, help="CEA 或试验基准特征速度 m/s")
+    parser.add_argument("--metrics-exit-to-throat-area-ratio", type=float, required=True, help="出口面积与喉部面积比 Ae/At")
+    parser.add_argument("--metrics-cstar-reference", type=float, required=True, help="CEA 或试验基准特征速度 m/s")
     return parser.parse_args()
 
 
@@ -101,6 +102,22 @@ def _move_and_rename(config_id: int, working_dir_t: str, working_dir_v: str, ani
             os.remove(dst_path)
         shutil.move(src_path, dst_path)
         print(f"[{config_id}] 移动动画: {src_path} -> {dst_path}")
+
+
+def _final_animation_paths(config_id: int, anim_dir: str) -> tuple[str, str]:
+    return (
+        os.path.join(anim_dir, f"v_gen4_{config_id}.mp4"),
+        os.path.join(anim_dir, f"t_gen4_{config_id}.mp4"),
+    )
+
+
+def _final_animation_files_exist(config_id: int, anim_dir: str) -> bool:
+    return all(os.path.isfile(path) for path in _final_animation_paths(config_id, anim_dir))
+
+
+def _is_video_options_journal_error(error: Exception) -> bool:
+    message = str(error)
+    return "Video Options" in message and "cannot find widget" in message
 
 
 def _cleanup_working_dirs(config_id: int, working_dirs: list[str]) -> None:
@@ -176,6 +193,8 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
         metrics_output_dir,
         "--compute-script",
         compute_script,
+        "--fluent-path",
+        args.fluent_path,
         "--processor-count",
         str(args.metrics_processor_count),
         "--ambient-pressure",
@@ -208,6 +227,12 @@ def _write_flag(flag_file: str) -> None:
     os.replace(tmp_file, flag_file)
 
 
+def _run_metrics_and_write_flag(args: argparse.Namespace, case_path: str, config_id: int) -> None:
+    _run_metrics_postprocess(args, case_path, config_id)
+    _write_flag(args.flag_file)
+    print(f"[{config_id}] 后处理完成标志已写入: {args.flag_file}")
+
+
 def main() -> None:
     args = parse_args()
     if args.config_id < 0:
@@ -218,7 +243,6 @@ def main() -> None:
     data_path = os.path.join(args.case_dir, f"model_gen4_{config_id}.dat.h5")
     _require_file(case_path, "Case 文件")
     _require_file(data_path, "Data 文件")
-    _require_file(args.post_journal_path, "后处理 Journal 文件")
 
     for dir_path in (
         args.postprocess_output_dir,
@@ -230,15 +254,24 @@ def main() -> None:
         os.makedirs(dir_path, exist_ok=True)
 
     print(f"[配置] 模型编号: {config_id}")
+    print(f"[配置] Fluent 可执行文件: {args.fluent_path}")
     print(f"[配置] Case 目录: {args.case_dir}")
     print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 额外后处理 Journal: {args.extra_post_journal_path or '<none>'}")
     print(f"[配置] 后处理输出目录: {args.postprocess_output_dir}")
 
+    if _final_animation_files_exist(config_id, args.anim_dir):
+        print(f"[{config_id}] 最终动画已存在，跳过视频后处理 Journal")
+        _run_metrics_and_write_flag(args, case_path, config_id)
+        return
+
+    _require_file(args.post_journal_path, "后处理 Journal 文件")
+
     session = pyfluent.launch_fluent(
         mode=pyfluent.FluentMode.SOLVER,
         precision=pyfluent.Precision.DOUBLE,
         product_version=pyfluent.FluentVersion.v241,
+        fluent_path=args.fluent_path,
         cleanup_on_exit=True,
         ui_mode="gui",
         cwd=args.working_dir,
@@ -265,8 +298,14 @@ def main() -> None:
         time.sleep(2)
         _move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
     except Exception as e:
-        print(f"[错误] 后处理模型 {config_id} 时发生异常: {e}")
-        raise
+        if _is_video_options_journal_error(e) and _final_animation_files_exist(config_id, args.anim_dir):
+            print(
+                f"[{config_id}] 视频 Journal GUI 控件失败，但最终动画已存在，"
+                "继续执行指标后处理"
+            )
+        else:
+            print(f"[错误] 后处理模型 {config_id} 时发生异常: {e}")
+            raise
     finally:
         print(f"[{config_id}] 正在清理后处理日志文件...")
         _cleanup_log_files(config_id, args.working_dir)
@@ -274,9 +313,7 @@ def main() -> None:
         _cleanup_working_dirs(config_id, [args.working_dir_t, args.working_dir_v])
         _close_session(config_id, session)
 
-    _run_metrics_postprocess(args, case_path, config_id)
-    _write_flag(args.flag_file)
-    print(f"[{config_id}] 后处理完成标志已写入: {args.flag_file}")
+    _run_metrics_and_write_flag(args, case_path, config_id)
 
 
 if __name__ == "__main__":

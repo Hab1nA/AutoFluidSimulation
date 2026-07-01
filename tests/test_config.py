@@ -25,6 +25,8 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+import json
 
 
 # ====================================================================
@@ -80,6 +82,68 @@ class TestLocalPathsCompleteness:
             assert isinstance(val, str) and val, (
                 f"LOCAL_PATHS['{key}'] 应为非空字符串，实际: {val!r}"
             )
+
+
+# ====================================================================
+# fallback 默认值与 TOML 对齐
+# ====================================================================
+
+class TestFallbackDefaultsMatchToml:
+    """验证 TOML 缺失时的代码 fallback 与仓库默认 TOML 保持一致。"""
+
+    @staticmethod
+    def _load_config_snapshot_without_startup_toml() -> dict[str, object]:
+        code = r'''
+import json
+import os
+original_exists = os.path.exists
+os.path.exists = lambda path: False if str(path).endswith("autofluid_config.toml") else original_exists(path)
+import engine.config as cfg
+print(json.dumps({
+    "local_paths": {
+        "sw_model": cfg.LOCAL_PATHS["sw_model"],
+        "excel": cfg.LOCAL_PATHS["excel"],
+        "step_dir": cfg.LOCAL_PATHS["step_dir"],
+        "scdoc_dir": cfg.LOCAL_PATHS["scdoc_dir"],
+    },
+    "remote_config": {
+        "scripts_dir": cfg.REMOTE_CONFIG["scripts_dir"],
+    },
+    "operation_timeouts": {
+        "sc_gui_stable_delay": cfg.OPERATION_TIMEOUTS["sc_gui_stable_delay"],
+    },
+    "engine_config": {
+        "meshing_timeout": cfg.ENGINE_CONFIG["meshing_timeout"],
+        "solver_timeout": cfg.ENGINE_CONFIG["solver_timeout"],
+        "solver_startup_timeout": cfg.ENGINE_CONFIG["solver_startup_timeout"],
+        "postprocess_timeout": cfg.ENGINE_CONFIG["postprocess_timeout"],
+    },
+}, ensure_ascii=False))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_local_and_remote_path_fallbacks_match_repository_toml(self):
+        snapshot = self._load_config_snapshot_without_startup_toml()
+        repo_root = Path(__file__).resolve().parents[1]
+        assert snapshot["local_paths"]["sw_model"] == str(repo_root / "data" / "model.SLDPRT")
+        assert snapshot["local_paths"]["excel"] == str(repo_root / "data" / "model.xlsx")
+        assert snapshot["local_paths"]["step_dir"] == str(repo_root / "data" / "step")
+        assert snapshot["local_paths"]["scdoc_dir"] == str(repo_root / "data" / "scdoc")
+        assert snapshot["remote_config"]["scripts_dir"] == r"D:\xkz_1020\scripts"
+
+    def test_timeout_fallbacks_match_repository_toml(self):
+        snapshot = self._load_config_snapshot_without_startup_toml()
+        assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
+        assert snapshot["engine_config"]["meshing_timeout"] == 7200
+        assert snapshot["engine_config"]["solver_timeout"] == 28800
+        assert snapshot["engine_config"]["solver_startup_timeout"] == 900
+        assert snapshot["engine_config"]["postprocess_timeout"] == 14400
 
 
 # ====================================================================
@@ -190,7 +254,15 @@ class TestConstants:
 
     def test_all_statuses_complete(self):
         from engine.config import ALL_STATUSES
-        expected = ["Waiting", "Running", "Paused", "Retrying", "Completed", "Error"]
+        expected = [
+            "Waiting",
+            "Running",
+            "Paused",
+            "Retrying",
+            "UnknownRemote",
+            "Completed",
+            "Error",
+        ]
         assert ALL_STATUSES == expected
 
     def test_step_index_consistent_with_step_names(self):
@@ -201,10 +273,10 @@ class TestConstants:
     def test_status_constants_are_strings(self):
         from engine.config import (
             STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED,
-            STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+            STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, STATUS_COMPLETED, STATUS_ERROR,
         )
         for s in [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED,
-                  STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]:
+                  STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, STATUS_COMPLETED, STATUS_ERROR]:
             assert isinstance(s, str) and s
 
 
@@ -301,6 +373,23 @@ class TestValidateConfig:
         from engine.config import validate_config
         warnings = validate_config()
         assert any("SSH 密码" in w for w in warnings)
+
+    def test_validation_details_marks_local_environment_warnings_info(self, tmp_path, monkeypatch):
+        from engine.config import LOCAL_PATHS, REMOTE_CONFIG, validate_config_details
+
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        monkeypatch.setitem(LOCAL_PATHS, "sw_model", str(tmp_path / "missing.SLDPRT"))
+        for key, name in [("excel", "t.xlsx"), ("sc_exe", "sc.exe"), ("sw_exe", "sw.exe")]:
+            f = tmp_path / name
+            f.touch()
+            monkeypatch.setitem(LOCAL_PATHS, key, str(f))
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "")
+
+        issues = validate_config_details()
+
+        assert any("SSH 密码" in issue.message for issue in issues)
+        assert any("SW 模型文件不存在" in issue.message for issue in issues)
+        assert {issue.log_level for issue in issues} == {"info"}
 
     def test_warns_missing_sw_model(self, tmp_path, monkeypatch):
         from engine.config import LOCAL_PATHS, REMOTE_CONFIG
@@ -404,6 +493,34 @@ class TestValidateConfig:
         assert any("WS-A" in warning for warning in warnings)
         assert any("AUTOFLUID_SSH_REACHABLE_HOST" in warning for warning in warnings)
         assert any("172.17.135.240:22" in warning for warning in warnings)
+
+    def test_server_mode_reachability_warnings_stay_warning_level(self, monkeypatch):
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config_details
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setitem(REMOTE_CONFIG, "password", "pass")
+        WORKSTATIONS[:] = [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "username": "ps",
+                "password": "pass",
+            }
+        ]
+
+        try:
+            issues = validate_config_details()
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+        assert len(issues) == 1
+        assert issues[0].log_level == "warning"
+        assert "AUTOFLUID_SSH_REACHABLE_HOST" in issues[0].message
 
     def test_server_mode_warns_when_reachable_port_missing(self, monkeypatch):
         from engine.config import REMOTE_CONFIG, WORKSTATIONS, validate_config
@@ -528,6 +645,16 @@ class TestLoadTomlConfig:
         toml_file.write_text("this is not valid toml [[[[", encoding="utf-8")
         result = load_toml_config(str(toml_file))
         assert result == {}
+
+    def test_invalid_toml_logs_warning(self, tmp_path, caplog):
+        """Invalid TOML should log a warning instead of silently swallowing."""
+        import logging
+        from engine.config import load_toml_config
+        toml_file = tmp_path / "bad.toml"
+        toml_file.write_text("this is not valid toml [[[[", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            load_toml_config(str(toml_file))
+        assert any("TOML" in r.message or "toml" in r.message.lower() for r in caplog.records)
 
 
 # ====================================================================
@@ -739,7 +866,8 @@ class TestReloadConfigFromToml:
         import engine.config as cfg
         from engine.config import WORKSTATIONS
 
-        monkeypatch.setenv("AUTOFLUID_WS_A_PASSWORD", "secret-a")
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_PASSWORD", "secret-a")
+        monkeypatch.delenv("AUTOFLUID_WS_A_PASSWORD", raising=False)
         original = [dict(ws) for ws in WORKSTATIONS]
 
         def _mock_load(*args, **kwargs):
@@ -753,7 +881,7 @@ class TestReloadConfigFromToml:
                         "connectivity_mode": "tailscale",
                         "port": 2222,
                         "username": "ps",
-                        "password": "${AUTOFLUID_WS_A_PASSWORD}",
+                        "password": "toml-secret",
                         "working_dir": r"D:\work",
                         "scripts_dir": r"D:\scripts",
                         "ref_files_dir": r"D:\refs",
@@ -764,6 +892,7 @@ class TestReloadConfigFromToml:
                         "flag_dir": r"D:\flags",
                         "conda_env": "pyfluent",
                         "conda_exe": r"C:\conda.exe",
+                        "fluent_path": r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
                         "mpi_bin_dir": r"C:\mpi",
                     }
                 ]
@@ -791,12 +920,61 @@ class TestReloadConfigFromToml:
             assert workstation["flag_dir"] == r"D:\flags"
             assert workstation["conda_env"] == "pyfluent"
             assert workstation["conda_exe"] == r"C:\conda.exe"
+            assert workstation["fluent_path"] == r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
             assert workstation["mpi_bin_dir"] == r"C:\mpi"
             assert "postprocess_output_dir" in workstation
             assert "postprocess_animation_dir" in workstation
             assert "postprocess_metrics_dir" in workstation
         finally:
             WORKSTATIONS[:] = original
+
+    def test_workstation_fluent_path_inherits_and_overrides_remote_default(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS, get_workstation_config
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+
+        def _mock_load(*args, **kwargs):
+            return {
+                "remote_config": {
+                    "host": "10.0.0.1",
+                    "port": 22,
+                    "username": "ps",
+                    "fluent_path": r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+                    "mpi_bin_dir": r"C:\mpi",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "10.0.0.1",
+                        "port": 22,
+                        "username": "ps",
+                    },
+                    {
+                        "id": "WS-C",
+                        "host": "10.0.0.3",
+                        "port": 22,
+                        "username": "bh",
+                        "fluent_path": r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+                    },
+                ],
+            }
+
+        monkeypatch.setattr(cfg, "load_toml_config", _mock_load)
+        try:
+            assert cfg.reload_config_from_toml() is True
+            assert get_workstation_config("WS-A")["fluent_path"] == (
+                r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+            )
+            assert get_workstation_config("WS-C")["fluent_path"] == (
+                r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+            )
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
 
     def test_remote_config_backfills_default_workstation(self, monkeypatch):
         import engine.config as cfg
@@ -823,7 +1001,8 @@ class TestReloadConfigFromToml:
             assert WORKSTATIONS[0]["host"] == "10.99.99.99"
             assert WORKSTATIONS[0]["reachable_host"] == "203.0.113.10"
             assert WORKSTATIONS[0]["connectivity_mode"] == "public"
-            assert WORKSTATIONS[0]["password"] == "pw"
+            assert REMOTE_CONFIG["password"] == ""
+            assert WORKSTATIONS[0]["password"] == ""
         finally:
             REMOTE_CONFIG.update(original_remote)
             WORKSTATIONS[:] = original_workstations
@@ -1100,8 +1279,8 @@ class TestConfigDictCompleteness:
     _ENGINE_REQUIRED_KEYS = {
         "watchdog_interval", "sw_macro_timeout", "max_retries",
         "sc_timeout", "transfer_timeout", "meshing_timeout",
-        "meshing_processor_count", "solver_timeout", "solver_processor_count",
-        "solver_iteration_count",
+        "meshing_processor_count", "solver_timeout", "solver_startup_timeout",
+        "solver_processor_count", "solver_iteration_count", "log_max_bytes", "log_backup_count",
     }
 
     def test_remote_config_keys(self):
@@ -1244,6 +1423,350 @@ class TestWorkstationLookup:
 
         with pytest.raises(KeyError):
             cfg.get_workstation_config("missing")
+
+    def test_workstations_do_not_inherit_default_password(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.delenv("AUTOFLUID_WS_A_SSH_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_A_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_B_SSH_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_B_PASSWORD", raising=False)
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "172.17.135.240",
+                        "username": "ps",
+                        "auth_method": "password",
+                    },
+                    {
+                        "id": "WS-B",
+                        "host": "172.17.135.89",
+                        "username": "ps",
+                        "auth_method": "none",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+            ws_b = cfg.get_workstation_config("WS-B")
+
+            assert ws_a["password"] == ""
+            assert ws_a["auth_method"] == "password"
+            assert ws_b["password"] == ""
+            assert ws_b["auth_method"] == "none"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_workstation_password_uses_per_workstation_env(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_PASSWORD", "secret-a")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "172.17.135.240",
+                        "username": "ps",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+
+            assert ws_a["password"] == "secret-a"
+            assert ws_a["auth_method"] == "password"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_ws_d_password_uses_per_workstation_env(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_PASSWORD", "secret-d")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-D",
+                        "host": "172.17.135.200",
+                        "username": "ps",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_d = cfg.get_workstation_config("WS-D")
+
+            assert ws_d["password"] == "secret-d"
+            assert ws_d["auth_method"] == "password"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_workstation_legacy_password_env_is_ignored(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.delenv("AUTOFLUID_WS_A_SSH_PASSWORD", raising=False)
+        monkeypatch.setenv("AUTOFLUID_WS_A_PASSWORD", "legacy-secret")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "172.17.135.240",
+                        "username": "ps",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+
+            assert ws_a["password"] == ""
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_workstation_toml_password_is_ignored(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.delenv("AUTOFLUID_WS_A_SSH_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_A_PASSWORD", raising=False)
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-A",
+                        "host": "172.17.135.240",
+                        "username": "ps",
+                        "auth_method": "password",
+                        "password": "toml-secret",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+
+            assert ws_a["password"] == ""
+            assert ws_a["auth_method"] == "password"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_blank_workstation_env_password_selects_passwordless_auth(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_PASSWORD", "")
+        monkeypatch.setenv("AUTOFLUID_WS_C_SSH_PASSWORD", "")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                    "password": "default-secret",
+                },
+                "workstations": [
+                    {
+                        "id": "WS-B",
+                        "host": "172.17.135.89",
+                        "username": "ps",
+                    },
+                    {
+                        "id": "WS-C",
+                        "host": "172.17.135.254",
+                        "username": "ps",
+                        "auth_method": "password",
+                    },
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_b = cfg.get_workstation_config("WS-B")
+            ws_c = cfg.get_workstation_config("WS-C")
+
+            assert ws_b["password"] == ""
+            assert ws_b["auth_method"] == "none"
+            assert ws_c["password"] == ""
+            assert ws_c["auth_method"] == "none"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_per_workstation_reachable_env_overrides_toml(self, monkeypatch):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_REACHABLE_PORT", "2222")
+        monkeypatch.setenv("AUTOFLUID_WS_A_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_REACHABLE_PORT", "2224")
+        monkeypatch.setenv("AUTOFLUID_WS_B_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_REACHABLE_HOST", "127.0.0.1")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_REACHABLE_PORT", "2226")
+        monkeypatch.setenv("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE", "reverse_tunnel")
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                },
+                "workstations": [
+                    {"id": "WS-A", "host": "172.17.135.240", "username": "ps"},
+                    {"id": "WS-B", "host": "172.17.135.89", "username": "ps"},
+                    {"id": "WS-D", "host": "172.17.135.200", "username": "ps"},
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_a = cfg.get_workstation_config("WS-A")
+            ws_b = cfg.get_workstation_config("WS-B")
+            ws_d = cfg.get_workstation_config("WS-D")
+
+            assert ws_a["reachable_host"] == "127.0.0.1"
+            assert ws_a["reachable_port"] == 2222
+            assert ws_a["connectivity_mode"] == "reverse_tunnel"
+            assert ws_b["reachable_host"] == "127.0.0.1"
+            assert ws_b["reachable_port"] == 2224
+            assert ws_b["connectivity_mode"] == "reverse_tunnel"
+            assert ws_d["reachable_host"] == "127.0.0.1"
+            assert ws_d["reachable_port"] == 2226
+            assert ws_d["connectivity_mode"] == "reverse_tunnel"
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
+
+    def test_reload_config_refreshes_ws_d_reachable_env_from_dotenv(
+        self, monkeypatch, tmp_path
+    ):
+        import engine.config as cfg
+        from engine.config import REMOTE_CONFIG, WORKSTATIONS
+
+        original_remote = dict(REMOTE_CONFIG)
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        env_path = tmp_path / ".env"
+        env_path.write_text(
+            "\n".join(
+                [
+                    "AUTOFLUID_WS_D_SSH_REACHABLE_HOST=127.0.0.1",
+                    "AUTOFLUID_WS_D_SSH_REACHABLE_PORT=2226",
+                    "AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE=reverse_tunnel",
+                    "AUTOFLUID_WS_D_SSH_PASSWORD=",
+                    "AUTOFLUID_WS_A_SSH_PASSWORD=should-not-load-from-runtime-reload",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_REACHABLE_HOST", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_REACHABLE_PORT", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_CONNECTIVITY_MODE", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_D_SSH_PASSWORD", raising=False)
+        monkeypatch.delenv("AUTOFLUID_WS_A_SSH_PASSWORD", raising=False)
+        monkeypatch.setattr(cfg, "_env_path", str(env_path))
+        monkeypatch.setattr(
+            cfg,
+            "load_toml_config",
+            lambda _path=None: {
+                "remote_config": {
+                    "host": "172.17.135.240",
+                    "username": "ps",
+                },
+                "workstations": [
+                    {"id": "WS-D", "host": "172.17.135.254", "username": "ps"},
+                ],
+            },
+        )
+        try:
+            assert cfg.reload_config_from_toml() is True
+            ws_d = cfg.get_workstation_config("WS-D")
+
+            assert ws_d["host"] == "127.0.0.1"
+            assert ws_d["port"] == 2226
+            assert ws_d["connectivity_mode"] == "reverse_tunnel"
+            assert ws_d["password"] == ""
+            assert ws_d["auth_method"] == "none"
+            assert os.environ["AUTOFLUID_WS_D_SSH_PASSWORD"] == ""
+            assert "AUTOFLUID_WS_A_SSH_PASSWORD" not in os.environ
+        finally:
+            REMOTE_CONFIG.clear()
+            REMOTE_CONFIG.update(original_remote)
+            WORKSTATIONS[:] = original_workstations
 
 
 class TestServerModeLocalPaths:

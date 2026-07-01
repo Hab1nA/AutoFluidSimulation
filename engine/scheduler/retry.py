@@ -13,6 +13,7 @@ from engine.config import (
     ENGINE_CONFIG,
 )
 from engine.state_manager import StateManager
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 
 from .utils import pause_aware_sleep, PauseGuard
@@ -133,6 +134,20 @@ class RetryManager:
                         #    恢复后下一轮迭代会检测 _paused 并正确等待
                         if not pause_aware_sleep(5 * attempt, self._paused, self._stopped):
                             return False  # stopped
+            except InfrastructureUnavailableError as e:
+                self.state.set_step_status(
+                    config_name,
+                    step_name,
+                    STATUS_RETRYING,
+                    f"基础设施恢复中（不消耗业务重试次数）: {e}",
+                )
+                logger.warning(
+                    "[%s] 构型%s 基础设施不可用，等待恢复且不消耗业务重试次数: %s",
+                    step_name,
+                    config_name,
+                    e,
+                )
+                raise
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 if attempt < max_retries:
                     retry_count = self.state.increment_retry(config_name, step_name)

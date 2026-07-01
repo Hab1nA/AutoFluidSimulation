@@ -25,6 +25,7 @@ try:
     import paramiko
 except ImportError:  # pragma: no cover
     paramiko = None
+from engine.config import OPERATION_TIMEOUTS
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -42,7 +43,15 @@ class RemoteWorkstation:
     以独立后台进程方式启动，确保 SSH 断开后任务继续运行。
     """
 
-    def __init__(self, host: str, port: int, username: str, password: str):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        key_filename: str | None = None,
+        auth_method: str = "password",
+    ):
         """
         初始化 SSH 客户端配置。
 
@@ -51,11 +60,15 @@ class RemoteWorkstation:
             port: SSH 端口
             username: 用户名
             password: 密码
+            key_filename: 私钥文件路径；为空时使用 Paramiko 默认 key/agent
+            auth_method: 认证方式，支持 password/key/none
         """
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.key_filename = key_filename or None
+        self.auth_method = (auth_method or "password").lower()
         self._ssh: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
         self._task_pid_files: dict[str, str] = {}
@@ -64,23 +77,33 @@ class RemoteWorkstation:
     # 连接管理
     # ------------------------------------------------------------------
 
-    def connect(self) -> bool:
+    def connect(self, *, log_failure: bool = True) -> bool:
         """建立 SSH 连接。"""
         if paramiko is None:
             raise ModuleNotFoundError(
                 "未安装依赖 paramiko。请执行: pip install -r requirements.txt"
             )
+        transport = None
         try:
             self._ssh = paramiko.SSHClient()
             self._ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # "none" represents passwordless workstation accounts in config.
+            # Windows OpenSSH commonly implements this as password auth with an
+            # empty password, not as the SSH protocol "none" auth method.
+            password = "" if self.auth_method == "none" else self.password or None
+            use_key_auth = self.auth_method == "key" or (
+                password is None and self.auth_method != "none"
+            )
+            key_filename = self.key_filename if use_key_auth else None
             self._ssh.connect(
                 hostname=self.host,
                 port=self.port,
                 username=self.username,
-                password=self.password,
-                timeout=10,
-                look_for_keys=False,
-                allow_agent=False,
+                password=password,
+                key_filename=key_filename,
+                timeout=OPERATION_TIMEOUTS.get("ssh_connection", 10),
+                look_for_keys=use_key_auth,
+                allow_agent=use_key_auth,
             )
             transport = self._ssh.get_transport()
             if transport:
@@ -88,8 +111,15 @@ class RemoteWorkstation:
             self._sftp = self._ssh.open_sftp()
             logger.info(f"[SSH] SSH 连接成功: {self.username}@{self.host}:{self.port}")
             return True
-        except (paramiko.SSHException, OSError, EOFError) as e:
-            logger.error(f"[SSH] SSH 连接失败: {e}")
+        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+            if log_failure:
+                logger.error(f"[SSH] SSH 连接失败: {e}")
+            if transport is not None:
+                try:
+                    transport.close()
+                except (OSError, EOFError, socket.timeout) as close_error:
+                    if log_failure:
+                        logger.warning(f"[SSH] Transport 关闭异常: {close_error}")
             self._ssh = None
             self._sftp = None
             return False
@@ -118,25 +148,28 @@ class RemoteWorkstation:
             return False
         transport = self._ssh.get_transport()
         if transport is None or not transport.is_active():
+            self.disconnect()
             return False
         try:
             transport.send_ignore()
             return True
-        except (OSError, EOFError):
+        except (OSError, EOFError, socket.timeout, Exception):
+            self.disconnect()
             return False
 
     def connection_is_active(self) -> bool:
-        """Return cached transport activity without sending a network heartbeat."""
+        """Return cached transport state without proving network reachability."""
         if self._ssh is None:
             return False
         transport = self._ssh.get_transport()
         return bool(transport is not None and transport.is_active())
 
-    def ensure_connected(self) -> bool:
+    def ensure_connected(self, *, log_failure: bool = True) -> bool:
         """确保连接有效，若断开则自动重连。"""
         if not self.is_connected():
-            logger.info("[SSH] SSH 已断开，尝试重新连接...")
-            return self.connect()
+            if log_failure:
+                logger.info("[SSH] SSH 已断开，尝试重新连接...")
+            return self.connect(log_failure=log_failure)
         return True
 
     # ------------------------------------------------------------------
@@ -276,7 +309,7 @@ class RemoteWorkstation:
         *,
         timeout: float | None = None,
     ) -> int | None:
-        """返回远程文件大小；文件不存在或连接异常时返回 None。"""
+        """返回远程文件大小；连接/探测异常时返回 None，文件不存在时抛 FileNotFoundError。"""
         if not self.ensure_connected():
             return None
         if self._sftp is None:
@@ -284,7 +317,7 @@ class RemoteWorkstation:
         try:
             return int(self._sftp_stat(remote_path, timeout=timeout).st_size)
         except FileNotFoundError:
-            return None
+            raise
         except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
             logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
@@ -469,8 +502,16 @@ class RemoteWorkstation:
                     self._sftp.rmdir(child_path)
                     deleted_count += 1
                 except (paramiko.SSHException, OSError, EOFError) as e:
-                    logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
-                    failed_count += 1
+                    if self._remove_remote_directory_via_shell(child_path):
+                        deleted_count += 1
+                    elif child_failed == 0:
+                        logger.warning(
+                            f"[SSH] 远程子目录已清空但目录本身仍被 Windows 占用，保留: "
+                            f"{child_path}: {e}"
+                        )
+                    else:
+                        logger.warning(f"[SSH] 删除远程子目录失败: {child_path}: {e}")
+                        failed_count += 1
             else:
                 try:
                     self._sftp.remove(child_path)
@@ -479,6 +520,25 @@ class RemoteWorkstation:
                     logger.warning(f"[SSH] 删除远程文件失败: {child_path}: {e}")
                     failed_count += 1
         return (deleted_count, failed_count)
+
+    def _remove_remote_directory_via_shell(self, remote_dir: str) -> bool:
+        """Fallback for Windows OpenSSH SFTP rmdir permission quirks."""
+        windows_path = remote_dir.replace("/", "\\")
+        quoted = windows_path.replace('"', r'\"')
+        command = f'cmd /c rmdir "{quoted}"'
+        out, err, code = self.exec_command(command, timeout=30)
+        if code == 0:
+            logger.info(
+                f"[SSH] 远程子目录已通过 shell 删除: {remote_dir}",
+                extra={"broadcast": False},
+            )
+            return True
+        logger.debug(
+            f"[SSH] shell 删除远程子目录失败: {remote_dir}: code={code}, "
+            f"stdout={out.strip()}, stderr={err.strip()}",
+            extra={"broadcast": False},
+        )
+        return False
 
     def list_remote_directory(self, remote_dir: str) -> list[str]:
         """返回远程目录下的直接子项名称；目录不存在时返回空列表。"""
@@ -525,6 +585,7 @@ class RemoteWorkstation:
             return ("", str(e), -1)
         except socket.timeout:
             logger.error("[SSH] 远程命令执行超时")
+            self.disconnect()
             return ("", "命令执行超时", -1)
         except OSError as e:
             logger.error(f"[SSH] 远程命令执行失败: {e}")
@@ -536,6 +597,7 @@ class RemoteWorkstation:
             return ("", str(e), -1)
         except Exception as e:
             logger.error(f"[SSH] 远程命令执行未知异常: {e}")
+            self.disconnect()
             return ("", str(e), -1)
 
     @staticmethod
@@ -740,6 +802,70 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 终止远程任务异常 {task_name}: {e}")
             return False
 
+    def cleanup_fluent_processes_for_task(self, task: dict[str, object]) -> bool:
+        """Use task-specific command-line evidence to terminate detached Fluent children."""
+        if not self.ensure_connected():
+            return False
+        task_name = str(task.get("task_name") or "").strip()
+        config_name = str(task.get("config_name") or "").strip()
+        evidence = [
+            task_name,
+            os.path.basename(str(task.get("script_file") or "")),
+            os.path.basename(str(task.get("pid_file") or "")),
+            os.path.basename(str(task.get("log_file") or "")),
+        ]
+        if config_name:
+            evidence.extend([
+                f"model_gen4_{config_name}",
+                f"solver_progress_{config_name}",
+                f"solver_done_{config_name}",
+                f"postprocess_done_{config_name}",
+            ])
+        evidence = [item for item in evidence if item]
+        if not evidence:
+            return True
+
+        def ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        evidence_array = "@(" + ",".join(ps_quote(item.lower()) for item in evidence) + ")"
+        process_names = "@('fluent','cx2410','mpiexec','hydra_pmi_proxy','fl_mpi2410','ansyscl')"
+        script = (
+            "$ErrorActionPreference='SilentlyContinue';"
+            f"$evidence={evidence_array};"
+            f"$names={process_names};"
+            "$matches=Get-CimInstance Win32_Process | Where-Object {"
+            "  $name=([string]$_.Name).ToLower();"
+            "  $cmd=([string]$_.CommandLine).ToLower();"
+            "  ($names -contains [IO.Path]::GetFileNameWithoutExtension($name)) -and "
+            "  ($evidence | Where-Object { $_ -and $cmd.Contains($_) })"
+            "};"
+            "$matches | ForEach-Object {"
+            "  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; "
+            "        Write-Output ('killed=' + $_.ProcessId + ':' + $_.Name) }"
+            "  catch { Write-Output ('failed=' + $_.ProcessId + ':' + $_.Name + ':' + $_.Exception.Message) }"
+            "}"
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        try:
+            out, err, code = self.exec_command(
+                f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}",
+                timeout=60,
+            )
+            if code != 0:
+                logger.warning(
+                    "[SSH] Fluent 任务证据清理返回非零码 %s: %s",
+                    code,
+                    err or out,
+                )
+                return False
+            if out.strip():
+                logger.info("[SSH] Fluent 任务证据清理结果: %s", out.strip())
+            return True
+        except (paramiko.SSHException, OSError, EOFError) as e:
+            logger.warning("[SSH] Fluent 任务证据清理异常: %s", e)
+            return False
+
     def cleanup_remote_task_entry(
         self,
         task_name: str,
@@ -823,17 +949,8 @@ class RemoteWorkstation:
             cmd_working = working_dir.replace("/", "\\")
             cd_line = f'cd /d "{cmd_working}"\r\n'
         if interactive:
-            pid_capture_line = (
-                "set \"AF_WRAPPER_PID=\"\r\n"
-                "for /f \"tokens=2 delims==\" %%P in ('wmic process where "
-                "\"Name='cmd.exe' and CommandLine like '%%%~nx0%%' "
-                "and not CommandLine like '%%wmic process%%'\" "
-                "get ProcessId /value 2^>nul ^| find \"=\"') do "
-                "if not defined AF_WRAPPER_PID set \"AF_WRAPPER_PID=%%P\"\r\n"
-                "if defined AF_WRAPPER_PID > \"%AF_PID_FILE%\" echo %AF_WRAPPER_PID%\r\n"
-            )
+            # Avoid WMIC-based PID probing here: if WMI stalls, the solver never starts.
             command_runner = (
-                f"{pid_capture_line}"
                 f"call {command} >> \"{cmd_log}\" 2>&1\r\n"
             )
         else:
@@ -951,6 +1068,7 @@ class RemoteWorkstation:
 
     def check_system(self, conda_exe: str = "", conda_env: str = "",
                      remote_dirs: dict[str, str] | None = None,
+                     fluent_path: str = "",
                      mpi_bin_dir: str = "",
                      scripts_dir: str = "",
                      script_files: list[str] | None = None,
@@ -966,6 +1084,7 @@ class RemoteWorkstation:
             conda_exe: conda 可执行文件的完整远程路径
             conda_env: conda 环境名称
             remote_dirs: 需要检查存在性的远程目录 {显示名: 路径}
+            fluent_path: Fluent 可执行文件完整路径
             mpi_bin_dir: ANSYS Fluent MPI 安装目录
             scripts_dir: 远程脚本部署目录
             script_files: 需要检查部署的脚本文件列表
@@ -988,8 +1107,38 @@ class RemoteWorkstation:
         }
 
         if not self.ensure_connected():
+            results["ssh_connected"] = False
+            results["remote_dirs"].extend(
+                {"label": label, "path": path, "exists": None}
+                for label, path in (remote_dirs or {}).items()
+            )
+            results["remote_programs"].extend([
+                {
+                    "label": "Conda可执行文件",
+                    "path": conda_exe or "(PATH)",
+                    "exists": None,
+                },
+                {
+                    "label": "Conda环境",
+                    "path": conda_env or "(未设置)",
+                    "exists": None,
+                },
+            ])
+            if fluent_path:
+                results["remote_programs"].append({
+                    "label": "Fluent可执行文件",
+                    "path": fluent_path,
+                    "exists": None,
+                })
+            if mpi_bin_dir:
+                results["remote_programs"].append({
+                    "label": "MPI安装目录",
+                    "path": mpi_bin_dir,
+                    "exists": None,
+                })
+            results["scripts_status"] = {"status": "skipped", "message": "SSH 未连接，未检查"}
+            results["ref_files_status"] = {"status": "skipped", "message": "SSH 未连接，未检查"}
             return results
-
         # ---- Conda 检查（1 次 SSH） ----
         if conda_exe:
             out, _, code = self.exec_command(f'if exist "{conda_exe}" (echo found)')
@@ -1030,9 +1179,11 @@ class RemoteWorkstation:
         # 将目录、脚本、引用文件三类路径合并为一次 PowerShell Test-Path 调用，
         # 避免 23+ 次独立 SSH exec_command 导致总耗时超过 TUI 超时。
         all_paths: list[tuple[str, str, str]] = []  # (kind, label, path)
-        # kind: "dir" | "mpi" | "script" | "ref"
+        # kind: "dir" | "program" | "mpi" | "script" | "ref"
 
         all_dirs: dict[str, str] = dict(remote_dirs) if remote_dirs else {}
+        if fluent_path:
+            all_paths.append(("program", "Fluent可执行文件", fluent_path))
         if mpi_bin_dir:
             all_dirs["MPI安装目录"] = mpi_bin_dir
         for label, path in all_dirs.items():
@@ -1098,7 +1249,7 @@ class RemoteWorkstation:
             script_missing: list[str] = []
             ref_missing: list[str] = []
             for (kind, label, path), exists in zip(all_paths, flags):
-                if kind == "mpi":
+                if kind in {"mpi", "program"}:
                     results["remote_programs"].append({
                         "label": label, "path": path, "exists": exists,
                     })

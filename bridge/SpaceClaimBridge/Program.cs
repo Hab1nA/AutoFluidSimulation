@@ -66,6 +66,7 @@ namespace AutoFluidSimulation.Bridge
         private const int PersistentReadyPollIntervalMs = 2000;
         private const int PersistentLoopPollIntervalMs = 1000;
         private const int PersistentMonitorHeartbeatSeconds = 30;
+        private const int PersistentQuitTimeoutSeconds = 30;
         private const int ProcessAppearPollIntervalMs = 1000;
         private const int ProcessCheckRetryDelayMs = 2000;
         private const int WaitForInputIdleTimeoutMs = 15000;
@@ -308,20 +309,18 @@ namespace AutoFluidSimulation.Bridge
 
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = scExe,
-                    Arguments = runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
-                    UseShellExecute = false,
-                };
-                PrepareSpaceClaimEnvironment(psi);
-                psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
-                psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName!;
-                Process started = Process.Start(psi);
-                workingProcess = ResolveStartedSpaceClaimProcess(
-                    started, launchBaseline, processAppearTimeout);
+                workingProcess = LaunchAndResolve(
+                    scExe,
+                    runScriptArg + " /Splash=False /Welcome=False /ExitAfterScript=True",
+                    psi =>
+                    {
+                        psi.EnvironmentVariables["AUTOFLUID_SC_CONFIG"] = opts.ConfigName!;
+                        psi.EnvironmentVariables["AUTOFLUID_SC_STEP_DIR"] = opts.StepDir!;
+                        psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_DIR"] = opts.ScdocDir!;
+                        psi.EnvironmentVariables["AUTOFLUID_SC_SCDOC_NAME"] = opts.ScdocFileName!;
+                    },
+                    launchBaseline,
+                    processAppearTimeout);
             }
             catch (Exception ex)
             {
@@ -346,12 +345,12 @@ namespace AutoFluidSimulation.Bridge
                 Console.WriteLine("[BRIDGE] SpaceClaim 正在运行, 监控脚本执行完成...");
 
                 int totalTimeout = opts.TimeoutSeconds;
-                DateTime deadline = DateTime.UtcNow.AddSeconds(totalTimeout);
+                var deadlineTimer = Stopwatch.StartNew();
                 string scdocFile = GetScdocFilePath(opts);
 
-                while (DateTime.UtcNow < deadline)
+                while (deadlineTimer.Elapsed.TotalSeconds < totalTimeout)
                 {
-                    if (File.Exists(scdocFile))
+                    if (IsFreshScdocFile(scdocFile, launchBaseline))
                     {
                         var fi = new FileInfo(scdocFile);
                         Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi.Length} bytes)");
@@ -377,13 +376,14 @@ namespace AutoFluidSimulation.Bridge
                     {
                         Console.WriteLine("[BRIDGE] SpaceClaim 进程已退出, 最终检查...");
                         Thread.Sleep(ProcessExitGraceDelayMs);
-                        if (File.Exists(scdocFile))
+                        if (IsFreshScdocFile(scdocFile, launchBaseline))
                         {
                             var fi2 = new FileInfo(scdocFile);
                             Console.WriteLine($"[BRIDGE] ✓ SCDOC 已生成: {scdocFile} ({fi2.Length} bytes)");
                             return (int)ExitCode.Success;
                         }
-                        Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成 SCDOC 文件");
+                        TryKillWorkingProcess(workingProcess, "SpaceClaim exited without fresh SCDOC");
+                        Console.Error.WriteLine("[BRIDGE_ERROR] SpaceClaim 已退出但未生成新的 SCDOC 文件");
                         return (int)ExitCode.OutputValidationFailed;
                     }
 
@@ -391,17 +391,20 @@ namespace AutoFluidSimulation.Bridge
                 }
 
                 Console.Error.WriteLine($"[BRIDGE_ERROR] 超时 ({totalTimeout}s)");
+                TryKillWorkingProcess(workingProcess, "one-shot timed out");
                 return (int)ExitCode.Timeout;
             }
             catch (InvalidOperationException ex)
             {
                 int? earlySuccess = TryReturnSuccessIfScdocExists(
                     opts,
+                    launchBaseline,
                     "SpaceClaim exited before GUI ready but SCDOC exists");
                 if (earlySuccess.HasValue)
                 {
                     return earlySuccess.Value;
                 }
+                TryKillWorkingProcess(workingProcess, "SpaceClaim GUI ready detection failed");
                 Console.Error.WriteLine($"[BRIDGE_ERROR] SpaceClaim GUI 就绪检测失败 (进程已不可用): {ex.Message}");
                 return (int)ExitCode.LaunchFailed;
             }
@@ -409,6 +412,35 @@ namespace AutoFluidSimulation.Bridge
             {
                 workingProcess?.Dispose();
             }
+        }
+
+        /// <summary>
+        /// 启动 SpaceClaim 进程并解析返回可用句柄：创建 ProcessStartInfo、
+        /// 准备环境变量、启动进程、回退到进程扫描。
+        /// </summary>
+        /// <param name="scExe">SpaceClaim.exe 路径</param>
+        /// <param name="arguments">命令行参数</param>
+        /// <param name="configureEnvironment">设置模式特定环境变量的委托</param>
+        /// <param name="launchBaseline">启动时间基线</param>
+        /// <param name="processAppearTimeout">进程出现超时秒数</param>
+        /// <returns>可用的 SpaceClaim 进程对象，未找到返回 null</returns>
+        private static Process? LaunchAndResolve(
+            string scExe,
+            string arguments,
+            Action<ProcessStartInfo> configureEnvironment,
+            DateTime launchBaseline,
+            int processAppearTimeout)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = scExe,
+                Arguments = arguments,
+                UseShellExecute = false,
+            };
+            PrepareSpaceClaimEnvironment(psi);
+            configureEnvironment(psi);
+            Process started = Process.Start(psi);
+            return ResolveStartedSpaceClaimProcess(started, launchBaseline, processAppearTimeout);
         }
 
         /// <summary>
@@ -685,15 +717,41 @@ namespace AutoFluidSimulation.Bridge
         }
 
         /// <summary>
-        /// 检查 SCDOC 文件是否已存在，存在时返回 Success 退出码。
+        /// 检查 SCDOC 文件是否由当前启动周期生成且非空。
+        /// </summary>
+        /// <param name="scdocFile">SCDOC 文件路径</param>
+        /// <param name="launchBaseline">当前启动时间基线</param>
+        /// <returns>文件存在、非空且晚于启动基线时返回 true</returns>
+        private static bool IsFreshScdocFile(string scdocFile, DateTime launchBaseline)
+        {
+            if (!File.Exists(scdocFile))
+            {
+                return false;
+            }
+
+            var fi = new FileInfo(scdocFile);
+            if (fi.Length <= 0)
+            {
+                return false;
+            }
+
+            return fi.LastWriteTimeUtc >= launchBaseline;
+        }
+
+        /// <summary>
+        /// 检查当前启动周期内生成的 SCDOC 文件，存在时返回 Success 退出码。
         /// </summary>
         /// <param name="opts">Bridge 选项</param>
+        /// <param name="launchBaseline">当前启动时间基线</param>
         /// <param name="reason">用于日志输出的检查原因</param>
-        /// <returns>SCDOC 存在返回 Success 退出码，否则返回 null</returns>
-        private static int? TryReturnSuccessIfScdocExists(BridgeOptions opts, string reason)
+        /// <returns>新 SCDOC 存在返回 Success 退出码，否则返回 null</returns>
+        private static int? TryReturnSuccessIfScdocExists(
+            BridgeOptions opts,
+            DateTime launchBaseline,
+            string reason)
         {
             string scdocFile = GetScdocFilePath(opts);
-            if (!File.Exists(scdocFile))
+            if (!IsFreshScdocFile(scdocFile, launchBaseline))
             {
                 return null;
             }
@@ -703,6 +761,35 @@ namespace AutoFluidSimulation.Bridge
             return (int)ExitCode.Success;
         }
 
+        /// <summary>
+        /// 尝试终止本次 Bridge 启动的 SpaceClaim 进程。
+        /// </summary>
+        /// <param name="process">SpaceClaim 进程对象</param>
+        /// <param name="reason">终止原因</param>
+        private static void TryKillWorkingProcess(Process? process, string reason)
+        {
+            if (process == null)
+            {
+                return;
+            }
+
+            try
+            {
+                process.Refresh();
+                if (process.HasExited)
+                {
+                    return;
+                }
+
+                Console.WriteLine($"[BRIDGE_WARN] 正在终止 SpaceClaim 进程 (PID={process.Id}): {reason}");
+                process.Kill();
+                process.WaitForExit(5000);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BRIDGE_WARN] 终止 SpaceClaim 进程失败: {ex.Message}");
+            }
+        }
         // ==============================================================
         // 常驻模式：启动 SpaceClaim 后通过文件协议循环处理命令
         // ==============================================================
@@ -744,23 +831,18 @@ namespace AutoFluidSimulation.Bridge
 
             try
             {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = scExe,
-                    // 常驻模式不使用 /ExitAfterScript=True
-                    Arguments = runScriptArg + " /Splash=False /Welcome=False",
-                    UseShellExecute = false,
-                };
-                PrepareSpaceClaimEnvironment(psi);
-                // Python passes the same slot settings to Bridge; Bridge forwards them
-                // to the child SpaceClaim process that runs spaceclaim_transit.py.
-                psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";
-                psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
-                psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir!;
-                psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = opts.SlotId.ToString();
-                Process started = Process.Start(psi);
-                workingProcess = ResolveStartedSpaceClaimProcess(
-                    started, launchBaseline, processAppearTimeout);
+                workingProcess = LaunchAndResolve(
+                    scExe,
+                    runScriptArg + " /Splash=False /Welcome=False",
+                    psi =>
+                    {
+                        psi.EnvironmentVariables["AUTOFLUID_SC_NOEXIT"] = "1";
+                        psi.EnvironmentVariables["AUTOFLUID_SC_PERSISTENT"] = "1";
+                        psi.EnvironmentVariables["AUTOFLUID_SC_CMD_DIR"] = opts.CmdDir!;
+                        psi.EnvironmentVariables["AUTOFLUID_SC_SLOT_ID"] = opts.SlotId.ToString();
+                    },
+                    launchBaseline,
+                    processAppearTimeout);
             }
             catch (Exception ex)
             {
@@ -797,8 +879,8 @@ namespace AutoFluidSimulation.Bridge
             int persistentReadyTimeout = GetEnvInt(
                 "AUTOFLUID_SC_PERSISTENT_READY_TIMEOUT",
                 DefaultPersistentReadyTimeoutSeconds);
-            DateTime readyDeadline = DateTime.UtcNow.AddSeconds(persistentReadyTimeout);
-            while (DateTime.UtcNow < readyDeadline)
+            var readyTimer = Stopwatch.StartNew();
+            while (readyTimer.Elapsed.TotalSeconds < persistentReadyTimeout)
             {
                 if (File.Exists(readyFile))
                 {
@@ -841,7 +923,8 @@ namespace AutoFluidSimulation.Bridge
             // 命令循环：监听进程退出和 quit 文件命令
             int exitCode = (int)ExitCode.Success;
             bool quitRequested = false;
-            DateTime lastMonitorUpdate = DateTime.UtcNow;
+            Stopwatch? quitTimer = null;
+            var heartbeatTimer = Stopwatch.StartNew();
             // ★ 进程检测连续失败计数器：防止因瞬态异常（如进程句柄暂不可用）
             //    误判 SpaceClaim 退出。累计 5 次连续失败才确认退出。
             int consecutiveProcessCheckFailures = 0;
@@ -921,13 +1004,13 @@ namespace AutoFluidSimulation.Bridge
                         continue;
                     }
 
-                    if ((DateTime.UtcNow - lastMonitorUpdate).TotalSeconds >= PersistentMonitorHeartbeatSeconds)
+                    if (heartbeatTimer.Elapsed.TotalSeconds >= PersistentMonitorHeartbeatSeconds)
                     {
                         WritePersistentMonitorFile(
                             opts,
                             GetProcessIdOrDefault(workingProcess),
                             "running");
-                        lastMonitorUpdate = DateTime.UtcNow;
+                        heartbeatTimer.Restart();
                     }
 
                     // ★ 检测 quit 命令文件（Python 端 shutdown 时写入）。
@@ -935,12 +1018,26 @@ namespace AutoFluidSimulation.Bridge
                     if (!quitRequested && IsQuitCommandPending(cmdFile))
                     {
                         quitRequested = true;
+                        quitTimer = Stopwatch.StartNew();
                         Console.WriteLine("[BRIDGE] 收到 quit 命令，等待 SpaceClaim 脚本退出...");
                         WritePersistentMonitorFile(
                             opts,
                             GetProcessIdOrDefault(workingProcess),
                             "quit_requested");
-                        lastMonitorUpdate = DateTime.UtcNow;
+                        heartbeatTimer.Restart();
+                    }
+
+                    if (quitTimer != null
+                        && quitTimer.Elapsed.TotalSeconds >= PersistentQuitTimeoutSeconds)
+                    {
+                        Console.Error.WriteLine("[BRIDGE_ERROR] quit 请求超时，强制终止 SpaceClaim");
+                        TryKillWorkingProcess(workingProcess, "persistent quit timeout");
+                        WritePersistentMonitorFile(
+                            opts,
+                            GetProcessIdOrDefault(workingProcess),
+                            "quit_timeout");
+                        exitCode = (int)ExitCode.Timeout;
+                        break;
                     }
 
                     Thread.Sleep(PersistentLoopPollIntervalMs);
@@ -985,6 +1082,8 @@ namespace AutoFluidSimulation.Bridge
                     Console.WriteLine(
                         $"[BRIDGE_WARN] 检查启动进程句柄失败，回退到进程扫描: {ex.Message}");
                 }
+
+                startedProcess.Dispose();
             }
 
             Console.WriteLine("[BRIDGE] 等待 SpaceClaim 进程出现...");
@@ -1239,8 +1338,8 @@ namespace AutoFluidSimulation.Bridge
                 p.Dispose();
             }
 
-            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
-            while (DateTime.UtcNow < deadline)
+            var deadlineTimer = Stopwatch.StartNew();
+            while (deadlineTimer.Elapsed.TotalSeconds < timeoutSec)
             {
                 Process[] procs = Process.GetProcessesByName(ProcessName);
                 Process? selectedProcess = null;
@@ -1363,11 +1462,11 @@ namespace AutoFluidSimulation.Bridge
         /// <param name="timeoutSec">主窗口出现超时秒数</param>
         private static void WaitForGuiReady(Process p, int timeoutSec)
         {
-            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSec);
+            var deadlineTimer = Stopwatch.StartNew();
 
             Console.WriteLine("[BRIDGE] Phase 1: 等待 SpaceClaim 主窗口出现...");
             bool mainWindowFound = false;
-            while (DateTime.UtcNow < deadline && !mainWindowFound)
+            while (deadlineTimer.Elapsed.TotalSeconds < timeoutSec && !mainWindowFound)
             {
                 try
                 {

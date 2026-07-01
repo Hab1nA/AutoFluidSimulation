@@ -11,6 +11,7 @@ use crate::generate_request_id;
 pub const CMD_START: &str = "start";
 pub const CMD_PAUSE: &str = "pause";
 pub const CMD_STOP: &str = "stop";
+pub const CMD_STOP_STEP: &str = "stop_step";
 pub const CMD_CHECK: &str = "check";
 pub const CMD_RESET_STEP: &str = "reset_step";
 pub const CMD_CLEAN_STEP: &str = "clean_step";
@@ -20,6 +21,9 @@ pub const CMD_GET_ENGINE_STATUS: &str = "get_engine_status";
 pub const CMD_GET_LOG_ENTRIES: &str = "get_log_entries";
 pub const CMD_GET_DASHBOARD: &str = "get_dashboard";
 pub const CMD_RELOAD_CONFIG: &str = "reload_config";
+/// 与 Python 侧 `ipc/protocol.py` 同步的协议常量。
+///
+/// 以下常量虽在 TUI 侧暂未使用，但必须保留以维持与 Python daemon 的协议一致性。
 #[allow(dead_code)]
 pub const CMD_WORKER_REGISTER: &str = "worker_register";
 #[allow(dead_code)]
@@ -34,6 +38,7 @@ pub const CMD_WORKER_STEP_ERROR: &str = "worker_step_error";
 // ---- Worker 生命周期管理命令 ----
 pub const CMD_WORKER_START: &str = "worker_start";
 pub const CMD_WORKER_STOP: &str = "worker_stop";
+/// 与 Python 侧协议同步，暂未使用。
 #[allow(dead_code)]
 pub const CMD_WORKER_RESTART: &str = "worker_restart";
 

@@ -7,16 +7,18 @@ from __future__ import annotations
 """
 
 import threading
+import time
 from typing import Callable
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
-    STATUS_RETRYING, ENGINE_CONFIG,
+    STATUS_RETRYING, STATUS_UNKNOWN_REMOTE, ENGINE_CONFIG, WORKSTATIONS,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 from engine.scheduler.utils import pause_aware_sleep, PauseGuard
 
@@ -64,11 +66,25 @@ class BarrierCoordinator:
         self._solver_terminal_reported = False
         self._guard = PauseGuard(paused_event, stopped_event)
 
-        # ---- Solver 线程（串行执行：同一时刻仅一个构型求解）----
+        # ---- Solver 线程（同一工作站串行，不同工作站可并行）----
         self._solver_threads: list[threading.Thread] = []
+        self._solver_thread_workstations: dict[threading.Thread, str] = {}
         self._solver_dispatch_lock = threading.Lock()
         self._solver_active_config: int | None = None
+        self._solver_active_by_workstation: dict[str, int] = {}
+        self._workstation_solver_failures: dict[str, int] = {}
+        self._workstation_quarantine_until: dict[str, float] = {}
+        self._restore_solver_quarantine_state()
         self._workstation_barriers_passed: set[str] = set()
+        self._configured_workstation_ids = {
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        }
+        self._multi_workstation_mode = any(
+            workstation_id != DEFAULT_WORKSTATION_ID
+            for workstation_id in self._configured_workstation_ids
+        )
 
         logger.info("全局屏障协调器初始化完成")
 
@@ -89,10 +105,39 @@ class BarrierCoordinator:
             grouped.setdefault(workstation_id, []).append(config_name)
         return grouped
 
+    def _is_dynamic_assignment_pending(self, config_name: int) -> bool:
+        """Whether a config could still be claimed by any real workstation."""
+        if not self._multi_workstation_mode:
+            return False
+        for upstream_step in ("sw", "sc", "transfer"):
+            if self.state.get_step_status(config_name, upstream_step) == STATUS_ERROR:
+                return False
+        meshing_status = self.state.get_step_status(config_name, "meshing")
+        if meshing_status in (STATUS_COMPLETED, STATUS_ERROR):
+            return False
+        return self._workstation_for_config(config_name) == DEFAULT_WORKSTATION_ID
+
+    def _all_assignable_configs_assigned(self) -> bool:
+        """Return True once no unclaimed config can later enter Meshing."""
+        return not any(
+            self._is_dynamic_assignment_pending(config_name)
+            for config_name in self.state.get_all_configs()
+        )
+
+    @staticmethod
+    def _counts_all_terminal(counts: dict[str, int], total: int) -> bool:
+        """Whether every known config for a step is Completed or Error."""
+        terminal = counts.get(STATUS_COMPLETED, 0) + counts.get(STATUS_ERROR, 0)
+        return total > 0 and terminal >= total
+
     def _ready_workstations_for_solver(self) -> set[str]:
         """Return workstations whose Meshing barrier has passed."""
+        if not self._all_assignable_configs_assigned():
+            return set()
         ready: set[str] = set()
         for workstation_id, config_names in self._configs_by_workstation().items():
+            if self._multi_workstation_mode and workstation_id == DEFAULT_WORKSTATION_ID:
+                continue
             if self.state.all_configs_completed_at_step(
                 "meshing",
                 workstation_id=workstation_id,
@@ -100,6 +145,16 @@ class BarrierCoordinator:
             ):
                 ready.add(workstation_id)
         return ready
+
+    def workstation_barrier_snapshot(self) -> dict[str, bool]:
+        """Return pass state for configured real workstation barriers."""
+        if not self._multi_workstation_mode:
+            return {}
+        return {
+            workstation_id: workstation_id in self._workstation_barriers_passed
+            for workstation_id in sorted(self._configured_workstation_ids)
+            if workstation_id != DEFAULT_WORKSTATION_ID
+        }
 
     def clear_workstation_barrier(self, workstation_id: str) -> None:
         """Clear one workstation barrier cache after reset."""
@@ -142,8 +197,13 @@ class BarrierCoordinator:
         Returns True when the step has been marked Error.
         """
         retry_count = self.state.increment_retry(config_name, step_name)
-        max_retries = int(ENGINE_CONFIG["max_retries"])
+        max_retries = int(ENGINE_CONFIG.get("remote_unknown_max_retries", 3))
+        workstation_id = self._workstation_for_config(config_name)
         if retry_count >= max_retries:
+            remote_executor = self.runner.get_remote_executor()
+            kill_remote_task = getattr(remote_executor, "_kill_remote_task_for_config", None)
+            if callable(kill_remote_task):
+                kill_remote_task(config_name, step_name, workstation_id)
             self.state.set_step_status(
                 config_name,
                 step_name,
@@ -155,14 +215,115 @@ class BarrierCoordinator:
                 config_name,
             )
             return True
+        self.state.set_step_status(
+            config_name,
+            step_name,
+            STATUS_UNKNOWN_REMOTE,
+            f"远程 {step_name} 状态未知，等待恢复探测 ({retry_count}/{max_retries})",
+        )
         logger.warning(
-            "[Solver] 构型%s 远程状态未知，保留 Running 状态等待后续重试 "
+            "[Solver] 构型%s 远程状态未知，标记 UnknownRemote 等待后续重试 "
             "(%s/%s)",
             config_name,
             retry_count,
             max_retries,
         )
         return False
+
+    def _restore_solver_quarantine_state(self) -> None:
+        get_solver_quarantine = getattr(self.state, "get_solver_quarantine", None)
+        if not callable(get_solver_quarantine):
+            return
+        restored = get_solver_quarantine()
+        now = time.time()
+        for workstation_id, data in restored.items():
+            until = data.get("until")
+            failure_count = data.get("failure_count")
+            if not isinstance(until, int | float) or not isinstance(failure_count, int | float):
+                continue
+            if int(failure_count) > 0 and (float(until) <= 0.0 or float(until) >= now):
+                self._workstation_solver_failures[workstation_id] = int(failure_count)
+            if float(until) > now:
+                self._workstation_quarantine_until[workstation_id] = float(until)
+        if self._workstation_quarantine_until:
+            logger.warning(
+                "[Solver] 已恢复工作站 Solver 隔离状态: %s",
+                self.solver_quarantine_snapshot(),
+            )
+        else:
+            self._persist_solver_quarantine_state()
+
+    def _persist_solver_quarantine_state(self) -> None:
+        set_solver_quarantine = getattr(self.state, "set_solver_quarantine", None)
+        if not callable(set_solver_quarantine):
+            return
+        workstation_ids = set(self._workstation_solver_failures) | set(
+            self._workstation_quarantine_until
+        )
+        snapshot = {
+            workstation_id: {
+                "failure_count": self._workstation_solver_failures.get(workstation_id, 0),
+                "until": self._workstation_quarantine_until.get(workstation_id, 0.0),
+            }
+            for workstation_id in workstation_ids
+            if self._workstation_solver_failures.get(workstation_id, 0) > 0
+            or workstation_id in self._workstation_quarantine_until
+        }
+        set_solver_quarantine(snapshot)
+
+    def _is_workstation_quarantined(self, workstation_id: str) -> bool:
+        until = self._workstation_quarantine_until.get(workstation_id)
+        if until is None:
+            return False
+        if time.time() >= until:
+            self._workstation_quarantine_until.pop(workstation_id, None)
+            self._workstation_solver_failures.pop(workstation_id, None)
+            self._persist_solver_quarantine_state()
+            logger.info("[Solver] 工作站 %s Solver 隔离已到期，恢复调度", workstation_id)
+            return False
+        return True
+
+    def _record_solver_failure_for_workstation(self, workstation_id: str) -> None:
+        failures = self._workstation_solver_failures.get(workstation_id, 0) + 1
+        self._workstation_solver_failures[workstation_id] = failures
+        max_failures = int(ENGINE_CONFIG.get("solver_workstation_max_consecutive_failures", 2))
+        if max_failures <= 0 or failures < max_failures:
+            self._persist_solver_quarantine_state()
+            return
+        quarantine_seconds = float(
+            ENGINE_CONFIG.get("solver_workstation_quarantine_minutes", 30)
+        ) * 60.0
+        until = time.time() + quarantine_seconds
+        self._workstation_quarantine_until[workstation_id] = until
+        self._persist_solver_quarantine_state()
+        logger.error(
+            "[Solver] 工作站 %s 连续 Solver 失败 %s 次，隔离 %.0f 秒",
+            workstation_id,
+            failures,
+            quarantine_seconds,
+        )
+
+    def _clear_solver_failures_for_workstation(self, workstation_id: str) -> None:
+        self._workstation_solver_failures.pop(workstation_id, None)
+        self._workstation_quarantine_until.pop(workstation_id, None)
+        self._persist_solver_quarantine_state()
+
+    def solver_quarantine_snapshot(self) -> dict[str, dict[str, int | float]]:
+        now = time.time()
+        snapshot: dict[str, dict[str, int | float]] = {}
+        for workstation_id, until in list(self._workstation_quarantine_until.items()):
+            remaining = int(max(0.0, until - now))
+            if remaining <= 0:
+                self._workstation_quarantine_until.pop(workstation_id, None)
+                self._workstation_solver_failures.pop(workstation_id, None)
+                self._persist_solver_quarantine_state()
+                continue
+            snapshot[workstation_id] = {
+                "remaining_seconds": remaining,
+                "failure_count": self._workstation_solver_failures.get(workstation_id, 0),
+                "until": until,
+            }
+        return snapshot
 
     def join_solver_threads(self, timeout: float = 3.0) -> None:
         """等待所有 Solver 线程退出并清空列表。
@@ -176,6 +337,8 @@ class BarrierCoordinator:
             if t.is_alive():
                 t.join(timeout=timeout)
         self._solver_threads.clear()
+        self._solver_thread_workstations.clear()
+        self._solver_active_by_workstation.clear()
 
     # ------------------------------------------------------------------
     # 全局屏障监控
@@ -204,18 +367,13 @@ class BarrierCoordinator:
                 continue
 
             all_configs = self.state.get_all_configs()
+            total_configs = len(all_configs)
 
             # ---- 前置检查：SW 阶段是否已全部终结且有错误 ----
             # 若 SW 宏执行完毕但所有构型的 STEP 均缺失，后续流程无法推进。
-            sw_all_terminal = True
-            sw_has_completed = False
-            for cn in all_configs:
-                s = self.state.get_step_status(cn, "sw")
-                if s not in (STATUS_COMPLETED, STATUS_ERROR):
-                    sw_all_terminal = False
-                    break
-                if s == STATUS_COMPLETED:
-                    sw_has_completed = True
+            sw_counts = self.state.get_step_status_counts("sw")
+            sw_all_terminal = self._counts_all_terminal(sw_counts, total_configs)
+            sw_has_completed = sw_counts.get(STATUS_COMPLETED, 0) > 0
             if sw_all_terminal and not sw_has_completed:
                 logger.error("=" * 60)
                 logger.error(">>> 流水线中止！所有构型的 SW 步骤均已失败 <<<")
@@ -231,22 +389,12 @@ class BarrierCoordinator:
                 break
 
             # 检查是否所有 Meshing 均已终结（Completed 或 Error）
-            all_configs = self.state.get_all_configs()
-            all_terminal = True
-            has_error = False
-            for cn in all_configs:
-                s = self.state.get_step_status(cn, "meshing")
-                if s not in (STATUS_COMPLETED, STATUS_ERROR):
-                    all_terminal = False
-                    break
-                if s == STATUS_ERROR:
-                    has_error = True
+            meshing_counts = self.state.get_step_status_counts("meshing")
+            all_terminal = self._counts_all_terminal(meshing_counts, total_configs)
+            has_error = meshing_counts.get(STATUS_ERROR, 0) > 0
 
             if all_terminal and has_error:
-                if any(
-                    self.state.get_step_status(cn, "meshing") == STATUS_COMPLETED
-                    for cn in all_configs
-                ):
+                if meshing_counts.get(STATUS_COMPLETED, 0) > 0:
                     logger.warning("=" * 60)
                     logger.warning(">>> 部分工作站 Meshing 失败，已通过工作站继续进入 Solver <<<")
                     logger.warning("=" * 60)
@@ -320,8 +468,8 @@ class BarrierCoordinator:
         """
         工作站屏障通过后，启动对应构型的仿真求解。
 
-        Solver 使用单个调度线程串行执行，确保同一时刻只有一个构型
-        处于求解阶段。
+        Solver 以工作站为并发边界：同一工作站串行执行，多个已通过
+        屏障的工作站可并行求解。
         若暂停标志已置位，则等待恢复后再分发。
         """
         # ★ 分发前检查暂停标志（统一使用 PauseGuard）
@@ -330,36 +478,60 @@ class BarrierCoordinator:
             return False
 
         logger.info("=" * 60)
-        logger.info("开始串行调度仿真求解任务...")
+        logger.info("开始按工作站调度仿真求解任务...")
         logger.info("=" * 60)
 
         allowed_snapshot = (
             set(allowed_workstations)
             if allowed_workstations is not None
-            else None
+            else self._ready_workstations_for_solver()
         )
+        if not allowed_snapshot:
+            return False
+
+        started_any = False
+        live_threads_exist = False
         with self._solver_dispatch_lock:
             self._solver_threads = [t for t in self._solver_threads if t.is_alive()]
-            if self._solver_threads:
-                logger.info("[Solver] 串行调度线程已在运行，跳过重复启动")
-                return True
+            self._solver_thread_workstations = {
+                t: workstation_id
+                for t, workstation_id in self._solver_thread_workstations.items()
+                if t.is_alive()
+            }
+            live_workstations = set(self._solver_thread_workstations.values())
+            live_threads_exist = bool(self._solver_threads)
 
-            if self._next_solver_config(allowed_snapshot) is None:
+            for workstation_id in sorted(allowed_snapshot):
+                if workstation_id in live_workstations:
+                    logger.info(
+                        "[Solver] 工作站 %s 调度线程已在运行，跳过重复启动",
+                        workstation_id,
+                    )
+                    continue
+
+                workstation_scope = {workstation_id}
+                if self._next_solver_config(workstation_scope) is None:
+                    continue
+
+                t = threading.Thread(
+                    target=self._solver_dispatch_loop,
+                    args=(workstation_scope,),
+                    name=f"SolverDispatcher-{workstation_id}",
+                    daemon=True,
+                )
+                t.start()
+                self._solver_threads.append(t)
+                self._solver_thread_workstations[t] = workstation_id
+                started_any = True
+
+            if not started_any and not live_threads_exist:
                 logger.info("[Solver] 当前没有待执行的求解任务")
                 self._report_solver_terminal_if_ready()
                 return False
 
-            t = threading.Thread(
-                target=self._solver_dispatch_loop,
-                args=(allowed_snapshot,),
-                name="SolverDispatcher",
-                daemon=True,
-            )
-            t.start()
-            self._solver_threads.append(t)
-
-        logger.info("[Solver] 串行调度线程已启动")
-        return True
+        if started_any:
+            logger.info("[Solver] 已启动 %s 个工作站调度线程", len(allowed_snapshot))
+        return started_any or live_threads_exist
 
     def _next_solver_config(
         self,
@@ -371,7 +543,26 @@ class BarrierCoordinator:
             STATUS_RUNNING,
             STATUS_PAUSED,
             STATUS_RETRYING,
+            STATUS_UNKNOWN_REMOTE,
         )
+
+        # Daemon 重启后内存中的工作站调度线程列表为空，但远程 Fluent
+        # 任务可能仍在运行。必须先恢复这些 Running 任务的轮询，避免同一
+        # 工作站启动新的独立 PostProcess/Solver 并争用工作目录和 Fluent 资源。
+        for cn in self.state.get_all_configs():
+            if self.state.get_step_status(cn, "meshing") != STATUS_COMPLETED:
+                continue
+            if (
+                allowed_workstations is not None
+                and self._workstation_for_config(cn) not in allowed_workstations
+            ):
+                continue
+            solver_status = self.state.get_step_status(cn, "solver")
+            postprocess_status = self.state.get_step_status(cn, "postprocess")
+            if solver_status in {STATUS_RUNNING, STATUS_UNKNOWN_REMOTE}:
+                return cn
+            if solver_status == STATUS_COMPLETED and postprocess_status == STATUS_RUNNING:
+                return cn
 
         # PostProcess 是 Solver 的尾部阶段。若某些构型已经完成 Solver，
         # 优先补齐这些后处理 backlog，再启动新的 Solver 任务。
@@ -382,6 +573,9 @@ class BarrierCoordinator:
                 allowed_workstations is not None
                 and self._workstation_for_config(cn) not in allowed_workstations
             ):
+                continue
+            workstation_id = self._workstation_for_config(cn)
+            if self._is_workstation_quarantined(workstation_id):
                 continue
             solver_status = self.state.get_step_status(cn, "solver")
             postprocess_status = self.state.get_step_status(cn, "postprocess")
@@ -399,6 +593,9 @@ class BarrierCoordinator:
                 and self._workstation_for_config(cn) not in allowed_workstations
             ):
                 continue
+            workstation_id = self._workstation_for_config(cn)
+            if self._is_workstation_quarantined(workstation_id):
+                continue
             solver_status = self.state.get_step_status(cn, "solver")
             if solver_status in schedulable_statuses:
                 return cn
@@ -408,8 +605,11 @@ class BarrierCoordinator:
         self,
         allowed_workstations: set[str] | None = None,
     ) -> None:
-        """串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
-        logger.info("[Solver] 串行调度循环启动")
+        """按工作站串行消费 Solver 任务，直到无待执行构型或收到停止指令。"""
+        logger.info(
+            "[Solver] 工作站调度循环启动: %s",
+            ",".join(sorted(allowed_workstations)) if allowed_workstations else "all",
+        )
         try:
             while not self._stopped.is_set():
                 config_name = self._next_solver_config(allowed_workstations)
@@ -418,15 +618,28 @@ class BarrierCoordinator:
 
                 with self._solver_dispatch_lock:
                     self._solver_active_config = config_name
+                    workstation_id = self._workstation_for_config(config_name)
+                    self._solver_active_by_workstation[workstation_id] = config_name
                 try:
                     if not self._execute_solver_for_config(config_name):
+                        break
+                except InfrastructureUnavailableError as e:
+                    logger.warning(
+                        "[Solver] 构型%s 基础设施不可用，等待恢复后重试: %s",
+                        config_name,
+                        e,
+                    )
+                    # 基础设施恢复后重新进入循环，尝试下一个可执行的构型
+                    if not pause_aware_sleep(30, self._paused, self._stopped):
                         break
                 finally:
                     with self._solver_dispatch_lock:
                         self._solver_active_config = None
+                        workstation_id = self._workstation_for_config(config_name)
+                        self._solver_active_by_workstation.pop(workstation_id, None)
         finally:
             self._report_solver_terminal_if_ready()
-            logger.info("[Solver] 串行调度循环退出")
+            logger.info("[Solver] 工作站调度循环退出")
 
     def _execute_solver_for_config(self, config_name: int) -> bool:
         """
@@ -444,19 +657,35 @@ class BarrierCoordinator:
             self._execute_or_recover_postprocess_for_config(config_name)
             return True
 
-        if self.state.get_step_status(config_name, "solver") == STATUS_RUNNING:
+        if self.state.get_step_status(config_name, "solver") in (
+            STATUS_RUNNING,
+            STATUS_PAUSED,
+            STATUS_RETRYING,
+            STATUS_UNKNOWN_REMOTE,
+        ):
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
-            remote_status = remote_executor.query_remote_task_status(
-                config_name,
-                "solver",
-                workstation_id=workstation_id,
-            )
+            try:
+                remote_status = remote_executor.query_remote_task_status(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
+            except InfrastructureUnavailableError as e:
+                logger.warning(
+                    f"[Solver] 构型{config_name} 查询远程状态时基础设施不可用: {e}",
+                )
+                self.state.set_step_status(
+                    config_name, "solver", STATUS_RETRYING,
+                    f"基础设施恢复中: {e}",
+                )
+                raise
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
+                self._clear_solver_failures_for_workstation(workstation_id)
                 if not self.runner.register_postprocess_from_solver(config_name):
                     self.state.set_step_status(
                         config_name,
@@ -481,6 +710,7 @@ class BarrierCoordinator:
                     STATUS_ERROR,
                     "远程求解任务失败",
                 )
+                self._record_solver_failure_for_workstation(workstation_id)
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
                     return False
@@ -497,6 +727,7 @@ class BarrierCoordinator:
                     self._discard_stale_step_result(config_name, "solver")
                     return False
                 if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                    self._clear_solver_failures_for_workstation(workstation_id)
                     if self.runner.register_postprocess_from_solver(config_name):
                         self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                         remote_executor.forget_remote_task(
@@ -514,7 +745,8 @@ class BarrierCoordinator:
                         )
                 return True
             if remote_status == "unknown":
-                self._record_unknown_remote_status(config_name, "solver")
+                if self._record_unknown_remote_status(config_name, "solver"):
+                    self._record_solver_failure_for_workstation(workstation_id)
                 return False
             self.state.set_step_status(config_name, "solver", STATUS_WAITING)
             remote_executor.forget_remote_task(
@@ -540,6 +772,9 @@ class BarrierCoordinator:
                 self._discard_stale_step_result(config_name, "solver")
                 return False
             if self.state.get_step_status(config_name, "solver") == STATUS_COMPLETED:
+                self._clear_solver_failures_for_workstation(
+                    self._workstation_for_config(config_name)
+                )
                 if self.runner.register_postprocess_from_solver(config_name):
                     self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                     remote_executor = self.runner.get_remote_executor()
@@ -556,6 +791,10 @@ class BarrierCoordinator:
                         STATUS_ERROR,
                         "无法接管远程 Solver 任务进行后处理",
                     )
+            elif self.state.get_step_status(config_name, "solver") == STATUS_ERROR:
+                self._record_solver_failure_for_workstation(
+                    self._workstation_for_config(config_name)
+                )
         return True
 
     def _execute_or_recover_postprocess_for_config(self, config_name: int) -> None:
@@ -566,14 +805,24 @@ class BarrierCoordinator:
         if postprocess_status == STATUS_ERROR:
             return
 
-        if postprocess_status == STATUS_RUNNING:
+        if postprocess_status in (STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING):
             remote_executor = self.runner.get_remote_executor()
             workstation_id = self._workstation_for_config(config_name)
-            remote_status = remote_executor.query_remote_task_status(
-                config_name,
-                "postprocess",
-                workstation_id=workstation_id,
-            )
+            try:
+                remote_status = remote_executor.query_remote_task_status(
+                    config_name,
+                    "postprocess",
+                    workstation_id=workstation_id,
+                )
+            except InfrastructureUnavailableError as e:
+                logger.warning(
+                    f"[PostProcess] 构型{config_name} 查询远程状态时基础设施不可用: {e}",
+                )
+                self.state.set_step_status(
+                    config_name, "postprocess", STATUS_RETRYING,
+                    f"基础设施恢复中: {e}",
+                )
+                raise
             if remote_status == "completed":
                 self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
                 remote_executor.forget_remote_task(
@@ -616,29 +865,42 @@ class BarrierCoordinator:
 
     def _wait_for_solver_completion(self, config_name: int) -> None:
         """轮询等待 Solver 完成，并按控制状态更新数据库。"""
-        if self.runner.wait_solver_completion(
-            config_name,
-            paused_event=self._paused,
-            stopped_event=self._stopped,
-        ):
-            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
-            logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
-        else:
-            # ★ 区分暂停和真正的超时
-            if self._paused.is_set():
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_PAUSED,
-                    "等待求解期间暂停"
-                )
-            elif self._stopped.is_set():
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_PAUSED,
-                    "引擎已停止"
-                )
+        try:
+            if self.runner.wait_solver_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
+                self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+                logger.info(f"[Solver] 构型{config_name} 求解完成 ✓")
             else:
-                self.state.set_step_status(
-                    config_name, "solver", STATUS_ERROR, "求解超时"
-                )
+                # ★ 区分暂停和真正的超时
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_PAUSED,
+                        "等待求解期间暂停"
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_PAUSED,
+                        "引擎已停止"
+                    )
+                else:
+                    error_message = str(
+                        getattr(self.runner, "last_solver_error", "") or "求解超时"
+                    )
+                    self.state.set_step_status(
+                        config_name, "solver", STATUS_ERROR, error_message
+                    )
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[Solver] 构型{config_name} 基础设施不可用: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "solver", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            raise
 
     def _execute_postprocess_for_config(self, config_name: int) -> None:
         """执行单个构型的后处理步骤。"""
@@ -659,38 +921,48 @@ class BarrierCoordinator:
 
     def _wait_for_postprocess_completion(self, config_name: int) -> None:
         """轮询等待 PostProcess 完成，并按控制状态更新数据库。"""
-        if self.runner.wait_postprocess_completion(
-            config_name,
-            paused_event=self._paused,
-            stopped_event=self._stopped,
-        ):
-            self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
-            cleanup = getattr(self.runner, "cleanup_completed_postprocess_task", None)
-            if callable(cleanup):
-                cleanup(config_name)
-            logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
-        else:
-            if self._paused.is_set():
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_PAUSED,
-                    "等待后处理期间暂停",
-                )
-            elif self._stopped.is_set():
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_PAUSED,
-                    "引擎已停止",
-                )
+        try:
+            if self.runner.wait_postprocess_completion(
+                config_name,
+                paused_event=self._paused,
+                stopped_event=self._stopped,
+            ):
+                self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+                cleanup = getattr(self.runner, "cleanup_completed_postprocess_task", None)
+                if callable(cleanup):
+                    cleanup(config_name)
+                logger.info(f"[PostProcess] 构型{config_name} 后处理完成 ✓")
             else:
-                self.state.set_step_status(
-                    config_name,
-                    "postprocess",
-                    STATUS_ERROR,
-                    "后处理超时",
-                )
+                if self._paused.is_set():
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_PAUSED,
+                        "等待后处理期间暂停",
+                    )
+                elif self._stopped.is_set():
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_PAUSED,
+                        "引擎已停止",
+                    )
+                else:
+                    self.state.set_step_status(
+                        config_name,
+                        "postprocess",
+                        STATUS_ERROR,
+                        "后处理超时",
+                    )
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[PostProcess] 构型{config_name} 基础设施不可用: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "postprocess", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            raise
 
     def _report_solver_terminal_if_ready(self) -> None:
         """PostProcess 全部终结时报告流水线自然完成或失败终态。"""

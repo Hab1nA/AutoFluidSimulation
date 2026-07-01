@@ -15,6 +15,7 @@ from collections.abc import Callable as CallableABC, Mapping
 from contextlib import AbstractContextManager, nullcontext
 import ipaddress
 import os
+import threading
 from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,14 +24,13 @@ if TYPE_CHECKING:
 
 from engine.config import (
     DEFAULT_WORKSTATION_ID, IPC_CONFIG, LOCAL_PATHS, REMOTE_CONFIG, WORKSTATIONS,
-    STEP_NAMES, STEP_FILE_PATTERNS, ENGINE_CONFIG, get_workstation_config, is_server_mode,
+    STEP_NAMES, STEP_FILE_PATTERNS, get_workstation_config, is_server_mode,
 )
+from executor.postprocess_paths import resolve_postprocess_paths
 from executor.remote_executor import REMOTE_SCRIPT_FILES, REMOTE_REF_FILES
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
 
 
 def _is_private_ip(host: str) -> bool:
@@ -55,36 +55,20 @@ def _remote_flag_paths(config: Mapping[str, object], stem: str, config_name: int
     if not flag_dir:
         return []
     flag_file = f"{flag_dir}/{stem}_{config_name}.txt"
-    return [flag_file, f"{flag_file}.error"]
+    paths = [flag_file, f"{flag_file}.error"]
+    if stem == "solver_done":
+        progress_file = f"{flag_dir}/solver_progress_{config_name}.json"
+        paths.extend([progress_file, f"{progress_file}.transcript"])
+    return paths
 
 
 def _postprocess_cleanup_paths(config: Mapping[str, object], config_name: int) -> list[str]:
     """Return per-config postprocess result and runtime files to delete."""
     flag_dir = str(config.get("flag_dir", "")).replace("\\", "/").rstrip("/")
-    output_dir = str(
-        config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
-    engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
-    config_postprocess_animation_dir = config.get("postprocess_animation_dir")
-    if (
-        config_postprocess_animation_dir
-        and config_postprocess_animation_dir != engine_animation_dir
-    ):
-        animation_source = config_postprocess_animation_dir
-    elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir", ""):
-        animation_source = config.get("animation_dir", "")
-    else:
-        animation_source = config.get("animation_dir", "") or engine_animation_dir
-    animation_dir = str(animation_source).replace("\\", "/").rstrip("/")
-    metrics_dir = str(
-        config.get("postprocess_metrics_dir")
-        or ENGINE_CONFIG.get("postprocess_metrics_dir")
-        or config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    postprocess_paths = resolve_postprocess_paths(config)
+    output_dir = postprocess_paths["output_dir"]
+    animation_dir = postprocess_paths["animation_dir"]
+    metrics_dir = postprocess_paths["metrics_dir"]
     paths: list[str] = []
     if flag_dir:
         paths.extend([
@@ -119,13 +103,7 @@ def _postprocess_metrics_config_dir(
     config: Mapping[str, object],
     config_name: int,
 ) -> str | None:
-    metrics_dir = str(
-        config.get("postprocess_metrics_dir")
-        or ENGINE_CONFIG.get("postprocess_metrics_dir")
-        or config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    metrics_dir = resolve_postprocess_paths(config)["metrics_dir"]
     if not metrics_dir:
         return None
     return f"{metrics_dir}/model_gen4_{config_name}"
@@ -135,15 +113,165 @@ def _postprocess_output_config_dir(
     config: Mapping[str, object],
     config_name: int,
 ) -> str | None:
-    output_dir = str(
-        config.get("postprocess_output_dir")
-        or ENGINE_CONFIG.get("postprocess_output_dir")
-        or config.get("result_dir", "")
-    ).replace("\\", "/").rstrip("/")
+    output_dir = resolve_postprocess_paths(config)["output_dir"]
     if not output_dir:
         return None
     return f"{output_dir}/model_gen4_{config_name}"
 
+
+_CHECK_METADATA_KEYS = {"ok", "status", "summary"}
+
+
+def _status_from_counts(passed: int, failed: int, warnings: int, *, empty_status: str = "skipped") -> str:
+    if failed:
+        return "failed"
+    if warnings:
+        return "warning"
+    if passed:
+        return "passed"
+    return empty_status
+
+
+def _state_from_check_item(value: object) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    severity = value.get("severity")
+    if severity == "error":
+        return "failed"
+    if severity == "warning":
+        return "warning"
+    status = value.get("status")
+    if status in {"passed", "failed", "warning"}:
+        return str(status)
+    ok = value.get("ok")
+    if isinstance(ok, bool):
+        return "passed" if ok else "failed"
+    exists = value.get("exists")
+    if isinstance(exists, bool):
+        return "passed" if exists else "failed"
+    return None
+
+
+def _summarize_states(states: list[str]) -> dict[str, int]:
+    return {
+        "passed": states.count("passed"),
+        "failed": states.count("failed"),
+        "warnings": states.count("warning"),
+    }
+
+
+def _check_mapping_states(mapping: Mapping[str, object]) -> list[str]:
+    states: list[str] = []
+    for key, value in mapping.items():
+        if key in _CHECK_METADATA_KEYS:
+            continue
+        state = _state_from_check_item(value)
+        if state is not None:
+            states.append(state)
+    return states
+
+
+def _apply_check_section_status(
+    section: dict[str, object],
+    *,
+    empty_status: str = "skipped",
+) -> None:
+    counts = _summarize_states(_check_mapping_states(section))
+    section["ok"] = counts["failed"] == 0
+    section["status"] = _status_from_counts(
+        counts["passed"],
+        counts["failed"],
+        counts["warnings"],
+        empty_status=empty_status,
+    )
+    section["summary"] = counts
+
+
+def _int_value(value: object) -> int:
+    if isinstance(value, (int, float, str, bytes, bytearray)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _list_value(value: object) -> list[object]:
+    return list(value) if isinstance(value, list | tuple) else []
+
+
+def _remote_deployment_state(info: Mapping[str, object]) -> str | None:
+    status = info.get("status")
+    if status == "skipped":
+        return None
+    total = _int_value(info.get("total", 0))
+    deployed = _int_value(info.get("deployed", 0))
+    missing = _list_value(info.get("missing", []))
+    if total == 0 and deployed == 0 and not missing:
+        return None
+    if missing or deployed < total:
+        return "failed"
+    return "passed"
+
+
+def _remote_workstation_states(checks: Mapping[str, object]) -> list[str]:
+    states: list[str] = []
+    ssh_status = str(checks.get("ssh", ""))
+    if ssh_status:
+        states.append("passed" if "成功" in ssh_status else "failed")
+    for key in ("conda_available", "ssh_connected"):
+        value = checks.get(key)
+        if isinstance(value, bool):
+            states.append("passed" if value else "failed")
+    python_version = checks.get("python_version")
+    if isinstance(python_version, str):
+        states.append("passed" if python_version else "failed")
+    for collection_key in ("remote_dirs", "remote_programs"):
+        for item in _list_value(checks.get(collection_key, [])):
+            state = _state_from_check_item(item)
+            if state is not None:
+                states.append(state)
+    for deployment_key in ("scripts_status", "ref_files_status"):
+        deployment = checks.get(deployment_key)
+        if isinstance(deployment, Mapping):
+            state = _remote_deployment_state(deployment)
+            if state is not None:
+                states.append(state)
+    return states
+
+
+def _apply_remote_workstation_status(checks: dict[str, object]) -> None:
+    counts = _summarize_states(_remote_workstation_states(checks))
+    checks["ok"] = counts["failed"] == 0
+    checks["status"] = _status_from_counts(
+        counts["passed"],
+        counts["failed"],
+        counts["warnings"],
+        empty_status="unknown",
+    )
+    checks["summary"] = counts
+
+
+def _collect_result_summary(result: Mapping[str, object]) -> dict[str, int]:
+    states: list[str] = []
+    for section_name in ("local_checks", "daemon_checks"):
+        section = result.get(section_name)
+        if isinstance(section, Mapping):
+            states.extend(_check_mapping_states(section))
+    workstation_checks = result.get("workstation_checks")
+    if isinstance(workstation_checks, Mapping):
+        for workstation in workstation_checks.get("workstations") or []:
+            state = _state_from_check_item(workstation)
+            if state is not None:
+                states.append(state)
+    remote_checks = result.get("remote_checks")
+    if isinstance(remote_checks, Mapping):
+        workstations = remote_checks.get("workstations")
+        if isinstance(workstations, Mapping):
+            for workstation in workstations.values():
+                if isinstance(workstation, Mapping):
+                    states.extend(_remote_workstation_states(workstation))
+    return _summarize_states(states)
 
 class FileCleaner:
     """文件清理与系统自检器。"""
@@ -153,6 +281,8 @@ class FileCleaner:
         state_manager: StateManager,
         ssh_getter: Callable[..., "RemoteWorkstation"],
         ssh_lock: AbstractContextManager[object] | None = None,
+        ssh_locks: dict[str, threading.RLock] | None = None,
+        ssh_locks_guard: threading.Lock | None = None,
     ):
         """初始化清理器。
 
@@ -160,14 +290,28 @@ class FileCleaner:
             state_manager: StateManager 实例
             ssh_getter: 可调用对象，返回 RemoteWorkstation 实例
             ssh_lock: 保护共享 SSH/SFTP 客户端的上下文锁
+            ssh_locks: 可选的按工作站锁池，与 TaskRunner/RemoteExecutor 共享
+            ssh_locks_guard: 保护共享锁池的锁
         """
         self.state = state_manager
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
+        self._ssh_locks = ssh_locks
+        self._ssh_locks_guard = ssh_locks_guard or threading.Lock()
 
-    def _ssh_guard(self) -> AbstractContextManager[object]:
+    def _ssh_guard(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> AbstractContextManager[object]:
         """返回远端 SSH/SFTP 操作使用的锁上下文。"""
-        return self._ssh_lock if self._ssh_lock is not None else nullcontext()
+        if self._ssh_locks is None:
+            return self._ssh_lock if self._ssh_lock is not None else nullcontext()
+        with self._ssh_locks_guard:
+            lock = self._ssh_locks.get(workstation_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._ssh_locks[workstation_id] = lock
+            return lock
 
     def _get_ssh_for_workstation(
         self,
@@ -205,6 +349,16 @@ class FileCleaner:
                 return str(workstation_id)
         return DEFAULT_WORKSTATION_ID
 
+    def _workstations_for_config_cleanup(self, config_name: int) -> list[str]:
+        workstation_id = self._workstation_for_config(config_name)
+        configured_ids = self._configured_workstation_ids()
+        if (
+            workstation_id == DEFAULT_WORKSTATION_ID
+            and DEFAULT_WORKSTATION_ID not in configured_ids
+        ):
+            return configured_ids
+        return [workstation_id]
+
     # ------------------------------------------------------------------
     # 系统自检
     # ------------------------------------------------------------------
@@ -222,52 +376,188 @@ class FileCleaner:
         if not is_server_mode():
             results["local_checks"] = self.run_local_system_check()
 
+        remote_by_workstation: dict[str, dict[str, object]] = {}
+        successful = 0
+        failed = 0
+
         # ---- 远程检查 ----
-        try:
-            with self._ssh_guard():
-                workstation_id = self._configured_workstation_ids()[0]
-                remote_config = self._remote_config_for_workstation(workstation_id)
-                ssh = self._get_ssh_for_workstation(workstation_id)
-                if ssh.is_connected():
-                    remote_checks["ssh"] = "连接成功"
-                    remote_info = ssh.check_system(
-                        conda_exe=str(remote_config["conda_exe"]),
-                        conda_env=str(remote_config["conda_env"]),
-                        remote_dirs={
-                            "仿真工作目录": str(remote_config["working_dir"]),
-                            "脚本部署目录": str(remote_config["scripts_dir"]),
-                            "引用文件目录": str(remote_config["ref_files_dir"]),
-                            "SCDOC接收目录": str(remote_config["scdoc_dir"]),
-                            "网格输出目录": str(remote_config["msh_dir"]),
-                            "仿真输出目录": str(remote_config["result_dir"]),
-                            "仿真标志目录": str(remote_config["flag_dir"]),
-                        },
-                        mpi_bin_dir=str(remote_config["mpi_bin_dir"]),
-                        scripts_dir=str(remote_config["scripts_dir"]),
-                        script_files=REMOTE_SCRIPT_FILES,
-                        ref_files_dir=str(remote_config["ref_files_dir"]),
-                        ref_files=REMOTE_REF_FILES,
-                    )
-                    remote_checks.update(remote_info)
-                else:
-                    remote_checks["ssh"] = "连接失败"
-        except (OSError, ConnectionError) as e:
-            logger.error(f"[SSH] 远程自检异常: {e}")
-            remote_checks["ssh"] = f"错误: {e}"
-            # 保持结构一致性：填充默认值，避免 TUI 缺失字段
-            remote_checks.update({
-                "ssh_connected": False,
-                "conda_available": False,
-                "python_version": "",
-                "disk_space": "",
-                "background_processes": [],
-                "remote_dirs": [],
-                "remote_programs": [],
-                "scripts_status": {"total": 0, "deployed": 0, "missing": []},
-                "ref_files_status": {"total": 0, "deployed": 0, "missing": []},
-            })
+        for workstation_id in self._configured_workstation_ids():
+            workstation_checks: dict[str, object] = {}
+            try:
+                with self._ssh_guard(workstation_id):
+                    remote_config = self._remote_config_for_workstation(workstation_id)
+                    ssh = self._get_ssh_for_workstation(workstation_id)
+                    if ssh.is_connected():
+                        workstation_checks["ssh"] = "连接成功"
+                        remote_info = ssh.check_system(
+                            conda_exe=str(remote_config["conda_exe"]),
+                            conda_env=str(remote_config["conda_env"]),
+                            remote_dirs={
+                                "仿真工作目录": str(remote_config["working_dir"]),
+                                "脚本部署目录": str(remote_config["scripts_dir"]),
+                                "引用文件目录": str(remote_config["ref_files_dir"]),
+                                "SCDOC接收目录": str(remote_config["scdoc_dir"]),
+                                "网格输出目录": str(remote_config["msh_dir"]),
+                                "仿真输出目录": str(remote_config["result_dir"]),
+                                "仿真标志目录": str(remote_config["flag_dir"]),
+                            },
+                            fluent_path=str(remote_config["fluent_path"]),
+                            mpi_bin_dir=str(remote_config["mpi_bin_dir"]),
+                            scripts_dir=str(remote_config["scripts_dir"]),
+                            script_files=REMOTE_SCRIPT_FILES,
+                            ref_files_dir=str(remote_config["ref_files_dir"]),
+                            ref_files=REMOTE_REF_FILES,
+                        )
+                        if remote_info.get("ssh_connected") is False:
+                            workstation_checks["ssh"] = "连接失败"
+                            failed += 1
+                        else:
+                            successful += 1
+                        workstation_checks.update(remote_info)
+                    else:
+                        workstation_checks.update(
+                            self._default_remote_check_values(remote_config)
+                        )
+                        workstation_checks["ssh"] = "连接失败"
+                        failed += 1
+            except (OSError, ConnectionError) as e:
+                logger.error(f"[SSH] 远程自检异常 ({workstation_id}): {e}")
+                fallback_config = self._remote_config_for_workstation(workstation_id)
+                workstation_checks.update(
+                    self._default_remote_check_values(fallback_config)
+                )
+                workstation_checks["ssh"] = f"错误: {e}"
+                failed += 1
+            _apply_remote_workstation_status(workstation_checks)
+            remote_by_workstation[workstation_id] = workstation_checks
+
+        remote_checks["workstations"] = remote_by_workstation
+        if successful and failed:
+            remote_checks["status"] = "partial"
+        elif successful:
+            remote_checks["status"] = "passed"
+        else:
+            remote_checks["status"] = "failed"
+        remote_checks["ok"] = failed == 0 and successful > 0
+        remote_counts = {"passed": 0, "failed": 0, "warnings": 0}
+        for workstation_checks in remote_by_workstation.values():
+            summary = workstation_checks.get("summary")
+            if isinstance(summary, Mapping):
+                remote_counts["passed"] += int(summary.get("passed", 0) or 0)
+                remote_counts["failed"] += int(summary.get("failed", 0) or 0)
+                remote_counts["warnings"] += int(summary.get("warnings", 0) or 0)
+        remote_checks["summary"] = remote_counts
+
+        local_checks = results.get("local_checks")
+        if isinstance(local_checks, dict):
+            _apply_check_section_status(local_checks)
+        daemon_checks = results.get("daemon_checks")
+        if isinstance(daemon_checks, dict):
+            _apply_check_section_status(daemon_checks)
+        workstation_section = results.get("workstation_checks")
+        if isinstance(workstation_section, dict):
+            workstation_states = [
+                _state_from_check_item(workstation)
+                for workstation in _list_value(workstation_section.get("workstations", []))
+            ]
+            counts = _summarize_states([state for state in workstation_states if state is not None])
+            workstation_section["ok"] = counts["failed"] == 0
+            workstation_section["status"] = _status_from_counts(
+                counts["passed"],
+                counts["failed"],
+                counts["warnings"],
+            )
+            workstation_section["summary"] = counts
+
+        summary = _collect_result_summary(results)
+        results["summary"] = summary
+        results["overall_ok"] = summary["failed"] == 0
+        results["status"] = _status_from_counts(
+            summary["passed"],
+            summary["failed"],
+            summary["warnings"],
+        )
 
         return results
+
+    @staticmethod
+    def _default_remote_check_values(
+        remote_config: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Return remote-check fields for disconnected workstations."""
+        remote_dirs: list[dict[str, object]] = []
+        remote_programs: list[dict[str, object]] = []
+        if remote_config is not None:
+            remote_dirs.extend([
+                {
+                    "label": "仿真工作目录",
+                    "path": str(remote_config.get("working_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "脚本部署目录",
+                    "path": str(remote_config.get("scripts_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "引用文件目录",
+                    "path": str(remote_config.get("ref_files_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "SCDOC接收目录",
+                    "path": str(remote_config.get("scdoc_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "网格输出目录",
+                    "path": str(remote_config.get("msh_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "仿真输出目录",
+                    "path": str(remote_config.get("result_dir", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "仿真标志目录",
+                    "path": str(remote_config.get("flag_dir", "")),
+                    "exists": None,
+                },
+            ])
+            remote_programs.extend([
+                {
+                    "label": "Conda可执行文件",
+                    "path": str(remote_config.get("conda_exe", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "Conda环境",
+                    "path": str(remote_config.get("conda_env", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "Fluent可执行文件",
+                    "path": str(remote_config.get("fluent_path", "")),
+                    "exists": None,
+                },
+                {
+                    "label": "MPI安装目录",
+                    "path": str(remote_config.get("mpi_bin_dir", "")),
+                    "exists": None,
+                },
+            ])
+        return {
+            "ssh_connected": False,
+            "conda_available": False,
+            "python_version": "",
+            "disk_space": "",
+            "background_processes": [],
+            "remote_dirs": remote_dirs,
+            "remote_programs": remote_programs,
+            "scripts_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
+            "ref_files_status": {"status": "skipped", "message": "SSH 未连接，未检查"},
+        }
 
     def _build_daemon_checks(self) -> dict[str, object]:
         """Build checks for the daemon host itself."""
@@ -356,8 +646,15 @@ class FileCleaner:
             target_config_name = int(config_name)
 
         if step_name == "all":
+            failures: list[str] = []
             for s in STEP_NAMES:
-                self._clean_single_step(s, target_config_name)
+                try:
+                    self._clean_single_step(s, target_config_name)
+                except RuntimeError as exc:
+                    failures.append(str(exc))
+                    logger.warning("[Cleaner] 步骤 %s 清理未完全成功: %s", s, exc)
+            if failures:
+                raise RuntimeError("远程文件清理未完成: " + "; ".join(failures))
         else:
             self._clean_single_step(step_name, target_config_name)
 
@@ -381,10 +678,10 @@ class FileCleaner:
     def clean_all_cache(self) -> None:
         """清空远程工作站上运行产生的临时缓存目录内容。"""
         try:
-            with self._ssh_guard():
-                total_deleted = 0
-                total_failed = 0
-                for workstation_id in self._configured_workstation_ids():
+            total_deleted = 0
+            total_failed = 0
+            for workstation_id in self._configured_workstation_ids():
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if not ssh.is_connected():
                         logger.warning(
@@ -411,17 +708,18 @@ class FileCleaner:
                             f"已删除 {deleted_count} 项，失败 {failed_count} 项 ({remote_dir})"
                         )
 
-                logger.info(
-                    "[Cleaner] 远程缓存清理完成："
-                    f"已删除 {total_deleted} 项，失败 {total_failed} 项"
+            logger.info(
+                "[Cleaner] 远程缓存清理完成："
+                f"已删除 {total_deleted} 项，失败 {total_failed} 项"
+            )
+            if total_failed:
+                raise RuntimeError(
+                    f"远程缓存清理未完成：已删除 {total_deleted} 项，失败 {total_failed} 项"
                 )
-                if total_failed:
-                    raise RuntimeError(
-                        f"远程缓存清理未完成：已删除 {total_deleted} 项，失败 {total_failed} 项"
-                    )
         except (OSError, ConnectionError) as e:
             logger.error(f"[Cleaner] 远程缓存清理异常: {e}")
-            raise RuntimeError(f"远程缓存清理未完成: {e}") from e
+            from utils.infrastructure import InfrastructureUnavailableError
+            raise InfrastructureUnavailableError(f"远程缓存清理未完成: {e}") from e
 
     def _clean_single_step(self, step_name: str, config_name: int | None = None) -> None:
         """清理单个步骤的文件（内部方法）。"""
@@ -501,67 +799,71 @@ class FileCleaner:
             file_templates = remote_info[1]
             extra_paths_factory = remote_info[2] if len(remote_info) > 2 else None
             try:
-                with self._ssh_guard():
-                    processed_count = 0
-                    failed_count = 0
-                    for cn in configs:
-                        workstation_id = self._workstation_for_config(int(cn))
-                        ssh = self._get_ssh_for_workstation(workstation_id)
-                        if not ssh.is_connected():
-                            logger.warning(
-                                f"[Cleaner] SSH 未连接，跳过远程文件清理: "
-                                f"{step_name}/构型{cn}/{workstation_id}"
-                            )
-                            failed_count += len(file_templates)
-                            continue
-                        remote_config = self._remote_config_for_workstation(workstation_id)
-                        target_dir = str(remote_config.get(dir_key, "")) if dir_key else ""
-                        remote_dir = target_dir.replace("\\", "/").rstrip("/")
-                        remote_paths = []
-                        for file_template in file_templates:
-                            filename = str(file_template).format(config=cn)
-                            remote_paths.append(f"{remote_dir}/{filename}")
-                        if callable(extra_paths_factory):
-                            remote_paths.extend(
-                                path
-                                for path in extra_paths_factory(cn, remote_config)
-                                if path
-                            )
-                        deduped_remote_paths = list(dict.fromkeys(remote_paths))
-                        for remote_path in deduped_remote_paths:
-                            if ssh.delete_remote_file(remote_path):
-                                processed_count += 1
-                                logger.info(
-                                    f"[Cleaner] 已处理远程文件清理: {remote_path}",
-                                    extra={"broadcast": False},
+                processed_count = 0
+                failed_count = 0
+                for cn in configs:
+                    workstation_ids = self._workstations_for_config_cleanup(int(cn))
+                    for workstation_id in workstation_ids:
+                        with self._ssh_guard(workstation_id):
+                            ssh = self._get_ssh_for_workstation(workstation_id)
+                            if not ssh.is_connected():
+                                logger.warning(
+                                    f"[Cleaner] SSH 未连接，跳过远程文件清理: "
+                                    f"{step_name}/构型{cn}/{workstation_id}"
                                 )
-                            else:
-                                failed_count += 1
-                        if step_name == "postprocess":
-                            config_dirs = [
-                                _postprocess_output_config_dir(remote_config, int(cn)),
-                                _postprocess_metrics_config_dir(remote_config, int(cn)),
-                            ]
-                            clear_remote_directory = getattr(ssh, "clear_remote_directory", None)
-                            if callable(clear_remote_directory):
-                                for config_dir in config_dirs:
-                                    if not config_dir:
-                                        continue
-                                    _, clear_failed_count = clear_remote_directory(config_dir)
-                                    if clear_failed_count:
-                                        failed_count += clear_failed_count
-                    logger.info(
-                        f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                                failed_count += len(file_templates)
+                                continue
+                            remote_config = self._remote_config_for_workstation(workstation_id)
+                            target_dir = str(remote_config.get(dir_key, "")) if dir_key else ""
+                            remote_dir = target_dir.replace("\\", "/").rstrip("/")
+                            remote_paths = []
+                            for file_template in file_templates:
+                                filename = str(file_template).format(config=cn)
+                                remote_paths.append(f"{remote_dir}/{filename}")
+                            if callable(extra_paths_factory):
+                                remote_paths.extend(
+                                    path
+                                    for path in extra_paths_factory(cn, remote_config)
+                                    if path
+                                )
+                            deduped_remote_paths = list(dict.fromkeys(remote_paths))
+                            for remote_path in deduped_remote_paths:
+                                if ssh.delete_remote_file(remote_path):
+                                    processed_count += 1
+                                    logger.info(
+                                        f"[Cleaner] 已处理远程文件清理: {remote_path}",
+                                        extra={"broadcast": False},
+                                    )
+                                else:
+                                    failed_count += 1
+                            if step_name == "postprocess":
+                                config_dirs = [
+                                    _postprocess_output_config_dir(remote_config, int(cn)),
+                                    _postprocess_metrics_config_dir(remote_config, int(cn)),
+                                ]
+                                clear_remote_directory = getattr(
+                                    ssh, "clear_remote_directory", None
+                                )
+                                if callable(clear_remote_directory):
+                                    for config_dir in config_dirs:
+                                        if not config_dir:
+                                            continue
+                                        _, clear_failed_count = clear_remote_directory(config_dir)
+                                        if clear_failed_count:
+                                            failed_count += clear_failed_count
+                logger.info(
+                    f"[Cleaner] 步骤 {step_name} 远程文件清理完成："
+                    f"已处理 {processed_count} 个，失败 {failed_count} 个"
+                )
+                if failed_count:
+                    raise RuntimeError(
+                        f"远程文件清理未完成: step={step_name}, "
                         f"已处理 {processed_count} 个，失败 {failed_count} 个"
                     )
-                    if failed_count:
-                        raise RuntimeError(
-                            f"远程文件清理未完成: step={step_name}, "
-                            f"已处理 {processed_count} 个，失败 {failed_count} 个"
-                        )
             except (OSError, ConnectionError) as e:
                 logger.error(f"[Cleaner] 远程文件清理异常 ({step_name}): {e}")
-                raise RuntimeError(f"远程文件清理未完成: step={step_name}: {e}") from e
+                from utils.infrastructure import InfrastructureUnavailableError
+                raise InfrastructureUnavailableError(f"远程文件清理未完成: step={step_name}: {e}") from e
 
     def _remote_cache_dirs(
         self,

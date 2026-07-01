@@ -60,6 +60,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
     return argparse.Namespace(
         config_id=config_id,
         mpi_bin_dir=str(mpi_bin_dir),
+        fluent_path=str(tmp_path / "fluent.exe"),
         workflow_path=str(workflow_path),
         journal_path=str(journal_path),
         scdoc_dir=str(scdoc_dir),
@@ -187,6 +188,25 @@ def test_launch_does_not_force_localized_fluent_gui(tmp_path, monkeypatch):
     assert launch_kwargs["start_watchdog"] is False
 
 
+def test_launch_uses_configured_fluent_path(tmp_path, monkeypatch):
+    launch_kwargs: dict[str, Any] = {}
+    session = _SuccessfulMeshingSession()
+
+    def launch_fluent(**kwargs: Any):
+        launch_kwargs.update(kwargs)
+        return session
+
+    module = _load_batch_meshing_module(monkeypatch, launch_fluent)
+    args = _make_args(tmp_path)
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert launch_kwargs["fluent_path"] == args.fluent_path
+
+
 def test_launch_uses_configured_working_dir(tmp_path, monkeypatch):
     launch_kwargs: dict[str, Any] = {}
     session = _SuccessfulMeshingSession()
@@ -235,3 +255,24 @@ def test_invalid_processor_count_is_rejected(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="--processor-count"):
         module.main()
+
+
+def test_processor_count_is_required_by_cli(monkeypatch):
+    module = _load_batch_meshing_module(monkeypatch, lambda **kwargs: None)
+    argv = [
+        "batch_meshing_gen4.py",
+        "--config-id", "1",
+        "--mpi-bin-dir", r"C:\mpi",
+        "--fluent-path", r"C:\fluent.exe",
+        "--workflow-path", "mesh.wft",
+        "--journal-path", "mesh.jou",
+        "--scdoc-dir", r"D:\scdoc",
+        "--scdoc-name", "model.scdoc",
+        "--output-dir", r"D:\msh",
+        "--working-dir", r"D:\work",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2

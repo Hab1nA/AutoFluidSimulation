@@ -25,7 +25,8 @@ from engine.config import (
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.scheduler.retry import RetryManager
-from engine.scheduler.utils import wait_unless_paused_or_stopped
+from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+from engine.scheduler.utils import pause_aware_sleep, wait_unless_paused_or_stopped
 from engine.scheduler.work_queue import UniqueWorkQueue
 from utils.logger import setup_logger
 
@@ -52,6 +53,7 @@ class WorkerPoolManager:
         barrier_passed_event: threading.Event,
         retry_manager: RetryManager,
         get_reset_generation: Callable[[int, str], int] | None = None,
+        workstation_slots: WorkstationSlotCoordinator | None = None,
     ):
         """
         初始化工作线程池管理器。
@@ -73,6 +75,8 @@ class WorkerPoolManager:
         self._barrier_passed = barrier_passed_event
         self._retry_manager = retry_manager
         self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
+        self._workstation_slots = workstation_slots
+        self._transfer_requeue_delay = 1.0
 
         # ---- MeshingMonitor（由 PipelineScheduler 注入） ----
         self._meshing_monitor = None
@@ -483,12 +487,14 @@ class WorkerPoolManager:
 
             logger.info(f"[{threading.current_thread().name}] 开始处理构型{config_name} Transfer 步骤")
 
+            should_requeue = False
             try:
-                self._process_transfer_step(config_name)
+                should_requeue = self._process_transfer_step(config_name)
                 _consecutive_fatal_count = 0
             except (RuntimeError, ValueError, OSError, ConnectionError) as e:
                 logger.error(f"Transfer 步骤处理构型{config_name} 异常: {e}", exc_info=True)
                 self._mark_current_step_error(config_name, "transfer", str(e))
+                should_requeue = False
             except Exception as e:
                 _consecutive_fatal_count += 1
                 if _consecutive_fatal_count >= 3:
@@ -506,12 +512,16 @@ class WorkerPoolManager:
                 self._mark_current_step_error(
                     config_name, "transfer", f"致命异常: {type(e).__name__}: {e}"
                 )
+                should_requeue = False
             finally:
-                self._transfer_queue.complete(config_name)
+                if should_requeue:
+                    self._transfer_queue.requeue(config_name)
+                else:
+                    self._transfer_queue.complete(config_name)
 
         logger.info(f"[{threading.current_thread().name}] Transfer 工作线程退出")
 
-    def _process_transfer_step(self, config_name: int):
+    def _process_transfer_step(self, config_name: int) -> bool:
         """执行单个构型的 Transfer 步骤，成功后提交 MeshingMonitor。
 
         包含远程文件存在性检查，若远程 SCDOC 已存在则跳过传输。
@@ -521,7 +531,7 @@ class WorkerPoolManager:
             config_name: 构型名称
         """
         if not wait_unless_paused_or_stopped(self._paused, self._stopped):
-            return
+            return False
 
         generation = self._step_generation(config_name, "transfer")
         transfer_status = self.state.get_step_status(config_name, "transfer")
@@ -533,10 +543,24 @@ class WorkerPoolManager:
                 f"[WorkerPool] 检测到重复入队：构型{config_name} Transfer 已处于 {transfer_status} 状态，"
                 f"跳过本次处理"
             )
-            return
+            return False
 
         # 排除 RUNNING：防止重复入队导致两个 Worker 同时执行同一构型的 Transfer
         if transfer_status in (STATUS_WAITING, STATUS_PAUSED, STATUS_ERROR, STATUS_RETRYING):
+            if self._workstation_slots is not None:
+                workstation_id = self._workstation_slots.claim(config_name)
+                if workstation_id is None:
+                    logger.debug(
+                        "[WorkerPool] 所有 Meshing 工作站槽位忙，构型%s Transfer 等待",
+                        config_name,
+                    )
+                    pause_aware_sleep(
+                        self._transfer_requeue_delay,
+                        self._paused,
+                        self._stopped,
+                        check_interval=0.2,
+                    )
+                    return not self._stopped.is_set()
             # ★ 远程文件存在性检查已移入 remote_executor.execute_transfer() 内部，
             #    在 _ssh_lock 保护下执行，避免与 upload_file() 并发操作 SFTP 通道
             #    导致死锁。此处不再单独检查，直接委托 execute_transfer 处理。
@@ -547,9 +571,13 @@ class WorkerPoolManager:
             )
             if self._is_stale_step_result(config_name, "transfer", generation):
                 self._discard_stale_step_result(config_name, "transfer")
-                return
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_config(config_name)
+                return False
             if not success:
-                return
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_config(config_name)
+                return False
 
             # ★ 执行完成后再次确认状态
             transfer_status = self.state.get_step_status(config_name, "transfer")
@@ -558,19 +586,25 @@ class WorkerPoolManager:
                     "[WorkerPool] 构型%s Transfer 完成后检测到停止标志，跳过 Meshing 入队",
                     config_name,
                 )
-                return
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_config(config_name)
+                return False
 
         # ★ Transfer 成功（或已 Completed），提交 MeshingMonitor
         if transfer_status == STATUS_COMPLETED:
             if self._is_stale_step_result(config_name, "transfer", generation):
                 self._discard_stale_step_result(config_name, "transfer")
-                return
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_config(config_name)
+                return False
             if self._stopped.is_set():
                 logger.info(
                     "[WorkerPool] 构型%s Transfer 已完成但引擎已停止，跳过 Meshing 入队",
                     config_name,
                 )
-                return
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_config(config_name)
+                return False
             if self._meshing_monitor is not None:
                 self._meshing_monitor.submit(config_name)
                 logger.info(f"构型{config_name} Transfer 完成，已提交 MeshingMonitor")
@@ -584,6 +618,7 @@ class WorkerPoolManager:
                 f"[WorkerPool] 构型{config_name} Transfer 执行后状态为 {transfer_status}，"
                 f"未提交 MeshingMonitor"
             )
+        return False
 
     def _mark_current_step_error(self, config_name: int, step_name: str, reason: str) -> None:
         """只标记实际失败的步骤；未执行的下游步骤保持 Waiting。"""

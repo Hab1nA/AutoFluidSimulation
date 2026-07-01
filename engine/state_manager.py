@@ -19,7 +19,8 @@ from contextlib import contextmanager
 
 from engine.config import (
     STEP_NAMES, STEP_INDEX,
-    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR,
+    STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_UNKNOWN_REMOTE,
+    STATUS_COMPLETED, STATUS_ERROR,
     ALL_STATUSES, IPC_CONFIG,
     DEFAULT_WORKSTATION_ID,
 )
@@ -88,13 +89,13 @@ class StateManager:
             if not readonly:
                 try:
                     conn.rollback()
-                except Exception as e:
+                except sqlite3.Error as e:
                     logger.error("数据库回滚异常: %s", e)
             raise
         finally:
             try:
                 conn.close()
-            except Exception as e:
+            except sqlite3.Error as e:
                 logger.error("数据库连接关闭异常: %s", e)
 
     @staticmethod
@@ -373,6 +374,20 @@ class StateManager:
             result: str = row["status"] if row else STATUS_WAITING
             return result
 
+    def get_step_status_counts(self, step_name: str) -> dict[str, int]:
+        """Return status distribution for one step using one aggregate query."""
+        with self._get_connection(readonly=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM steps
+                WHERE step_name = ?
+                GROUP BY status
+                """,
+                (step_name,),
+            ).fetchall()
+        return {str(row["status"]): int(row["cnt"]) for row in rows}
+
     def set_step_status(self, config_name: int, step_name: str, status: str,
                         error_message: str = ""):
         """
@@ -638,6 +653,18 @@ class StateManager:
                     [(config_name, step_name) for step_name in steps_to_delete],
                 )
 
+    def delete_all_remote_tasks(self, workstation_id: str | None = None) -> None:
+        """删除所有或指定工作站的远程任务元数据。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                if workstation_id is None:
+                    conn.execute("DELETE FROM remote_tasks")
+                else:
+                    conn.execute(
+                        "DELETE FROM remote_tasks WHERE workstation_id = ?",
+                        (workstation_id,),
+                    )
+
     def set_config_workstation(
         self,
         config_name: int,
@@ -690,40 +717,37 @@ class StateManager:
         """
         with self._lock:
             with self._get_connection() as conn:
-                if workstation_id is None:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status = ?",
-                        (STATUS_RUNNING,),
-                    ).fetchone()
-                else:
-                    row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM steps "
-                        "WHERE step_name = 'meshing' AND status = ? "
-                        "AND workstation_id = ?",
-                        (STATUS_RUNNING, workstation_id),
-                    ).fetchone()
+                # De-dup SELECT: unified query with optional workstation filter
+                params: list[object] = [STATUS_RUNNING, STATUS_RETRYING]
+                ws_filter = ""
+                if workstation_id is not None:
+                    ws_filter = " AND workstation_id = ?"
+                    params.append(workstation_id)
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM steps "
+                    "WHERE step_name = 'meshing' AND status IN (?, ?)"
+                    + ws_filter,
+                    params,
+                ).fetchone()
                 if (row["cnt"] or 0) > 0:
                     logger.debug(
                         f"set_meshing_running_if_idle({config_name}): "
                         f"已有其他构型在执行网格划分，拒绝"
                     )
                     return False
-                if workstation_id is None:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, error_message = '', "
-                        "updated_at = strftime('%s','now') "
-                        "WHERE config_name = ? AND step_name = ?",
-                        (STATUS_RUNNING, config_name, "meshing"),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE steps SET status = ?, error_message = '', "
-                        "workstation_id = ?, "
-                        "updated_at = strftime('%s','now') "
-                        "WHERE config_name = ? AND step_name = ?",
-                        (STATUS_RUNNING, workstation_id, config_name, "meshing"),
-                    )
+                # De-dup UPDATE: unified statement with optional workstation_id
+                update_params: list[object] = [STATUS_RUNNING, config_name, "meshing"]
+                ws_set = ""
+                if workstation_id is not None:
+                    ws_set = " workstation_id = ?,"
+                    update_params.insert(1, workstation_id)
+                conn.execute(
+                    "UPDATE steps SET status = ?, error_message = '',"
+                    + ws_set
+                    + " updated_at = strftime('%s','now') "
+                    "WHERE config_name = ? AND step_name = ?",
+                    update_params,
+                )
                 logger.info(f"状态更新: 构型{config_name} [Meshing] -> Running（原子防护通过）")
                 return True
 
@@ -747,7 +771,8 @@ class StateManager:
 
     def _reset_single_config(self, config_name: int, from_step: str | None = None):
         """重置单个构型的步骤状态（内部方法）。"""
-        start_idx = STEP_INDEX.get(from_step, 0) if from_step else 0
+        effective_from_step = "transfer" if from_step == "meshing" else from_step
+        start_idx = STEP_INDEX.get(effective_from_step, 0) if effective_from_step else 0
         steps_to_reset = STEP_NAMES[start_idx:]
 
         with self._lock:
@@ -763,6 +788,15 @@ class StateManager:
                         SET status = ?, retry_count = 0, error_message = '', updated_at = strftime('%s','now')
                         WHERE config_name = ? AND step_name = ?
                     """, (STATUS_WAITING, config_name, step_name))
+                if from_step is None or STEP_INDEX.get(from_step, 0) <= STEP_INDEX["meshing"]:
+                    conn.execute(
+                        """
+                        UPDATE steps
+                        SET workstation_id = ?, slot_id = NULL, updated_at = strftime('%s','now')
+                        WHERE config_name = ?
+                        """,
+                        (DEFAULT_WORKSTATION_ID, config_name),
+                    )
                 # 如果重置了 SW，需谨慎处理 sw_macro_started 标志：
                 # 仅当数据库中不再有任何 SW=Completed 的构型时才清除该标志。
                 # 这样可以避免部分重置（仅重置单个构型）时意外允许全部重跑 SW。
@@ -786,6 +820,7 @@ class StateManager:
                         "DELETE FROM engine_state WHERE key = ?",
                         ("solver_progress",),
                     )
+                    self._clear_solver_progress_by_config_locked(conn, config_name)
 
         logger.info(f"已重置构型 {config_name} 从 {from_step or 'sw'} 起的所有步骤")
 
@@ -806,6 +841,10 @@ class StateManager:
                 conn.execute(
                     "DELETE FROM engine_state WHERE key = ?",
                     ("solver_progress",),
+                )
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress_by_config",),
                 )
         logger.warning("已重置所有构型的所有步骤！")
 
@@ -835,6 +874,51 @@ class StateManager:
                 )
         logger.info(f"引擎状态变更: -> {status}")
 
+    def set_solver_quarantine(
+        self,
+        quarantine: dict[str, dict[str, int | float]],
+    ) -> None:
+        """持久化 Solver 工作站隔离状态。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                if quarantine:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                        ("solver_quarantine", json.dumps(quarantine, ensure_ascii=False)),
+                    )
+                else:
+                    conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_quarantine",))
+
+    def get_solver_quarantine(self) -> dict[str, dict[str, int | float]]:
+        """读取 Solver 工作站隔离状态；不存在或损坏时返回空字典。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM engine_state WHERE key = ?",
+                ("solver_quarantine",),
+            ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning("[State] solver_quarantine JSON 损坏，已忽略")
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        restored: dict[str, dict[str, int | float]] = {}
+        for workstation_id, data in value.items():
+            if not isinstance(workstation_id, str) or not isinstance(data, dict):
+                continue
+            failure_count = data.get("failure_count")
+            until = data.get("until")
+            if not isinstance(failure_count, int | float) or not isinstance(until, int | float):
+                continue
+            restored[workstation_id] = {
+                "failure_count": int(failure_count),
+                "until": float(until),
+            }
+        return restored
+
     def set_solver_progress(self, progress: dict[str, object]) -> None:
         """存储当前 Solver 剩余时间进度。"""
         payload = json.dumps(progress, ensure_ascii=False)
@@ -844,6 +928,18 @@ class StateManager:
                     "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
                     ("solver_progress", payload),
                 )
+                config_name = progress.get("config_name")
+                if config_name is not None:
+                    try:
+                        if not isinstance(config_name, str | int | float):
+                            raise TypeError
+                        self._set_solver_progress_by_config_locked(
+                            conn,
+                            int(config_name),
+                            progress,
+                        )
+                    except (TypeError, ValueError):
+                        logger.debug("[State] solver_progress 缺少有效 config_name，跳过 per-config map")
 
     def get_solver_progress(self) -> dict[str, object] | None:
         """读取当前 Solver 剩余时间进度；不存在或损坏时返回 None。"""
@@ -858,8 +954,53 @@ class StateManager:
             value = json.loads(row["value"])
         except json.JSONDecodeError:
             logger.warning("[State] solver_progress JSON 损坏，已忽略")
-            return None
-        return value if isinstance(value, dict) else None
+        else:
+            if isinstance(value, dict):
+                return value
+        progress_by_config = self.get_solver_progress_by_config()
+        return self._latest_solver_progress_from_map(progress_by_config)
+
+    def set_solver_progress_by_config(
+        self,
+        config_name: int,
+        progress: dict[str, object],
+    ) -> None:
+        """按构型存储 Solver 剩余时间进度。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                self._set_solver_progress_by_config_locked(conn, config_name, progress)
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    ("solver_progress", json.dumps(progress, ensure_ascii=False)),
+                )
+
+    def get_solver_progress_by_config(self) -> dict[str, dict[str, object]]:
+        """读取所有构型的 Solver 剩余时间进度。"""
+        with self._get_connection(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM engine_state WHERE key = ?",
+                ("solver_progress_by_config",),
+            ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            logger.warning("[State] solver_progress_by_config JSON 损坏，已忽略")
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): progress
+            for key, progress in value.items()
+            if isinstance(progress, dict)
+        }
+
+    def clear_solver_progress_by_config(self, config_name: int) -> None:
+        """清理指定构型的 Solver progress。"""
+        with self._lock:
+            with self._get_connection() as conn:
+                self._clear_solver_progress_by_config_locked(conn, config_name)
 
     def clear_solver_progress(self) -> None:
         """清理当前 Solver 剩余时间进度。"""
@@ -869,17 +1010,93 @@ class StateManager:
                     "DELETE FROM engine_state WHERE key = ?",
                     ("solver_progress",),
                 )
+                conn.execute(
+                    "DELETE FROM engine_state WHERE key = ?",
+                    ("solver_progress_by_config",),
+                )
+
+    def _set_solver_progress_by_config_locked(
+        self,
+        conn: sqlite3.Connection,
+        config_name: int,
+        progress: dict[str, object],
+    ) -> None:
+        progress_by_config = self._read_solver_progress_by_config_locked(conn)
+        progress_by_config[str(config_name)] = progress
+        conn.execute(
+            "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+            ("solver_progress_by_config", json.dumps(progress_by_config, ensure_ascii=False)),
+        )
+
+    def _clear_solver_progress_by_config_locked(
+        self,
+        conn: sqlite3.Connection,
+        config_name: int,
+    ) -> None:
+        progress_by_config = self._read_solver_progress_by_config_locked(conn)
+        progress_by_config.pop(str(config_name), None)
+        if progress_by_config:
+            conn.execute(
+                "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                ("solver_progress_by_config", json.dumps(progress_by_config, ensure_ascii=False)),
+            )
+            latest_progress = self._latest_solver_progress_from_map(progress_by_config)
+            if latest_progress is None:
+                conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress",))
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO engine_state (key, value) VALUES (?, ?)",
+                    (
+                        "solver_progress",
+                        json.dumps(latest_progress, ensure_ascii=False),
+                    ),
+                )
+        else:
+            conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress_by_config",))
+            conn.execute("DELETE FROM engine_state WHERE key = ?", ("solver_progress",))
+
+    @staticmethod
+    def _read_solver_progress_by_config_locked(
+        conn: sqlite3.Connection,
+    ) -> dict[str, dict[str, object]]:
+        row = conn.execute(
+            "SELECT value FROM engine_state WHERE key = ?",
+            ("solver_progress_by_config",),
+        ).fetchone()
+        if not row or not row["value"]:
+            return {}
+        try:
+            value = json.loads(row["value"])
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): progress
+            for key, progress in value.items()
+            if isinstance(progress, dict)
+        }
+
+    @staticmethod
+    def _latest_solver_progress_from_map(
+        progress_by_config: dict[str, dict[str, object]],
+    ) -> dict[str, object] | None:
+        for key in reversed(progress_by_config):
+            progress = progress_by_config.get(key)
+            if isinstance(progress, dict):
+                return progress
+        return None
 
     def set_all_running_to_paused(self):
-        """将所有 Running 和 Retrying 状态的步骤批量切换为 Paused。"""
+        """将所有 Running、Retrying 和 UnknownRemote 状态的步骤批量切换为 Paused。"""
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute(
                     "UPDATE steps SET status = ?, updated_at = strftime('%s','now') "
-                    "WHERE status IN (?, ?)",
-                    (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING)
+                    "WHERE status IN (?, ?, ?)",
+                    (STATUS_PAUSED, STATUS_RUNNING, STATUS_RETRYING, STATUS_UNKNOWN_REMOTE)
                 )
-        logger.info("已将所有运行中/重试中步骤切换为 Paused")
+        logger.info("已将所有运行中/重试中/远程未知步骤切换为 Paused")
 
     def is_sw_macro_started(self) -> bool:
         """检查 SW 宏是否已启动。"""

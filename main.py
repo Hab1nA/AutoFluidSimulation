@@ -14,7 +14,7 @@ from __future__ import annotations
     python main.py --status       # 查看运行状态
 
 快捷方式：
-    scripts/start_autofluid_preflight.ps1  # Windows 预检并启动
+    scripts/start_autofluid_preflight.ps1  # Windows 启动前预检
     python main.py --quit                  # 停止所有程序
     python main.py --status                # 查看状态
 ===============================================================================
@@ -519,7 +519,7 @@ def main() -> None:
         print("推荐使用方式:")
         print("python main.py --all       # 一键启动 (Daemon + Client)")
         print("python main.py --worker     # 启动本地 LocalWorker 连接远程 daemon")
-        print("scripts/start_autofluid_preflight.ps1  # Windows 预检并启动")
+        print("scripts/start_autofluid_preflight.ps1  # Windows 启动前预检")
         print("终端1: python start_daemon.py")
         print("终端2: python start_client.py")
 

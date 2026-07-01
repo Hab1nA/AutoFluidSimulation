@@ -60,6 +60,17 @@ def test_pause_arriving_during_resume_wins_after_reconciliation() -> None:
     assert control.paused_event.is_set() is True
 
 
+def test_resume_transition_opens_pause_gate_for_reconciliation() -> None:
+    """resume 扫描自身触发的 dispatch 不能被旧 paused 标志自锁。"""
+    control = PipelineControl()
+    control.pause()
+
+    with control.resume_transition():
+        assert control.paused_event.is_set() is False
+
+    assert control.paused_event.is_set() is False
+
+
 def test_external_start_does_not_block_pause_acknowledgement() -> None:
     """pause 不等待已准入的长耗时副作用完成，后续副作用会被拒绝。"""
     control = PipelineControl()
@@ -86,6 +97,40 @@ def test_external_start_rejects_stopped_pipeline() -> None:
     control = PipelineControl()
     control.stop()
 
+    with control.external_start() as allowed:
+        assert allowed is False
+
+
+def test_finalize_external_start_holds_transition_until_fast_finalize_completes() -> None:
+    """收口阶段必须与 pause 串行，避免 pause 后又写回 running。"""
+    control = PipelineControl()
+    finalize_started = threading.Event()
+    allow_finalize_to_finish = threading.Event()
+    pause_finished = threading.Event()
+
+    def finalize() -> None:
+        with control.finalize_external_start() as allowed:
+            assert allowed is True
+            finalize_started.set()
+            allow_finalize_to_finish.wait(timeout=2)
+
+    def pause() -> None:
+        control.pause()
+        pause_finished.set()
+
+    finalize_thread = threading.Thread(target=finalize)
+    finalize_thread.start()
+    assert finalize_started.wait(timeout=1)
+
+    pause_thread = threading.Thread(target=pause)
+    pause_thread.start()
+    assert pause_finished.wait(timeout=0.05) is False
+
+    allow_finalize_to_finish.set()
+    finalize_thread.join(timeout=1)
+    pause_thread.join(timeout=1)
+
+    assert pause_finished.is_set() is True
     with control.external_start() as allowed:
         assert allowed is False
 

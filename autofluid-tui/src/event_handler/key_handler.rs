@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::event_handler::{SCROLL_LINE_STEP, SCROLL_PAGE_STEP};
+use crate::settings::settings_ui::settings_workstation_visible_columns;
 use crate::state::app_state::{AppState, FocusZone, UiMode};
 
 pub enum AppAction {
@@ -23,6 +24,11 @@ pub fn handle_key(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 }
 
+fn is_ctrl_char(key: KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+}
+
 fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
     match key.code {
         KeyCode::Tab => {
@@ -35,9 +41,8 @@ fn handle_key_normal(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('c')
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && state.focus_zone != FocusZone::CommandInput =>
+        KeyCode::Char(_)
+            if is_ctrl_char(key, 'c') && state.focus_zone != FocusZone::CommandInput =>
         {
             // Ctrl+C 退出（命令输入区的 Ctrl+C 由 handle_command_input 处理为复制）
             state.should_quit = true;
@@ -64,26 +69,26 @@ fn handle_command_input(key: KeyEvent, state: &mut AppState) -> AppAction {
             }
         }
         // ── Clipboard shortcuts ──────────────────────────────────
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'a') => {
             state.command_buffer.select_all();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             state.command_buffer.copy_selection();
             AppAction::None
         }
-        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'x') => {
             state.command_buffer.cut_selection();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'u') => {
             state.command_buffer.clear();
             state.needs_redraw = true;
             AppAction::None
         }
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'v') => {
             state.command_buffer.paste_from_clipboard();
             state.needs_redraw = true;
             AppAction::None
@@ -189,7 +194,7 @@ fn handle_command_passthrough(key: KeyEvent, state: &mut AppState) -> AppAction 
                 return AppAction::SubmitCommand(cmd);
             }
         }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'u') => {
             state.command_buffer.clear();
             state.focus_zone = FocusZone::CommandInput;
             state.needs_redraw = true;
@@ -394,7 +399,7 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
     }
 
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             // Ctrl+C 在设置页非编辑态：退出设置
             if let Some(ref mut ss) = state.settings_state {
                 if ss.dirty {
@@ -413,12 +418,30 @@ fn handle_key_settings(key: KeyEvent, state: &mut AppState) -> AppAction {
             state.close_settings();
             AppAction::DiscardSettings
         }
-        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            AppAction::SaveSettings
-        }
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 's') => AppAction::SaveSettings,
+        KeyCode::Char(_) if is_ctrl_char(key, 'z') => {
             if let Some(ref mut ss) = state.settings_state {
                 ss.undo();
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Left => {
+            let area = state.terminal_size;
+            if let Some(ref mut ss) = state.settings_state {
+                let visible_columns =
+                    settings_workstation_visible_columns(area, ss.config.workstations.len());
+                ss.scroll_workstation_columns_left(visible_columns);
+                state.needs_redraw = true;
+            }
+            AppAction::None
+        }
+        KeyCode::Right => {
+            let area = state.terminal_size;
+            if let Some(ref mut ss) = state.settings_state {
+                let visible_columns =
+                    settings_workstation_visible_columns(area, ss.config.workstations.len());
+                ss.scroll_workstation_columns_right(visible_columns);
                 state.needs_redraw = true;
             }
             AppAction::None
@@ -507,19 +530,19 @@ fn handle_settings_text_input(key: KeyEvent, ss: &mut crate::settings::SettingsS
             AppAction::None
         }
         // ── Clipboard shortcuts ──────────────────────────────────────
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'a') => {
             ss.select_all();
             AppAction::None
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'c') => {
             ss.copy_selection();
             AppAction::None
         }
-        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'x') => {
             ss.cut_selection();
             AppAction::None
         }
-        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(_) if is_ctrl_char(key, 'v') => {
             ss.paste_from_clipboard();
             AppAction::None
         }
@@ -589,5 +612,195 @@ mod tests {
         assert_eq!(state.focus_zone, FocusZone::CommandInput);
         assert_eq!(state.command_buffer.text, "");
         assert_eq!(state.command_buffer.cursor, 0);
+    }
+
+    #[test]
+    fn settings_left_right_scroll_workstation_columns_when_not_editing() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let right = handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+        assert!(matches!(right, AppAction::None));
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+
+        let left = handle_key(key(KeyCode::Left, KeyModifiers::NONE), &mut state);
+        assert!(matches!(left, AppAction::None));
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            0
+        );
+    }
+
+    #[test]
+    fn settings_right_scroll_caps_at_visible_workstation_window() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+    }
+
+    #[test]
+    fn settings_scroll_keeps_workstation_focus_visible() {
+        let mut state = AppState::new();
+        state.terminal_size = ratatui::layout::Rect::new(0, 0, 60, 40);
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+        ss.set_focus(1, 0, Some(0));
+
+        handle_key(key(KeyCode::Right, KeyModifiers::NONE), &mut state);
+
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert_eq!(ss.workstation_column_offset, 1);
+        assert_eq!(ss.focus.workstation_index, Some(1));
+    }
+
+    #[test]
+    fn settings_left_right_keep_text_cursor_behavior_while_editing() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.set_focus(1, 0, Some(0));
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.buffer.move_cursor_end();
+        ss.focus.editing = true;
+
+        handle_key(key(KeyCode::Left, KeyModifiers::NONE), &mut state);
+
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert_eq!(ss.workstation_column_offset, 0);
+        assert_eq!(ss.buffer.cursor, 3);
+    }
+
+    #[test]
+    fn settings_ctrl_c_while_editing_does_not_close_or_mutate_field() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.buffer.select_all();
+        ss.focus.editing = true;
+
+        let action = handle_key(
+            key(
+                KeyCode::Char('C'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            &mut state,
+        );
+
+        assert!(matches!(action, AppAction::None));
+        assert!(!state.should_quit);
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert!(ss.focus.editing);
+        assert_eq!(ss.buffer.text, "abcd");
+        assert_eq!(state.ui_mode, UiMode::Settings);
+    }
+
+    #[test]
+    fn settings_ctrl_c_when_not_editing_closes_settings() {
+        let mut state = AppState::new();
+        state.open_settings();
+
+        let action = handle_key(key(KeyCode::Char('c'), KeyModifiers::CONTROL), &mut state);
+
+        assert!(matches!(action, AppAction::DiscardSettings));
+        assert!(!state.should_quit);
+        assert!(state.settings_state.is_none());
+        assert_eq!(state.ui_mode, UiMode::Normal);
+    }
+
+    #[test]
+    fn settings_escape_while_editing_cancels_edit_only() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.buffer = TextBuffer::with_text("abcd".to_string());
+        ss.focus.editing = true;
+
+        let action = handle_key(key(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+
+        assert!(matches!(action, AppAction::None));
+        let ss = state.settings_state.as_ref().expect("settings state");
+        assert!(!ss.focus.editing);
+        assert_eq!(state.ui_mode, UiMode::Settings);
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use ratatui::style::Style;
@@ -12,6 +12,7 @@ pub const STATUS_WAITING: &str = "Waiting";
 pub const STATUS_RUNNING: &str = "Running";
 pub const STATUS_PAUSED: &str = "Paused";
 pub const STATUS_RETRYING: &str = "Retrying";
+pub const STATUS_UNKNOWN_REMOTE: &str = "UnknownRemote";
 pub const STATUS_COMPLETED: &str = "Completed";
 pub const STATUS_ERROR: &str = "Error";
 pub const SETTINGS_LOCKED_MESSAGE: &str =
@@ -42,6 +43,7 @@ pub fn status_icon(status: &str) -> &str {
         STATUS_RUNNING => "⏳",
         STATUS_PAUSED => "⏸️",
         STATUS_RETRYING => "🔄",
+        STATUS_UNKNOWN_REMOTE => "❔",
         STATUS_COMPLETED => "✅",
         STATUS_ERROR => "❌",
         _ => "?",
@@ -54,6 +56,7 @@ pub fn status_color(status: &str) -> ratatui::style::Color {
         STATUS_RUNNING => ratatui::style::Color::Yellow,
         STATUS_PAUSED => ratatui::style::Color::Gray,
         STATUS_RETRYING => ratatui::style::Color::Rgb(255, 136, 0),
+        STATUS_UNKNOWN_REMOTE => ratatui::style::Color::Yellow,
         STATUS_COMPLETED => ratatui::style::Color::Green,
         STATUS_ERROR => ratatui::style::Color::Red,
         _ => ratatui::style::Color::White,
@@ -113,11 +116,14 @@ pub struct EngineInfo {
     pub engine_status: String,
     pub sw_macro_started: bool,
     pub barrier_passed: bool,
+    pub workstation_barriers: BTreeMap<String, bool>,
     pub pipeline_started: bool,
     pub daemon_started_at: Option<f64>,
     pub daemon_started_at_display: Option<String>,
     pub daemon_uptime_seconds: Option<u64>,
+    pub config_load_error: Option<String>,
     pub solver_progress: Option<SolverProgress>,
+    pub solver_progress_by_config: BTreeMap<u64, SolverProgress>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -172,6 +178,7 @@ pub struct ScrollbarRenderedInfo {
 pub struct AppState {
     pub connected: bool,
     pub status_data: HashMap<String, HashMap<String, String>>,
+    pub config_workstations: HashMap<String, String>,
     pub configs: Vec<u64>,
     pub engine_info: EngineInfo,
     pub health_info: HealthInfo,
@@ -322,6 +329,50 @@ impl AppState {
         self.needs_redraw = true;
     }
 
+    pub fn update_config_workstations(&mut self, data: &serde_json::Value) {
+        self.config_workstations.clear();
+        if let Some(obj) = data.as_object() {
+            for (config_name, workstation) in obj {
+                if let Some(workstation_id) = workstation.as_str() {
+                    self.config_workstations
+                        .insert(config_name.clone(), workstation_id.to_string());
+                }
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    pub fn config_cell_text(&self, config: &str) -> String {
+        config.to_string()
+    }
+
+    pub fn work_location_cell_text(&self, config: &str) -> String {
+        let Some(steps) = self.status_data.get(config) else {
+            return String::new();
+        };
+
+        for step in STEP_NAMES {
+            if steps.get(step).map(String::as_str) != Some(STATUS_RUNNING) {
+                continue;
+            }
+            return match step {
+                "sw" | "sc" => "本地".to_string(),
+                "transfer" | "meshing" | "solver" | "postprocess" => self
+                    .config_workstations
+                    .get(config)
+                    .map(String::as_str)
+                    .filter(|workstation_id| {
+                        !workstation_id.is_empty() && *workstation_id != "default"
+                    })
+                    .unwrap_or("")
+                    .to_string(),
+                _ => String::new(),
+            };
+        }
+
+        String::new()
+    }
+
     pub fn update_engine_info(&mut self, data: &serde_json::Value) {
         if let Some(obj) = data.as_object() {
             self.engine_info.engine_status = obj
@@ -337,6 +388,18 @@ impl AppState {
                 .get("barrier_passed")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            self.engine_info.workstation_barriers.clear();
+            if let Some(workstation_barriers) =
+                obj.get("workstation_barriers").and_then(|v| v.as_object())
+            {
+                for (workstation_id, passed) in workstation_barriers {
+                    if let Some(passed) = passed.as_bool() {
+                        self.engine_info
+                            .workstation_barriers
+                            .insert(workstation_id.clone(), passed);
+                    }
+                }
+            }
             self.engine_info.pipeline_started = obj
                 .get("pipeline_started")
                 .and_then(|v| v.as_bool())
@@ -349,8 +412,25 @@ impl AppState {
                 .map(str::to_string);
             self.engine_info.daemon_uptime_seconds =
                 obj.get("daemon_uptime_seconds").and_then(|v| v.as_u64());
+            self.engine_info.config_load_error = obj
+                .get("config_load_error")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             self.engine_info.solver_progress =
                 obj.get("solver_progress").and_then(parse_solver_progress);
+            self.engine_info.solver_progress_by_config = obj
+                .get("solver_progress_by_config")
+                .map(parse_solver_progress_by_config)
+                .unwrap_or_default();
+            if self.engine_info.solver_progress_by_config.is_empty() {
+                if let Some(progress) = self.engine_info.solver_progress.clone() {
+                    self.engine_info
+                        .solver_progress_by_config
+                        .insert(progress.config_name, progress);
+                }
+            }
         }
         self.needs_redraw = true;
     }
@@ -401,7 +481,7 @@ impl AppState {
     pub fn step_cell_text(&self, config: &str, step: &str) -> String {
         let status = self.get_step_status(config, step);
         if self.should_show_solver_progress(config, step, status) {
-            if let Some(progress) = self.engine_info.solver_progress.as_ref() {
+            if let Some(progress) = self.solver_progress_for_config(config) {
                 return format!(
                     "{} {}",
                     status_icon(status),
@@ -424,7 +504,7 @@ impl AppState {
         if step != "solver" || status != STATUS_RUNNING {
             return false;
         }
-        let Some(progress) = self.engine_info.solver_progress.as_ref() else {
+        let Some(progress) = self.solver_progress_for_config(config) else {
             return false;
         };
         let iteration_is_valid = progress
@@ -436,6 +516,19 @@ impl AppState {
             && iteration_is_valid
             && timestamp_is_valid
             && config.parse::<u64>().ok() == Some(progress.config_name)
+    }
+
+    fn solver_progress_for_config(&self, config: &str) -> Option<&SolverProgress> {
+        let config_name = config.parse::<u64>().ok()?;
+        self.engine_info
+            .solver_progress_by_config
+            .get(&config_name)
+            .or_else(|| {
+                self.engine_info
+                    .solver_progress
+                    .as_ref()
+                    .filter(|progress| progress.config_name == config_name)
+            })
     }
 
     #[cfg(test)]
@@ -519,17 +612,35 @@ impl AppState {
 
         let engine_status = engine_status_display(&self.engine_info.engine_status);
         parts.push(InfoBarPart::status(engine_status));
+        if self.engine_info.config_load_error.is_some() {
+            parts.push(InfoBarPart::plain(" │ 配置:"));
+            parts.push(InfoBarPart::status("错误"));
+        }
         parts.push(InfoBarPart::plain(format!(
             " │ 构型:{}",
             self.configs.len()
         )));
         parts.push(InfoBarPart::plain(" │ 屏障:"));
-        let barrier = if self.engine_info.barrier_passed {
-            "已通过"
+        if self.engine_info.workstation_barriers.is_empty() {
+            let barrier = if self.engine_info.barrier_passed {
+                "已通过"
+            } else {
+                "未通过"
+            };
+            parts.push(InfoBarPart::status(barrier));
         } else {
-            "未通过"
-        };
-        parts.push(InfoBarPart::status(barrier));
+            for (idx, (workstation_id, passed)) in
+                self.engine_info.workstation_barriers.iter().enumerate()
+            {
+                if idx > 0 {
+                    parts.push(InfoBarPart::plain(" | "));
+                }
+                parts.push(InfoBarPart::workstation_barrier(
+                    workstation_barrier_label(workstation_id),
+                    *passed,
+                ));
+            }
+        }
         parts
     }
 
@@ -641,6 +752,24 @@ impl InfoBarPart {
         };
         Self { text, color }
     }
+
+    fn workstation_barrier(text: impl Into<String>, passed: bool) -> Self {
+        Self {
+            text: text.into(),
+            color: Some(if passed {
+                InfoBarColor::Success
+            } else {
+                InfoBarColor::Error
+            }),
+        }
+    }
+}
+
+fn workstation_barrier_label(workstation_id: &str) -> String {
+    workstation_id
+        .strip_prefix("WS-")
+        .unwrap_or(workstation_id)
+        .to_string()
 }
 
 fn push_status_part(parts: &mut Vec<InfoBarPart>, label: &'static str) {
@@ -658,6 +787,7 @@ fn ok_label(value: Option<bool>) -> &'static str {
 fn status_label(value: Option<&str>) -> &'static str {
     match value {
         Some("ok") => "OK",
+        Some("stale") => "旧",
         Some("disconnected") => "断",
         Some(status) if status.starts_with("error:") => "断",
         Some("unknown") | None => "未知",
@@ -706,6 +836,25 @@ fn parse_solver_progress(value: &serde_json::Value) -> Option<SolverProgress> {
     })
 }
 
+fn parse_solver_progress_by_config(value: &serde_json::Value) -> BTreeMap<u64, SolverProgress> {
+    let mut progress_by_config = BTreeMap::new();
+    let Some(obj) = value.as_object() else {
+        return progress_by_config;
+    };
+    for (key, value) in obj {
+        let Ok(config_name) = key.parse::<u64>() else {
+            continue;
+        };
+        let Some(progress) = parse_solver_progress(value) else {
+            continue;
+        };
+        if progress.config_name == config_name {
+            progress_by_config.insert(config_name, progress);
+        }
+    }
+    progress_by_config
+}
+
 fn expire_click<T>(
     click_time: &mut Option<std::time::Instant>,
     clicked: &mut Option<T>,
@@ -751,6 +900,17 @@ mod tests {
     }
 
     #[test]
+    fn info_bar_text_labels_stale_workstation_ssh_as_old() {
+        let mut state = AppState::default();
+        state.health_info.server_to_workstation_ssh = Some("stale".to_string());
+
+        assert_eq!(
+            status_label(state.health_info.server_to_workstation_ssh.as_deref()),
+            "旧"
+        );
+    }
+
+    #[test]
     fn info_bar_line_colors_status_values_only() {
         let mut state = AppState::default();
         state.connected = true;
@@ -769,6 +929,72 @@ mod tests {
         assert_span_color(&line, "未通过", Some(state.theme.error));
         assert_span_color(&line, "未知", Some(state.theme.gray_5));
         assert_span_color(&line, " │ 引擎:", Some(state.theme.gray_5));
+    }
+
+    #[test]
+    fn info_bar_text_shows_config_load_error() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "stopped".to_string();
+        state.engine_info.config_load_error = Some("Excel 读取失败: missing.xlsx".to_string());
+
+        assert!(state.info_bar_text().contains("配置:错误"));
+    }
+
+    #[test]
+    fn info_bar_text_shows_workstation_barrier_letters() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-A".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-B".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-C".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-D".to_string(), true);
+
+        assert!(state.info_bar_text().contains("屏障:A | B | C | D"));
+    }
+
+    #[test]
+    fn info_bar_line_colors_workstation_barrier_letters() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.engine_info.engine_status = "running".to_string();
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-A".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-B".to_string(), false);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-C".to_string(), true);
+        state
+            .engine_info
+            .workstation_barriers
+            .insert("WS-D".to_string(), false);
+
+        let line = state.info_bar_line();
+
+        assert_span_color(&line, "A", Some(state.theme.success));
+        assert_span_color(&line, "B", Some(state.theme.error));
+        assert_span_color(&line, "C", Some(state.theme.success));
+        assert_span_color(&line, "D", Some(state.theme.error));
+        assert_span_color(&line, " | ", Some(state.theme.gray_5));
     }
 
     #[test]
@@ -806,6 +1032,22 @@ mod tests {
     }
 
     #[test]
+    fn update_engine_info_parses_config_load_error() {
+        let mut state = AppState::default();
+        let data = serde_json::json!({
+            "engine_status": "stopped",
+            "config_load_error": "Excel 读取失败: missing.xlsx"
+        });
+
+        state.update_engine_info(&data);
+
+        assert_eq!(
+            state.engine_info.config_load_error.as_deref(),
+            Some("Excel 读取失败: missing.xlsx")
+        );
+    }
+
+    #[test]
     fn update_engine_info_parses_solver_progress() {
         let mut state = AppState::default();
         let data = serde_json::json!({
@@ -834,6 +1076,41 @@ mod tests {
     }
 
     #[test]
+    fn update_engine_info_parses_workstation_barriers() {
+        let mut state = AppState::default();
+        state.update_engine_info(&serde_json::json!({
+            "workstation_barriers": {
+                "WS-A": true,
+                "WS-B": false,
+                "WS-C": true,
+                "WS-D": false,
+                "ignored": "yes"
+            }
+        }));
+
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-A"),
+            Some(&true)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-B"),
+            Some(&false)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-C"),
+            Some(&true)
+        );
+        assert_eq!(
+            state.engine_info.workstation_barriers.get("WS-D"),
+            Some(&false)
+        );
+        assert!(!state
+            .engine_info
+            .workstation_barriers
+            .contains_key("ignored"));
+    }
+
+    #[test]
     fn solver_running_cell_shows_remaining_time_for_matching_config() {
         let mut state = AppState::default();
         state.update_status_data(&serde_json::json!({
@@ -856,6 +1133,59 @@ mod tests {
             status_color(STATUS_RUNNING)
         );
         assert_eq!(state.step_cell_text("6", "solver"), "⏳ Running");
+    }
+
+    #[test]
+    fn solver_running_cells_show_remaining_time_for_multiple_configs() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "1": {"solver": "Running"},
+            "2": {"solver": "Running"}
+        }));
+        state.update_engine_info(&serde_json::json!({
+            "solver_progress_by_config": {
+                "1": {
+                    "config_name": 1,
+                    "total_iter": 1000,
+                    "remaining_sec": 3600.0
+                },
+                "2": {
+                    "config_name": 2,
+                    "total_iter": 1000,
+                    "remaining_sec": 125.0
+                }
+            }
+        }));
+
+        assert_eq!(state.step_cell_text("1", "solver"), "⏳ 01:00:00");
+        assert_eq!(state.step_cell_text("2", "solver"), "⏳ 00:02:05");
+    }
+
+    #[test]
+    fn work_location_cell_text_reflects_only_running_step_location() {
+        let mut state = AppState::default();
+        state.update_status_data(&serde_json::json!({
+            "1": {"sw": STATUS_RUNNING},
+            "2": {"sc": STATUS_RUNNING},
+            "3": {"meshing": STATUS_RUNNING},
+            "4": {"solver": STATUS_PAUSED},
+            "5": {"postprocess": STATUS_COMPLETED},
+            "6": {"transfer": STATUS_RUNNING},
+            "7": {"solver": STATUS_RUNNING}
+        }));
+        state.update_config_workstations(&serde_json::json!({
+            "3": "WS-B",
+            "6": "default"
+        }));
+
+        assert_eq!(state.config_cell_text("3"), "3");
+        assert_eq!(state.work_location_cell_text("1"), "本地");
+        assert_eq!(state.work_location_cell_text("2"), "本地");
+        assert_eq!(state.work_location_cell_text("3"), "WS-B");
+        assert_eq!(state.work_location_cell_text("4"), "");
+        assert_eq!(state.work_location_cell_text("5"), "");
+        assert_eq!(state.work_location_cell_text("6"), "");
+        assert_eq!(state.work_location_cell_text("7"), "");
     }
 
     #[test]

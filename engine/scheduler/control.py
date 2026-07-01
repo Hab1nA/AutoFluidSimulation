@@ -55,8 +55,8 @@ class PipelineControl:
         """在恢复扫描完成后开放流水线；期间到达的 pause 会排队并最终生效。"""
         with self._transition_lock:
             self._stopped.clear()
-            yield
             self._paused.clear()
+            yield
 
     @contextmanager
     def external_start(self) -> Iterator[bool]:
@@ -70,3 +70,9 @@ class PipelineControl:
         with self._transition_lock:
             allowed = not self._paused.is_set() and not self._stopped.is_set()
         yield allowed
+
+    @contextmanager
+    def finalize_external_start(self) -> Iterator[bool]:
+        """Hold the transition lock while committing fast start/resume finalization."""
+        with self._transition_lock:
+            yield not self._paused.is_set() and not self._stopped.is_set()

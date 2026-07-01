@@ -52,6 +52,10 @@ class LocalWorkerConfig:
     heartbeat_interval: float = 30.0
     poll_interval: float = 2.0
     register_retry_interval: float = 2.0
+    register_max_consecutive_failures: int = 5
+    register_max_recovery_seconds: float = 120.0
+    register_failure_cooldown_seconds: float = 30.0
+    register_log_repeat_seconds: float = 60.0
     request_timeout: float = 10.0
 
 
@@ -94,6 +98,7 @@ class LocalWorker:
             "sc": True,
             "clean": True,
             "check": True,
+            "workstation_tunnel": True,
             "sc_slots": max(1, int(ENGINE_CONFIG.get("sc_max_slots", 1))),
         }
         return cls(
@@ -127,7 +132,11 @@ class LocalWorker:
         """Return the IPC request used to refresh this LocalWorker heartbeat."""
         return create_request(
             CMD_WORKER_HEARTBEAT,
-            {"worker_id": self.config.worker_id},
+            {
+                "worker_id": self.config.worker_id,
+                "capabilities": dict(self.config.capabilities),
+                "network": dict(self.config.network),
+            },
             auth_token=self.config.auth_token,
         )
 
@@ -177,7 +186,7 @@ class LocalWorker:
 
     def run_forever(self) -> None:
         """Register once, then keep polling tasks and heartbeating until interrupted."""
-        self._register_until_available()
+        self._recover_registration_until_available()
         self._last_heartbeat_at = time.monotonic()
         while True:
             time.sleep(self.config.poll_interval)
@@ -185,19 +194,56 @@ class LocalWorker:
                 self.run_once()
             except RuntimeError as exc:
                 logger.warning(str(exc))
-                self._register_until_available()
+                self._recover_registration_until_available()
                 self._last_heartbeat_at = time.monotonic()
 
+    def _recover_registration_until_available(self) -> None:
+        """Keep trying bounded registration windows until the daemon returns."""
+        while True:
+            try:
+                self._register_until_available()
+                return
+            except RuntimeError as exc:
+                logger.warning(
+                    "LocalWorker 注册恢复窗口失败，将在 %.1fs 后重试: %s",
+                    self.config.register_failure_cooldown_seconds,
+                    exc,
+                )
+                time.sleep(self.config.register_failure_cooldown_seconds)
+
     def _register_until_available(self) -> None:
-        """Keep the worker alive while the remote daemon is still starting."""
+        """Retry registration within a bounded recovery budget."""
+        consecutive_failures = 0
+        first_failure_at: float | None = None
+        last_log_at: float | None = None
         while True:
             try:
                 self.register_once()
                 return
             except RuntimeError as exc:
-                logger.warning(str(exc))
+                now = time.monotonic()
+                if first_failure_at is None:
+                    first_failure_at = now
+                consecutive_failures += 1
+                elapsed = now - first_failure_at
+                exhausted = (
+                    consecutive_failures >= self.config.register_max_consecutive_failures
+                    or elapsed >= self.config.register_max_recovery_seconds
+                )
+                if exhausted:
+                    message = (
+                        "LocalWorker 注册重试预算耗尽: "
+                        f"consecutive_failures={consecutive_failures}, elapsed={elapsed:.1f}s"
+                    )
+                    logger.warning(message)
+                    raise RuntimeError(message) from exc
+                if (
+                    last_log_at is None
+                    or now - last_log_at >= self.config.register_log_repeat_seconds
+                ):
+                    logger.warning(str(exc))
+                    last_log_at = now
                 time.sleep(self.config.register_retry_interval)
-
     def run_once(self, now: float | None = None) -> str:
         """Advance the LocalWorker scheduler by one non-blocking tick."""
         current = time.monotonic() if now is None else now
@@ -460,6 +506,8 @@ class LocalWorker:
             return self._run_clean_local_files_task
         if step == "cleanup_stage":
             return self._run_cleanup_stage_task
+        if step == "workstation_tunnel_ensure":
+            return self._run_workstation_tunnel_ensure_task
         raise RuntimeError(f"LocalWorker 尚未配置步骤处理器: {step}")
 
     def _run_sw_task(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -540,6 +588,21 @@ class LocalWorker:
                 raise RuntimeError(f"未知 SC 清理阶段: {phase}")
             return {"ok": True}
         raise RuntimeError(f"未知本地清理步骤: {step_name}")
+
+    def _run_workstation_tunnel_ensure_task(self, params: dict[str, Any]) -> dict[str, Any]:
+        from tools import workstation_tunnel
+
+        workstation_id = str(params.get("workstation_id") or "").strip()
+        if not workstation_id:
+            raise RuntimeError("工作站隧道修复任务缺少 workstation_id")
+        specs = workstation_tunnel.configured_workstation_specs(
+            workstation_id=workstation_id,
+        )
+        results = workstation_tunnel.run_for_specs("ensure", specs, jobs=1)
+        return {
+            "ok": workstation_tunnel.all_results_ok(results),
+            "results": results,
+        }
 
     def _build_scdoc_payload(self, config_name: int) -> dict[str, Any]:
         """Read the generated SCDOC so the server daemon can continue transfer."""

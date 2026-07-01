@@ -393,30 +393,3 @@ class StepFileMonitor:
         except OSError as e:
             logger.warning(f"无法创建/访问 STEP 目录: {self.step_dir}: {e}")
             return False
-
-    # ------------------------------------------------------------------
-    # 已处理文件查询
-    # ------------------------------------------------------------------
-
-    def is_processed(self, filename: str) -> bool:
-        """检查文件是否已被处理。"""
-        return filename in self._processed_files
-
-    def get_pending_configs(self) -> list[tuple[int, str]]:
-        """获取所有未被处理的构型列表（扫描 STEP 目录）。"""
-        pending: list[tuple[int, str]] = []
-        if not os.path.isdir(self.step_dir):
-            return pending
-        try:
-            for filename in os.listdir(self.step_dir):
-                if filename in self._processed_files:
-                    continue
-                filepath = os.path.join(self.step_dir, filename)
-                if not os.path.isfile(filepath):
-                    continue
-                config_name = self.parse_config_name(filename)
-                if config_name is not None:
-                    pending.append((config_name, filepath))
-        except OSError as e:
-            logger.warning(f"扫描待处理文件时出错: {e}")
-        return pending

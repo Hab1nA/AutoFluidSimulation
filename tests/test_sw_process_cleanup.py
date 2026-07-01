@@ -108,6 +108,17 @@ class TestSWProcessCleanup:
 
         assert calls == ["disconnect", "terminate"]
 
+    def test_is_sw_process_running_handles_missing_stdout(self, monkeypatch) -> None:
+        executor = SWExecutor(_State())
+
+        monkeypatch.setattr("executor.sw_executor.os.name", "nt")
+        monkeypatch.setattr(
+            "executor.sw_executor.subprocess.run",
+            lambda *_args, **_kwargs: SimpleNamespace(stdout=None),
+        )
+
+        assert executor._is_sw_process_running() is False
+
     def test_disconnect_sw_defers_exit_to_full_cleanup(self, monkeypatch) -> None:
         executor = SWExecutor(_State())
         sw_app = MagicMock()

@@ -1,4 +1,8 @@
-from ipc.server import IPCServer
+import logging
+import socket
+import threading
+import time
+
 from ipc.protocol import (
     CMD_GET_DASHBOARD,
     CMD_WORKER_HEARTBEAT,
@@ -9,6 +13,7 @@ from ipc.protocol import (
     create_request,
     serialize,
 )
+from ipc.server import IPCServer
 
 
 class DummyHandler:
@@ -43,6 +48,31 @@ def test_process_message_handler_returns_false():
     assert resp["status"] == "error"
     assert resp["request_id"] == req["request_id"]
     assert "failed" in resp["message"]
+
+
+def test_process_message_debug_log_summarizes_large_params(caplog):
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+    srv.register_handler("test_cmd", DummyHandler())
+    req = create_request(
+        "test_cmd",
+        {
+            "result": {
+                "scdoc_file": {
+                    "filename": "model.scdoc",
+                    "content_b64": "A" * 2048,
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="ipc.server"):
+        resp = srv._process_message(serialize(req))
+
+    assert resp["status"] == "ok"
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "content_b64" in log_text
+    assert "<str len=2048" in log_text
+    assert "A" * 1024 not in log_text
 
 
 def test_process_message_handler_raises_exception():
@@ -149,3 +179,40 @@ def test_register_default_handlers_includes_dashboard_query():
 
 
 
+
+def test_stop_closes_active_client_handlers() -> None:
+    srv = IPCServer(host="127.0.0.1", port=0, auth_token="")
+    client = None
+    try:
+        srv.start()
+        assert srv._socket is not None
+        port = srv._socket.getsockname()[1]
+        client = socket.create_connection(("127.0.0.1", port), timeout=1.0)
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            with srv._conn_lock:
+                active = srv._active_connections
+            if active == 1:
+                break
+            time.sleep(0.01)
+        assert active == 1
+
+        srv.stop()
+
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with srv._conn_lock:
+                active = srv._active_connections
+            if active == 0:
+                break
+            time.sleep(0.01)
+        assert active == 0
+        assert not any(
+            thread.name.startswith("IPC-Client-") and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+    finally:
+        if client is not None:
+            client.close()
+        srv.stop()

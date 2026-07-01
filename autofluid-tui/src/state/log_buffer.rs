@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
+use std::fmt;
+use std::sync::Arc;
 
 use super::filter::severity_rank;
 
 const MAX_DETAIL_BUFFER: usize = 2000;
 const MAX_INFO_BUFFER: usize = 200;
+type InfoTap = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -142,11 +145,23 @@ fn optional_string_field(
         .map(str::to_string)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LogBuffer {
     pub detail_buffer: VecDeque<LogEntry>,
     pub info_messages: VecDeque<String>,
     pub log_generation: u64,
+    info_tap: Option<InfoTap>,
+}
+
+impl fmt::Debug for LogBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LogBuffer")
+            .field("detail_buffer", &self.detail_buffer)
+            .field("info_messages", &self.info_messages)
+            .field("log_generation", &self.log_generation)
+            .field("has_info_tap", &self.info_tap.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl LogBuffer {
@@ -155,7 +170,12 @@ impl LogBuffer {
             detail_buffer: VecDeque::with_capacity(MAX_DETAIL_BUFFER),
             info_messages: VecDeque::with_capacity(MAX_INFO_BUFFER),
             log_generation: 0,
+            info_tap: None,
         }
+    }
+
+    pub fn set_info_tap(&mut self, tap: InfoTap) {
+        self.info_tap = Some(tap);
     }
 
     pub fn push_detail(&mut self, entry: LogEntry) {
@@ -174,6 +194,9 @@ impl LogBuffer {
 
     pub fn push_info(&mut self, message: String) {
         log_info_message(&message);
+        if let Some(tap) = &self.info_tap {
+            tap(&message);
+        }
         if self.info_messages.len() >= MAX_INFO_BUFFER {
             self.info_messages.pop_front();
         }
@@ -240,9 +263,9 @@ impl LogBuffer {
 
 fn log_info_message(message: &str) {
     match info_message_level(message) {
-        log::Level::Error => log::error!("高级信息: {message}"),
-        log::Level::Warn => log::warn!("高级信息: {message}"),
-        _ => log::info!("高级信息: {message}"),
+        log::Level::Error => log::error!("{message}"),
+        log::Level::Warn => log::warn!("{message}"),
+        _ => log::info!("{message}"),
     }
 }
 
@@ -343,7 +366,14 @@ mod tests {
             info_message_level("⚠️ 启动 SSH 隧道失败: timeout"),
             log::Level::Warn
         );
+        assert_eq!(
+            info_message_level("⚠ 工作站 SSH 隧道启动失败"),
+            log::Level::Warn
+        );
         assert_eq!(info_message_level("⏸️ 流水线已暂停"), log::Level::Warn);
+        assert_eq!(info_message_level("❌ 后台引擎启动失败"), log::Level::Error);
         assert_eq!(info_message_level("后台引擎启动失败"), log::Level::Error);
+        assert_eq!(info_message_level("收到超时警告"), log::Level::Warn);
+        assert_eq!(info_message_level("✅ 后台引擎已启动"), log::Level::Info);
     }
 }

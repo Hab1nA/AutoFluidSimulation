@@ -12,14 +12,15 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib.util
 import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 # 强制 Python 使用 UTF-8 编码，避免 conda run 在中文 Windows 上的 GBK 编码崩溃
@@ -45,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     # ANSYS 路径参数（必需）
     parser.add_argument('--mpi-bin-dir', type=str, required=True,
                         help='Intel MPI bin 目录路径')
+    parser.add_argument('--fluent-path', type=str, required=True,
+                        help='Fluent 可执行文件完整路径')
 
     # 文件路径参数（必需）
     parser.add_argument('--journal-path', type=str, required=True,
@@ -68,11 +71,11 @@ def parse_args() -> argparse.Namespace:
 
     # Fluent 参数
     parser.add_argument('--processor-count', type=int,
-                        default=128,
-                        help='处理器核心数 (默认: 128)')
+                        required=True,
+                        help='处理器核心数')
     parser.add_argument('--iterate-count', type=int,
-                        default=1000,
-                        help='迭代次数 (默认: 1000)')
+                        required=True,
+                        help='迭代次数')
     parser.add_argument('--progress-file', type=str, default=None,
                         help='可选：写入 Solver 剩余时间进度的 JSON 文件路径')
     parser.add_argument('--solver-flag-file', type=str, required=True,
@@ -99,9 +102,9 @@ def parse_args() -> argparse.Namespace:
                         help='混合比统计温度阈值 K')
     parser.add_argument('--metrics-thrust-axis', choices=('x', 'y', 'z'), default='x',
                         help='推力轴向')
-    parser.add_argument('--metrics-exit-to-throat-area-ratio', type=float, default=7.427276607,
+    parser.add_argument('--metrics-exit-to-throat-area-ratio', type=float, required=True,
                         help='出口面积与喉部面积比 Ae/At')
-    parser.add_argument('--metrics-cstar-reference', type=float, default=1830.4,
+    parser.add_argument('--metrics-cstar-reference', type=float, required=True,
                         help='CEA 或试验基准特征速度 m/s')
 
     return parser.parse_args()
@@ -217,7 +220,12 @@ def _remove_file_if_exists(path: str | None) -> None:
         print(f"[SolverProgress] 删除文件失败: {path}, error: {e}")
 
 
-def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id: int) -> None:
+def _run_metrics_postprocess_in_session(
+    args: argparse.Namespace,
+    solver_session: Any,
+    transcript_file: str | None,
+    config_id: int,
+) -> None:
     metrics_script = getattr(args, "metrics_script", None)
     if not metrics_script:
         print(f"[{config_id}] 未配置五项指标后处理脚本，跳过指标计算")
@@ -230,37 +238,31 @@ def _run_metrics_postprocess(args: argparse.Namespace, case_path: str, config_id
     _require_file(compute_script, "指标计算脚本")
     metrics_output_dir = os.path.join(args.metrics_output_dir, f"model_gen4_{config_id}")
     os.makedirs(metrics_output_dir, exist_ok=True)
-    command = [
-        sys.executable,
-        "-u",
-        metrics_script,
-        "--case-data",
-        case_path,
-        "--output-dir",
-        metrics_output_dir,
-        "--compute-script",
-        compute_script,
-        "--processor-count",
-        str(args.metrics_processor_count),
-        "--ambient-pressure",
-        str(args.metrics_ambient_pressure),
-        "--pressure-reference",
-        str(args.metrics_pressure_reference),
-        "--tcomb",
-        str(args.metrics_tcomb),
-        "--thrust-axis",
-        args.metrics_thrust_axis,
-        "--exit-to-throat-area-ratio",
-        str(args.metrics_exit_to_throat_area_ratio),
-        "--cstar-reference",
-        str(args.metrics_cstar_reference),
-        "--config-name",
-        f"model_gen4_{config_id}",
-        "--config-id",
-        str(config_id),
-    ]
     print(f"[{config_id}] 正在计算五项指标: {metrics_output_dir}")
-    subprocess.run(command, check=True)
+    spec = importlib.util.spec_from_file_location(
+        "postprocess_metrics_gen4_runtime",
+        metrics_script,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load metrics script: {metrics_script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.compute_metrics_with_solver(
+        solver_session,
+        output_dir=Path(metrics_output_dir),
+        compute_script=Path(compute_script),
+        ambient_pressure=args.metrics_ambient_pressure,
+        pressure_reference=args.metrics_pressure_reference,
+        tcomb=args.metrics_tcomb,
+        chamber_x_max=None,
+        thrust_axis=args.metrics_thrust_axis,
+        exit_to_throat_area_ratio=args.metrics_exit_to_throat_area_ratio,
+        cstar_reference=args.metrics_cstar_reference,
+        config_name=f"model_gen4_{config_id}",
+        config_id=config_id,
+        transcript_path=Path(transcript_file) if transcript_file else None,
+        transcript_search_dir=Path(args.working_dir),
+    )
     print(f"[{config_id}] 五项指标后处理完成: {metrics_output_dir}")
 
 
@@ -541,6 +543,7 @@ def main() -> None:
     # 打印配置信息
     print(f"[配置] 模型编号: {args.config_id}")
     print(f"[配置] MPI bin 目录: {args.mpi_bin_dir}")
+    print(f"[配置] Fluent 可执行文件: {args.fluent_path}")
     print(f"[配置] 求解 Journal: {args.journal_path}")
     print(f"[配置] 网格目录: {args.msh_dir}")
     print(f"[配置] 输出目录: {args.output_dir}")
@@ -572,6 +575,7 @@ def main() -> None:
         precision=pyfluent.Precision.DOUBLE,
         processor_count=args.processor_count,
         product_version=pyfluent.FluentVersion.v241,
+        fluent_path=args.fluent_path,
         cleanup_on_exit=True,
         ui_mode="gui",
         cwd=args.working_dir,
@@ -634,6 +638,14 @@ def main() -> None:
 
         time.sleep(2)
         move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
+        _run_metrics_postprocess_in_session(
+            args,
+            solver_session,
+            transcript_file,
+            config_id,
+        )
+        _write_flag(args.postprocess_flag_file)
+        print(f"[{config_id}] PostProcess 完成标志已写入: {args.postprocess_flag_file}")
 
     except Exception as e:
         print(f"[错误] 处理模型 {config_id} 时发生异常: {e}")
@@ -658,10 +670,6 @@ def main() -> None:
 
         # --- 8. 退出 Fluent ---
         close_solver_session(config_id, solver_session)
-
-    _run_metrics_postprocess(args, case_full_path, config_id)
-    _write_flag(args.postprocess_flag_file)
-    print(f"[{config_id}] PostProcess 完成标志已写入: {args.postprocess_flag_file}")
 
     print(f"模型 {config_id} 的仿真计算完成！")
 

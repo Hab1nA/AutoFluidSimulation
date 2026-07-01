@@ -25,13 +25,17 @@ from engine.config import (
 )
 from engine.state_manager import StateManager
 from executor.remote_executor import RemoteExecutor
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 from engine.scheduler.utils import (
     pause_aware_sleep, wait_unless_paused_or_stopped,
 )
 from engine.scheduler.work_queue import UniqueWorkQueue
+from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 
 logger = setup_logger(__name__)
+_BUSY_SLOT_REQUEUE_SLEEP_SECONDS = 1.0
+_BUSY_SLOT_REQUEUE_SLEEP_MAX_SECONDS = 5.0
 
 
 class MeshingMonitor:
@@ -49,6 +53,7 @@ class MeshingMonitor:
         stopped_event: threading.Event,
         get_reset_generation: Callable[[int, str], int] | None = None,
         on_meshing_completed: Callable[[int], None] | None = None,
+        workstation_slots: WorkstationSlotCoordinator | None = None,
     ):
         self.state = state_manager
         self._remote_executor = remote_executor
@@ -56,10 +61,14 @@ class MeshingMonitor:
         self._stopped = stopped_event
         self._get_reset_generation = get_reset_generation or (lambda _cn, _step: 0)
         self._on_meshing_completed = on_meshing_completed
+        self._workstation_slots = workstation_slots
 
         self._meshing_queue = UniqueWorkQueue[int]()
         self._monitor_thread: threading.Thread | None = None
         self._in_flight_config: int | None = None  # 当前正在执行 Meshing 的构型
+        self._in_flight_by_workstation: dict[str, int] = {}
+        self._worker_threads: set[threading.Thread] = set()
+        self._worker_lock = threading.Lock()
 
         logger.info("[MeshingMonitor] 初始化完成")
 
@@ -142,6 +151,35 @@ class MeshingMonitor:
         """返回当前正在执行 Meshing 的构型编号，无则返回 None。"""
         return self._in_flight_config
 
+    def is_config_in_flight(self, config_name: int) -> bool:
+        """Return whether a config is actively handled by any workstation worker."""
+        with self._worker_lock:
+            return (
+                self._in_flight_config == config_name
+                or config_name in self._in_flight_by_workstation.values()
+            )
+
+    def join_worker_threads(self, timeout: float | None = None) -> None:
+        """Wait briefly for monitor-owned threads to observe stop/pause state."""
+        threads: list[threading.Thread] = []
+        if self._monitor_thread is not None:
+            threads.append(self._monitor_thread)
+        with self._worker_lock:
+            self._worker_threads = {t for t in self._worker_threads if t.is_alive()}
+            threads.extend(self._worker_threads)
+
+        if not threads:
+            return
+
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        for thread in threads:
+            if thread is threading.current_thread():
+                continue
+            remaining = None
+            if deadline is not None:
+                remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+
     # ------------------------------------------------------------------
     # 线程生命周期
     # ------------------------------------------------------------------
@@ -159,7 +197,7 @@ class MeshingMonitor:
         logger.info("[MeshingMonitor] 监控线程已启动")
 
     def _monitor_loop(self) -> None:
-        """监控线程主循环。串行处理 Meshing 队列。"""
+        """监控线程主循环。按工作站单槽派发 Meshing 队列。"""
         logger.info("[MeshingMonitor] 监控循环开始")
 
         # ---- 断点续传：扫描 DB 补充队列 ----
@@ -171,6 +209,7 @@ class MeshingMonitor:
                 exc_info=True,
             )
 
+        busy_requeue_count = 0
         while not self._stopped.is_set():
             # 检查暂停
             if self._paused.is_set():
@@ -182,61 +221,119 @@ class MeshingMonitor:
             except queue.Empty:
                 continue
 
-            logger.info(
+            queue_depth = self._meshing_queue.qsize()
+            logger.debug(
                 f"[MeshingMonitor] 从队列取出构型{config_name} "
-                f"(剩余队列深度: {self._meshing_queue.qsize()})"
+                f"(剩余队列深度: {queue_depth})"
             )
 
-            self._in_flight_config = config_name
-            should_requeue = False
-            try:
-                should_requeue = self._process_single_meshing(config_name)
-            except (RuntimeError, ValueError, OSError, ConnectionError) as e:
-                logger.error(
-                    f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
-                    exc_info=True,
+            workstation_id = self._workstation_for_config(config_name)
+            if not self._try_start_worker(config_name, workstation_id):
+                logger.debug(
+                    "[MeshingMonitor] 工作站%s 已有 Meshing 在运行，构型%s 重新排队",
+                    workstation_id,
+                    config_name,
                 )
-                # ★ 不标记 ERROR：避免 _scan_db_for_pending() 重复入队
-                #   检查重试次数，未达上限则 requeue
-                retry_count = self.state.increment_retry(config_name, "meshing")
-                max_retries = int(ENGINE_CONFIG["max_retries"])
-                if retry_count < max_retries:
-                    self.state.set_step_status(
-                        config_name, "meshing", STATUS_RETRYING,
-                        f"异常重试 {retry_count}/{max_retries}",
-                    )
-                    should_requeue = True
-                else:
-                    self.state.set_step_status(
-                        config_name, "meshing", STATUS_ERROR,
-                        f"Meshing 异常重试 {retry_count} 次后放弃: {e}",
-                    )
-            except Exception as e:
-                logger.critical(
-                    f"[MeshingMonitor] 处理构型{config_name} 致命异常: "
-                    f"{type(e).__name__}: {e}",
-                    exc_info=True,
+                self._meshing_queue.requeue(config_name)
+                busy_requeue_count += 1
+                sleep_seconds = min(
+                    _BUSY_SLOT_REQUEUE_SLEEP_MAX_SECONDS,
+                    _BUSY_SLOT_REQUEUE_SLEEP_SECONDS * busy_requeue_count,
                 )
-                retry_count = self.state.increment_retry(config_name, "meshing")
-                max_retries = int(ENGINE_CONFIG["max_retries"])
-                if retry_count < max_retries:
-                    should_requeue = True
-                else:
-                    self.state.set_step_status(
-                        config_name, "meshing", STATUS_ERROR,
-                        f"致命异常重试 {retry_count} 次后放弃: {type(e).__name__}: {e}",
-                    )
-            finally:
-                self._in_flight_config = None
-                if should_requeue:
-                    logger.warning(
-                        f"[MeshingMonitor] 构型{config_name} 异常，重新入队"
-                    )
-                    self._meshing_queue.requeue(config_name)
-                else:
-                    self._meshing_queue.complete(config_name)
+                if not pause_aware_sleep(sleep_seconds, self._paused, self._stopped):
+                    break
+            else:
+                busy_requeue_count = 0
+                logger.info(
+                    f"[MeshingMonitor] 启动构型{config_name} Meshing worker: "
+                    f"workstation={workstation_id}, queue_depth={queue_depth}"
+                )
 
         logger.info("[MeshingMonitor] 监控循环退出")
+
+    def _try_start_worker(self, config_name: int, workstation_id: str) -> bool:
+        """Start one workstation worker if that workstation slot is idle."""
+        with self._worker_lock:
+            self._worker_threads = {t for t in self._worker_threads if t.is_alive()}
+            if workstation_id in self._in_flight_by_workstation:
+                return False
+            self._in_flight_by_workstation[workstation_id] = config_name
+            self._in_flight_config = config_name
+            thread = threading.Thread(
+                target=self._process_worker,
+                args=(config_name, workstation_id),
+                name=f"MeshingMonitor-{workstation_id}",
+                daemon=True,
+            )
+            self._worker_threads.add(thread)
+            thread.start()
+            return True
+
+    def _process_worker(self, config_name: int, workstation_id: str) -> None:
+        should_requeue = False
+        try:
+            should_requeue = self._process_single_meshing(config_name)
+        except InfrastructureUnavailableError as e:
+            logger.warning(
+                f"[MeshingMonitor] 构型{config_name} 基础设施不可用（不消耗业务重试次数）: {e}",
+            )
+            self.state.set_step_status(
+                config_name, "meshing", STATUS_RETRYING,
+                f"基础设施恢复中: {e}",
+            )
+            should_requeue = True
+        except (RuntimeError, ValueError, OSError, ConnectionError) as e:
+            logger.error(
+                f"[MeshingMonitor] 处理构型{config_name} 异常: {e}",
+                exc_info=True,
+            )
+            retry_count = self.state.increment_retry(config_name, "meshing")
+            max_retries = int(ENGINE_CONFIG["max_retries"])
+            if retry_count < max_retries:
+                self.state.set_step_status(
+                    config_name, "meshing", STATUS_RETRYING,
+                    f"异常重试 {retry_count}/{max_retries}",
+                )
+                should_requeue = True
+            else:
+                self.state.set_step_status(
+                    config_name, "meshing", STATUS_ERROR,
+                    f"Meshing 异常重试 {retry_count} 次后放弃: {e}",
+                )
+        except Exception as e:
+            logger.critical(
+                f"[MeshingMonitor] 处理构型{config_name} 致命异常: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            retry_count = self.state.increment_retry(config_name, "meshing")
+            max_retries = int(ENGINE_CONFIG["max_retries"])
+            if retry_count < max_retries:
+                should_requeue = True
+            else:
+                self.state.set_step_status(
+                    config_name, "meshing", STATUS_ERROR,
+                    f"致命异常重试 {retry_count} 次后放弃: {type(e).__name__}: {e}",
+                )
+        finally:
+            with self._worker_lock:
+                self._in_flight_by_workstation.pop(workstation_id, None)
+                self._in_flight_config = next(
+                    iter(self._in_flight_by_workstation.values()),
+                    None,
+                )
+            if should_requeue:
+                logger.warning(
+                    f"[MeshingMonitor] 构型{config_name} 异常，重新入队"
+                )
+                self._meshing_queue.requeue(config_name)
+            else:
+                if self._workstation_slots is not None:
+                    self._workstation_slots.release_workstation(
+                        workstation_id,
+                        config_name,
+                    )
+                self._meshing_queue.complete(config_name)
 
     # ------------------------------------------------------------------
     # 单构型处理
@@ -371,7 +468,11 @@ class MeshingMonitor:
                 logger.error(f"[MeshingMonitor] 构型{config_name} Meshing 启动最终失败")
                 return False
 
-        should_requeue = self._wait_for_meshing_completion(config_name, workstation_id)
+        should_requeue = self._wait_for_meshing_completion(
+            config_name,
+            workstation_id,
+            generation,
+        )
         if self._is_stale_step_result(config_name, "meshing", generation):
             self._discard_stale_step_result(config_name, "meshing")
             return False
@@ -381,6 +482,7 @@ class MeshingMonitor:
         self,
         config_name: int,
         workstation_id: str | None = None,
+        generation: int | None = None,
     ) -> bool:
         """轮询等待 Meshing 完成，并按控制状态更新数据库。"""
         workstation_id = workstation_id or self._workstation_for_config(config_name)
@@ -393,6 +495,12 @@ class MeshingMonitor:
         ):
             self.state.set_step_status(config_name, "meshing", STATUS_COMPLETED)
             logger.info(f"[MeshingMonitor] 构型{config_name} 网格划分完成 ✓")
+            if (
+                generation is not None
+                and self._is_stale_step_result(config_name, "meshing", generation)
+            ):
+                self._discard_stale_step_result(config_name, "meshing")
+                return False
             if self._on_meshing_completed is not None:
                 self._on_meshing_completed(config_name)
         else:
@@ -407,8 +515,12 @@ class MeshingMonitor:
                     "引擎已停止",
                 )
             else:
+                error = str(
+                    getattr(self._remote_executor, "last_meshing_error", "")
+                    or "网格划分失败"
+                )
                 self.state.set_step_status(
-                    config_name, "meshing", STATUS_ERROR, "网格划分超时",
+                    config_name, "meshing", STATUS_ERROR, error,
                 )
         return False
 
@@ -456,5 +568,7 @@ class MeshingMonitor:
                 timeout=float(ENGINE_CONFIG["transfer_timeout"]),
                 workstation_id=workstation_id,
             )
+        except InfrastructureUnavailableError:
+            raise
         except Exception:
             return False

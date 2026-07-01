@@ -16,14 +16,20 @@ import subprocess
 from engine.config import LOCAL_PATHS
 
 
-MIN_VALID_PID = 1
-WORKER_PID_KINDS = (
+MIN_VALID_PID = 2
+ALL_WORKER_PID_KINDS = (
     "local_worker",
     "tunnel_workstation",
     "tunnel_localworker",
     "server_ipc_tunnel",
 )
-TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
+WORKER_PID_KINDS = (
+    "local_worker",
+    "tunnel_localworker",
+    "server_ipc_tunnel",
+)
+TUNNEL_WATCHDOG_KINDS = ("LocalWorker",)
+ALL_TUNNEL_WATCHDOG_KINDS = ("Workstation", "LocalWorker")
 logger = logging.getLogger(__name__)
 
 
@@ -67,13 +73,17 @@ def read_pid_file(pid_file: str) -> int | None:
         pid_file: PID 文件路径
 
     Returns:
-        读取的 PID（整数），失败或文件不存在时返回 None
+        读取的 PID（整数），失败、文件不存在或 PID 不可管理时返回 None
     """
     try:
         with open(pid_file, "r", encoding="utf-8") as f:
-            return int(f.read().strip())
+            pid = int(f.read().strip())
     except (FileNotFoundError, ValueError):
         return None
+    if pid < MIN_VALID_PID:
+        logger.warning("忽略保留或无效 PID 文件: %s, pid=%s", pid_file, pid)
+        return None
+    return pid
 
 
 def write_pid_file(pid_file: str, pid: int) -> None:
@@ -129,15 +139,95 @@ def run_taskkill(pid: int, timeout: int = 5) -> bool:
         return False
 
 
+def get_process_command_line(pid: int, timeout: int = 3) -> str | None:
+    """Return a process command line for ownership checks."""
+    if pid < MIN_VALID_PID:
+        return None
+
+    try:
+        if sys.platform == "win32":
+            powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+            if powershell is None:
+                return None
+            completed = subprocess.run(
+                [
+                    powershell,
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "Get-CimInstance Win32_Process -Filter "
+                        f"'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+        else:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+            )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if completed.returncode != 0:
+        return None
+    command_line = completed.stdout.strip()
+    return command_line or None
+
+
+def worker_process_is_owned(kind: str, pid: int) -> bool:
+    """Return True when a PID is recognizably owned by AutoFluid worker control."""
+    command_line = get_process_command_line(pid)
+    if command_line is None:
+        return False
+    lowered = command_line.lower()
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).lower()
+    has_project_context = "autofluid" in lowered or project_root in lowered
+    if not has_project_context:
+        return False
+
+    if kind == "local_worker":
+        return (
+            ("main.py" in lowered and "--worker" in lowered)
+            or "engine.local_worker" in lowered
+        )
+    if kind == "tunnel_workstation":
+        return (
+            "start_workstation_reverse_tunnel.ps1" in lowered
+            and "workstation" in lowered
+        )
+    if kind == "tunnel_localworker":
+        return (
+            "start_workstation_reverse_tunnel.ps1" in lowered
+            and "localworker" in lowered
+        )
+    if kind == "server_ipc_tunnel":
+        return (
+            "start_server_ipc_tunnel.ps1" in lowered
+            or ("ssh" in lowered and "127.0.0.1:9527" in lowered)
+        )
+    return False
+
+
 def worker_pid_file(kind: str) -> str:
     """Return the stable PID file path for worker and SSH tunnel helpers."""
-    if kind not in WORKER_PID_KINDS:
+    if kind not in ALL_WORKER_PID_KINDS:
         raise ValueError(f"未知 Worker PID 类型: {kind}")
     data_dir = str(LOCAL_PATHS.get("data_dir") or "data")
     return os.path.join(data_dir, f"{kind}.pid")
 
 
-def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[str, int | str]]:
+def cleanup_worker_processes_from_pid_files(
+    timeout: int = 5,
+    *,
+    include_workstation: bool = False,
+) -> dict[str, dict[str, int | str]]:
     """Terminate worker/tunnel processes recorded in stable PID files.
 
     This is intentionally PID-file based so `worker stop`, `quit full`, and
@@ -145,22 +235,31 @@ def cleanup_worker_processes_from_pid_files(timeout: int = 5) -> dict[str, dict[
     or daemon process whose in-memory `Popen`/`Child` handles are gone.
     """
     results: dict[str, dict[str, int | str]] = {}
-    for kind in WORKER_PID_KINDS:
+    kinds = ALL_WORKER_PID_KINDS if include_workstation else WORKER_PID_KINDS
+    for kind in kinds:
         pid_file = worker_pid_file(kind)
         pid = read_pid_file(pid_file)
         if pid is None:
             continue
         status = "stale"
         if is_process_alive(pid):
-            status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+            if worker_process_is_owned(kind, pid):
+                status = "terminated" if run_taskkill(pid, timeout=timeout) else "failed"
+            else:
+                status = "skipped_not_owned"
         if status != "failed":
-            remove_pid_file(pid_file)
+            if status != "skipped_not_owned":
+                remove_pid_file(pid_file)
         results[kind] = {"pid": pid, "status": status}
     return results
 
 
-def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, dict[str, str] | str]:
-    """Uninstall Windows Task Scheduler watchdogs for reverse SSH tunnels."""
+def cleanup_tunnel_watchdog_tasks(
+    project_dir: str | None = None,
+    *,
+    include_workstation: bool = False,
+) -> dict[str, dict[str, str] | str]:
+    """Uninstall local Windows watchdogs for locally owned reverse SSH tunnels."""
     if sys.platform != "win32":
         return {"status": "skipped", "reason": "non_windows"}
 
@@ -171,7 +270,8 @@ def cleanup_tunnel_watchdog_tasks(project_dir: str | None = None) -> dict[str, d
 
     powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
     results: dict[str, dict[str, str] | str] = {}
-    for tunnel_kind in TUNNEL_WATCHDOG_KINDS:
+    tunnel_kinds = ALL_TUNNEL_WATCHDOG_KINDS if include_workstation else TUNNEL_WATCHDOG_KINDS
+    for tunnel_kind in tunnel_kinds:
         try:
             completed = subprocess.run(
                 [

@@ -3,7 +3,11 @@ from __future__ import annotations
 import csv
 import importlib.util
 import math
+import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT_PATH = (
@@ -51,6 +55,21 @@ def _load_postprocess_module(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_postprocess_metric_reference_values_are_required_by_cli(monkeypatch) -> None:
+    module = _load_postprocess_module(monkeypatch)
+    argv = [
+        "postprocess_metrics_gen4.py",
+        "--case-data", r"D:\case\model.cas.h5",
+        "--output-dir", r"D:\metrics",
+        "--fluent-path", r"C:\fluent.exe",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -369,6 +388,24 @@ def test_default_config_name_strips_fluent_case_suffix(monkeypatch) -> None:
     assert module._default_config_name(Path("model_gen4_12.cas.h5")) == "model_gen4_12"
     assert module._default_config_name(Path("model_gen4_12.dat.h5")) == "model_gen4_12"
     assert module._default_config_name(Path("custom.case")) == "custom"
+
+
+def test_resolve_fluid_cell_zone_uses_case_specific_fluent_name(monkeypatch) -> None:
+    module = _load_postprocess_module(monkeypatch)
+
+    class _FluidZones:
+        def get_object_names(self):
+            return ["s------6.5084"]
+
+    solver = SimpleNamespace(
+        settings=SimpleNamespace(
+            setup=SimpleNamespace(
+                cell_zone_conditions=SimpleNamespace(fluid=_FluidZones())
+            )
+        )
+    )
+
+    assert module._resolve_fluid_cell_zone(solver) == "s------6.5084"
 
 
 def test_config_named_metrics_csv_is_single_row(tmp_path: Path) -> None:

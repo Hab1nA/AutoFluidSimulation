@@ -110,10 +110,10 @@ server mode 下有两个特殊边界：
 
 ## 5. 流水线阶段分工
 
-当前仍使用原有五阶段：
+当前使用六阶段流水线（PostProcess 已于 2026-06-20 落地实现）：
 
 ```text
-SW -> SC -> Transfer -> Meshing -> Solver
+SW -> SC -> Transfer -> Meshing -> Solver -> PostProcess
 ```
 
 | 阶段 | 当前执行位置 | 说明 |
@@ -123,6 +123,7 @@ SW -> SC -> Transfer -> Meshing -> Solver
 | `transfer` | ocar -> 工作站 | ocar 使用 SFTP 将服务器本地 SCDOC 传到工作站 |
 | `meshing` | 工作站 | ocar 通过 SSH 创建并运行 Windows 计划任务 |
 | `solver` | 工作站 | Meshing 屏障满足后，通过同样的远程计划任务机制启动 Fluent |
+| `postprocess` | 工作站 | Solver 完成后由 `BarrierCoordinator` 自动调度，委托 `RemoteExecutor` 执行 |
 
 当前没有要求本地 PC 作为 ocar 到工作站的跳板。实际连接路径必须是 ocar 自己能够访问的地址。
 
@@ -271,7 +272,15 @@ ocar 上提供轻量服务器 CLI，用于无图形环境和 OpenClaw 调用：
 
 CLI 默认输出 JSON，并复用 `AUTOFLUID_IPC_HOST`、`AUTOFLUID_IPC_PORT` 和
 `AUTOFLUID_IPC_AUTH_TOKEN`。`daemon start|stop|restart|status` 默认控制
-systemd 服务 `autofluid-daemon`，可用 `AUTOFLUID_DAEMON_SERVICE` 覆盖。
+systemd 服务 `autofluid-daemon`，可用 `AUTOFLUID_DAEMON_SERVICE` 覆盖。server mode
+下 TUI 远端 daemon 启停也优先走同一个 systemd service；只有目标服务器没有
+systemd unit 时才回退到 SSH `nohup start_daemon.py` / `main.py --stop` 临时路径。
+
+生产部署中，`autofluid-daemon.service` 是服务器 daemon 的生命周期 owner。停止
+daemon 应使用 `systemctl stop autofluid-daemon` 或 `python -m tools.autofluid_cli daemon stop`，不要直接 `kill` service 管理的主进程；被信号异常
+杀死会被 `Restart=on-failure` 视为故障并自动拉起。unit 显式使用
+`KillMode=control-group` 和 `TimeoutStopSec=30`，daemon 自身 shutdown 也会按顺序停止
+scheduler、alert watcher、LocalWorker、IPC 和进程锁，避免子进程脱管。
 
 服务器 CLI 的 `clean/reset` 权限比 TUI 更窄：它会拒绝任何影响 `sw`、`sc`
 或 `all` 的操作，避免 ocar 侧命令改写 LocalWorker 持有的 SolidWorks /

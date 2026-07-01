@@ -78,6 +78,18 @@ def test_main_stop_cleans_worker_pid_files(monkeypatch) -> None:
     assert calls == ["pid_cleanup", "stop_daemon"]
 
 
+def test_stop_daemon_subprocess_removes_reserved_pid_file(tmp_path, monkeypatch) -> None:
+    import main as main_module
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("1", encoding="utf-8")
+
+    monkeypatch.setattr(main_module, "DAEMON_PID_FILE", str(pid_file))
+
+    main_module._stop_daemon_subprocess()
+
+    assert not pid_file.exists()
+
 def test_stop_daemon_subprocess_keeps_pid_file_when_posix_process_survives(
     monkeypatch,
     tmp_path,

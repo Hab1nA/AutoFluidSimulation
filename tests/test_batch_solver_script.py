@@ -65,6 +65,7 @@ def _make_args(tmp_path: Path, config_id: int = 7) -> argparse.Namespace:
     return argparse.Namespace(
         config_id=config_id,
         mpi_bin_dir=str(mpi_bin_dir),
+        fluent_path=str(tmp_path / "fluent.exe"),
         journal_path=str(journal_path),
         msh_dir=str(msh_dir),
         output_dir=str(output_dir),
@@ -173,6 +174,32 @@ def test_invalid_iterate_count_is_rejected_before_fluent_launch(tmp_path, monkey
         module.main()
 
 
+def test_solver_core_counts_are_required_by_cli(monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    argv = [
+        "batch_solver_gen4.py",
+        "--config-id", "1",
+        "--mpi-bin-dir", r"C:\mpi",
+        "--fluent-path", r"C:\fluent.exe",
+        "--journal-path", "solver.jou",
+        "--msh-dir", r"D:\msh",
+        "--output-dir", r"D:\case",
+        "--anim-dir", r"D:\animation",
+        "--working-dir", r"D:\work",
+        "--working-dir-t", r"D:\work\animation-t",
+        "--working-dir-v", r"D:\work\animation-v",
+        "--solver-flag-file", r"D:\flags\solver.txt",
+        "--post-journal-path", "post.jou",
+        "--postprocess-flag-file", r"D:\flags\post.txt",
+        "--metrics-output-dir", r"D:\metrics",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.parse_args()
+    assert exc_info.value.code == 2
+
+
 def test_mpi_pin_list_matches_configured_processor_count(tmp_path, monkeypatch):
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
     mpi_bin_dir = tmp_path / "mpi" / "bin"
@@ -270,6 +297,26 @@ def test_write_progress_file_uses_atomic_replace(tmp_path, monkeypatch):
     assert "raw_line" not in stored
     assert isinstance(stored["updated_at"], float)
     assert not progress_file.with_suffix(".json.tmp").exists()
+
+
+def test_launch_uses_configured_fluent_path(tmp_path, monkeypatch):
+    launch_kwargs: dict[str, Any] = {}
+    session = _SuccessfulSolverSession()
+
+    def launch_fluent(**kwargs: Any):
+        launch_kwargs.update(kwargs)
+        return session
+
+    module = _load_batch_solver_module(monkeypatch, launch_fluent)
+    args = _make_args(tmp_path)
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 128)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.main()
+
+    assert launch_kwargs["fluent_path"] == args.fluent_path
 
 
 def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeypatch):
@@ -407,3 +454,50 @@ def test_solver_runs_postprocess_in_same_fluent_session(tmp_path, monkeypatch):
     assert Path(args.solver_flag_file).read_text(encoding="utf-8").strip() == "OK"
     assert Path(args.postprocess_flag_file).read_text(encoding="utf-8").strip() == "OK"
     assert session.exit_calls == 1
+
+
+def test_metrics_postprocess_reuses_active_solver_session(tmp_path, monkeypatch):
+    module = _load_batch_solver_module(monkeypatch, lambda **kwargs: None)
+    args = _make_args(tmp_path)
+    args.metrics_script = str(tmp_path / "postprocess_metrics_gen4.py")
+    args.compute_metrics_script = str(tmp_path / "compute_metrics_gen4.py")
+    args.metrics_output_dir = str(tmp_path / "metrics")
+    args.metrics_processor_count = 2
+    args.metrics_ambient_pressure = 0.0
+    args.metrics_pressure_reference = 101325.0
+    args.metrics_tcomb = 1000.0
+    args.metrics_thrust_axis = "x"
+    args.metrics_exit_to_throat_area_ratio = 7.42
+    args.metrics_cstar_reference = 1830.4
+    args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    Path(args.metrics_script).write_text(
+        "\n".join(
+            [
+                "def compute_metrics_with_solver(solver, **kwargs):",
+                "    from pathlib import Path",
+                "    output_dir = Path(kwargs['output_dir'])",
+                "    output_dir.mkdir(parents=True, exist_ok=True)",
+                "    marker = getattr(solver, 'metrics_marker', 'missing')",
+                "    transcript = kwargs.get('transcript_path')",
+                "    (output_dir / 'called.txt').write_text(f'{marker}|{transcript}', encoding='utf-8')",
+                "    return {'ok': True}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    Path(args.compute_metrics_script).write_text("# compute", encoding="utf-8")
+    session = _SuccessfulSolverSession()
+    session.metrics_marker = "same-session"
+    transcript_file = str(tmp_path / "flags" / "solver_progress_7.json.transcript")
+
+    module._run_metrics_postprocess_in_session(
+        args,
+        session,
+        transcript_file,
+        args.config_id,
+    )
+
+    marker_file = Path(args.metrics_output_dir, f"model_gen4_{args.config_id}", "called.txt")
+    marker_text = marker_file.read_text(encoding="utf-8")
+    assert marker_text.startswith("same-session|")
+    assert transcript_file in marker_text

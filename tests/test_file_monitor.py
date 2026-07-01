@@ -10,8 +10,6 @@
 - StepFileMonitor 生命周期: start/stop
 - StepFileMonitor._scan_directory: 回调触发
 - StepFileMonitor 暂停/恢复: pause/resume_only/resume_and_reset
-- StepFileMonitor 已处理追踪: is_processed
-- StepFileMonitor 待处理查询: get_pending_configs
 - 内存泄漏防护: _history 被正确清理
 ===============================================================================
 """
@@ -385,66 +383,6 @@ class TestPauseResume:
         assert monitor._known_files == set()
         assert monitor._detector._history == {}
         assert monitor._detector._first_seen == {}
-
-
-# ====================================================================
-# StepFileMonitor.is_processed 测试
-# ====================================================================
-
-class TestIsProcessed:
-    """验证已处理文件追踪。"""
-
-    def test_initially_not_processed(self, tmp_path):
-        monitor = _make_monitor(tmp_path, lambda cn, fp: None)
-        assert monitor.is_processed("model_gen4.SLDPRT_1.step") is False
-
-    def test_processed_after_stable_detection(self, tmp_path):
-        """文件稳定检测后标记为已处理。"""
-        monitor = _make_monitor(tmp_path, lambda cn, fp: None)
-        step_file = tmp_path / "model_gen4.SLDPRT_1.step"
-        step_file.write_bytes(b"content")
-
-        # 多次扫描使文件稳定
-        monitor._scan_directory()
-        time.sleep(0.08)
-        monitor._scan_directory()
-        time.sleep(0.1)
-        monitor._scan_directory()
-
-        assert monitor.is_processed("model_gen4.SLDPRT_1.step") is True
-
-
-# ====================================================================
-# StepFileMonitor.get_pending_configs 测试
-# ====================================================================
-
-class TestGetPendingConfigs:
-    """验证待处理构型查询。"""
-
-    def test_returns_unprocessed_configs(self, tmp_path):
-        monitor = _make_monitor(tmp_path, lambda cn, fp: None)
-        (tmp_path / "model_gen4.SLDPRT_1.step").write_bytes(b"a")
-        (tmp_path / "model_gen4.SLDPRT_2.step").write_bytes(b"b")
-
-        pending = monitor.get_pending_configs()
-        config_names = {cn for cn, _ in pending}
-        assert config_names == {1, 2}
-
-    def test_excludes_processed_files(self, tmp_path):
-        monitor = _make_monitor(tmp_path, lambda cn, fp: None)
-        (tmp_path / "model_gen4.SLDPRT_1.step").write_bytes(b"a")
-        (tmp_path / "model_gen4.SLDPRT_2.step").write_bytes(b"b")
-
-        # 模拟已处理文件
-        monitor._processed_files.add("model_gen4.SLDPRT_1.step")
-
-        pending = monitor.get_pending_configs()
-        config_names = {cn for cn, _ in pending}
-        assert config_names == {2}
-
-    def test_nonexistent_directory_returns_empty(self, tmp_path):
-        monitor = _make_monitor(tmp_path / "nope", lambda cn, fp: None)
-        assert monitor.get_pending_configs() == []
 
 
 # ====================================================================

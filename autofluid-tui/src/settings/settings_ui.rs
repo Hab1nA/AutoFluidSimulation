@@ -4,19 +4,41 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use super::{SettingCategory, SettingsState};
+use super::{SettingCategory, SettingsFieldHit, SettingsState};
 use crate::theme::AppTheme;
 use crate::ui::dialogs::{centered_rect, clear_dialog_background};
 use crate::ui::scrollbar::VerticalScrollbar;
 use crate::utils::{pad_label_by_display_width, truncate_for_display};
+
+const MIN_WORKSTATION_COLUMN_WIDTH: u16 = 8;
 
 pub struct SettingsRenderInfo {
     pub content_total_lines: usize,
     pub content_visible_lines: usize,
     pub scrollbar_area: Rect,
     pub button_bar_y: u16,
-    /// Map from (category_index, field_index) to y offset in content_area
-    pub field_positions: Vec<(usize, usize, u16)>,
+    /// Map field targets to content-area row/column bounds.
+    pub field_positions: Vec<SettingsFieldHit>,
+}
+
+pub fn settings_workstation_visible_columns(area: Rect, total: usize) -> usize {
+    let dialog_area = centered_rect(90, 90, area);
+    let inner_width = dialog_area.width.saturating_sub(2);
+    let content_width = inner_width.saturating_sub(1);
+    workstation_visible_columns_for_content_width(content_width, total)
+}
+
+fn workstation_visible_columns_for_content_width(content_width: u16, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+
+    let label_width: u16 = 18;
+    let value_start = label_width + 2;
+    let available_width = content_width.saturating_sub(value_start);
+    let max_visible_workstations =
+        usize::from((available_width / MIN_WORKSTATION_COLUMN_WIDTH).max(1));
+    total.min(max_visible_workstations)
 }
 
 pub fn render_settings_dialog(
@@ -129,7 +151,7 @@ pub fn render_settings_dialog(
         .saturating_sub(2) as usize;
 
     let mut raw_lines: Vec<Line> = Vec::new();
-    let mut field_positions: Vec<(usize, usize, u16)> = Vec::new();
+    let mut field_positions: Vec<SettingsFieldHit> = Vec::new();
 
     // 预计算子标题最大显示宽度，确保所有标题长度一致
     let target_header_w: usize = SettingCategory::ALL
@@ -159,17 +181,54 @@ pub fn render_settings_dialog(
         )));
         raw_lines.push(Line::from(""));
 
+        if matches!(
+            cat,
+            SettingCategory::RemoteConnection | SettingCategory::RemoteDirs
+        ) && !ss.config.workstations.is_empty()
+        {
+            render_workstation_category_lines(
+                &mut raw_lines,
+                &mut field_positions,
+                ss,
+                cat_idx,
+                *cat,
+                content_area.width,
+                theme,
+            );
+            continue;
+        }
+
+        if matches!(cat, SettingCategory::PostProcess) && !ss.config.workstations.is_empty() {
+            render_postprocess_category_lines(
+                &mut raw_lines,
+                &mut field_positions,
+                ss,
+                cat_idx,
+                content_area.width,
+                theme,
+            );
+            continue;
+        }
+
         for fi in 0..cat.field_count() {
             let field_y = raw_lines.len() as u16;
-            field_positions.push((cat_idx, fi, field_y));
+            field_positions.push(SettingsFieldHit {
+                category_index: cat_idx,
+                field_index: fi,
+                workstation_index: None,
+                y: field_y,
+                x_start: 0,
+                x_end: content_area.width,
+            });
 
             let label = cat.display_label(fi);
             let value = ss.get_field_value(*cat, fi);
             let field_name = cat.field_full_name(fi);
 
             let is_focused = ss.focus.category_index == cat_idx && ss.focus.field_index == fi;
-            let is_hovered = ss.hovered_field == Some((cat_idx, fi));
-            let is_clicked = ss.clicked_field == Some((cat_idx, fi));
+            let field_key = (cat_idx, fi, None);
+            let is_hovered = ss.hovered_field == Some(field_key);
+            let is_clicked = ss.clicked_field == Some(field_key);
             let is_current_field = is_focused && ss.focus.editing;
 
             // Pre-compute row background
@@ -377,6 +436,270 @@ pub fn render_settings_dialog(
     }
 }
 
+fn render_postprocess_category_lines(
+    raw_lines: &mut Vec<Line<'_>>,
+    field_positions: &mut Vec<SettingsFieldHit>,
+    ss: &SettingsState,
+    cat_idx: usize,
+    content_width: u16,
+    theme: &AppTheme,
+) {
+    let cat = SettingCategory::PostProcess;
+    let field_y = raw_lines.len() as u16;
+    field_positions.push(SettingsFieldHit {
+        category_index: cat_idx,
+        field_index: 0,
+        workstation_index: None,
+        y: field_y,
+        x_start: 0,
+        x_end: content_width,
+    });
+
+    let label_width: u16 = 20;
+    let field_content_width = content_width.saturating_sub(label_width).saturating_sub(2) as usize;
+    let is_focused = ss.focus.category_index == cat_idx
+        && ss.focus.field_index == 0
+        && ss.focus.workstation_index.is_none();
+    let is_current_field = is_focused && ss.focus.editing;
+    let row_bg = if is_focused {
+        theme.secondary
+    } else {
+        theme.bg
+    };
+    let label_style = if is_focused {
+        Style::default()
+            .fg(theme.success)
+            .add_modifier(Modifier::BOLD)
+            .bg(row_bg)
+    } else {
+        Style::default().fg(theme.gray_4).bg(row_bg)
+    };
+    let value_style = if is_current_field {
+        Style::default().fg(theme.success).bg(row_bg)
+    } else if is_focused {
+        Style::default().fg(theme.fg).bg(theme.secondary)
+    } else {
+        Style::default().fg(theme.gray_3).bg(row_bg)
+    };
+
+    let mut spans: Vec<Span<'_>> = vec![
+        Span::styled("  ", Style::default().bg(row_bg)),
+        Span::styled(
+            pad_label_by_display_width(cat.display_label(0), label_width),
+            label_style,
+        ),
+    ];
+
+    if is_current_field {
+        spans.extend(build_edit_spans(
+            &ss.buffer.text,
+            ss.buffer.cursor,
+            ss.buffer.selection_anchor,
+            field_content_width,
+            value_style,
+            Style::default().fg(theme.bg).bg(theme.success),
+            Style::default()
+                .fg(theme.cursor_fg)
+                .bg(theme.success)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.success),
+        ));
+    } else {
+        spans.push(Span::styled(
+            truncate_for_display(&ss.get_field_value(cat, 0), field_content_width),
+            value_style,
+        ));
+    }
+    raw_lines.push(Line::from(spans));
+
+    render_workstation_category_field_range(
+        raw_lines,
+        field_positions,
+        ss,
+        cat_idx,
+        cat,
+        1,
+        cat.field_count(),
+        content_width,
+        theme,
+    );
+}
+
+fn render_workstation_category_lines(
+    raw_lines: &mut Vec<Line<'_>>,
+    field_positions: &mut Vec<SettingsFieldHit>,
+    ss: &SettingsState,
+    cat_idx: usize,
+    cat: SettingCategory,
+    content_width: u16,
+    theme: &AppTheme,
+) {
+    render_workstation_category_field_range(
+        raw_lines,
+        field_positions,
+        ss,
+        cat_idx,
+        cat,
+        0,
+        cat.field_count(),
+        content_width,
+        theme,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workstation_category_field_range(
+    raw_lines: &mut Vec<Line<'_>>,
+    field_positions: &mut Vec<SettingsFieldHit>,
+    ss: &SettingsState,
+    cat_idx: usize,
+    cat: SettingCategory,
+    first_field: usize,
+    end_field: usize,
+    content_width: u16,
+    theme: &AppTheme,
+) {
+    let label_width: u16 = 18;
+    let value_start = label_width + 2;
+    let available_width = content_width.saturating_sub(value_start);
+    let workstation_count =
+        workstation_visible_columns_for_content_width(content_width, ss.config.workstations.len());
+    if workstation_count == 0 {
+        return;
+    }
+    let workstation_start = ss.workstation_column_offset.min(
+        ss.config
+            .workstations
+            .len()
+            .saturating_sub(workstation_count),
+    );
+
+    let workstation_count_u16 = workstation_count.min(usize::from(u16::MAX)) as u16;
+    let value_width = available_width
+        .checked_div(workstation_count_u16)
+        .unwrap_or(1)
+        .max(1);
+
+    let mut header_spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            pad_label_by_display_width("字段", label_width),
+            Style::default().fg(theme.gray_4),
+        ),
+    ];
+    for workstation in ss
+        .config
+        .workstations
+        .iter()
+        .skip(workstation_start)
+        .take(workstation_count)
+    {
+        let title = if workstation.id.is_empty() {
+            "WS".to_string()
+        } else {
+            workstation.id.clone()
+        };
+        header_spans.push(Span::styled(
+            pad_label_by_display_width(
+                &truncate_for_display(&title, value_width as usize),
+                value_width,
+            ),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    raw_lines.push(Line::from(header_spans));
+
+    for fi in first_field..end_field.min(cat.field_count()) {
+        let field_y = raw_lines.len() as u16;
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(
+                pad_label_by_display_width(cat.display_label(fi), label_width),
+                Style::default().fg(theme.gray_4),
+            ),
+        ];
+
+        for visible_idx in 0..workstation_count {
+            let ws_idx = workstation_start + visible_idx;
+            let x_start = value_start + (visible_idx as u16 * value_width);
+            let x_end = if visible_idx + 1 == workstation_count {
+                content_width
+            } else {
+                x_start + value_width
+            };
+            field_positions.push(SettingsFieldHit {
+                category_index: cat_idx,
+                field_index: fi,
+                workstation_index: Some(ws_idx),
+                y: field_y,
+                x_start,
+                x_end,
+            });
+
+            let field_key = (cat_idx, fi, Some(ws_idx));
+            let is_focused = ss.focus.category_index == cat_idx
+                && ss.focus.field_index == fi
+                && ss.focus.workstation_index == Some(ws_idx);
+            let is_hovered = ss.hovered_field == Some(field_key);
+            let is_clicked = ss.clicked_field == Some(field_key);
+            let is_current_field = is_focused && ss.focus.editing;
+            let row_bg = if is_clicked {
+                theme.secondary
+            } else if is_hovered {
+                theme.selection
+            } else {
+                theme.bg
+            };
+            let value_style = if is_current_field {
+                Style::default().fg(theme.success).bg(row_bg)
+            } else if is_focused {
+                Style::default().fg(theme.fg).bg(theme.secondary)
+            } else if is_hovered {
+                Style::default().fg(theme.fg).bg(row_bg)
+            } else {
+                Style::default().fg(theme.gray_3).bg(row_bg)
+            };
+
+            if is_current_field {
+                let edit_spans = build_edit_spans(
+                    &ss.buffer.text,
+                    ss.buffer.cursor,
+                    ss.buffer.selection_anchor,
+                    value_width.saturating_sub(1) as usize,
+                    value_style,
+                    Style::default().fg(theme.bg).bg(theme.success),
+                    Style::default()
+                        .fg(theme.cursor_fg)
+                        .bg(theme.success)
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.success),
+                );
+                spans.extend(edit_spans);
+                spans.push(Span::styled(" ", value_style));
+            } else {
+                let value = ss.get_workstation_field_value(ws_idx, cat, fi);
+                let display_value = if cat.is_password_field(fi) {
+                    if value.is_empty() {
+                        "(未设置)".to_string()
+                    } else {
+                        "*".repeat(12)
+                    }
+                } else {
+                    truncate_for_display(&value, value_width.saturating_sub(1) as usize)
+                };
+                spans.push(Span::styled(
+                    pad_label_by_display_width(&display_value, value_width),
+                    value_style,
+                ));
+            }
+        }
+
+        raw_lines.push(Line::from(spans));
+    }
+}
+
 /// Build styled spans for the edit field display.
 ///
 /// When a selection is active (`selection_anchor` is Some and differs from
@@ -395,6 +718,10 @@ fn build_edit_spans(
     cursor_style: Style,
     cursor_bar_style: Style,
 ) -> Vec<Span<'static>> {
+    if max_width == 0 {
+        return Vec::new();
+    }
+
     let chars: Vec<char> = buffer.chars().collect();
     assert!(
         cursor <= chars.len(),
@@ -437,17 +764,429 @@ fn build_edit_spans(
         spans.push(Span::styled("▎".to_string(), cursor_bar_style));
     }
 
-    // Truncate to max_width by measuring display width of spans
-    let mut total_w: usize = 0;
-    let mut keep: usize = 0;
-    for (idx, span) in spans.iter().enumerate() {
-        let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref() as &str);
+    let cursor_span_index = cursor.min(spans.len().saturating_sub(1));
+    visible_span_window(spans, cursor_span_index, max_width)
+}
+
+fn visible_span_window(
+    spans: Vec<Span<'static>>,
+    cursor_span_index: usize,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    if spans.is_empty() || max_width == 0 {
+        return Vec::new();
+    }
+
+    let mut start = 0;
+    while start < cursor_span_index
+        && spans_display_width(&spans[start..=cursor_span_index]) > max_width
+    {
+        start += 1;
+    }
+
+    let mut total_w = 0;
+    let mut end = start;
+    while end < spans.len() {
+        let w = span_display_width(&spans[end]);
         if total_w + w > max_width {
             break;
         }
         total_w += w;
-        keep = idx + 1;
+        end += 1;
     }
-    spans.truncate(keep);
-    spans
+
+    spans[start..end].to_vec()
+}
+
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(span_display_width).sum()
+}
+
+fn span_display_width(span: &Span<'_>) -> usize {
+    unicode_width::UnicodeWidthStr::width(span.content.as_ref() as &str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::WorkstationConfig;
+
+    fn state_with_three_workstations() -> SettingsState {
+        let mut state = SettingsState::default_for_tests();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                scdoc_dir: r"D:\ws-b\scdoc".to_string(),
+                conda_exe: r"C:\Users\ps\miniconda3\Scripts\conda.exe".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.254".to_string(),
+                scdoc_dir: r"D:\ws-c\scdoc".to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+        state
+    }
+
+    fn state_with_four_workstations() -> SettingsState {
+        let mut state = state_with_three_workstations();
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-D".to_string(),
+            host: "172.17.135.200".to_string(),
+            scdoc_dir: r"D:\ws-d\scdoc".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state
+    }
+
+    fn state_with_six_workstations() -> SettingsState {
+        let mut state = state_with_four_workstations();
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-E".to_string(),
+            host: "172.17.135.201".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state.config.workstations.push(WorkstationConfig {
+            id: "WS-F".to_string(),
+            host: "172.17.135.202".to_string(),
+            ..WorkstationConfig::default()
+        });
+        state
+    }
+
+    #[test]
+    fn workstation_field_hits_match_rendered_three_column_bounds() {
+        let state = state_with_three_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            80,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+
+        assert_eq!(host_hits.len(), 3);
+        assert_eq!(host_hits[0].workstation_index, Some(0));
+        assert_eq!((host_hits[0].x_start, host_hits[0].x_end), (20, 40));
+        assert_eq!(host_hits[1].workstation_index, Some(1));
+        assert_eq!((host_hits[1].x_start, host_hits[1].x_end), (40, 60));
+        assert_eq!(host_hits[2].workstation_index, Some(2));
+        assert_eq!((host_hits[2].x_start, host_hits[2].x_end), (60, 80));
+    }
+
+    #[test]
+    fn workstation_field_hits_include_fourth_workstation_column() {
+        let state = state_with_four_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            100,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 4);
+        assert_eq!(host_hits[3].workstation_index, Some(3));
+        assert_eq!((host_hits[3].x_start, host_hits[3].x_end), (80, 100));
+        assert!(rendered.contains("WS-D"));
+        assert!(rendered.contains("172.17.135.200"));
+    }
+
+    #[test]
+    fn four_workstation_columns_remain_visible_in_narrow_terminal() {
+        let state = state_with_four_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            60,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 4);
+        assert_eq!((host_hits[3].x_start, host_hits[3].x_end), (50, 60));
+        assert!(rendered.contains("WS-D"));
+    }
+
+    #[test]
+    fn workstation_columns_are_width_capped_before_becoming_unreadable() {
+        let state = state_with_six_workstations();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            60,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 5);
+        assert_eq!((host_hits[4].x_start, host_hits[4].x_end), (52, 60));
+        assert!(rendered.contains("WS-E"));
+        assert!(!rendered.contains("WS-F"));
+    }
+
+    #[test]
+    fn workstation_column_offset_reveals_later_columns() {
+        let mut state = state_with_four_workstations();
+        state.workstation_column_offset = 1;
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            44,
+            &theme,
+        );
+
+        let host_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 1 && hit.field_index == 0)
+            .copied()
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(host_hits.len(), 3);
+        assert_eq!(host_hits[0].workstation_index, Some(1));
+        assert_eq!(host_hits[2].workstation_index, Some(3));
+        assert!(rendered.contains("WS-D"));
+        assert!(!rendered.contains("WS-A"));
+    }
+
+    #[test]
+    fn workstation_passwords_are_masked_until_the_focused_field_is_edited() {
+        let mut state = state_with_three_workstations();
+        state.config.workstations[0].password = "secret-a".to_string();
+        state.config.workstations[1].password = "secret-b".to_string();
+        state.config.workstations[2].password = "secret-c".to_string();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            80,
+            &theme,
+        );
+        let password_line = raw_lines[4].to_string();
+
+        assert_eq!(password_line.matches("************").count(), 3);
+        assert!(!password_line.contains("secret-a"));
+        assert!(!password_line.contains("secret-b"));
+        assert!(!password_line.contains("secret-c"));
+
+        state.set_focus(1, 3, Some(1));
+        state.begin_edit_current_field();
+        raw_lines.clear();
+        field_positions.clear();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            1,
+            SettingCategory::RemoteConnection,
+            80,
+            &theme,
+        );
+        let editing_password_line = raw_lines[4].to_string();
+
+        assert!(editing_password_line.contains("secret-b"));
+        assert!(!editing_password_line.contains("secret-a"));
+        assert!(!editing_password_line.contains("secret-c"));
+        assert_eq!(editing_password_line.matches("************").count(), 2);
+    }
+
+    #[test]
+    fn focused_workstation_field_stays_on_single_row_without_detail_line() {
+        let mut state = state_with_three_workstations();
+        state.set_focus(2, 8, Some(1));
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            2,
+            SettingCategory::RemoteDirs,
+            80,
+            &theme,
+        );
+
+        assert_eq!(
+            raw_lines.len(),
+            1 + SettingCategory::RemoteDirs.field_count()
+        );
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !rendered.contains(r"WS-B / Conda可执行文件: C:\Users\ps\miniconda3\Scripts\conda.exe")
+        );
+    }
+
+    #[test]
+    fn editing_long_workstation_value_keeps_cursor_and_tail_visible() {
+        let mut state = state_with_three_workstations();
+        state.config.workstations[1].conda_exe =
+            r"C:\Users\ps\miniconda3\envs\autofluid\Scripts\conda.exe".to_string();
+        state.config.workstations[2].conda_exe = "NEXT-COLUMN".to_string();
+        state.set_focus(2, 8, Some(1));
+        state.begin_edit_current_field();
+        state.buffer.move_cursor_end();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_workstation_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            2,
+            SettingCategory::RemoteDirs,
+            80,
+            &theme,
+        );
+
+        let conda_line = raw_lines[1 + 8].to_string();
+
+        assert!(conda_line.contains(r"Scripts\conda.exe"));
+        assert!(conda_line.contains("▎"));
+        assert!(conda_line.contains("▎ NEXT-COLUMN"));
+    }
+
+    #[test]
+    fn postprocess_directory_rows_render_as_workstation_columns() {
+        let mut state = state_with_three_workstations();
+        state.config.postprocess.postprocess_timeout = 3600;
+        state.config.postprocess.output_dir = r"D:\global\post".to_string();
+        state.config.workstations[0].postprocess_output_dir = r"D:\ws-a\post".to_string();
+        state.config.workstations[1].postprocess_output_dir = r"E:\ws-b\post".to_string();
+        state.config.workstations[2].postprocess_output_dir = r"F:\ws-c\post".to_string();
+        let theme = AppTheme::default();
+        let mut raw_lines = Vec::new();
+        let mut field_positions = Vec::new();
+
+        render_postprocess_category_lines(
+            &mut raw_lines,
+            &mut field_positions,
+            &state,
+            8,
+            80,
+            &theme,
+        );
+
+        let timeout_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 8 && hit.field_index == 0)
+            .collect();
+        let output_hits: Vec<_> = field_positions
+            .iter()
+            .filter(|hit| hit.category_index == 8 && hit.field_index == 1)
+            .collect();
+        let rendered = raw_lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(timeout_hits.len(), 1);
+        assert_eq!(timeout_hits[0].workstation_index, None);
+        assert_eq!(output_hits.len(), 3);
+        assert_eq!(output_hits[0].workstation_index, Some(0));
+        assert_eq!(output_hits[1].workstation_index, Some(1));
+        assert_eq!(output_hits[2].workstation_index, Some(2));
+        assert!(rendered.contains(r"D:\ws-a\post"));
+        assert!(rendered.contains(r"E:\ws-b\post"));
+        assert!(rendered.contains(r"F:\ws-c\post"));
+        assert!(!rendered.contains(r"D:\global\post"));
+    }
 }

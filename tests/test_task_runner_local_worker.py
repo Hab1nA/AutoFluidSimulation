@@ -126,6 +126,36 @@ def test_task_runner_server_mode_delegates_sw_cleanup_and_verification(monkeypat
     ]
 
 
+def test_task_runner_server_mode_uses_short_local_worker_shutdown_timeout(monkeypatch) -> None:
+    from engine.task_runner import TaskRunner
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, float]] = []
+
+        def cleanup_stage(
+            self,
+            step_name: str,
+            phase: str,
+            timeout_seconds: float = 300.0,
+        ) -> bool:
+            self.calls.append((step_name, phase, timeout_seconds))
+            return False
+
+    runner = TaskRunner.__new__(TaskRunner)
+    runner._local_worker_adapter = _Adapter()
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+
+    runner.shutdown_sw_processes()
+    runner.shutdown_sc_pool()
+
+    assert runner._local_worker_adapter.calls == [
+        ("sw", "shutdown", 5.0),
+        ("sc", "shutdown", 5.0),
+    ]
+
+
 def test_task_runner_server_mode_delegates_sc_final_cleanup(monkeypatch) -> None:
     from engine.task_runner import TaskRunner
 

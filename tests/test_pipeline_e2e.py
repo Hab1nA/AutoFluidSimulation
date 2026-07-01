@@ -13,14 +13,11 @@
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
-import tempfile
-import shutil
 
 from engine.config import (
-    STEP_NAMES, IPC_CONFIG,
+    STEP_NAMES,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR,
 )
 from engine.state_manager import StateManager
@@ -113,20 +110,9 @@ class _E2ETaskRunner:
 class TestPipelineStateTransitions:
     """验证完整流水线的状态转换。"""
 
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="e2e_test_")
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
-
-    def teardown_method(self):
-        IPC_CONFIG["db_path"] = self._orig_db_path
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_all_steps_completed_flow(self):
+    def test_all_steps_completed_flow(self, tmp_db_path):
         """所有步骤成功 → 全部 Completed。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         runner = _E2ETaskRunner(state)
@@ -151,9 +137,9 @@ class TestPipelineStateTransitions:
                     f"构型{cn}[{step}] 应为 Completed"
                 )
 
-    def test_step_failure_marks_error(self):
+    def test_step_failure_marks_error(self, tmp_db_path):
         """步骤失败 → Error。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
 
         runner = _E2ETaskRunner(state)
@@ -169,9 +155,9 @@ class TestPipelineStateTransitions:
 
         assert state.get_step_status(1, "sc") == STATUS_ERROR
 
-    def test_pause_and_resume_state(self):
+    def test_pause_and_resume_state(self, tmp_db_path):
         """暂停后状态变为 Paused，恢复后可继续。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
 
         paused = threading.Event()
@@ -198,9 +184,9 @@ class TestPipelineStateTransitions:
 
         assert state.get_engine_status() == "running"
 
-    def test_stop_and_restart_breakpoint_resume(self):
+    def test_stop_and_restart_breakpoint_resume(self, tmp_db_path):
         """停止后重启，已完成步骤保持。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         # 模拟部分完成
@@ -236,20 +222,9 @@ class TestPipelineStateTransitions:
 class TestConfigToStatePipeline:
     """验证 Excel 读取 → StateManager 初始化 → 状态查询的完整链路。"""
 
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp(prefix="e2e_cfg_")
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
-
-    def teardown_method(self):
-        IPC_CONFIG["db_path"] = self._orig_db_path
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_load_configs_then_query_statistics(self):
+    def test_load_configs_then_query_statistics(self, tmp_db_path):
         """加载构型后查询统计信息。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         configs = {i: [float(i), 0.0, 0.0, 0.0] for i in range(1, 6)}
         state.load_configs(configs)
 
@@ -257,9 +232,9 @@ class TestConfigToStatePipeline:
         assert stats["total_configs"] == 5
         assert stats["steps"]["sw"][STATUS_WAITING] == 5
 
-    def test_partial_progress_statistics(self):
+    def test_partial_progress_statistics(self, tmp_db_path):
         """部分进度的统计正确。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         state.set_step_status(1, "sw", STATUS_COMPLETED)
@@ -270,9 +245,9 @@ class TestConfigToStatePipeline:
         assert stats["steps"]["sw"][STATUS_RUNNING] == 1
         assert stats["steps"]["sw"][STATUS_WAITING] == 0
 
-    def test_error_configs_query(self):
+    def test_error_configs_query(self, tmp_db_path):
         """查询错误构型。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         state.set_step_status(1, "sc", STATUS_ERROR, "连接超时")
@@ -283,9 +258,9 @@ class TestConfigToStatePipeline:
         assert error_dict[(1, "sc")] == "连接超时"
         assert error_dict[(2, "meshing")] == "发散"
 
-    def test_barrier_check_after_all_meshing_completed(self):
+    def test_barrier_check_after_all_meshing_completed(self, tmp_db_path):
         """所有 Meshing 完成后屏障判断正确。"""
-        state = StateManager(db_path=self.db_path)
+        state = StateManager(db_path=tmp_db_path)
         state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
 
         assert state.all_configs_completed_at_step("meshing") is False

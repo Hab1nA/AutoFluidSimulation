@@ -45,6 +45,7 @@ pub async fn dispatch_command(
         "status" => cmd_status(ipc, log_buffer).await,
         "reset" => cmd_reset(&parts, state, log_buffer),
         "clean" => cmd_clean(&parts, state, log_buffer),
+        "stop-step" => cmd_stop_step(&parts, ipc, log_buffer).await,
         "quit" => cmd_quit(&parts, state, log_buffer),
         "daemon" => cmd_daemon(&parts, state, log_buffer),
         "worker" => cmd_worker(&parts, ipc, state, log_buffer).await,
@@ -143,6 +144,49 @@ async fn cmd_status(ipc: &mut IpcClient, log_buffer: &mut LogBuffer) -> CommandR
                     }
                 }
             }
+        }
+        Ok(resp) => {
+            log_buffer.push_info(format!("❌ {}", resp.message));
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ 通信失败: {}", e));
+        }
+    }
+    CommandResult::None
+}
+
+async fn cmd_stop_step(
+    parts: &[&str],
+    ipc: &mut IpcClient,
+    log_buffer: &mut LogBuffer,
+) -> CommandResult {
+    if !ipc.is_connected() {
+        log_buffer.push_info("❌ 未连接到后台引擎".to_string());
+        return CommandResult::None;
+    }
+    if parts.len() < 3 {
+        log_buffer.push_info("用法: stop-step <构型名> <meshing|solver|postprocess>".to_string());
+        return CommandResult::None;
+    }
+    let Ok(config_name) = parts[1].parse::<u64>() else {
+        log_buffer.push_info("❌ 构型名称必须是整数".to_string());
+        return CommandResult::None;
+    };
+    let step_name = parts[2].to_lowercase();
+    if !matches!(step_name.as_str(), "meshing" | "solver" | "postprocess") {
+        log_buffer.push_info(format!("❌ 无效远程步骤名: {}", parts[2]));
+        return CommandResult::None;
+    }
+    match ipc
+        .stop_step(
+            serde_json::Value::Number(config_name.into()),
+            &step_name,
+            Some("TUI stop-step"),
+        )
+        .await
+    {
+        Ok(resp) if resp.is_ok() => {
+            log_buffer.push_info(format!("✅ {}", resp.message));
         }
         Ok(resp) => {
             log_buffer.push_info(format!("❌ {}", resp.message));
@@ -552,6 +596,7 @@ const HELP_LINES: &[&str] = &[
     "  settings                   - 打开程序设置页面",
     "  check                      - 系统自检",
     "  status                     - 显示状态摘要",
+    "  stop-step <XX> <step>      - 停止单个远程步骤任务",
     "  reset <XX|all> <step|all>  - 重置构型步骤状态",
     "  clean <XX|all> <step|all>  - 清理构型步骤文件",
     "  clean <step>               - 清理所有构型的指定步骤文件",

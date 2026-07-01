@@ -24,6 +24,7 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPositionalParameters', '')]
 param(
     [string]$ConfigPath = "",
+    [string]$WorkstationId = "",
     [string]$PyFluentVersion = "0.37.2",
     [switch]$NoPause
 )
@@ -182,6 +183,57 @@ function Read-RemoteConfig {
     Read-TomlSection -Path $Path -SectionName "remote_config"
 }
 
+function Read-TomlWorkstation {
+    param(
+        [string]$Path,
+        [string]$Id
+    )
+
+    $values = @{}
+    if (-not $Id) { return $values }
+
+    $inWorkstation = $false
+    $current = @{}
+    foreach ($line in Get-Content -Path $Path) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^\[\[workstations\]\]$') {
+            if ($inWorkstation -and $current.ContainsKey("id") -and $current["id"] -eq $Id) { return $current }
+            $inWorkstation = $true
+            $current = @{}
+            continue
+        }
+        if ($trimmed -match '^\[' -and $inWorkstation) {
+            if ($current.ContainsKey("id") -and $current["id"] -eq $Id) { return $current }
+            $inWorkstation = $false
+            continue
+        }
+        if (-not $inWorkstation -or -not $trimmed -or $trimmed.StartsWith("#")) { continue }
+        if ($trimmed -match '^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$') {
+            $key = $Matches[1]
+            $value = $Matches[2].Trim()
+            if (($value.StartsWith("'") -and $value.EndsWith("'")) -or
+                ($value.StartsWith('"') -and $value.EndsWith('"'))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $current[$key] = $value
+        }
+    }
+    if ($inWorkstation -and $current.ContainsKey("id") -and $current["id"] -eq $Id) { return $current }
+    return $values
+}
+
+function Merge-ConfigValues {
+    param(
+        [hashtable]$Base,
+        [hashtable]$Overrides
+    )
+
+    foreach ($key in $Overrides.Keys) {
+        if ($Overrides[$key]) { $Base[$key] = $Overrides[$key] }
+    }
+    return $Base
+}
+
 function Get-RequiredPositiveInteger {
     param(
         [hashtable]$Values,
@@ -210,6 +262,8 @@ function Initialize-RemoteConfigValue {
     }
 
     $remoteConfig = Read-RemoteConfig $resolvedConfigPath
+    $workstationConfig = Read-TomlWorkstation -Path $resolvedConfigPath -Id $WorkstationId
+    if ($workstationConfig.Count -gt 0) { $remoteConfig = Merge-ConfigValues -Base $remoteConfig -Overrides $workstationConfig }
     if ($remoteConfig.Count -eq 0) {
         Write-Result "读取 remote_config" $false "未能读取: $resolvedConfigPath"
         Exit-VerifyScript 1
@@ -241,6 +295,9 @@ function Initialize-RemoteConfigValue {
     $meshingConfig = Read-TomlSection -Path $resolvedConfigPath -SectionName "meshing"
     $solverConfig = Read-TomlSection -Path $resolvedConfigPath -SectionName "solver"
 
+    if ($WorkstationId -and $workstationConfig.Count -eq 0) {
+        Write-Host "  [!!] 未找到工作站配置 $WorkstationId，使用 [remote_config]" -ForegroundColor Yellow
+    }
     Write-Host "  [--] 已读取远程配置 — $resolvedConfigPath" -ForegroundColor Yellow
     $script:CondaEnv = $remoteConfig["conda_env"]
     $script:CondaExe = $remoteConfig["conda_exe"]
@@ -251,6 +308,12 @@ function Initialize-RemoteConfigValue {
     $script:MshDir = $remoteConfig["msh_dir"]
     $script:ResultDir = $remoteConfig["result_dir"]
     $script:FlagDir = $remoteConfig["flag_dir"]
+    if ($remoteConfig.ContainsKey("fluent_path") -and $remoteConfig["fluent_path"]) {
+        $script:FluentPath = $remoteConfig["fluent_path"]
+    }
+    else {
+        $script:FluentPath = "C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    }
     $script:MpiBinDir = $remoteConfig["mpi_bin_dir"]
     $script:MeshingProcessorCount = Get-RequiredPositiveInteger -Values $meshingConfig -Key "meshing_processor_count" -SectionName "meshing"
     $script:SolverProcessorCount = Get-RequiredPositiveInteger -Values $solverConfig -Key "solver_processor_count" -SectionName "solver"
@@ -307,9 +370,9 @@ if ($envOK) {
 Write-Result "ansys-fluent-core" $pfOK $pfVer
 
 # 5. ANSYS Fluent
-$fluentPath = "C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+$fluentPath = $script:FluentPath
 $fluentOK = Test-Path $fluentPath
-Write-Result "ANSYS Fluent 24.1" $fluentOK
+Write-Result "ANSYS Fluent 24.1" $fluentOK $fluentPath
 
 # 6. Intel MPI
 $mpiPath = Join-Path $MpiBinDir "mpiexec.exe"

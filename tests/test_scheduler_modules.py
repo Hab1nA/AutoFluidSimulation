@@ -15,15 +15,17 @@ import sys
 import tempfile
 import shutil
 import logging
+from pathlib import Path
 import pytest
 from engine.state_manager import StateManager
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
+    STATUS_UNKNOWN_REMOTE, DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG, LOCAL_PATHS,
 )
 from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
 from engine.task_runner import TaskRunner
+from utils.infrastructure import InfrastructureUnavailableError
 
 
 # ====================================================================
@@ -36,8 +38,8 @@ class TestRetryManager:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="retry_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         configs = {i: [1.0, 2.0, 3.0, 4.0] for i in range(1, 4)}
@@ -48,7 +50,8 @@ class TestRetryManager:
         self.retry_mgr = RetryManager(self.state, self.paused, self.stopped)
 
     def teardown_method(self):
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -151,6 +154,20 @@ class TestRetryManager:
         # 因暂停导致的失败应标记 Paused（或因线程调度竞态可能走正常重试路径）
         status = self.state.get_step_status(1, "sc")
         assert status in (STATUS_PAUSED, STATUS_RETRYING, STATUS_ERROR)
+
+    def test_infrastructure_error_does_not_consume_business_retry_budget(self):
+        """SSH/隧道基础设施故障不应消耗构型业务重试次数。"""
+        def tunnel_dropped(_cn):
+            raise InfrastructureUnavailableError("WS-B tunnel 127.0.0.1:2224 unavailable")
+
+        with pytest.raises(InfrastructureUnavailableError):
+            self.retry_mgr.execute_with_retry(1, "transfer", tunnel_dropped)
+
+        step = self.state.get_all_steps_for_config(1)["transfer"]
+        assert step["status"] == STATUS_RETRYING
+        assert step["retry_count"] == 0
+        assert "基础设施恢复中" in step["error_message"]
+        assert "127.0.0.1:2224" in step["error_message"]
 
     def test_pause_aware_sleep_completes(self):
         """无中断时 pause_aware_sleep 应正常完成。"""
@@ -815,7 +832,15 @@ class TestTaskRunnerSWDelegates:
         created: list[tuple[str, int, str, str]] = []
 
         class _SSH:
-            def __init__(self, host: str, port: int, username: str, password: str):
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ):
                 created.append((host, port, username, password))
                 self.connected = False
 
@@ -855,6 +880,140 @@ class TestTaskRunnerSWDelegates:
             ("WS-A.example", 22, "ps", "pw"),
             ("WS-B.example", 22, "ps", "pw"),
         ]
+
+    def test_get_ssh_can_skip_connect_for_passive_health(self, monkeypatch):
+        """被动健康检查可取得 SSH 客户端但不触发连接。"""
+        import engine.task_runner as task_runner_module
+
+        class _SSH:
+            connect_calls = 0
+
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ) -> None:
+                self.connected = False
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def connect(self) -> bool:
+                _SSH.connect_calls += 1
+                self.connected = True
+                return True
+
+        monkeypatch.setattr(
+            task_runner_module,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "host": f"{workstation_id}.example",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+            },
+        )
+        monkeypatch.setattr(task_runner_module, "RemoteWorkstation", _SSH)
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh_pool = {}
+        runner._ssh_locks = {}
+        runner._ssh_locks_guard = threading.Lock()
+        runner._ssh_lock = threading.RLock()
+        runner._ssh = None
+
+        ssh = runner.get_ssh("WS-A", connect=False)
+
+        assert ssh.is_connected() is False
+        assert _SSH.connect_calls == 0
+
+    def test_get_ssh_skips_reconnect_after_stop_event(self, monkeypatch):
+        """调度器停止后不应再触发新的 SSH 重连。"""
+        import engine.task_runner as task_runner_module
+
+        class _SSH:
+            connect_calls = 0
+
+            def __init__(
+                self,
+                host: str,
+                port: int,
+                username: str,
+                password: str,
+                key_filename: str | None = None,
+                auth_method: str = "password",
+            ) -> None:
+                self.connected = False
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def connect(self) -> bool:
+                _SSH.connect_calls += 1
+                self.connected = True
+                return True
+
+        monkeypatch.setattr(
+            task_runner_module,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "host": f"{workstation_id}.example",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+            },
+        )
+        monkeypatch.setattr(task_runner_module, "RemoteWorkstation", _SSH)
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh_pool = {}
+        runner._ssh_locks = {}
+        runner._ssh_locks_guard = threading.Lock()
+        runner._ssh_lock = threading.RLock()
+        runner._ssh = None
+        runner._stopped_event = threading.Event()
+        runner._stopped_event.set()
+
+        ssh = runner.get_ssh("WS-A")
+
+        assert ssh.is_connected() is False
+        assert _SSH.connect_calls == 0
+
+    def test_disconnect_ssh_can_skip_locked_workstation(self):
+        """停止流程遇到被占用的工作站锁时应限时跳过而非阻塞。"""
+        class _SSH:
+            def __init__(self) -> None:
+                self.disconnected = False
+
+            def disconnect(self) -> None:
+                self.disconnected = True
+
+        runner = TaskRunner.__new__(TaskRunner)
+        runner._ssh = None
+        runner._ssh_lock = threading.RLock()
+        runner._ssh_pool = {"WS-A": _SSH()}
+        locked = threading.Lock()
+        assert locked.acquire(timeout=0.1)
+        runner._ssh_locks = {"WS-A": locked}
+        runner._ssh_locks_guard = threading.Lock()
+
+        try:
+            started_at = time.monotonic()
+            runner.disconnect_ssh(lock_timeout=0.01)
+            elapsed = time.monotonic() - started_at
+        finally:
+            locked.release()
+
+        assert elapsed < 0.5
+        assert "WS-A" in runner._ssh_pool
+        assert runner._ssh_pool["WS-A"].disconnected is False
+
 
     def test_remote_stage_delegates_use_assigned_workstation(self):
         """Transfer/Meshing/Solver 委托时应使用构型分配的工作站。"""
@@ -1024,13 +1183,17 @@ class _MockSSH:
     """最小 SSH Mock，用于调度恢复扫描的远程产物检查。"""
 
     def __init__(self):
+        self.connected = True
         self.remote_file_sizes: dict[str, int] = {}
 
     def is_connected(self) -> bool:
-        return True
+        return self.connected
 
     def get_remote_file_size(self, remote_path: str, *, timeout: float | None = None) -> int | None:
-        return self.remote_file_sizes.get(remote_path.replace("\\", "/"))
+        normalized = remote_path.replace("\\", "/")
+        if normalized not in self.remote_file_sizes:
+            raise FileNotFoundError(normalized)
+        return self.remote_file_sizes[normalized]
 
     def check_remote_file(self, remote_path: str, *, timeout: float | None = None) -> bool:
         return remote_path.replace("\\", "/") in self.remote_file_sizes
@@ -1051,6 +1214,8 @@ class _MockRemoteExecutor:
         self._postprocess_handoff_result = True
         self._remote_task_events: list[tuple[str, int, str, str]] = []
         self._meshing_waits: list[tuple[int, str]] = []
+        self._cancel_all_calls = 0
+        self._kill_remote_task_calls: list[tuple[int, str, str]] = []
 
     def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         self._meshing_started.append((config_name, workstation_id))
@@ -1104,6 +1269,15 @@ class _MockRemoteExecutor:
         if callable(delete_remote_task):
             delete_remote_task(config_name, step_name, workstation_id=workstation_id)
 
+    def _kill_remote_task_for_config(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = "default",
+    ) -> bool:
+        self._kill_remote_task_calls.append((config_name, step_name, workstation_id))
+        return True
+
     def register_postprocess_from_solver(
         self,
         config_name: int,
@@ -1125,6 +1299,12 @@ class _MockRemoteExecutor:
             started_at=time.time(),
         )
         return True
+
+    def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+        self._cancel_all_calls += 1
+        tasks = list(self.state.get_all_remote_tasks())
+        self.state.delete_all_remote_tasks()
+        return {"cancelled": len(tasks), "failed": 0}
 
 
 class _SpyFileMonitor:
@@ -1168,8 +1348,8 @@ class TestPipelineSchedulerStartRecovery:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="scheduler_start_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         self.runner = _MockTaskRunner(self.state)
@@ -1185,9 +1365,29 @@ class TestPipelineSchedulerStartRecovery:
 
     def teardown_method(self):
         self.scheduler.stop()
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_stop_cancels_tracked_remote_tasks_before_disconnect(self):
+        """full quit/daemon stop 应终止并清除持久化远程任务。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.save_remote_task(
+            workstation_id="WS-A",
+            config_name=1,
+            step_name="postprocess",
+            task_name="AutoFluid_postprocess",
+            flag_file="D:/flags/postprocess_done_1.txt",
+            error_flag_file="D:/flags/postprocess_done_1.txt.error",
+            started_at=time.time(),
+        )
+
+        self.scheduler.stop()
+
+        remote_executor = self.runner.get_remote_executor()
+        assert remote_executor._cancel_all_calls == 1
+        assert self.state.get_all_remote_tasks() == []
 
     def test_server_mode_defaults_to_one_sc_worker_for_local_worker_sc_slots(self, monkeypatch):
         """server 模式下 SC 投递默认匹配 LocalWorker 单个 SC 槽位。"""
@@ -1217,6 +1417,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
             self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
             self.state.set_step_status(cn, "transfer", STATUS_COMPLETED)
+            self._record_remote_outputs(cn, transfer=True)
             self.state.set_step_status(cn, "meshing", STATUS_WAITING)
 
         with caplog.at_level(logging.INFO):
@@ -1286,6 +1487,8 @@ class TestPipelineSchedulerStartRecovery:
 
         assert cleared_workstations == ["WS-A"]
         assert cleared_all is False
+        assert self.state.get_config_workstation(1) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
 
     def test_reset_solver_clears_terminal_report_gate(self):
         """reset 触及 Solver 后应允许下一轮自然终态再次上报。"""
@@ -1326,13 +1529,102 @@ class TestPipelineSchedulerStartRecovery:
         assert cleared_all is True
         assert cleared_workstations == []
 
+    def test_reset_meshing_reopens_assignment_domain_and_blocks_barrier(self, monkeypatch):
+        """reset Meshing 后未重新 claim 的构型应阻止工作站屏障再次抢跑。"""
+        import engine.scheduler.barrier as barrier_module
+        from engine.scheduler.barrier import BarrierCoordinator
+
+        monkeypatch.setattr(barrier_module, "WORKSTATIONS", [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+        ])
+        self.scheduler.barrier_coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.scheduler._paused,
+            stopped_event=self.scheduler._stopped,
+            barrier_passed_event=self.scheduler._barrier_passed,
+            retry_manager=self.scheduler.retry_manager,
+            on_solver_terminal=self.scheduler.finalize_pipeline,
+            get_reset_generation=self.scheduler._current_reset_generation,
+        )
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        real_dispatch = self.scheduler.barrier_coordinator.dispatch_solver_if_ready
+        assert real_dispatch() is True
+        self.scheduler.barrier_coordinator.join_solver_threads(timeout=5)
+        assert self.runner._solver_dispatched == [1]
+
+        self.runner._solver_dispatched.clear()
+        self.scheduler.reset_config(1, "meshing")
+
+        assert self.scheduler.workstation_slots.busy_workstations() == {}
+        assert self.state.get_config_workstation(1) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.state.is_global_barrier_met() is False
+        assert real_dispatch() is False
+        assert self.runner._solver_dispatched == []
+
+    def test_pause_resume_does_not_bypass_assignment_domain_guard(self, monkeypatch):
+        """pause/start 收口屏障时不应越过未 claim 构型的分配域 guard。"""
+        import engine.scheduler.barrier as barrier_module
+        from engine.scheduler.barrier import BarrierCoordinator
+
+        monkeypatch.setattr(barrier_module, "WORKSTATIONS", [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+        ])
+        self.scheduler.barrier_coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.scheduler._paused,
+            stopped_event=self.scheduler._stopped,
+            barrier_passed_event=self.scheduler._barrier_passed,
+            retry_manager=self.scheduler.retry_manager,
+            on_solver_terminal=self.scheduler.finalize_pipeline,
+            get_reset_generation=self.scheduler._current_reset_generation,
+        )
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        self.scheduler._paused.set()
+        self.scheduler._paused.clear()
+        self.scheduler._finalize_barrier_after_downstream_start()
+
+        assert self.runner._solver_dispatched == []
+        assert self.scheduler.barrier_coordinator._workstation_barriers_passed == set()
+
     def _record_remote_outputs(
         self,
         config_name: int,
         *,
+        transfer: bool = False,
         meshing: bool = False,
         solver: bool = False,
+        postprocess: bool = False,
     ) -> None:
+        if transfer:
+            self.runner._ssh.remote_file_sizes[
+                f"D:/xkz_1020/scdoc/model_gen4_{config_name}.scdoc"
+            ] = 1024
         if meshing:
             self.runner._ssh.remote_file_sizes[
                 f"D:/xkz_1020/msh/model_gen4_{config_name}.msh.h5"
@@ -1344,6 +1636,11 @@ class TestPipelineSchedulerStartRecovery:
             self.runner._ssh.remote_file_sizes[
                 f"D:/xkz_1020/case/model_gen4_{config_name}.dat.h5"
             ] = 1024
+        if postprocess:
+            output_dir = str(
+                ENGINE_CONFIG.get("postprocess_output_dir") or "D:/xkz_1020/case"
+            ).replace("\\", "/").rstrip("/")
+            self.runner._ssh.remote_file_sizes[f"{output_dir}/model_gen4_{config_name}.csv"] = 1024
 
     def test_resume_scan_keeps_running_meshing_when_remote_task_running(self):
         """启动扫描遇到仍在运行的远程 Meshing 时不能重置或入队重启。"""
@@ -1352,6 +1649,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1386,14 +1684,18 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "sc") == STATUS_WAITING
         assert self.scheduler._sc_queue.qsize() == 1
 
-    def test_resume_scan_uses_assigned_workstation_for_remote_task(self):
+    def test_resume_scan_uses_assigned_workstation_for_remote_task(self, monkeypatch):
         """断点恢复查询远程任务时应使用构型分配的工作站。"""
+        import engine.scheduler.main as scheduler_main
+
+        monkeypatch.setattr(scheduler_main, "WORKSTATIONS", [{"id": "WS-A"}])
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         self.state.set_config_workstation(1, "WS-A")
         for step in ["sw", "sc", "transfer"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1402,33 +1704,109 @@ class TestPipelineSchedulerStartRecovery:
         ]
 
     def test_resume_scan_keeps_running_solver_when_remote_task_unknown(self):
-        """启动扫描无法确认远程 Solver 状态时保留 Running，避免重启。"""
+        """启动扫描无法确认远程 Solver 状态时标记 UnknownRemote，避免重启。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
-        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.state.get_step_status(1, "solver") == STATUS_UNKNOWN_REMOTE
 
     def test_resume_scan_unknown_remote_solver_surfaces_after_retry_budget(self, monkeypatch):
         """远程 unknown 连续达到重试上限后应暴露 Error，不能无限保留 Running。"""
-        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        monkeypatch.setitem(ENGINE_CONFIG, "remote_unknown_max_retries", 1)
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "unknown"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.runner._remote_executor._kill_remote_task_calls == [(1, "solver", "default")]
+
+    def test_completed_postprocess_without_durable_output_resets_to_waiting(self):
+        """恢复扫描应复核 PostProcess 输出，不能只相信 Completed 状态。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.scheduler._remote_files_exist = lambda cn, steps: False
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "postprocess") == STATUS_WAITING
+
+    def test_completed_postprocess_kept_when_remote_probe_unavailable(self):
+        """远程 SSH 暂不可达时不能把 Completed PostProcess 当作输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, transfer=True, meshing=True, solver=True, postprocess=True)
+        self.runner._ssh.connected = False
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "meshing") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_completed_postprocess_kept_when_remote_probe_drops_mid_check(self):
+        """远程 SSH 初始可达但检查中断开时不能误判 PostProcess 输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver", "postprocess"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        def raise_connection_error(remote_path: str, *, timeout: float | None = None) -> int | None:
+            raise ConnectionError("ssh tunnel dropped")
+
+        self.runner._ssh.get_remote_file_size = raise_connection_error
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_completed_solver_kept_when_remote_size_probe_is_unknown(self):
+        """远程 size probe 返回 None 时代表未知，不能误判 Completed Solver 输出缺失。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
+        original_get_size = self.runner._ssh.get_remote_file_size
+
+        def unknown_solver_size(remote_path: str, *, timeout: float | None = None) -> int | None:
+            if remote_path.replace("\\", "/").endswith((".cas.h5", ".dat.h5")):
+                return None
+            return original_get_size(remote_path, timeout=timeout)
+
+        self.runner._ssh.get_remote_file_size = unknown_solver_size
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_postprocess_artifact_exists_accepts_linux_absolute_path(self, monkeypatch):
+        """多工作站支持 Linux 绝对路径时，PostProcess 产物探测不能被前导 / 过滤掉。"""
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", "")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", "")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", "")
+        remote_config = {
+            "postprocess_output_dir": "/opt/autofluid/post",
+            "postprocess_metrics_dir": "",
+            "postprocess_animation_dir": "",
+            "result_dir": "/opt/autofluid/case",
+            "animation_dir": "/opt/autofluid/animation",
+        }
+        self.runner._ssh.remote_file_sizes["/opt/autofluid/post/model_gen4_1.csv"] = 1024
+
+        assert self.scheduler._postprocess_artifact_exists(1, remote_config, self.runner._ssh) is True
 
     def test_stale_sc_completion_after_reset_does_not_submit_transfer(
         self,
@@ -1563,6 +1941,114 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
+    def test_transfer_claims_idle_meshing_slot_before_upload(self):
+        """Transfer 上传前应按空闲 Meshing 槽位动态写入工作站。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B", "WS-C"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        for cn in (1, 2):
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
+        self.scheduler.workstation_slots.claim(1)
+
+        observed_workstations: list[str | None] = []
+
+        def complete_transfer(config_name: int, step_name: str, _func) -> bool:
+            assert config_name == 2
+            assert step_name == "transfer"
+            observed_workstations.append(self.state.get_config_workstation(config_name))
+            self.state.set_step_status(config_name, "transfer", STATUS_COMPLETED)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = complete_transfer
+
+        self.scheduler.worker_pool._process_transfer_step(2)
+
+        assert observed_workstations == ["WS-B"]
+        assert self.state.get_config_workstation(2) == "WS-B"
+        assert self.scheduler.meshing_monitor.qsize() == 1
+
+    def test_transfer_waits_without_upload_when_all_meshing_slots_busy(self, monkeypatch):
+        """所有 Meshing 槽位忙时 Transfer 不应上传到任何工作站。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        waits: list[float] = []
+
+        def record_requeue_wait(duration, _paused, _stopped, check_interval=1.0) -> bool:
+            waits.append(duration)
+            assert check_interval == 0.2
+            return True
+
+        monkeypatch.setattr(
+            "engine.scheduler.worker_pool.pause_aware_sleep",
+            record_requeue_wait,
+        )
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A", "WS-B", "WS-C"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+            4: [13.0, 14.0, 15.0, 16.0],
+        })
+        for cn in (1, 2, 3, 4):
+            self.state.set_step_status(cn, "sw", STATUS_COMPLETED)
+            self.state.set_step_status(cn, "sc", STATUS_COMPLETED)
+        for cn in (1, 2, 3):
+            self.scheduler.workstation_slots.claim(cn)
+
+        upload_calls: list[int] = []
+
+        def fail_if_upload_called(config_name: int, step_name: str, _func) -> bool:
+            upload_calls.append(config_name)
+            return True
+
+        self.scheduler.worker_pool._retry_manager.execute_with_retry = fail_if_upload_called
+
+        self.scheduler.worker_pool._process_transfer_step(4)
+
+        assert upload_calls == []
+        assert waits == [self.scheduler.worker_pool._transfer_requeue_delay]
+        assert self.state.get_config_workstation(4) == DEFAULT_WORKSTATION_ID
+        assert self.state.get_step_status(4, "transfer") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
+    def test_refresh_workstation_slots_updates_scheduler_submodules(self, monkeypatch):
+        """配置刷新后调度器和子模块应共享新的工作站槽位列表。"""
+        from engine.scheduler import main as scheduler_module
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.scheduler.workstation_slots = slots
+        self.scheduler.worker_pool._workstation_slots = slots
+        self.scheduler.meshing_monitor._workstation_slots = slots
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+
+        assert self.scheduler.workstation_slots.claim(1) == "WS-A"
+        assert self.scheduler.workstation_slots.claim(2) is None
+
+        monkeypatch.setattr(
+            scheduler_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}],
+        )
+
+        self.scheduler.refresh_workstation_slots()
+
+        assert self.scheduler.workstation_slots.claim(2) == "WS-B"
+        assert self.scheduler.worker_pool._workstation_slots is self.scheduler.workstation_slots
+        assert self.scheduler.meshing_monitor._workstation_slots is self.scheduler.workstation_slots
+
     def test_completed_local_step_with_missing_output_is_reset_on_resume(self, monkeypatch, tmp_path):
         """clean 删除本地产物后，resume 不应继续信任 Completed 状态。"""
         monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
@@ -1589,6 +2075,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "meshing", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "lost"
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1601,6 +2088,7 @@ class TestPipelineSchedulerStartRecovery:
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self._record_remote_outputs(1, transfer=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1608,13 +2096,33 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
         assert self.scheduler.meshing_monitor.qsize() == 1
 
+    def test_completed_remote_transfer_with_missing_scdoc_is_reset_on_resume(self):
+        """Transfer Completed 不能只信任状态库，远程 SCDOC 缺失时应重新传输。"""
+        step_dir = Path(LOCAL_PATHS["step_dir"])
+        scdoc_dir = Path(LOCAL_PATHS["scdoc_dir"])
+        step_dir.mkdir(parents=True, exist_ok=True)
+        scdoc_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / "model_gen4.SLDPRT_1.step").write_bytes(b"step")
+        (scdoc_dir / "model_gen4_1.scdoc").write_bytes(b"scdoc")
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+
+        self._record_remote_outputs(1, meshing=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.state.get_step_status(1, "transfer") == STATUS_WAITING
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+        assert self.scheduler.meshing_monitor.qsize() == 0
+
     def test_completed_remote_solver_with_missing_results_is_reset_on_resume(self):
         """Solver Completed 缺少 cas/dat 结果时应回到 Waiting 等屏障重新调度。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing", "solver"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
 
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1628,7 +2136,7 @@ class TestPipelineSchedulerStartRecovery:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
         self.runner._remote_executor._remote_task_status = "completed"
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1660,7 +2168,7 @@ class TestPipelineSchedulerStartRecovery:
             started_at=time.time(),
         )
         self.scheduler._check_step_output_exists = lambda *_args: True
-        self._record_remote_outputs(1, meshing=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1681,7 +2189,7 @@ class TestPipelineSchedulerStartRecovery:
             error_flag_file="D:/flags/solver_done_1.txt.error",
             started_at=time.time(),
         )
-        self._record_remote_outputs(1, meshing=True, solver=True)
+        self._record_remote_outputs(1, transfer=True, meshing=True, solver=True, postprocess=True)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -1892,7 +2400,10 @@ def test_task_runner_server_mode_merges_local_worker_check(monkeypatch):
     result = runner.run_system_check()
 
     assert result["local_checks"] == {}
-    assert result["local_worker_checks"] == {"SW可执行文件": {"exists": True}}
+    assert result["local_worker_checks"]["SW可执行文件"] == {"exists": True}
+    assert result["local_worker_checks"]["ok"] is True
+    assert result["local_worker_checks"]["status"] == "passed"
+    assert result["overall_ok"] is True
 
 
 def test_task_runner_server_mode_reports_active_local_worker_check_failure(monkeypatch):
@@ -1920,12 +2431,54 @@ def test_task_runner_server_mode_reports_active_local_worker_check_failure(monke
 
     result = runner.run_system_check()
 
-    assert result["local_worker_checks"] == {
-        "active_check": {
-            "exists": False,
-            "message": "LocalWorker 主动自检超时",
-        }
+    assert result["local_worker_checks"]["active_check"] == {
+        "exists": False,
+        "message": "LocalWorker 主动自检超时",
     }
+    assert result["local_worker_checks"]["ok"] is False
+    assert result["local_worker_checks"]["status"] == "failed"
+    assert result["overall_ok"] is False
+
+
+def test_task_runner_server_mode_skips_local_worker_check_after_local_steps_complete(monkeypatch):
+    from engine.task_runner import TaskRunner
+
+    class _Cleaner:
+        def run_system_check(self):
+            return {
+                "local_checks": {},
+                "remote_checks": {},
+                "daemon_checks": {},
+                "workstation_checks": {},
+                "summary": {"passed": 1, "failed": 0, "warnings": 0},
+                "overall_ok": True,
+                "status": "passed",
+            }
+
+    class _State:
+        def get_all_configs(self):
+            return [1006, 1009]
+
+        def get_step_status(self, _config_name, step_name):
+            if step_name in {"sw", "sc"}:
+                return "Completed"
+            return "Waiting"
+
+    class _LocalWorkerAdapter:
+        def check_local_environment(self):
+            raise AssertionError("LocalWorker check should be skipped")
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    runner = TaskRunner.__new__(TaskRunner)
+    runner.state = _State()
+    runner._cleaner = _Cleaner()
+    runner._local_worker_adapter = _LocalWorkerAdapter()
+
+    result = runner.run_system_check()
+
+    assert result["local_worker_checks"]["status"] == "skipped"
+    assert result["local_worker_checks"]["ok"] is True
+    assert result["overall_ok"] is True
 
 
 def test_task_runner_server_mode_delegates_local_file_clean(monkeypatch):
@@ -1990,6 +2543,8 @@ class _CleanStepRunner:
         self.clean_calls = []
         self.clean_all_cache_count = 0
         self.remote_executor = _DaemonRemoteExecutor(remote_status)
+        self.raise_on_clean = False
+        self.raise_on_cache = False
         self.system_check_result = {
             "local_checks": {},
             "remote_checks": {},
@@ -1997,9 +2552,13 @@ class _CleanStepRunner:
         }
 
     def clean_step_files(self, step_name, config_name):
+        if self.raise_on_clean:
+            raise RuntimeError("remote clean failed")
         self.clean_calls.append((step_name, config_name))
 
     def clean_all_cache(self):
+        if self.raise_on_cache:
+            raise RuntimeError("cache clean failed")
         self.clean_all_cache_count += 1
 
     def run_system_check(self):
@@ -2007,6 +2566,18 @@ class _CleanStepRunner:
 
     def get_remote_executor(self):
         return self.remote_executor
+
+
+class _CleanStepSlots:
+    def __init__(self):
+        self.released_configs = []
+        self.clear_count = 0
+
+    def release_config(self, config_name):
+        self.released_configs.append(config_name)
+
+    def clear(self):
+        self.clear_count += 1
 
 
 class _CleanStepScheduler:
@@ -2017,6 +2588,7 @@ class _CleanStepScheduler:
         self.resume_calls = 0
         self.is_paused = False
         self.pipeline_alive = False
+        self.workstation_slots = _CleanStepSlots()
 
     def request_file_monitor_reset(self):
         self.file_monitor_reset_count += 1
@@ -2041,6 +2613,8 @@ class _DaemonState:
         self.remote_tasks = remote_tasks or []
         self.statuses = statuses or {}
         self.set_status_calls = []
+        self.step_status_calls = []
+        self.delete_all_remote_tasks_calls = []
 
     def get_engine_status(self):
         return self.engine_status
@@ -2060,6 +2634,20 @@ class _DaemonState:
 
     def get_step_status(self, config_name, step_name):
         return self.statuses.get(config_name, {}).get(step_name, STATUS_WAITING)
+
+    def set_step_status(self, config_name, step_name, status, error_message=""):
+        self.statuses.setdefault(config_name, {})[step_name] = status
+        self.step_status_calls.append((config_name, step_name, status, error_message))
+
+    def delete_all_remote_tasks(self, workstation_id=None):
+        self.delete_all_remote_tasks_calls.append(workstation_id)
+        if workstation_id is None:
+            self.remote_tasks.clear()
+            return
+        self.remote_tasks = [
+            task for task in self.remote_tasks
+            if task.get("workstation_id", "default") != workstation_id
+        ]
 
 
 class _AssignmentState:
@@ -2084,6 +2672,9 @@ class _DaemonRemoteExecutor:
         self.remote_status = remote_status or {}
         self.query_calls = []
         self.forgotten: list[tuple[int, str]] = []
+        self.stopped_steps: list[tuple[int, str, str, str]] = []
+        self.stop_result = True
+        self.stop_exception: Exception | None = None
 
     def query_remote_task_status(self, config_name, step_name, workstation_id="default"):
         self.query_calls.append((config_name, step_name, workstation_id))
@@ -2091,6 +2682,18 @@ class _DaemonRemoteExecutor:
 
     def forget_remote_task(self, config_name, step_name, workstation_id="default"):
         self.forgotten.append((config_name, step_name, workstation_id))
+
+    def stop_remote_step(
+        self,
+        config_name,
+        step_name,
+        workstation_id="default",
+        reason="",
+    ):
+        if self.stop_exception is not None:
+            raise self.stop_exception
+        self.stopped_steps.append((config_name, step_name, workstation_id, reason))
+        return self.stop_result
 
 
 class TestPipelineDaemonCleanStep:
@@ -2234,6 +2837,38 @@ class TestPipelineDaemonCleanStep:
         assert daemon.scheduler.start_calls == 1
         assert daemon.state.get_engine_status() == "running"
 
+    def test_start_running_rereads_state_before_resuming_paused_flag(self, monkeypatch):
+        from engine.daemon import PipelineDaemon
+
+        class _PauseRacingState(_DaemonState):
+            def __init__(self):
+                super().__init__(engine_status="running")
+                self._reads = 0
+
+            def get_engine_status(self):
+                self._reads += 1
+                if self._reads == 1:
+                    self.engine_status = "paused"
+                    return "running"
+                return self.engine_status
+
+        monkeypatch.delenv("AUTOFLUID_SERVER_MODE", raising=False)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _PauseRacingState()
+        daemon.scheduler = _CleanStepScheduler()
+        daemon.scheduler.is_paused = True
+        daemon.scheduler.pipeline_alive = True
+        daemon._pipeline_ever_started = True
+
+        ok, data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert data is None
+        assert "已暂停" in message
+        assert daemon.scheduler.resume_calls == 0
+        assert daemon.scheduler.start_calls == 0
+        assert daemon.state.get_engine_status() == "paused"
+
     def test_worker_register_and_heartbeat_handlers_update_registry(self):
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
@@ -2314,6 +2949,52 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
+    def test_server_mode_start_allows_passwordless_workstation_auth_methods(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_adapter import LocalWorkerAdapter
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [
+                {
+                    "id": "WS-A",
+                    "host": "172.17.135.89",
+                    "port": 22,
+                    "username": "ps",
+                    "password": "",
+                    "auth_method": "none",
+                },
+                {
+                    "id": "WS-B",
+                    "host": "172.17.135.90",
+                    "port": 22,
+                    "username": "ps",
+                    "password": "",
+                    "auth_method": "key",
+                    "key_filename": r"C:\Users\XKZ\.ssh\id_ed25519",
+                },
+            ],
+        )
+        registry = LocalWorkerRegistry()
+        registry.register("local-pc-01", {"sw": True, "sc": True})
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(engine_status="stopped")
+        daemon.scheduler = _CleanStepScheduler()
+        daemon._pipeline_ever_started = False
+        daemon.local_worker_registry = registry
+        daemon.local_worker_adapter = LocalWorkerAdapter(registry)
+        daemon._last_worker_ssh_checks = {"WS-A": "ok", "WS-B": "ok"}
+
+        ok, _data, message = daemon.handle_start({})
+
+        assert ok is True
+        assert "AUTOFLUID_SSH_PASSWORD" not in message
+        assert daemon.scheduler.start_calls == 1
+
     def test_server_mode_start_rejects_failed_worker_ssh_snapshot(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
@@ -2388,7 +3069,7 @@ class TestPipelineDaemonCleanStep:
         assert daemon.state.set_status_calls == []
         assert daemon.scheduler.start_calls == 0
 
-    def test_server_mode_start_accepts_live_workstation_ssh_without_snapshot(self, monkeypatch):
+    def test_server_mode_start_rejects_cached_transport_without_active_snapshot(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
         from engine.local_worker_adapter import LocalWorkerAdapter
@@ -2430,12 +3111,12 @@ class TestPipelineDaemonCleanStep:
 
         ok, data, message = daemon.handle_start({})
 
-        assert ok is True
+        assert ok is False
         assert data is None
-        assert message == "流水线已启动"
-        assert daemon.state.set_status_calls == ["running"]
-        assert daemon.scheduler.start_calls == 1
-
+        assert "工作站 SSH 未就绪" in message
+        assert "worker start" in message
+        assert daemon.state.set_status_calls == []
+        assert daemon.scheduler.start_calls == 0
     def test_worker_start_reloads_config_and_drops_stale_ssh(self, monkeypatch):
         from engine import config as config_module
         from engine import daemon as daemon_module
@@ -2457,13 +3138,13 @@ class TestPipelineDaemonCleanStep:
 
         class _Runner:
             def __init__(self) -> None:
-                self.disconnect_calls = 0
+                self.disconnect_calls: list[float | None] = []
 
-            def disconnect_ssh(self) -> None:
-                self.disconnect_calls += 1
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                self.disconnect_calls.append(lock_timeout)
 
             def get_ssh(self, workstation_id: str = "default") -> _SSH:
-                return _SSH(self.disconnect_calls > 0)
+                return _SSH(bool(self.disconnect_calls))
 
         monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
         monkeypatch.setattr(
@@ -2482,12 +3163,146 @@ class TestPipelineDaemonCleanStep:
         assert ok is True
         assert message == "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
         assert reload_calls == ["reload"]
-        assert runner.disconnect_calls == 1
+        assert runner.disconnect_calls == [1.0]
         assert data["ssh_checks"] == {"default": "ok"}
         assert daemon._last_worker_ssh_checks == {"default": "ok"}
         assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
 
-    def test_worker_register_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
+    def test_worker_start_refreshes_scheduler_workstation_slots_after_reload(
+        self,
+        monkeypatch,
+    ):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        def _reload_config() -> bool:
+            daemon_module.WORKSTATIONS[:] = [
+                {"id": "WS-A"},
+                {"id": "WS-B"},
+            ]
+            return True
+
+        class _SSH:
+            def is_connected(self) -> bool:
+                return True
+
+        class _Runner:
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                pass
+
+            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+                return _SSH()
+
+        class _Scheduler:
+            def __init__(self, state) -> None:
+                self.workstation_slots = WorkstationSlotCoordinator(state, ["WS-A"])
+                self.worker_pool = type(
+                    "_WorkerPool",
+                    (),
+                    {"_workstation_slots": self.workstation_slots},
+                )()
+                self.meshing_monitor = type(
+                    "_MeshingMonitor",
+                    (),
+                    {"_workstation_slots": self.workstation_slots},
+                )()
+
+            def refresh_workstation_slots(self) -> None:
+                workstation_ids = [
+                    str(workstation.get("id"))
+                    for workstation in daemon_module.WORKSTATIONS
+                    if workstation.get("id")
+                ] or [DEFAULT_WORKSTATION_ID]
+                self.workstation_slots.update_workstation_ids(workstation_ids)
+                self.worker_pool._workstation_slots = self.workstation_slots
+                self.meshing_monitor._workstation_slots = self.workstation_slots
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}],
+        )
+
+        tmpdir = tempfile.mkdtemp(prefix="worker_start_slots_")
+        db_path = os.path.join(tmpdir, "test.db")
+        orig_db_path = IPC_CONFIG["db_path"]
+        IPC_CONFIG["db_path"] = db_path
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({
+                1: [1.0, 2.0, 3.0, 4.0],
+                2: [5.0, 6.0, 7.0, 8.0],
+            })
+            scheduler = _Scheduler(state)
+            daemon = PipelineDaemon.__new__(PipelineDaemon)
+            daemon.state = state
+            daemon.runner = _Runner()
+            daemon.scheduler = scheduler
+            daemon.local_worker_registry = LocalWorkerRegistry()
+            daemon._last_worker_ssh_checks = {}
+            daemon._config_warnings = []
+
+            assert scheduler.workstation_slots.claim(1) == "WS-A"
+            assert scheduler.workstation_slots.claim(2) is None
+
+            ok, data, message = daemon.handle_worker_start({})
+
+            assert ok is True
+            assert message == "Worker 启动准备就绪，等待本地 Worker 和工作站 Worker 连接"
+            assert data["ssh_checks"] == {"WS-A": "ok", "WS-B": "ok"}
+            assert scheduler.workstation_slots.claim(2) == "WS-B"
+            assert scheduler.worker_pool._workstation_slots is scheduler.workstation_slots
+            assert scheduler.meshing_monitor._workstation_slots is scheduler.workstation_slots
+        finally:
+            IPC_CONFIG["db_path"] = orig_db_path
+            if os.path.exists(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_worker_start_fails_when_scheduler_workstation_slot_refresh_fails(
+        self,
+        monkeypatch,
+    ):
+        from engine import config as config_module
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+        from engine.local_worker_registry import LocalWorkerRegistry
+
+        def _reload_config() -> bool:
+            return True
+
+        class _Runner:
+            def disconnect_ssh(self, lock_timeout: float | None = None) -> None:
+                pass
+
+        class _Scheduler:
+            def refresh_workstation_slots(self) -> None:
+                raise ValueError("工作站槽位 ID 重复")
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}],
+        )
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon.scheduler = _Scheduler()
+        daemon.local_worker_registry = LocalWorkerRegistry()
+        daemon._last_worker_ssh_checks = {}
+        daemon._config_warnings = []
+
+        ok, data, message = daemon.handle_worker_start({})
+
+        assert ok is False
+        assert data is None
+        assert message == "刷新工作站槽位失败: 工作站槽位 ID 重复"
+
+    def test_worker_register_passively_refreshes_workstation_ssh_after_runner_is_created(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
@@ -2503,8 +3318,10 @@ class TestPipelineDaemonCleanStep:
             def __init__(self, state, local_worker_adapter=None) -> None:
                 self.state = state
                 self.local_worker_adapter = local_worker_adapter
+                self.get_ssh_calls: list[tuple[str, bool]] = []
 
-            def get_ssh(self, workstation_id: str = "default") -> _SSH:
+            def get_ssh(self, workstation_id: str = "default", *, connect: bool = True) -> _SSH:
+                self.get_ssh_calls.append((workstation_id, connect))
                 return _SSH()
 
         class _Scheduler:
@@ -2538,8 +3355,9 @@ class TestPipelineDaemonCleanStep:
 
         assert ok is True
         assert message == "LocalWorker 已注册"
-        assert daemon._last_worker_ssh_checks == {"default": "ok"}
-        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "ok"
+        assert daemon.runner.get_ssh_calls == []
+        assert daemon._last_worker_ssh_checks == {"default": "unknown"}
+        assert daemon._build_health_snapshot()["server_to_workstation_ssh"] == "unknown"
 
     def test_worker_start_fails_when_all_workstation_ssh_checks_fail(self, monkeypatch):
         from engine import config as config_module
@@ -2625,6 +3443,11 @@ class TestPipelineDaemonCleanStep:
         from engine.local_worker_registry import LocalWorkerRegistry
 
         daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            remote_tasks=[
+                {"config_name": 1, "step_name": "meshing", "workstation_id": "WS-A"}
+            ],
+        )
         daemon.runner = None
         daemon.local_worker_registry = LocalWorkerRegistry()
         daemon._last_worker_ssh_checks = {"default": "ok"}
@@ -2635,6 +3458,9 @@ class TestPipelineDaemonCleanStep:
         assert message == "所有 Worker 已停止"
         assert data["registry_cleared"] is True
         assert daemon._last_worker_ssh_checks == {}
+        assert data["remote_tasks_cleared"] is True
+        assert daemon.state.get_all_remote_tasks() == []
+        assert daemon.state.delete_all_remote_tasks_calls == [None]
 
     def test_worker_start_keeps_partial_success_visible(self, monkeypatch):
         from engine import config as config_module
@@ -2685,11 +3511,8 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
-                return True
-
             def is_connected(self) -> bool:
-                return False
+                return True
 
         class _Runner:
             def get_ssh(self, workstation_id: str = "default") -> _SSH:
@@ -2721,6 +3544,67 @@ class TestPipelineDaemonCleanStep:
             for record in caplog.records
         )
 
+    def test_workstation_ssh_refresh_uses_single_quiet_active_probe(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _SSH:
+            def __init__(self) -> None:
+                self.is_connected_calls = 0
+                self.ensure_connected_calls = 0
+
+            def is_connected(self) -> bool:
+                self.is_connected_calls += 1
+                return False
+
+            def ensure_connected(self) -> bool:
+                self.ensure_connected_calls += 1
+                return False
+
+        class _Runner:
+            def __init__(self) -> None:
+                self.ssh = _SSH()
+                self.get_ssh_calls: list[tuple[str, bool, bool]] = []
+
+            def get_ssh(
+                self,
+                workstation_id: str = "default",
+                *,
+                connect: bool = True,
+                log_failure: bool = True,
+            ) -> _SSH:
+                self.get_ssh_calls.append((workstation_id, connect, log_failure))
+                return self.ssh
+
+        runner = _Runner()
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = runner
+        daemon._last_worker_ssh_checks = {}
+
+        result = daemon._refresh_workstation_ssh_checks()
+
+        assert result["ssh_checks"] == {"WS-A": "disconnected"}
+        assert runner.get_ssh_calls == [("WS-A", True, False)]
+        assert runner.ssh.is_connected_calls == 1
+        assert runner.ssh.ensure_connected_calls == 0
+
+    def test_workstation_ssh_refresh_reraises_unrelated_type_error(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _Runner:
+            def get_ssh(self, workstation_id: str = "default", *, log_failure: bool = True):
+                raise TypeError("internal type mismatch")
+
+        monkeypatch.setattr(daemon_module, "WORKSTATIONS", [{"id": "WS-A"}])
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+
+        with pytest.raises(TypeError, match="internal type mismatch"):
+            daemon._refresh_workstation_ssh_checks()
+
     def test_workstation_ssh_refresh_warns_when_error_connection_recovers(
         self,
         monkeypatch,
@@ -2730,7 +3614,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:
@@ -2760,7 +3644,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:
@@ -2790,7 +3674,7 @@ class TestPipelineDaemonCleanStep:
         from engine.daemon import PipelineDaemon
 
         class _SSH:
-            def ensure_connected(self) -> bool:
+            def is_connected(self) -> bool:
                 return True
 
         class _Runner:
@@ -2811,7 +3695,7 @@ class TestPipelineDaemonCleanStep:
             for record in caplog.records
         )
 
-    def test_assign_config_workstations_persists_only_new_assignments(self, monkeypatch):
+    def test_assign_config_workstations_does_not_preassign_waiting_configs(self, monkeypatch):
         from engine import daemon as daemon_module
         from engine.daemon import PipelineDaemon
 
@@ -2825,8 +3709,32 @@ class TestPipelineDaemonCleanStep:
 
         daemon._assign_config_workstations()
 
-        assert daemon.state.assignments == {1: "WS-A", 2: "WS-B", 3: "WS-A"}
-        assert daemon.state.set_calls == [(1, "WS-A"), (3, "WS-A")]
+        assert daemon.state.assignments == {2: "WS-B"}
+        assert daemon.state.set_calls == []
+
+    def test_assign_config_workstations_leaves_legacy_values_for_dynamic_claim(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        monkeypatch.setattr(
+            daemon_module,
+            "WORKSTATIONS",
+            [{"id": "WS-A"}, {"id": "WS-B"}, {"id": "WS-C"}],
+        )
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _AssignmentState(
+            [1, 2, 3, 4],
+            assignments={1: "default", 2: "WS-B", 3: "stale"},
+        )
+
+        daemon._assign_config_workstations()
+
+        assert daemon.state.assignments == {
+            1: "default",
+            2: "WS-B",
+            3: "stale",
+        }
+        assert daemon.state.set_calls == []
 
     def test_clean_sw_requests_scheduler_file_monitor_reset(self):
         from engine.daemon import PipelineDaemon
@@ -2894,6 +3802,106 @@ class TestPipelineDaemonCleanStep:
         assert "clean all cache" in message
         assert daemon.runner.clean_all_cache_count == 0
 
+    def test_clean_rejects_invalid_config_name_before_runner_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": "abc",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.runner.clean_calls == []
+
+    def test_clean_rejects_bool_config_name_before_runner_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "sw",
+            "config_name": True,
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.runner.clean_calls == []
+
+    def test_background_cache_clean_failure_is_logged(self, monkeypatch, caplog):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_cache = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "cache",
+                "config_name": None,
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理远程缓存文件" in message
+        assert any(
+            "[Cleaner] 后台清理失败: step=cache, config=all, error=cache clean failed"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_background_step_clean_failure_is_logged(self, monkeypatch, caplog):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_clean = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "meshing",
+                "config_name": "all",
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert any(
+            "[Cleaner] 后台清理失败: step=meshing, config=all, error=remote clean failed"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_check_returns_runner_schema(self):
         from engine.daemon import PipelineDaemon
         from engine.local_worker_registry import LocalWorkerRegistry
@@ -2930,6 +3938,144 @@ class TestPipelineDaemonCleanStep:
         assert data["local_worker_checks"] == expected["local_worker_checks"]
         assert message == "系统自检完成"
 
+    def test_check_reloads_config_before_running_system_check(self, monkeypatch):
+        from engine import config as config_module
+        from engine.daemon import PipelineDaemon
+
+        events: list[str] = []
+        path_snapshot = {"sw_exe": r"C:\old\SLDWORKS.exe"}
+
+        def _reload_config() -> bool:
+            events.append("reload")
+            path_snapshot["sw_exe"] = r"C:\new\SLDWORKS.exe"
+            return True
+
+        class _Runner:
+            def run_system_check(self) -> dict[str, object]:
+                events.append("check")
+                return {
+                    "local_checks": {
+                        "SW可执行文件": {
+                            "path": path_snapshot["sw_exe"],
+                            "exists": False,
+                        }
+                    },
+                    "remote_checks": {},
+                    "daemon_checks": {},
+                    "workstation_checks": {},
+                }
+
+        monkeypatch.setattr(config_module, "reload_config_from_toml", _reload_config)
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._build_health_snapshot = lambda: {}
+
+        ok, data, message = daemon.handle_check({})
+
+        assert ok is True
+        assert message == "系统自检完成"
+        assert events == ["reload", "check"]
+        assert data["local_checks"]["SW可执行文件"]["path"] == r"C:\new\SLDWORKS.exe"
+
+    def test_check_refreshes_workstation_ssh_readiness_cache(self):
+        from engine.daemon import PipelineDaemon
+
+        class _Runner:
+            def run_system_check(self) -> dict[str, object]:
+                return {
+                    "local_checks": {},
+                    "remote_checks": {
+                        "workstations": {
+                            "WS-A": {"ssh_connected": True, "ssh": "连接成功"},
+                            "WS-B": {"ssh_connected": False, "ssh": "连接失败"},
+                            "WS-C": {"ssh": "错误: timed out"},
+                        }
+                    },
+                    "daemon_checks": {},
+                    "workstation_checks": {},
+                }
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _Runner()
+        daemon._last_worker_ssh_checks = {}
+        daemon._last_worker_ssh_check_times = {}
+        daemon._build_health_snapshot = lambda: {
+            "workstation_ssh_details": daemon._last_worker_ssh_checks,
+            "config_warnings": [],
+        }
+
+        ok, data, message = daemon.handle_check({})
+
+        assert ok is True
+        assert message == "系统自检完成"
+        assert daemon._last_worker_ssh_checks == {
+            "WS-A": "ok",
+            "WS-B": "disconnected",
+            "WS-C": "error: 错误: timed out",
+        }
+        assert set(daemon._last_worker_ssh_check_times) == {"WS-A", "WS-B", "WS-C"}
+        assert data["health"]["workstation_ssh_details"]["WS-A"] == "ok"
+
+    def test_check_summary_includes_health_warnings_and_failures(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.system_check_result = {
+            "overall_ok": True,
+            "status": "passed",
+            "summary": {"passed": 1, "failed": 0, "warnings": 0},
+            "local_checks": {},
+            "remote_checks": {},
+            "daemon_checks": {},
+            "workstation_checks": {},
+        }
+        daemon._build_health_snapshot = lambda: {
+            "local_worker_online": False,
+            "server_to_local_ssh": "disconnected",
+            "server_to_workstation_ssh": "disconnected",
+            "workstation_ssh_details": {"WS-A": "error: timed out"},
+            "config_warnings": ["工作站 WS-A 缺少 reachable_host"],
+        }
+
+        ok, data, _message = daemon.handle_check({})
+
+        assert ok is True
+        assert data["overall_ok"] is False
+        assert data["status"] == "failed"
+        assert data["summary"]["failed"] == 3
+        assert data["summary"]["warnings"] == 1
+
+    def test_check_summary_counts_workstation_health_leaf_items_once(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.system_check_result = {
+            "overall_ok": True,
+            "status": "passed",
+            "summary": {"passed": 1, "failed": 0, "warnings": 0},
+            "local_checks": {},
+            "remote_checks": {},
+            "daemon_checks": {},
+            "workstation_checks": {},
+        }
+        daemon._build_health_snapshot = lambda: {
+            "local_worker_online": True,
+            "server_to_local_ssh": "ok",
+            "server_to_workstation_ssh": "ok",
+            "workstation_ssh_details": {
+                "WS-A": "ok",
+                "WS-B": "disconnected",
+            },
+            "config_warnings": [],
+        }
+
+        ok, data, _message = daemon.handle_check({})
+
+        assert ok is True
+        assert data["overall_ok"] is False
+        assert data["summary"] == {"passed": 4, "failed": 1, "warnings": 0}
     def test_clean_rejects_when_pipeline_running(self):
         from engine.daemon import PipelineDaemon
 
@@ -3010,6 +4156,158 @@ class TestPipelineDaemonCleanStep:
 
         assert ok is True
         assert daemon.runner.remote_executor.query_calls == [(1, "meshing", "WS-A")]
+
+    def test_clean_remote_single_config_releases_workstation_slot_after_success(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": 1,
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已清理 meshing 步骤的文件" in message
+        assert daemon.runner.clean_calls == [("meshing", 1)]
+        assert daemon.scheduler.workstation_slots.released_configs == [1]
+        assert daemon.scheduler.workstation_slots.clear_count == 0
+
+    def test_stop_step_stops_only_tracked_remote_task_and_marks_error(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            remote_tasks=[{
+                "config_name": 5,
+                "step_name": "solver",
+                "workstation_id": "WS-C",
+            }],
+            statuses={5: {"solver": STATUS_RUNNING}},
+        )
+        daemon.runner = _CleanStepRunner({(5, "solver"): "running"})
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_stop_step({
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        })
+
+        assert ok is True
+        assert data == {
+            "config_name": 5,
+            "step_name": "solver",
+            "workstation_id": "WS-C",
+            "stopped": True,
+        }
+        assert "已停止构型5的 solver 远程任务" in message
+        assert daemon.runner.remote_executor.stopped_steps == [
+            (5, "solver", "WS-C", "license startup stuck")
+        ]
+        assert daemon.state.step_status_calls == [
+            (5, "solver", STATUS_ERROR, "license startup stuck")
+        ]
+        assert daemon.state.get_step_status(5, "solver") == STATUS_ERROR
+
+    def test_stop_step_does_not_mark_error_when_remote_stop_fails(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState(
+            engine_status="paused",
+            remote_tasks=[{
+                "config_name": 5,
+                "step_name": "solver",
+                "workstation_id": "WS-C",
+            }],
+            statuses={5: {"solver": STATUS_RUNNING}},
+        )
+        daemon.runner = _CleanStepRunner({(5, "solver"): "running"})
+        daemon.runner.remote_executor.stop_result = False
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_stop_step({
+            "config_name": 5,
+            "step_name": "solver",
+            "reason": "license startup stuck",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "停止构型5的 solver 远程任务失败" in message
+        assert daemon.state.step_status_calls == []
+        assert daemon.state.get_step_status(5, "solver") == STATUS_RUNNING
+
+    def test_clean_remote_all_configs_clears_workstation_slots_after_success(self, monkeypatch):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_clean_step({
+            "step_name": "meshing",
+            "config_name": "all",
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert daemon.runner.clean_calls == [("meshing", "all")]
+        assert daemon.scheduler.workstation_slots.released_configs == []
+        assert daemon.scheduler.workstation_slots.clear_count == 1
+
+    def test_background_remote_clean_failure_does_not_release_workstation_slots(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        from engine import daemon as daemon_module
+        from engine.daemon import PipelineDaemon
+
+        class _ImmediateThread:
+            def __init__(self, target, daemon, name):
+                self._target = target
+
+            def start(self):
+                self._target()
+
+        monkeypatch.setattr(daemon_module.threading, "Thread", _ImmediateThread)
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.state = _DaemonState()
+        daemon.runner = _CleanStepRunner()
+        daemon.runner.raise_on_clean = True
+        daemon.scheduler = _CleanStepScheduler()
+
+        with caplog.at_level(logging.ERROR):
+            ok, data, message = daemon.handle_clean_step({
+                "step_name": "meshing",
+                "config_name": "all",
+            })
+
+        assert ok is True
+        assert data is None
+        assert "已启动后台清理 meshing 步骤的文件" in message
+        assert daemon.scheduler.workstation_slots.released_configs == []
+        assert daemon.scheduler.workstation_slots.clear_count == 0
 
 
 class TestPipelineDaemonResetStep:
@@ -3092,6 +4390,57 @@ class TestPipelineDaemonResetStep:
         assert "已重置构型1的solver 及后续步骤" in message
         assert daemon.scheduler.reset_calls == [(1, "solver")]
 
+    def test_reset_rejects_invalid_config_name_before_scheduler_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": "abc",
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_rejects_bool_config_name_before_scheduler_call(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": True,
+            "step_name": "sw",
+        })
+
+        assert ok is False
+        assert data is None
+        assert "无效构型名称" in message
+        assert daemon.scheduler.reset_calls == []
+
+    def test_reset_accepts_numeric_config_name_string(self):
+        from engine.daemon import PipelineDaemon
+
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = _CleanStepRunner()
+        daemon.scheduler = _CleanStepScheduler()
+
+        ok, data, message = daemon.handle_reset_step({
+            "config_name": "1",
+            "step_name": "sw",
+        })
+
+        assert ok is True
+        assert data is None
+        assert "已重置构型1的sw 及后续步骤" in message
+        assert daemon.scheduler.reset_calls == [(1, "sw")]
+
 
 # ====================================================================
 # BarrierCoordinator 测试
@@ -3103,8 +4452,11 @@ class TestBarrierCoordinator:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="barrier_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
+        import engine.scheduler.barrier as barrier_module
+        self._barrier_module = barrier_module
+        self._mp.setattr(barrier_module, "WORKSTATIONS", [{"id": DEFAULT_WORKSTATION_ID}])
 
         self.state = StateManager(db_path=self.db_path)
         self.runner = _MockTaskRunner(self.state)
@@ -3126,13 +4478,68 @@ class TestBarrierCoordinator:
         )
 
     def teardown_method(self):
-        # ★ 先停止所有后台线程再清理数据库，避免 SolverDispatcher 线程
-        #   在 teardown 删除 DB 后仍尝试访问 sqlite 文件。
         self.stopped.set()
         self.coordinator.join_solver_threads(timeout=5)
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _use_multi_workstation_barrier(self) -> None:
+        """Rebuild the coordinator with explicit multi-workstation test config."""
+        self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = [{"id": "WS-A"}, {"id": "WS-B"}]
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
+        )
+
+    def _use_three_workstation_barrier(self) -> None:
+        """Rebuild the coordinator with the production-style three workstation set."""
+        self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+            {"id": "WS-C"},
+            {"id": DEFAULT_WORKSTATION_ID},
+        ]
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
+        )
+
+    def _use_four_workstation_barrier(self) -> None:
+        """Rebuild the coordinator with a production-style four workstation set."""
+        self.coordinator.join_solver_threads(timeout=5)
+        self._barrier_module.WORKSTATIONS = [
+            {"id": "WS-A"},
+            {"id": "WS-B"},
+            {"id": "WS-C"},
+            {"id": "WS-D"},
+            {"id": DEFAULT_WORKSTATION_ID},
+        ]
+        from engine.scheduler.barrier import BarrierCoordinator
+        self.coordinator = BarrierCoordinator(
+            state_manager=self.state,
+            task_runner=self.runner,
+            paused_event=self.paused,
+            stopped_event=self.stopped,
+            barrier_passed_event=self.barrier_passed,
+            retry_manager=self.retry_mgr,
+            on_solver_terminal=self.solver_terminal_outcomes.append,
+        )
 
     def test_barrier_passes_when_all_meshing_completed(self):
         """所有构型 Meshing Completed → 屏障通过。"""
@@ -3169,6 +4576,50 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
         assert self.state.get_step_status(2, "solver") == STATUS_WAITING
 
+    def test_monitor_loop_uses_batch_status_counts_for_large_config_set(self, monkeypatch):
+        """大批量构型屏障监控不应每轮逐构型查询 SW/Meshing 状态。"""
+        configs = {
+            config_name: [1.0, 2.0, 3.0, 4.0]
+            for config_name in range(1, 121)
+        }
+        self.state.load_configs(configs)
+        for config_name in configs:
+            self.state.set_step_status(config_name, "sw", STATUS_COMPLETED)
+
+        class CountingState:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+                self.get_step_status_calls = 0
+                self.get_step_status_counts_calls = 0
+
+            def __getattr__(self, name):
+                return getattr(self.wrapped, name)
+
+            def get_step_status(self, config_name, step_name):
+                self.get_step_status_calls += 1
+                return self.wrapped.get_step_status(config_name, step_name)
+
+            def get_step_status_counts(self, step_name):
+                self.get_step_status_counts_calls += 1
+                return self.wrapped.get_step_status_counts(step_name)
+
+        counting_state = CountingState(self.state)
+        self.coordinator.state = counting_state
+
+        def stop_after_one_sleep(_seconds, _paused, stopped):
+            stopped.set()
+            return False
+
+        monkeypatch.setattr(
+            "engine.scheduler.barrier.pause_aware_sleep",
+            stop_after_one_sleep,
+        )
+
+        self.coordinator.monitor_loop()
+
+        assert counting_state.get_step_status_counts_calls >= 2
+        assert counting_state.get_step_status_calls < 20
+
     def test_meshing_error_on_one_workstation_does_not_block_ready_workstation_solver(self):
         """某工作站 Meshing 失败时，不应阻断其他已通过工作站的 Solver。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
@@ -3193,6 +4644,31 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(2, "solver") == STATUS_WAITING
         assert not self.stopped.is_set()
         assert not t.is_alive()
+
+    def test_idle_workstation_does_not_steal_solver_from_other_workstations(self):
+        """Solver 不应跨工作站接手其他站点生成的 Meshing 产物。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-C")
+        for cn in (1, 2, 3):
+            self.state.set_step_status(cn, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "solver", STATUS_COMPLETED)
+        self.state.set_step_status(2, "postprocess", STATUS_COMPLETED)
+
+        assert self.coordinator._next_solver_config({"WS-B"}) is None
+
+        started = self.coordinator._dispatch_solver_tasks({"WS-B"})
+
+        assert started is False
+        assert self.runner._solver_dispatched == []
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+        assert self.state.get_step_status(3, "solver") == STATUS_WAITING
 
     def test_barrier_waits_when_paused(self):
         """暂停期间屏障监控等待，恢复后继续。"""
@@ -3292,6 +4768,28 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
 
+    def test_solver_wait_failure_uses_runner_error_message(self):
+        """Solver 等待失败时应保留远端错误摘要，而不是统一写成超时。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+        self.runner.last_solver_error = "BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        errors = {
+            (config_name, step_name): error_message
+            for config_name, step_name, error_message in self.state.get_error_configs()
+        }
+        assert (
+            errors[(1, "solver")]
+            == "BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES"
+        )
+
     def test_workstation_barrier_dispatches_only_ready_workstation(self):
         """单个工作站 Meshing 完成后，应只分发该工作站的 Solver。"""
         self.state.load_configs({
@@ -3318,6 +4816,177 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(3, "solver") == STATUS_COMPLETED
         assert self.state.is_global_barrier_met() is False
         assert self.runner._sc_cleanup_called is False
+
+    def test_ready_workstations_start_solver_dispatchers_in_parallel(self):
+        """多个工作站屏障通过后，应为各工作站并行启动 Solver。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for config_name, workstation_id in {
+            1: "WS-A",
+            2: "WS-B",
+            3: "WS-C",
+        }.items():
+            self.state.set_config_workstation(config_name, workstation_id)
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(config_name, step, STATUS_COMPLETED)
+            self.state.set_step_status(config_name, "solver", STATUS_WAITING)
+
+        started = threading.Event()
+        release = threading.Event()
+        active: set[int] = set()
+        max_active = 0
+        active_lock = threading.Lock()
+        execution_order: list[int] = []
+
+        def execute_solver(config_name: int) -> bool:
+            nonlocal max_active
+            with active_lock:
+                active.add(config_name)
+                execution_order.append(config_name)
+                max_active = max(max_active, len(active))
+                if len(active) == 3:
+                    started.set()
+            release.wait(timeout=5)
+            with active_lock:
+                active.discard(config_name)
+            return _MockTaskRunner.execute_solver(self.runner, config_name)
+
+        self.runner.execute_solver = execute_solver
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        assert started.wait(timeout=2), execution_order
+        release.set()
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert max_active == 3
+        assert sorted(self.runner._solver_dispatched) == [1, 2, 3]
+
+    def test_unassigned_configs_block_workstation_barrier_dispatch(self):
+        """仍有 default/Waiting 构型时，真实工作站屏障不应提前放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is False
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert self.coordinator._workstation_barriers_passed == set()
+        assert self.state.get_step_status(1, "solver") == STATUS_WAITING
+
+    def test_workstation_barrier_dispatches_after_assignment_domain_closes(self):
+        """全部构型已 claim 后，只放行 Meshing 完成的工作站。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-A")
+        for cn in (1, 2, 3):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+        self.state.set_step_status(3, "meshing", STATUS_COMPLETED)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 3]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_default_group_is_not_ready_workstation_in_multi_workstation_mode(self):
+        """多工作站模式下 default 组不应作为独立工作站屏障放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(2, "WS-A")
+        for cn in (1, 2):
+            for step in ("sw", "sc", "transfer"):
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is False
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == []
+        assert DEFAULT_WORKSTATION_ID not in self.coordinator._workstation_barriers_passed
+
+    def test_upstream_failed_unassigned_config_does_not_block_ready_workstation_barrier(self):
+        """上游已失败的 default 构型不应阻塞已完成工作站的 Solver 放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ("sw", "sc", "transfer", "meshing"):
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sc", STATUS_ERROR, "SC 失败")
+        self.state.set_step_status(2, "transfer", STATUS_WAITING)
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_transfer_failed_unassigned_config_does_not_block_ready_workstation_barrier(self):
+        """Transfer 已失败的 default 构型不应阻塞已完成工作站的 Solver 放行。"""
+        self._use_multi_workstation_barrier()
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ("sw", "sc", "transfer", "meshing"):
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(2, "sc", STATUS_COMPLETED)
+        self.state.set_step_status(2, "transfer", STATUS_ERROR, "传输失败")
+        self.state.set_step_status(2, "meshing", STATUS_WAITING)
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1]
+        assert self.coordinator._workstation_barriers_passed == {"WS-A"}
+        assert self.state.get_step_status(2, "solver") == STATUS_WAITING
+
+    def test_workstation_barrier_snapshot_includes_configured_real_workstations(self):
+        """工作站屏障快照应包含真实工作站并排除 default。"""
+        self._use_four_workstation_barrier()
+        self.coordinator._workstation_barriers_passed.add("WS-A")
+        self.coordinator._workstation_barriers_passed.add("WS-D")
+
+        assert self.coordinator.workstation_barrier_snapshot() == {
+            "WS-A": True,
+            "WS-B": False,
+            "WS-C": False,
+            "WS-D": True,
+        }
 
     def test_all_postprocess_completed_reports_completed_terminal(self):
         """全部 PostProcess Completed 后应报告自然完成终态。"""
@@ -3408,6 +5077,45 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == [1]
         assert self.state.get_step_status(2, "postprocess") == STATUS_COMPLETED
 
+    def test_running_solver_on_same_workstation_preempts_postprocess_backlog_after_restart(self):
+        """重启恢复时同工作站 Running Solver 应先于 PostProcess backlog 恢复。"""
+        self._use_three_workstation_barrier()
+        self.state.load_configs({
+            2: [5.0, 6.0, 7.0, 8.0],
+            7: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (2, 7):
+            self.state.set_config_workstation(cn, "WS-B")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+        self.state.set_step_status(2, "solver", STATUS_COMPLETED)
+        self.state.set_step_status(2, "postprocess", STATUS_WAITING)
+        self.state.set_step_status(7, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        execution_order: list[tuple[str, int]] = []
+
+        def wait_solver_completion(config_name: int, paused_event=None, stopped_event=None) -> bool:
+            execution_order.append(("wait_solver", config_name))
+            self.runner._solver_wait_count += 1
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+            return True
+
+        def execute_postprocess(config_name: int) -> bool:
+            execution_order.append(("postprocess", config_name))
+            return _MockTaskRunner.execute_postprocess(self.runner, config_name)
+
+        self.runner.wait_solver_completion = wait_solver_completion
+        self.runner.execute_postprocess = execute_postprocess
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert execution_order[:2] == [
+            ("wait_solver", 7),
+            ("postprocess", 2),
+        ]
+
     def test_all_postprocess_backlog_runs_before_new_solver(self):
         """多个 PostProcess backlog 应全部完成后才启动后续 Solver。"""
         self.state.load_configs({
@@ -3476,12 +5184,108 @@ class TestBarrierCoordinator:
         assert self.runner._postprocess_dispatched == []
         assert self.solver_terminal_outcomes == ["failed"]
 
+    def test_consecutive_solver_failures_quarantine_workstation(self, monkeypatch):
+        """同一工作站连续 Solver 失败应进入隔离，避免继续派发。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 2]
+        assert self.state.get_step_status(3, "solver") == STATUS_WAITING
+        assert self.coordinator.solver_quarantine_snapshot()["WS-A"]["remaining_seconds"] == 1800
+
+    def test_solver_quarantine_survives_coordinator_restart(self, monkeypatch):
+        """Daemon 重启后仍应保留工作站隔离状态，避免立即继续派发。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        self.runner._solver_wait_result = False
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+        self._use_multi_workstation_barrier()
+
+        assert self.coordinator.solver_quarantine_snapshot()["WS-A"]["remaining_seconds"] == 1800
+        assert self.coordinator._next_solver_config({"WS-A"}) is None
+
+    def test_successful_solver_resets_workstation_failure_count(self, monkeypatch):
+        """一次成功的 Solver 应清除同工作站连续失败计数。"""
+        self._use_multi_workstation_barrier()
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_max_consecutive_failures", 2)
+        monkeypatch.setitem(ENGINE_CONFIG, "solver_workstation_quarantine_minutes", 30)
+        monkeypatch.setattr(self._barrier_module.time, "time", lambda: 1_000.0)
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        for cn in (1, 2, 3):
+            self.state.set_config_workstation(cn, "WS-A")
+            for step in ["sw", "sc", "transfer", "meshing"]:
+                self.state.set_step_status(cn, step, STATUS_COMPLETED)
+            self.state.set_step_status(cn, "solver", STATUS_WAITING)
+        outcomes = iter([False, True, False])
+
+        def wait_solver_completion(config_name: int, paused_event=None, stopped_event=None) -> bool:
+            self.runner._solver_wait_count += 1
+            return next(outcomes)
+
+        self.runner.wait_solver_completion = wait_solver_completion
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._solver_dispatched == [1, 2, 3]
+        assert self.coordinator.solver_quarantine_snapshot() == {}
+
     def test_running_solver_with_remote_task_recovers_wait_without_restart(self):
         """Daemon 重启后远程 Solver 仍运行时应恢复等待，不重复启动。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._remote_task_status = "running"
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
+        assert self.runner._solver_dispatched == []
+        assert self.runner._solver_wait_count == 1
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+
+    def test_paused_solver_with_remote_task_recovers_wait_without_restart(self):
+        """Daemon 停止落库 Paused 后，远程 Solver 仍运行时应恢复轮询。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_PAUSED)
         self.runner._remote_executor._remote_task_status = "running"
 
         assert self.coordinator.dispatch_solver_if_ready() is True
@@ -3542,7 +5346,7 @@ class TestBarrierCoordinator:
         )
 
     def test_running_solver_unknown_remote_state_does_not_restart(self):
-        """远程 Solver 状态未知时保守保持 Running，不重复启动。"""
+        """远程 Solver 状态未知时标记 UnknownRemote，不重复启动。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -3554,11 +5358,11 @@ class TestBarrierCoordinator:
 
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 0
-        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.state.get_step_status(1, "solver") == STATUS_UNKNOWN_REMOTE
 
     def test_running_solver_unknown_remote_state_errors_after_retry_budget(self, monkeypatch):
         """远程 unknown 达到重试上限后应标 Error，避免调度循环永久空转。"""
-        monkeypatch.setitem(ENGINE_CONFIG, "max_retries", 1)
+        monkeypatch.setitem(ENGINE_CONFIG, "remote_unknown_max_retries", 1)
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
         for step in ["sw", "sc", "transfer", "meshing"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
@@ -3571,6 +5375,7 @@ class TestBarrierCoordinator:
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 0
         assert self.state.get_step_status(1, "solver") == STATUS_ERROR
+        assert self.runner._remote_executor._kill_remote_task_calls == [(1, "solver", "default")]
         assert self.solver_terminal_outcomes == ["failed"]
 
     def test_running_solver_lost_remote_task_restarts_once_and_forgets_task(self):
@@ -3619,7 +5424,6 @@ class TestBarrierCoordinator:
 
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
 
-
 # ====================================================================
 # MeshingMonitor 测试
 # ====================================================================
@@ -3630,8 +5434,8 @@ class TestMeshingMonitor:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp(prefix="meshing_test_")
         self.db_path = os.path.join(self.tmpdir, "test.db")
-        self._orig_db_path = IPC_CONFIG["db_path"]
-        IPC_CONFIG["db_path"] = self.db_path
+        self._mp = pytest.MonkeyPatch()
+        self._mp.setitem(IPC_CONFIG, "db_path", self.db_path)
 
         self.state = StateManager(db_path=self.db_path)
         self.remote = _MockRemoteExecutor(self.state)
@@ -3648,7 +5452,8 @@ class TestMeshingMonitor:
 
     def teardown_method(self):
         self.stopped.set()
-        IPC_CONFIG["db_path"] = self._orig_db_path
+        if hasattr(self, "_mp"):
+            self._mp.undo()
         if os.path.exists(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -3743,6 +5548,159 @@ class TestMeshingMonitor:
         assert status == STATUS_COMPLETED, (
             f"队列中的构型应已被处理为 Completed，实际状态: {status}"
         )
+
+    def test_monitor_loop_backs_off_when_workstation_slot_busy(self, monkeypatch):
+        """工作站槽位繁忙时应退避，避免百构型队列 0.2 秒自旋。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.monitor.submit(1)
+        sleeps: list[float] = []
+
+        def fake_pause_aware_sleep(seconds, paused, stopped):
+            sleeps.append(seconds)
+            stopped.set()
+            return False
+
+        monkeypatch.setattr(
+            "engine.scheduler.meshing_monitor.pause_aware_sleep",
+            fake_pause_aware_sleep,
+        )
+        monkeypatch.setattr(self.monitor, "_try_start_worker", lambda *_args: False)
+
+        self.monitor._monitor_loop()
+
+        assert sleeps
+        assert max(sleeps) >= 1.0
+
+    def test_monitor_processes_different_workstations_concurrently(self):
+        """不同工作站各有一个 Meshing 槽位，应能同时处理。"""
+        self.state.load_configs({
+            1: [1.0, 2.0, 3.0, 4.0],
+            2: [5.0, 6.0, 7.0, 8.0],
+            3: [9.0, 10.0, 11.0, 12.0],
+        })
+        self.state.set_config_workstation(1, "WS-A")
+        self.state.set_config_workstation(2, "WS-B")
+        self.state.set_config_workstation(3, "WS-C")
+
+        entered: list[int] = []
+        entered_lock = threading.Lock()
+        all_entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_process(config_name: int) -> bool:
+            with entered_lock:
+                entered.append(config_name)
+                if len(entered) == 3:
+                    all_entered.set()
+            assert release.wait(timeout=2), "test did not release workers"
+            return False
+
+        self.monitor._process_single_meshing = _blocking_process
+        self.monitor.submit(1)
+        self.monitor.submit(2)
+        self.monitor.submit(3)
+
+        self.monitor.start_if_needed()
+
+        try:
+            assert all_entered.wait(timeout=1), entered
+            assert self.monitor.is_config_in_flight(1) is True
+            assert self.monitor.is_config_in_flight(2) is True
+            assert self.monitor.is_config_in_flight(3) is True
+        finally:
+            release.set()
+            self.stopped.set()
+
+        assert sorted(entered) == [1, 2, 3]
+
+    def test_terminal_meshing_worker_releases_workstation_slot(self):
+        """Meshing 终结后应释放工作站槽位，允许后续 Transfer 上传。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.monitor._workstation_slots = slots
+        assert slots.claim(1) == "WS-A"
+        self.monitor.submit(1)
+        assert self.monitor._meshing_queue.get_nowait() == 1
+        self.monitor._process_single_meshing = lambda _config_name: False
+
+        self.monitor._process_worker(1, "WS-A")
+
+        assert slots.busy_workstations() == {}
+
+    def test_requeued_meshing_worker_keeps_workstation_slot(self):
+        """需要重试/未知状态的 Meshing 仍应占用原工作站槽位。"""
+        from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
+
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        slots = WorkstationSlotCoordinator(self.state, ["WS-A"])
+        self.monitor._workstation_slots = slots
+        assert slots.claim(1) == "WS-A"
+        self.monitor.submit(1)
+        assert self.monitor._meshing_queue.get_nowait() == 1
+        self.monitor._process_single_meshing = lambda _config_name: True
+
+        self.monitor._process_worker(1, "WS-A")
+
+        assert slots.busy_workstations() == {"WS-A": 1}
+        assert self.monitor.qsize() == 1
+
+    def test_stale_meshing_completion_after_reset_does_not_dispatch_solver(self):
+        """reset 期间完成的旧 Meshing 结果不应触发下游 Solver 分发。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_step_status(1, "transfer", STATUS_COMPLETED)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
+        self.remote._meshing_wait_result = True
+        generation = {"value": 0}
+        dispatched: list[int] = []
+        original_set_step_status = self.state.set_step_status
+
+        def get_reset_generation(config_name: int, step_name: str) -> int:
+            assert config_name == 1
+            assert step_name == "meshing"
+            return generation["value"]
+
+        def reset_before_completion(config_name: int, step_name: str, status: str, msg: str | None = None) -> None:
+            assert config_name == 1
+            assert step_name == "meshing"
+            assert status == STATUS_COMPLETED
+            generation["value"] += 1
+            self.state.reset_config_steps(1, "meshing")
+            original_set_step_status(config_name, step_name, status, msg)
+
+        self.monitor._get_reset_generation = get_reset_generation
+        self.monitor._on_meshing_completed = lambda config_name: dispatched.append(config_name)
+        self.state.set_step_status = reset_before_completion
+
+        self.monitor._process_single_meshing(1)
+
+        assert dispatched == []
+        assert self.state.get_step_status(1, "meshing") == STATUS_WAITING
+
+    def test_wait_failure_preserves_remote_error_summary(self):
+        """远程 Meshing 失败摘要应写入状态，供 TUI/日志定位真实原因。"""
+        self.state.load_configs({3: [9.0, 10.0, 11.0, 12.0]})
+        self.state.set_config_workstation(3, "WS-C")
+        self.remote.last_meshing_error = "FileNotFoundError: MPI bin 目录不存在"
+
+        def fail_wait(
+            config_name: int,
+            paused_event=None,
+            stopped_event=None,
+            workstation_id: str = "default",
+        ) -> bool:
+            self.remote._meshing_waits.append((config_name, workstation_id))
+            return False
+
+        self.remote.wait_meshing_completion = fail_wait
+
+        self.monitor._wait_for_meshing_completion(3)
+
+        step = self.state.get_all_steps_for_config(3)["meshing"]
+        assert step["status"] == STATUS_ERROR
+        assert step["error_message"] == "FileNotFoundError: MPI bin 目录不存在"
+        assert self.remote._meshing_waits == [(3, "WS-C")]
 
     def test_monitor_paused_waits(self):
         """暂停期间监控循环等待。"""

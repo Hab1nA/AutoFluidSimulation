@@ -69,6 +69,21 @@ class LocalWorkerAdapter:
             timeout_seconds,
         )
 
+    def ensure_workstation_tunnel(
+        self,
+        workstation_id: str,
+        timeout_seconds: float = 180.0,
+    ) -> dict[str, Any]:
+        """Delegate workstation reverse-tunnel repair to a LocalWorker."""
+        result = self._execute_for_result(
+            "workstation_tunnel_ensure",
+            {"workstation_id": workstation_id},
+            timeout_seconds,
+        )
+        if result is None:
+            return {"ok": False, "error": self.last_error or "LocalWorker 任务失败"}
+        return dict(result)
+
     def has_active_task(
         self,
         step: str,

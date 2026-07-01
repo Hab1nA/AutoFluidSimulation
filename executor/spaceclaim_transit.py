@@ -24,7 +24,6 @@
 # ============================================================================
 import os
 import sys
-import io
 import codecs
 import json
 import time

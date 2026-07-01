@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::settings::validation::{validate_config, ValidationError};
 use crate::text_buffer::TextBuffer;
 
+pub const DEFAULT_FLUENT_PATH: &str =
+    r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalPaths {
     pub sw_exe: String,
@@ -18,11 +21,12 @@ pub struct LocalPaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RemoteConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    #[serde(skip_serializing, default)]
+    #[serde(skip, default)]
     pub password: String,
     pub working_dir: String,
     pub scripts_dir: String,
@@ -35,7 +39,118 @@ pub struct RemoteConfig {
     pub flag_dir: String,
     pub conda_env: String,
     pub conda_exe: String,
+    #[serde(default)]
+    pub fluent_path: String,
     pub mpi_bin_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkstationConfig {
+    pub id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_method: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_filename: String,
+    #[serde(skip, default)]
+    pub password: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reachable_host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub connectivity_mode: String,
+    pub working_dir: String,
+    pub scripts_dir: String,
+    pub ref_files_dir: String,
+    pub scdoc_dir: String,
+    pub msh_dir: String,
+    pub result_dir: String,
+    #[serde(default)]
+    pub animation_dir: String,
+    pub flag_dir: String,
+    pub conda_env: String,
+    pub conda_exe: String,
+    #[serde(default)]
+    pub fluent_path: String,
+    pub mpi_bin_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_output_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_animation_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub postprocess_metrics_dir: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
+}
+
+impl Default for WorkstationConfig {
+    fn default() -> Self {
+        let remote = RemoteConfig::default();
+        Self {
+            id: "WS-A".to_string(),
+            host: remote.host,
+            port: remote.port,
+            username: remote.username,
+            auth_method: String::new(),
+            key_filename: String::new(),
+            password: remote.password,
+            reachable_host: String::new(),
+            reachable_port: None,
+            connectivity_mode: String::new(),
+            working_dir: remote.working_dir,
+            scripts_dir: remote.scripts_dir,
+            ref_files_dir: remote.ref_files_dir,
+            scdoc_dir: remote.scdoc_dir,
+            msh_dir: remote.msh_dir,
+            result_dir: remote.result_dir,
+            animation_dir: remote.animation_dir,
+            flag_dir: remote.flag_dir,
+            conda_env: remote.conda_env,
+            conda_exe: remote.conda_exe,
+            fluent_path: remote.fluent_path,
+            mpi_bin_dir: remote.mpi_bin_dir,
+            postprocess_output_dir: String::new(),
+            postprocess_animation_dir: String::new(),
+            postprocess_metrics_dir: String::new(),
+            notes: String::new(),
+        }
+    }
+}
+
+impl WorkstationConfig {
+    fn from_remote_config(id: &str, remote: &RemoteConfig) -> Self {
+        Self {
+            id: id.to_string(),
+            host: remote.host.clone(),
+            port: remote.port,
+            username: remote.username.clone(),
+            auth_method: String::new(),
+            key_filename: String::new(),
+            password: remote.password.clone(),
+            reachable_host: String::new(),
+            reachable_port: None,
+            connectivity_mode: String::new(),
+            working_dir: remote.working_dir.clone(),
+            scripts_dir: remote.scripts_dir.clone(),
+            ref_files_dir: remote.ref_files_dir.clone(),
+            scdoc_dir: remote.scdoc_dir.clone(),
+            msh_dir: remote.msh_dir.clone(),
+            result_dir: remote.result_dir.clone(),
+            animation_dir: remote.animation_dir.clone(),
+            flag_dir: remote.flag_dir.clone(),
+            conda_env: remote.conda_env.clone(),
+            conda_exe: remote.conda_exe.clone(),
+            fluent_path: remote.fluent_path.clone(),
+            mpi_bin_dir: remote.mpi_bin_dir.clone(),
+            postprocess_output_dir: String::new(),
+            postprocess_animation_dir: String::new(),
+            postprocess_metrics_dir: String::new(),
+            notes: String::new(),
+        }
+    }
 }
 
 impl Default for RemoteConfig {
@@ -55,12 +170,14 @@ impl Default for RemoteConfig {
             flag_dir: String::new(),
             conda_env: String::new(),
             conda_exe: String::new(),
+            fluent_path: DEFAULT_FLUENT_PATH.to_string(),
             mpi_bin_dir: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StepFilePatterns {
     #[serde(rename = "sw")]
     pub sw: String,
@@ -90,6 +207,7 @@ impl Default for StepFilePatterns {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SolidWorksConfig {
     pub sw_macro_timeout: u64,
     pub sw_close_doc_on_finish: bool,
@@ -111,6 +229,7 @@ impl Default for SolidWorksConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpaceClaimConfig {
     pub sc_timeout: u64,
     pub sc_poll_interval: f64,
@@ -120,6 +239,8 @@ pub struct SpaceClaimConfig {
     pub sc_max_slots: u64,
     pub sc_persistent_enabled: bool,
     pub sc_oneshot_fallback_enabled: bool,
+    pub sc_persistent_ready_timeout: u64,
+    pub sc_scdoc_stable_seconds: f64,
 }
 
 impl Default for SpaceClaimConfig {
@@ -133,11 +254,14 @@ impl Default for SpaceClaimConfig {
             sc_max_slots: 1,
             sc_persistent_enabled: true,
             sc_oneshot_fallback_enabled: true,
+            sc_persistent_ready_timeout: 180,
+            sc_scdoc_stable_seconds: 3.0,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MeshingConfig {
     pub meshing_timeout: u64,
     pub meshing_processor_count: u32,
@@ -146,13 +270,14 @@ pub struct MeshingConfig {
 impl Default for MeshingConfig {
     fn default() -> Self {
         Self {
-            meshing_timeout: 600,
+            meshing_timeout: 7200,
             meshing_processor_count: 8,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SolverConfig {
     pub solver_timeout: u64,
     pub solver_processor_count: u32,
@@ -162,7 +287,7 @@ pub struct SolverConfig {
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
-            solver_timeout: 7200,
+            solver_timeout: 14400,
             solver_processor_count: 128,
             solver_iteration_count: 1000,
         }
@@ -170,6 +295,7 @@ impl Default for SolverConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PostProcessConfig {
     pub postprocess_timeout: u64,
     pub output_dir: String,
@@ -193,6 +319,7 @@ impl Default for PostProcessConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GlobalSettings {
     pub watchdog_interval: f64,
     pub transfer_timeout: u64,
@@ -201,6 +328,8 @@ pub struct GlobalSettings {
     pub ssh_connection: u64,
     pub dir_recursion_limit: u32,
     pub ssh_upload_max_retries: u32,
+    pub log_max_bytes: u64,
+    pub log_backup_count: u32,
 }
 
 impl Default for GlobalSettings {
@@ -213,6 +342,46 @@ impl Default for GlobalSettings {
             ssh_connection: 10,
             dir_recursion_limit: 32,
             ssh_upload_max_retries: 3,
+            log_max_bytes: 20 * 1024 * 1024,
+            log_backup_count: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IpcConfig {
+    // Keep Python IPC config round-trippable. The Rust client still takes its
+    // live endpoint from launcher environment variables.
+    pub host: String,
+    pub port: u16,
+    pub timeout: f64,
+    pub max_connections: u32,
+    pub auth_token: String,
+}
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 9527,
+            timeout: 5.0,
+            max_connections: 10,
+            auth_token: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    pub project_dir: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            project_dir: "/root/AutoFluidSimulation".to_string(),
         }
     }
 }
@@ -223,6 +392,8 @@ pub struct SettingsConfig {
     pub local_paths: LocalPaths,
     #[serde(default)]
     pub remote_config: RemoteConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workstations: Vec<WorkstationConfig>,
     #[serde(default)]
     pub step_file_patterns: StepFilePatterns,
     #[serde(default)]
@@ -237,6 +408,24 @@ pub struct SettingsConfig {
     pub postprocess: PostProcessConfig,
     #[serde(default)]
     pub global_settings: GlobalSettings,
+    #[serde(default)]
+    pub ipc_config: IpcConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
+}
+
+impl SettingsConfig {
+    pub fn apply_derived_defaults(&mut self) {
+        if self.remote_config.fluent_path.trim().is_empty() {
+            self.remote_config.fluent_path = DEFAULT_FLUENT_PATH.to_string();
+        }
+
+        for workstation in &mut self.workstations {
+            if workstation.fluent_path.trim().is_empty() {
+                workstation.fluent_path = self.remote_config.fluent_path.clone();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,14 +475,14 @@ impl SettingCategory {
         match self {
             SettingCategory::LocalPaths => 6,
             SettingCategory::RemoteConnection => 4,
-            SettingCategory::RemoteDirs => 10,
+            SettingCategory::RemoteDirs => 11,
             SettingCategory::StepPatterns => 6,
             SettingCategory::SolidWorks => 5,
-            SettingCategory::SpaceClaim => 8,
+            SettingCategory::SpaceClaim => 10,
             SettingCategory::Meshing => 2,
             SettingCategory::Solver => 3,
             SettingCategory::PostProcess => 4,
-            SettingCategory::GlobalSettings => 7,
+            SettingCategory::GlobalSettings => 9,
         }
     }
 
@@ -326,6 +515,7 @@ impl SettingCategory {
                 7 => "conda_env",
                 8 => "conda_exe",
                 9 => "mpi_bin_dir",
+                10 => "fluent_path",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -354,6 +544,8 @@ impl SettingCategory {
                 5 => "sc_max_slots",
                 6 => "sc_persistent_enabled",
                 7 => "sc_oneshot_fallback_enabled",
+                8 => "sc_persistent_ready_timeout",
+                9 => "sc_scdoc_stable_seconds",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -382,6 +574,8 @@ impl SettingCategory {
                 4 => "max_retries",
                 5 => "ssh_upload_max_retries",
                 6 => "dir_recursion_limit",
+                7 => "log_max_bytes",
+                8 => "log_backup_count",
                 _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
@@ -416,6 +610,7 @@ impl SettingCategory {
                 7 => "Conda环境名",
                 8 => "Conda可执行文件",
                 9 => "MPI安装目录",
+                10 => "Fluent可执行文件",
                 _ => panic!("RemoteDirs: invalid field index {idx}"),
             },
             SettingCategory::StepPatterns => match idx {
@@ -444,6 +639,8 @@ impl SettingCategory {
                 5 => "常驻槽位数",
                 6 => "启用常驻Bridge",
                 7 => "失败回退一次性Bridge",
+                8 => "常驻就绪超时(秒)",
+                9 => "SCDOC稳定等待(秒)",
                 _ => panic!("SpaceClaim: invalid field index {idx}"),
             },
             SettingCategory::Meshing => match idx {
@@ -472,6 +669,8 @@ impl SettingCategory {
                 4 => "最大重试",
                 5 => "SSH上传最大重试",
                 6 => "目录递归深度限制",
+                7 => "日志大小上限",
+                8 => "日志备份数量",
                 _ => panic!("GlobalSettings: invalid field index {idx}"),
             },
         }
@@ -512,10 +711,26 @@ impl SettingCategory {
     }
 }
 
+fn category_field_is_workstation_scoped(category: SettingCategory, idx: usize) -> bool {
+    matches!(
+        category,
+        SettingCategory::RemoteConnection | SettingCategory::RemoteDirs
+    ) || (matches!(category, SettingCategory::PostProcess) && matches!(idx, 1..=3))
+}
+
+fn non_empty_or(value: String, fallback: String) -> String {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UndoEntry {
     pub category: SettingCategory,
     pub field_index: usize,
+    pub workstation_index: Option<usize>,
     pub old_value: String,
 }
 
@@ -523,7 +738,24 @@ pub struct UndoEntry {
 pub struct SettingsFocus {
     pub category_index: usize,
     pub field_index: usize,
+    pub workstation_index: Option<usize>,
     pub editing: bool,
+}
+
+impl SettingsFocus {
+    pub fn workstation_index_or_default(&self) -> usize {
+        self.workstation_index.unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsFieldHit {
+    pub category_index: usize,
+    pub field_index: usize,
+    pub workstation_index: Option<usize>,
+    pub y: u16,
+    pub x_start: u16,
+    pub x_end: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -531,6 +763,7 @@ pub struct SettingsState {
     pub config: SettingsConfig,
     pub focus: SettingsFocus,
     pub scroll: u16,
+    pub workstation_column_offset: usize,
     pub dirty: bool,
     pub validation_errors: Vec<ValidationError>,
     /// 通用文本编辑缓冲区（光标、选区、剪贴板）。
@@ -538,16 +771,16 @@ pub struct SettingsState {
     pub undo_stack: Vec<UndoEntry>,
     pub saved: bool,
     pub save_error: Option<String>,
-    /// Mouse hover tracking: (category_index, field_index)
-    pub hovered_field: Option<(usize, usize)>,
+    /// Mouse hover tracking: (category_index, field_index, workstation_index)
+    pub hovered_field: Option<(usize, usize, Option<usize>)>,
     /// Click animation highlight (short-lived, ~20ms)
-    pub clicked_field: Option<(usize, usize)>,
+    pub clicked_field: Option<(usize, usize, Option<usize>)>,
     pub field_click_time: Option<std::time::Instant>,
     /// Double-click tracking (longer window, ~400ms)
-    pub last_clicked_field: Option<(usize, usize)>,
+    pub last_clicked_field: Option<(usize, usize, Option<usize>)>,
     pub last_click_time: Option<std::time::Instant>,
-    /// Field positions computed during rendering: (cat_idx, fi, y)
-    pub field_positions: Vec<(usize, usize, u16)>,
+    /// Field positions computed during rendering.
+    pub field_positions: Vec<SettingsFieldHit>,
     /// Path existence cache: field_name -> exists
     pub path_status: std::collections::HashMap<String, bool>,
 }
@@ -556,14 +789,35 @@ impl SettingsState {
     pub fn new() -> Self {
         let mut config = config_io::load_config().unwrap_or_default();
         // 密码始终从 .env 文件读取（TOML 中不存储密码）
-        let env_pwd = config_io::read_env_password();
-        if !env_pwd.is_empty() {
-            config.remote_config.password = env_pwd;
-        }
+        config_io::apply_env_passwords(&mut config);
         Self {
             config,
             focus: SettingsFocus::default(),
             scroll: 0,
+            workstation_column_offset: 0,
+            dirty: false,
+            validation_errors: Vec::new(),
+            buffer: TextBuffer::new(),
+            undo_stack: Vec::new(),
+            saved: false,
+            save_error: None,
+            hovered_field: None,
+            clicked_field: None,
+            field_click_time: None,
+            last_clicked_field: None,
+            last_click_time: None,
+            field_positions: Vec::new(),
+            path_status: std::collections::HashMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn default_for_tests() -> Self {
+        Self {
+            config: SettingsConfig::default(),
+            focus: SettingsFocus::default(),
+            scroll: 0,
+            workstation_column_offset: 0,
             dirty: false,
             validation_errors: Vec::new(),
             buffer: TextBuffer::new(),
@@ -587,11 +841,31 @@ impl SettingsState {
             .unwrap_or(SettingCategory::LocalPaths)
     }
 
+    pub fn set_focus(
+        &mut self,
+        category_index: usize,
+        field_index: usize,
+        workstation_index: Option<usize>,
+    ) {
+        self.focus.category_index = category_index;
+        self.focus.field_index = field_index;
+        self.focus.workstation_index = workstation_index;
+    }
+
     pub fn is_editing_field(&self) -> bool {
         self.focus.editing
     }
 
     pub fn get_field_value(&self, category: SettingCategory, idx: usize) -> String {
+        if self.focus.workstation_index.is_some()
+            && category_field_is_workstation_scoped(category, idx)
+        {
+            return self.get_workstation_field_value(
+                self.focus.workstation_index_or_default(),
+                category,
+                idx,
+            );
+        }
         macro_rules! field_val {
             ($config:expr, $field:ident) => {
                 $config.$field.to_string()
@@ -628,6 +902,7 @@ impl SettingsState {
                 7 => field_val!(self.config.remote_config, conda_env, string),
                 8 => field_val!(self.config.remote_config, conda_exe, string),
                 9 => field_val!(self.config.remote_config, mpi_bin_dir, string),
+                10 => field_val!(self.config.remote_config, fluent_path, string),
                 _ => String::new(),
             },
             SettingCategory::StepPatterns => match idx {
@@ -656,6 +931,8 @@ impl SettingsState {
                 5 => field_val!(self.config.spaceclaim, sc_max_slots),
                 6 => field_val!(self.config.spaceclaim, sc_persistent_enabled),
                 7 => field_val!(self.config.spaceclaim, sc_oneshot_fallback_enabled),
+                8 => field_val!(self.config.spaceclaim, sc_persistent_ready_timeout),
+                9 => field_val!(self.config.spaceclaim, sc_scdoc_stable_seconds),
                 _ => String::new(),
             },
             SettingCategory::Meshing => match idx {
@@ -684,12 +961,86 @@ impl SettingsState {
                 4 => field_val!(self.config.global_settings, max_retries),
                 5 => field_val!(self.config.global_settings, ssh_upload_max_retries),
                 6 => field_val!(self.config.global_settings, dir_recursion_limit),
+                7 => field_val!(self.config.global_settings, log_max_bytes),
+                8 => field_val!(self.config.global_settings, log_backup_count),
                 _ => String::new(),
             },
         }
     }
 
+    fn workstation_or_legacy(&self, workstation_index: usize) -> WorkstationConfig {
+        self.config
+            .workstations
+            .get(workstation_index)
+            .cloned()
+            .unwrap_or_else(|| {
+                WorkstationConfig::from_remote_config(
+                    if workstation_index == 0 { "WS-A" } else { "" },
+                    &self.config.remote_config,
+                )
+            })
+    }
+
+    pub fn get_workstation_field_value(
+        &self,
+        workstation_index: usize,
+        category: SettingCategory,
+        idx: usize,
+    ) -> String {
+        let workstation = self.workstation_or_legacy(workstation_index);
+        match category {
+            SettingCategory::RemoteConnection => match idx {
+                0 => workstation.host,
+                1 => workstation.port.to_string(),
+                2 => workstation.username,
+                3 => workstation.password,
+                _ => String::new(),
+            },
+            SettingCategory::RemoteDirs => match idx {
+                0 => workstation.working_dir,
+                1 => workstation.scripts_dir,
+                2 => workstation.ref_files_dir,
+                3 => workstation.scdoc_dir,
+                4 => workstation.msh_dir,
+                5 => workstation.result_dir,
+                6 => workstation.flag_dir,
+                7 => workstation.conda_env,
+                8 => workstation.conda_exe,
+                9 => workstation.mpi_bin_dir,
+                10 => workstation.fluent_path,
+                _ => String::new(),
+            },
+            SettingCategory::PostProcess => match idx {
+                1 => non_empty_or(
+                    workstation.postprocess_output_dir,
+                    self.config.postprocess.output_dir.clone(),
+                ),
+                2 => non_empty_or(
+                    workstation.postprocess_animation_dir,
+                    self.config.postprocess.animation_dir.clone(),
+                ),
+                3 => non_empty_or(
+                    workstation.postprocess_metrics_dir,
+                    self.config.postprocess.metrics_dir.clone(),
+                ),
+                _ => self.get_field_value(category, idx),
+            },
+            _ => self.get_field_value(category, idx),
+        }
+    }
+
     pub fn set_field_value(&mut self, category: SettingCategory, idx: usize, value: &str) {
+        if self.focus.workstation_index.is_some()
+            && category_field_is_workstation_scoped(category, idx)
+        {
+            self.set_workstation_field_value(
+                self.focus.workstation_index_or_default(),
+                category,
+                idx,
+                value,
+            );
+            return;
+        }
         match category {
             SettingCategory::LocalPaths => match idx {
                 0 => self.config.local_paths.sw_exe = value.to_string(),
@@ -722,6 +1073,7 @@ impl SettingsState {
                 7 => self.config.remote_config.conda_env = value.to_string(),
                 8 => self.config.remote_config.conda_exe = value.to_string(),
                 9 => self.config.remote_config.mpi_bin_dir = value.to_string(),
+                10 => self.config.remote_config.fluent_path = value.to_string(),
                 _ => {}
             },
             SettingCategory::StepPatterns => match idx {
@@ -792,6 +1144,16 @@ impl SettingsState {
                 7 => {
                     self.config.spaceclaim.sc_oneshot_fallback_enabled =
                         value == "true" || value == "是"
+                }
+                8 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.spaceclaim.sc_persistent_ready_timeout = v;
+                    }
+                }
+                9 => {
+                    if let Ok(v) = value.parse::<f64>() {
+                        self.config.spaceclaim.sc_scdoc_stable_seconds = v;
+                    }
                 }
                 _ => {}
             },
@@ -873,8 +1235,78 @@ impl SettingsState {
                         self.config.global_settings.dir_recursion_limit = v;
                     }
                 }
+                7 => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.global_settings.log_max_bytes = v;
+                    }
+                }
+                8 => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.global_settings.log_backup_count = v;
+                    }
+                }
                 _ => {}
             },
+        }
+        self.dirty = true;
+    }
+
+    fn ensure_workstation_index(&mut self, workstation_index: usize) {
+        while self.config.workstations.len() <= workstation_index {
+            let id = default_workstation_id(self.config.workstations.len());
+            self.config
+                .workstations
+                .push(WorkstationConfig::from_remote_config(
+                    &id,
+                    &self.config.remote_config,
+                ));
+        }
+    }
+
+    pub fn set_workstation_field_value(
+        &mut self,
+        workstation_index: usize,
+        category: SettingCategory,
+        idx: usize,
+        value: &str,
+    ) {
+        self.ensure_workstation_index(workstation_index);
+        let Some(workstation) = self.config.workstations.get_mut(workstation_index) else {
+            return;
+        };
+        match category {
+            SettingCategory::RemoteConnection => match idx {
+                0 => workstation.host = value.to_string(),
+                1 => {
+                    if let Ok(port) = value.parse::<u16>() {
+                        workstation.port = port;
+                    }
+                }
+                2 => workstation.username = value.to_string(),
+                3 => workstation.password = value.to_string(),
+                _ => {}
+            },
+            SettingCategory::RemoteDirs => match idx {
+                0 => workstation.working_dir = value.to_string(),
+                1 => workstation.scripts_dir = value.to_string(),
+                2 => workstation.ref_files_dir = value.to_string(),
+                3 => workstation.scdoc_dir = value.to_string(),
+                4 => workstation.msh_dir = value.to_string(),
+                5 => workstation.result_dir = value.to_string(),
+                6 => workstation.flag_dir = value.to_string(),
+                7 => workstation.conda_env = value.to_string(),
+                8 => workstation.conda_exe = value.to_string(),
+                9 => workstation.mpi_bin_dir = value.to_string(),
+                10 => workstation.fluent_path = value.to_string(),
+                _ => {}
+            },
+            SettingCategory::PostProcess => match idx {
+                1 => workstation.postprocess_output_dir = value.to_string(),
+                2 => workstation.postprocess_animation_dir = value.to_string(),
+                3 => workstation.postprocess_metrics_dir = value.to_string(),
+                _ => self.set_field_value(category, idx, value),
+            },
+            _ => self.set_field_value(category, idx, value),
         }
         self.dirty = true;
     }
@@ -885,6 +1317,7 @@ impl SettingsState {
         } else if self.focus.category_index > 0 {
             self.focus.category_index -= 1;
             self.focus.field_index = self.current_category().field_count().saturating_sub(1);
+            self.focus.workstation_index = None;
         }
     }
 
@@ -895,6 +1328,7 @@ impl SettingsState {
         } else if self.focus.category_index + 1 < SettingCategory::ALL.len() {
             self.focus.category_index += 1;
             self.focus.field_index = 0;
+            self.focus.workstation_index = None;
         }
     }
 
@@ -905,9 +1339,11 @@ impl SettingsState {
         } else if self.focus.category_index + 1 < SettingCategory::ALL.len() {
             self.focus.category_index += 1;
             self.focus.field_index = 0;
+            self.focus.workstation_index = None;
         } else {
             self.focus.category_index = 0;
             self.focus.field_index = 0;
+            self.focus.workstation_index = None;
         }
     }
 
@@ -917,12 +1353,56 @@ impl SettingsState {
         } else if self.focus.category_index > 0 {
             self.focus.category_index -= 1;
             self.focus.field_index = self.current_category().field_count().saturating_sub(1);
+            self.focus.workstation_index = None;
         } else {
             let last_idx = SettingCategory::ALL.len() - 1;
             self.focus.category_index = last_idx;
             self.focus.field_index = SettingCategory::ALL[last_idx]
                 .field_count()
                 .saturating_sub(1);
+            self.focus.workstation_index = None;
+        }
+    }
+
+    pub fn scroll_workstation_columns_left(&mut self, visible_columns: usize) {
+        self.workstation_column_offset = self.workstation_column_offset.saturating_sub(1);
+        self.keep_workstation_focus_visible(visible_columns);
+    }
+
+    pub fn scroll_workstation_columns_right(&mut self, visible_columns: usize) {
+        let visible_columns = visible_columns
+            .max(1)
+            .min(self.config.workstations.len().max(1));
+        let max_offset = self
+            .config
+            .workstations
+            .len()
+            .saturating_sub(visible_columns);
+        self.workstation_column_offset = (self.workstation_column_offset + 1).min(max_offset);
+        self.keep_workstation_focus_visible(visible_columns);
+    }
+
+    fn keep_workstation_focus_visible(&mut self, visible_columns: usize) {
+        let Some(ws_idx) = self.focus.workstation_index else {
+            return;
+        };
+        let total = self.config.workstations.len();
+        if total == 0 {
+            self.focus.workstation_index = None;
+            self.workstation_column_offset = 0;
+            return;
+        }
+
+        let visible_columns = visible_columns.max(1).min(total);
+        let max_offset = total.saturating_sub(visible_columns);
+        let start = self.workstation_column_offset.min(max_offset);
+        self.workstation_column_offset = start;
+        let end = start + visible_columns;
+
+        if ws_idx < start {
+            self.focus.workstation_index = Some(start);
+        } else if ws_idx >= end {
+            self.focus.workstation_index = Some(end.saturating_sub(1));
         }
     }
 
@@ -947,6 +1427,7 @@ impl SettingsState {
             self.undo_stack.push(UndoEntry {
                 category: cat,
                 field_index: idx,
+                workstation_index: self.focus.workstation_index,
                 old_value,
             });
             if self.undo_stack.len() > 200 {
@@ -958,7 +1439,10 @@ impl SettingsState {
         // 路径字段提交后立即检查文件/目录是否存在
         if cat.is_path_field(idx) {
             let value = self.get_field_value(cat, idx);
-            let field_name = cat.field_full_name(idx);
+            let field_name = self.focus.workstation_index.map_or_else(
+                || cat.field_full_name(idx),
+                |ws| format!("workstations[{ws}].{}", cat.field_name(idx)),
+            );
             if !value.is_empty() {
                 self.path_status
                     .insert(field_name, std::path::Path::new(&value).exists());
@@ -976,7 +1460,16 @@ impl SettingsState {
 
     pub fn undo(&mut self) {
         if let Some(entry) = self.undo_stack.pop() {
-            self.set_field_value(entry.category, entry.field_index, &entry.old_value);
+            if let Some(workstation_index) = entry.workstation_index {
+                self.set_workstation_field_value(
+                    workstation_index,
+                    entry.category,
+                    entry.field_index,
+                    &entry.old_value,
+                );
+            } else {
+                self.set_field_value(entry.category, entry.field_index, &entry.old_value);
+            }
         }
     }
 
@@ -1020,6 +1513,7 @@ impl SettingsState {
         self.undo_stack.push(UndoEntry {
             category: cat,
             field_index: idx,
+            workstation_index: self.focus.workstation_index,
             old_value: old,
         });
         self.set_field_value(cat, idx, new);
@@ -1040,8 +1534,14 @@ impl SettingsState {
                 severity: crate::settings::validation::Severity::Error,
             }]
         })?;
-        // Write password to .env (always write to allow clearing)
-        let _ = config_io::write_env_password(&self.config.remote_config.password);
+        // Write passwords to .env (always write to allow clearing).
+        config_io::write_env_passwords(&self.config).map_err(|e| {
+            vec![ValidationError {
+                field_name: ".env".to_string(),
+                message: e,
+                severity: crate::settings::validation::Severity::Error,
+            }]
+        })?;
         Ok(())
     }
 
@@ -1064,9 +1564,569 @@ impl SettingsState {
     }
 }
 
+fn default_workstation_id(index: usize) -> String {
+    if index < 26 {
+        let letter = char::from(b'A' + index as u8);
+        format!("WS-{letter}")
+    } else {
+        format!("WS-{}", index + 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        &crate::TEST_ENV_LOCK
+    }
+
+    fn unique_temp_project_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "autofluid-tui-settings-{}",
+            crate::generate_request_id()
+        ))
+    }
+
+    #[test]
+    fn settings_config_round_trips_three_workstations() {
+        let toml_text = r#"
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "toml-remote-secret"
+working_dir = 'D:\xkz_1020\workingdir'
+scripts_dir = 'D:\xkz_1020\scripts'
+ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
+scdoc_dir = 'D:\xkz_1020\scdoc'
+msh_dir = 'D:\xkz_1020\msh'
+result_dir = 'D:\xkz_1020\case'
+flag_dir = 'D:\xkz_1020\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "toml-secret"
+reachable_host = "127.0.0.1"
+reachable_port = 2222
+connectivity_mode = "reverse_tunnel"
+working_dir = 'D:\xkz_1020\workingdir'
+scripts_dir = 'D:\xkz_1020\scripts'
+ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
+scdoc_dir = 'D:\xkz_1020\scdoc'
+msh_dir = 'D:\xkz_1020\msh'
+result_dir = 'D:\xkz_1020\case'
+flag_dir = 'D:\xkz_1020\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+auth_method = "none"
+key_filename = '${USERPROFILE}\.ssh\id_ed25519'
+working_dir = 'D:\xkz_1020\workingdir'
+scripts_dir = 'D:\xkz_1020\scripts'
+ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
+scdoc_dir = 'D:\xkz_1020\scdoc_b'
+msh_dir = 'D:\xkz_1020\msh_b'
+result_dir = 'D:\xkz_1020\case_b'
+flag_dir = 'D:\xkz_1020\flags_b'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.254"
+port = 22
+username = "ps"
+auth_method = "none"
+key_filename = '${USERPROFILE}\.ssh\id_ed25519'
+notes = "offline during development"
+working_dir = 'D:\xkz_1020\workingdir'
+scripts_dir = 'D:\xkz_1020\scripts'
+ref_files_dir = 'D:\xkz_1020\fluent_chemkin_files'
+scdoc_dir = 'D:\xkz_1020\scdoc_c'
+msh_dir = 'D:\xkz_1020\msh_c'
+result_dir = 'D:\xkz_1020\case_c'
+flag_dir = 'D:\xkz_1020\flags_c'
+conda_env = "pyfluent"
+conda_exe = 'C:\ProgramData\anaconda3\Scripts\conda.exe'
+mpi_bin_dir = 'C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin'
+fluent_path = 'D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+"#;
+
+        let config: SettingsConfig = toml::from_str(toml_text).expect("parse workstations");
+
+        assert_eq!(config.remote_config.password, "");
+        assert_eq!(config.workstations.len(), 3);
+        assert_eq!(config.workstations[0].id, "WS-A");
+        assert_eq!(config.workstations[0].password, "");
+        assert_eq!(config.workstations[1].host, "172.17.135.89");
+        assert_eq!(config.workstations[1].auth_method, "none");
+        assert_eq!(
+            config.workstations[1].key_filename,
+            r"${USERPROFILE}\.ssh\id_ed25519"
+        );
+        assert_eq!(config.workstations[1].scdoc_dir, r"D:\xkz_1020\scdoc_b");
+        assert_eq!(config.workstations[2].notes, "offline during development");
+        assert_eq!(
+            config.workstations[2].fluent_path,
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize workstations");
+
+        assert!(serialized.contains("[[workstations]]"));
+        assert!(serialized.contains("id = \"WS-A\""));
+        assert!(serialized.contains("host = \"172.17.135.89\""));
+        assert!(serialized.contains("auth_method = \"none\""));
+        assert!(serialized.contains("key_filename"));
+        assert!(serialized.contains("fluent_path"));
+        assert!(
+            serialized.contains("scdoc_dir = 'D:\\xkz_1020\\scdoc_c'")
+                || serialized.contains("scdoc_dir = \"D:\\\\xkz_1020\\\\scdoc_c\"")
+        );
+    }
+
+    #[test]
+    fn workstation_field_edits_do_not_cross_columns() {
+        let mut state = SettingsState::default_for_tests();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.254".to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        state.set_workstation_field_value(1, SettingCategory::RemoteDirs, 3, r"D:\ws-b\scdoc");
+
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::RemoteDirs, 3),
+            r"D:\ws-b\scdoc"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(0, SettingCategory::RemoteDirs, 3),
+            r"D:\ws-b\scdoc"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 3),
+            r"D:\ws-b\scdoc"
+        );
+    }
+
+    #[test]
+    fn workstation_field_edit_creates_ws_d_with_stable_id() {
+        let mut state = SettingsState::default_for_tests();
+        state.set_workstation_field_value(
+            3,
+            SettingCategory::RemoteConnection,
+            0,
+            "172.17.135.200",
+        );
+
+        assert_eq!(state.config.workstations.len(), 4);
+        assert_eq!(state.config.workstations[3].id, "WS-D");
+        assert_eq!(state.config.workstations[3].host, "172.17.135.200");
+    }
+
+    #[test]
+    fn default_workstation_id_uses_letters_then_numeric_fallback() {
+        assert_eq!(default_workstation_id(0), "WS-A");
+        assert_eq!(default_workstation_id(3), "WS-D");
+        assert_eq!(default_workstation_id(25), "WS-Z");
+        assert_eq!(default_workstation_id(26), "WS-27");
+    }
+
+    #[test]
+    fn derived_defaults_backfill_missing_fluent_path() {
+        let mut config: SettingsConfig = toml::from_str(
+            r#"
+[remote_config]
+host = "172.17.135.240"
+port = 22
+username = "ps"
+working_dir = 'D:\working'
+scripts_dir = 'D:\scripts'
+ref_files_dir = 'D:\ref'
+scdoc_dir = 'D:\scdoc'
+msh_dir = 'D:\msh'
+result_dir = 'D:\case'
+flag_dir = 'D:\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.115"
+port = 22
+username = "bh"
+working_dir = 'D:\working'
+scripts_dir = 'D:\scripts'
+ref_files_dir = 'D:\ref'
+scdoc_dir = 'D:\scdoc'
+msh_dir = 'D:\msh'
+result_dir = 'D:\case'
+flag_dir = 'D:\flags'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'D:\mpi'
+"#,
+        )
+        .expect("parse legacy config");
+
+        config.apply_derived_defaults();
+
+        assert_eq!(config.remote_config.fluent_path, DEFAULT_FLUENT_PATH);
+        assert_eq!(config.workstations[0].fluent_path, DEFAULT_FLUENT_PATH);
+    }
+    #[test]
+    fn workstation_fluent_path_edits_do_not_cross_columns() {
+        let mut state = SettingsState::default_for_tests();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.115".to_string(),
+                fluent_path: DEFAULT_FLUENT_PATH.to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        state.set_workstation_field_value(
+            2,
+            SettingCategory::RemoteDirs,
+            10,
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe",
+        );
+
+        assert_eq!(
+            state.get_workstation_field_value(2, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(0, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(1, SettingCategory::RemoteDirs, 10),
+            r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        );
+    }
+
+    #[test]
+    fn workstation_postprocess_directory_edits_do_not_cross_columns_or_global_defaults() {
+        let mut state = SettingsState::default_for_tests();
+        state.config.postprocess.output_dir = r"D:\global\post".to_string();
+        state.config.postprocess.animation_dir = r"D:\global\animation".to_string();
+        state.config.postprocess.metrics_dir = r"D:\global\metrics".to_string();
+        state.config.workstations = vec![
+            WorkstationConfig {
+                id: "WS-A".to_string(),
+                host: "172.17.135.240".to_string(),
+                postprocess_output_dir: r"D:\ws-a\post".to_string(),
+                postprocess_animation_dir: r"D:\ws-a\animation".to_string(),
+                postprocess_metrics_dir: r"D:\ws-a\metrics".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-B".to_string(),
+                host: "172.17.135.89".to_string(),
+                ..WorkstationConfig::default()
+            },
+            WorkstationConfig {
+                id: "WS-C".to_string(),
+                host: "172.17.135.254".to_string(),
+                ..WorkstationConfig::default()
+            },
+        ];
+
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 1, r"E:\ws-b\post");
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 2, r"E:\ws-b\animation");
+        state.set_workstation_field_value(1, SettingCategory::PostProcess, 3, r"E:\ws-b\metrics");
+
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 1),
+            r"E:\ws-b\post"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 2),
+            r"E:\ws-b\animation"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::PostProcess, 3),
+            r"E:\ws-b\metrics"
+        );
+        assert_ne!(
+            state.get_workstation_field_value(0, SettingCategory::PostProcess, 1),
+            r"E:\ws-b\post"
+        );
+        assert_eq!(state.config.postprocess.output_dir, r"D:\global\post");
+        assert_eq!(
+            state.config.postprocess.animation_dir,
+            r"D:\global\animation"
+        );
+        assert_eq!(state.config.postprocess.metrics_dir, r"D:\global\metrics");
+    }
+
+    #[test]
+    fn workstation_postprocess_directories_round_trip_through_toml() {
+        let toml_text = r#"
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+working_dir = 'D:\work-a'
+scripts_dir = 'D:\scripts-a'
+ref_files_dir = 'D:\refs-a'
+scdoc_dir = 'D:\scdoc-a'
+msh_dir = 'D:\msh-a'
+result_dir = 'D:\case-a'
+flag_dir = 'D:\flags-a'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+postprocess_output_dir = 'D:\post-a'
+postprocess_animation_dir = 'D:\animation-a'
+postprocess_metrics_dir = 'D:\metrics-a'
+
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+working_dir = 'D:\work-b'
+scripts_dir = 'D:\scripts-b'
+ref_files_dir = 'D:\refs-b'
+scdoc_dir = 'D:\scdoc-b'
+msh_dir = 'D:\msh-b'
+result_dir = 'D:\case-b'
+flag_dir = 'D:\flags-b'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+postprocess_output_dir = 'E:\post-b'
+postprocess_animation_dir = 'E:\animation-b'
+postprocess_metrics_dir = 'E:\metrics-b'
+"#;
+
+        let config: SettingsConfig =
+            toml::from_str(toml_text).expect("parse workstation postprocess dirs");
+
+        assert_eq!(config.workstations[0].postprocess_output_dir, r"D:\post-a");
+        assert_eq!(
+            config.workstations[1].postprocess_animation_dir,
+            r"E:\animation-b"
+        );
+        assert_eq!(
+            config.workstations[1].postprocess_metrics_dir,
+            r"E:\metrics-b"
+        );
+
+        let serialized =
+            toml::to_string_pretty(&config).expect("serialize workstation postprocess dirs");
+        assert!(serialized.contains("postprocess_output_dir"));
+        assert!(serialized.contains("postprocess_animation_dir"));
+        assert!(serialized.contains("postprocess_metrics_dir"));
+    }
+
+    #[test]
+    fn settings_page_round_trips_three_workstation_passwords_through_env_only() {
+        let _guard = cwd_lock().lock().expect("lock cwd");
+        let project_dir = unique_temp_project_dir();
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::write(project_dir.join("start_daemon.py"), "").expect("write project marker");
+        let sw_model = project_dir.join("model.SLDPRT");
+        let excel = project_dir.join("params.xlsx");
+        std::fs::write(&sw_model, "").expect("write model placeholder");
+        std::fs::write(&excel, "").expect("write excel placeholder");
+        std::fs::write(
+            project_dir.join("autofluid_config.toml"),
+            r#"
+[[workstations]]
+id = "WS-A"
+host = "172.17.135.240"
+port = 22
+username = "ps"
+password = "toml-a-ignored"
+working_dir = 'D:\work-a'
+scripts_dir = 'D:\scripts-a'
+ref_files_dir = 'D:\refs-a'
+scdoc_dir = 'D:\scdoc-a'
+msh_dir = 'D:\msh-a'
+result_dir = 'D:\case-a'
+flag_dir = 'D:\flags-a'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+
+[[workstations]]
+id = "WS-B"
+host = "172.17.135.89"
+port = 22
+username = "ps"
+password = "toml-b-ignored"
+working_dir = 'D:\work-b'
+scripts_dir = 'D:\scripts-b'
+ref_files_dir = 'D:\refs-b'
+scdoc_dir = 'D:\scdoc-b'
+msh_dir = 'D:\msh-b'
+result_dir = 'D:\case-b'
+flag_dir = 'D:\flags-b'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+
+[[workstations]]
+id = "WS-C"
+host = "172.17.135.254"
+port = 22
+username = "ps"
+password = "toml-c-ignored"
+working_dir = 'D:\work-c'
+scripts_dir = 'D:\scripts-c'
+ref_files_dir = 'D:\refs-c'
+scdoc_dir = 'D:\scdoc-c'
+msh_dir = 'D:\msh-c'
+result_dir = 'D:\case-c'
+flag_dir = 'D:\flags-c'
+conda_env = "pyfluent"
+conda_exe = 'C:\conda.exe'
+mpi_bin_dir = 'C:\mpi'
+fluent_path = 'C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe'
+"#,
+        )
+        .expect("write config");
+        std::fs::write(
+            project_dir.join(".env"),
+            "AUTOFLUID_WS_A_SSH_PASSWORD=old-a\nAUTOFLUID_WS_B_SSH_PASSWORD=old-b\nAUTOFLUID_WS_C_SSH_PASSWORD=old-c\n",
+        )
+        .expect("write env");
+
+        let previous_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&project_dir).expect("set cwd");
+
+        let mut state = SettingsState::new();
+        state.config.local_paths.sw_model = sw_model.to_string_lossy().into_owned();
+        state.config.local_paths.excel = excel.to_string_lossy().into_owned();
+        assert_eq!(
+            state.get_workstation_field_value(0, SettingCategory::RemoteConnection, 3),
+            "old-a"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(1, SettingCategory::RemoteConnection, 3),
+            "old-b"
+        );
+        assert_eq!(
+            state.get_workstation_field_value(2, SettingCategory::RemoteConnection, 3),
+            "old-c"
+        );
+
+        for (workstation_index, password) in ["new-a", "new-b", "new-c"].iter().enumerate() {
+            state.set_focus(1, 3, Some(workstation_index));
+            state.begin_edit_current_field();
+            assert_eq!(
+                state.buffer.text,
+                format!("old-{}", (b'a' + workstation_index as u8) as char)
+            );
+            state.buffer = TextBuffer::with_text((*password).to_string());
+            state.commit_edit_current_field();
+        }
+        state.save().expect("save settings");
+
+        let env_contents = std::fs::read_to_string(project_dir.join(".env")).expect("read env");
+        assert!(env_contents.contains("AUTOFLUID_WS_A_SSH_PASSWORD=new-a\n"));
+        assert!(env_contents.contains("AUTOFLUID_WS_B_SSH_PASSWORD=new-b\n"));
+        assert!(env_contents.contains("AUTOFLUID_WS_C_SSH_PASSWORD=new-c\n"));
+
+        let toml_contents =
+            std::fs::read_to_string(project_dir.join("autofluid_config.toml")).expect("read toml");
+        assert!(!toml_contents.contains("old-a"));
+        assert!(!toml_contents.contains("old-b"));
+        assert!(!toml_contents.contains("old-c"));
+        assert!(!toml_contents.contains("new-a"));
+        assert!(!toml_contents.contains("new-b"));
+        assert!(!toml_contents.contains("new-c"));
+        assert!(!toml_contents.contains("toml-a-ignored"));
+        assert!(!toml_contents.contains("toml-b-ignored"));
+        assert!(!toml_contents.contains("toml-c-ignored"));
+
+        let reopened = SettingsState::new();
+        std::env::set_current_dir(previous_dir).expect("restore cwd");
+
+        assert_eq!(
+            reopened.get_workstation_field_value(0, SettingCategory::RemoteConnection, 3),
+            "new-a"
+        );
+        assert_eq!(
+            reopened.get_workstation_field_value(1, SettingCategory::RemoteConnection, 3),
+            "new-b"
+        );
+        assert_eq!(
+            reopened.get_workstation_field_value(2, SettingCategory::RemoteConnection, 3),
+            "new-c"
+        );
+
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn serializing_config_keeps_workstation_password_out_of_toml() {
+        let mut config = SettingsConfig::default();
+        config.workstations = vec![WorkstationConfig {
+            id: "WS-A".to_string(),
+            host: "172.17.135.240".to_string(),
+            port: 22,
+            username: "ps".to_string(),
+            password: "secret".to_string(),
+            ..WorkstationConfig::default()
+        }];
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("password"));
+    }
 
     #[test]
     fn step_patterns_do_not_expose_transfer_field() {
@@ -1127,7 +2187,7 @@ mod tests {
 
     #[test]
     fn spaceclaim_settings_expose_persistent_bridge_fields() {
-        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 10);
 
         let field_names = (0..SettingCategory::SpaceClaim.field_count())
             .map(|idx| SettingCategory::SpaceClaim.field_name(idx))
@@ -1144,6 +2204,8 @@ mod tests {
                 "sc_max_slots",
                 "sc_persistent_enabled",
                 "sc_oneshot_fallback_enabled",
+                "sc_persistent_ready_timeout",
+                "sc_scdoc_stable_seconds",
             ]
         );
 
@@ -1155,6 +2217,8 @@ mod tests {
         state.set_field_value(SettingCategory::SpaceClaim, 5, "2");
         state.set_field_value(SettingCategory::SpaceClaim, 6, "false");
         state.set_field_value(SettingCategory::SpaceClaim, 7, "false");
+        state.set_field_value(SettingCategory::SpaceClaim, 8, "240");
+        state.set_field_value(SettingCategory::SpaceClaim, 9, "4.5");
 
         assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 5), "2");
         assert_eq!(
@@ -1165,6 +2229,98 @@ mod tests {
             state.get_field_value(SettingCategory::SpaceClaim, 7),
             "false"
         );
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 8), "240");
+        assert_eq!(state.get_field_value(SettingCategory::SpaceClaim, 9), "4.5");
+    }
+
+    #[test]
+    fn default_runtime_timeouts_match_repository_toml() {
+        let spaceclaim = SpaceClaimConfig::default();
+        let meshing = MeshingConfig::default();
+        let solver = SolverConfig::default();
+
+        assert_eq!(spaceclaim.sc_gui_stable_delay, 5);
+        assert_eq!(spaceclaim.sc_persistent_ready_timeout, 180);
+        assert_eq!(spaceclaim.sc_scdoc_stable_seconds, 3.0);
+        assert_eq!(meshing.meshing_timeout, 7200);
+        assert_eq!(solver.solver_timeout, 14400);
+    }
+
+    #[test]
+    fn spaceclaim_config_deserializes_legacy_toml_without_new_fields() {
+        let toml_text = r#"
+[spaceclaim]
+sc_timeout = 300
+sc_poll_interval = 2.0
+sc_process_appear_timeout = 120
+sc_gui_ready_timeout = 30
+sc_gui_stable_delay = 5
+sc_max_slots = 1
+sc_persistent_enabled = true
+sc_oneshot_fallback_enabled = true
+"#;
+
+        let config: SettingsConfig = toml::from_str(toml_text).expect("parse legacy spaceclaim");
+
+        assert_eq!(config.spaceclaim.sc_persistent_ready_timeout, 180);
+        assert_eq!(config.spaceclaim.sc_scdoc_stable_seconds, 3.0);
+    }
+
+    #[test]
+    fn partial_runtime_sections_fill_missing_fields_from_defaults() {
+        let toml_text = r#"
+[solidworks]
+sw_macro_timeout = 120
+
+[meshing]
+meshing_processor_count = 16
+
+[solver]
+solver_processor_count = 64
+
+[postprocess]
+output_dir = 'D:\post\output'
+
+[global_settings]
+ssh_connection = 15
+log_max_bytes = 4096
+log_backup_count = 4
+
+[ipc_config]
+port = 19627
+
+[server]
+project_dir = "/srv/autofluid"
+"#;
+
+        let config: SettingsConfig =
+            toml::from_str(toml_text).expect("parse partial runtime sections");
+
+        assert_eq!(config.solidworks.sw_macro_timeout, 120);
+        assert!(config.solidworks.sw_close_doc_on_finish);
+        assert_eq!(config.solidworks.sw_startup, 60);
+        assert_eq!(config.meshing.meshing_timeout, 7200);
+        assert_eq!(config.meshing.meshing_processor_count, 16);
+        assert_eq!(config.solver.solver_timeout, 14400);
+        assert_eq!(config.solver.solver_processor_count, 64);
+        assert_eq!(config.solver.solver_iteration_count, 1000);
+        assert_eq!(config.postprocess.output_dir, r"D:\post\output");
+        assert_eq!(config.postprocess.postprocess_timeout, 3600);
+        assert_eq!(config.postprocess.cstar_reference, 1830.4);
+        assert_eq!(config.global_settings.ssh_connection, 15);
+        assert_eq!(config.global_settings.watchdog_interval, 1.0);
+        assert_eq!(config.global_settings.ssh_upload_max_retries, 3);
+        assert_eq!(config.global_settings.log_max_bytes, 4096);
+        assert_eq!(config.global_settings.log_backup_count, 4);
+        assert_eq!(config.ipc_config.port, 19627);
+        assert_eq!(config.ipc_config.host, "127.0.0.1");
+        assert_eq!(config.server.project_dir, "/srv/autofluid");
+
+        let serialized = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(serialized.contains("[ipc_config]"));
+        assert!(serialized.contains("port = 19627"));
+        assert!(serialized.contains("[server]"));
+        assert!(serialized.contains("project_dir = \"/srv/autofluid\""));
     }
 
     #[test]
@@ -1198,24 +2354,25 @@ mod tests {
         // Verify field_count is consistent across all categories
         assert_eq!(SettingCategory::LocalPaths.field_count(), 6);
         assert_eq!(SettingCategory::RemoteConnection.field_count(), 4);
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         assert_eq!(SettingCategory::StepPatterns.field_count(), 6);
         assert_eq!(SettingCategory::SolidWorks.field_count(), 5);
-        assert_eq!(SettingCategory::SpaceClaim.field_count(), 8);
+        assert_eq!(SettingCategory::SpaceClaim.field_count(), 10);
         assert_eq!(SettingCategory::Meshing.field_count(), 2);
         assert_eq!(SettingCategory::Solver.field_count(), 3);
         assert_eq!(SettingCategory::PostProcess.field_count(), 4);
-        assert_eq!(SettingCategory::GlobalSettings.field_count(), 7);
+        assert_eq!(SettingCategory::GlobalSettings.field_count(), 9);
     }
 
     #[test]
     fn remote_dirs_do_not_expose_animation_dir() {
-        assert_eq!(SettingCategory::RemoteDirs.field_count(), 10);
+        assert_eq!(SettingCategory::RemoteDirs.field_count(), 11);
         let visible_fields = (0..SettingCategory::RemoteDirs.field_count())
             .map(|idx| SettingCategory::RemoteDirs.field_name(idx))
             .collect::<Vec<_>>();
         assert!(!visible_fields.contains(&"animation_dir"));
         assert_eq!(SettingCategory::RemoteDirs.field_name(6), "flag_dir");
+        assert_eq!(SettingCategory::RemoteDirs.field_name(10), "fluent_path");
         assert_eq!(
             SettingCategory::RemoteDirs.field_full_name(6),
             "remote_config.flag_dir"

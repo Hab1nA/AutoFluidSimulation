@@ -248,6 +248,8 @@ Environment=PYTHONUNBUFFERED=1
 Environment=AUTOFLUID_SERVER_MODE=server
 EnvironmentFile=-${ENV_FILE_SYSTEMD}
 ExecStart=${VENV_PYTHON_SYSTEMD} start_daemon.py
+KillMode=control-group
+TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
 UMask=0027
@@ -295,13 +297,17 @@ Next checks:
   1. Edit ${PROJECT_DIR}/.env and set AUTOFLUID_IPC_AUTH_TOKEN, AUTOFLUID_SSH_PASSWORD, and optional AUTOFLUID_OPENCLAW_WEBHOOK_URL.
   2. Verify the server can reach the workstation SSH endpoint from this Linux host.
   3. Start daemon:
-       sudo systemctl restart ${SERVICE_NAME}
-  4. Inspect status/logs:
+       sudo systemctl start ${SERVICE_NAME}
+  4. Stop daemon cleanly:
+       sudo systemctl stop ${SERVICE_NAME}
+     Do not kill the service main process directly; Restart=on-failure treats that as a crash.
+  5. Inspect status/logs:
        systemctl status ${SERVICE_NAME} --no-pager
        journalctl -u ${SERVICE_NAME} -f
-  5. Use the server CLI:
+  6. Use the server CLI:
        .venv/bin/python -m tools.autofluid_cli status
        .venv/bin/python -m tools.autofluid_cli start
+       .venv/bin/python -m tools.autofluid_cli daemon stop
      The alert watcher is started and stopped by the server-mode daemon when AUTOFLUID_OPENCLAW_WEBHOOK_URL is set.
 
 Manual foreground start:

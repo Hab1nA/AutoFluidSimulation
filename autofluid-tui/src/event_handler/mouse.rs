@@ -4,9 +4,9 @@
 
 use crossterm::event::{MouseEvent, MouseEventKind};
 
-use crate::daemon_mgr::DaemonManager;
 use crate::event_handler::{actions, HORIZONTAL_SCROLL_STEP, SCROLL_LINE_STEP, SCROLL_WHEEL_STEP};
 use crate::ipc::client::IpcClient;
+use crate::settings::settings_ui::settings_workstation_visible_columns;
 use crate::settings::SettingsState;
 use crate::state::app_state::{FocusZone, ScrollbarDragZone, UiMode};
 use crate::state::AppState;
@@ -16,18 +16,14 @@ use crate::ui::command_bar;
 use crate::ui::command_bar::BUTTON_DEFS;
 use crate::ui::layout::AppLayout;
 use crate::ui::scrollbar::{HorizontalScrollbar, VerticalScrollbar};
-use crate::worker_mgr::WorkerManager;
+use crate::CommandTask;
 
 use crate::point_in_rect;
 
 pub struct MouseRuntime<'a> {
     pub ipc: &'a mut IpcClient,
     pub rt: &'a tokio::runtime::Runtime,
-    pub daemon: &'a mut DaemonManager,
-    pub worker: &'a mut WorkerManager,
-    pub project_dir: &'a str,
-    pub full_quit: &'a mut bool,
-    pub full_quit_stop_sent: &'a mut bool,
+    pub command_task: Option<&'a mut Option<CommandTask>>,
 }
 
 // ====================================================================
@@ -248,7 +244,15 @@ fn handle_scroll_up(
         || state.ui_mode == UiMode::Settings
     {
         if state.ui_mode == UiMode::Settings {
+            let area = state.terminal_size;
             if let Some(ref mut ss) = state.settings_state {
+                if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    let visible_columns =
+                        settings_workstation_visible_columns(area, ss.config.workstations.len());
+                    ss.scroll_workstation_columns_left(visible_columns);
+                    state.needs_redraw = true;
+                    return;
+                }
                 if ss.scroll > 0 {
                     ss.scroll = ss.scroll.saturating_sub(SCROLL_LINE_STEP);
                     state.needs_redraw = true;
@@ -303,7 +307,15 @@ fn handle_scroll_down(
         || state.ui_mode == UiMode::Settings
     {
         if state.ui_mode == UiMode::Settings {
+            let area = state.terminal_size;
             if let Some(ref mut ss) = state.settings_state {
+                if modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                    let visible_columns =
+                        settings_workstation_visible_columns(area, ss.config.workstations.len());
+                    ss.scroll_workstation_columns_right(visible_columns);
+                    state.needs_redraw = true;
+                    return;
+                }
                 ss.scroll = ss.scroll.saturating_add(SCROLL_LINE_STEP);
                 state.needs_redraw = true;
             }
@@ -538,16 +550,18 @@ fn handle_mouse_down(
         if let Some(ref mut ss) = state.settings_state {
             // 编辑模式下阻止鼠标对其他行进行双击/单击操作
             if !ss.focus.editing {
-                if let Some((cat_idx, fi)) = detect_settings_field(col, row, area, ss) {
+                if let Some((cat_idx, fi, workstation_idx)) =
+                    detect_settings_field(col, row, area, ss)
+                {
                     let now = std::time::Instant::now();
                     // Double-click: same field clicked within 400ms
-                    let is_double = ss.last_clicked_field == Some((cat_idx, fi))
+                    let field_key = (cat_idx, fi, workstation_idx);
+                    let is_double = ss.last_clicked_field == Some(field_key)
                         && ss
                             .last_click_time
                             .is_some_and(|t| now.duration_since(t).as_millis() < 400);
                     if is_double {
-                        ss.focus.category_index = cat_idx;
-                        ss.focus.field_index = fi;
+                        ss.set_focus(cat_idx, fi, workstation_idx);
                         let cat = ss.current_category();
                         if cat.is_bool_field(fi) {
                             // Boolean fields: toggle directly, don't enter text editing
@@ -561,11 +575,10 @@ fn handle_mouse_down(
                         ss.last_click_time = None;
                     } else {
                         // Single click: select field + animation + track for double-click
-                        ss.focus.category_index = cat_idx;
-                        ss.focus.field_index = fi;
-                        ss.clicked_field = Some((cat_idx, fi));
+                        ss.set_focus(cat_idx, fi, workstation_idx);
+                        ss.clicked_field = Some(field_key);
                         ss.field_click_time = Some(now);
-                        ss.last_clicked_field = Some((cat_idx, fi));
+                        ss.last_clicked_field = Some(field_key);
                         ss.last_click_time = Some(now);
                     }
                     state.needs_redraw = true;
@@ -1112,13 +1125,13 @@ pub fn detect_dialog_button(
 }
 
 /// 检测鼠标是否悬停在 Settings 对话框的某一行字段上。
-/// 返回 (category_index, field_index)
+/// 返回 (category_index, field_index, workstation_index)
 pub fn detect_settings_field(
     col: u16,
     row: u16,
     area: ratatui::layout::Rect,
     ss: &SettingsState,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, Option<usize>)> {
     let dialog_area = ui::dialogs::centered_rect(90, 90, area);
     if !point_in_rect(col, row, dialog_area) {
         return None;
@@ -1140,9 +1153,10 @@ pub fn detect_settings_field(
     let rel_row = row - content_y;
     let visual_line = ss.scroll + rel_row;
 
-    for (cat_idx, fi, y) in &ss.field_positions {
-        if *y == visual_line {
-            return Some((*cat_idx, *fi));
+    let rel_col = col.saturating_sub(dialog_area.x + 1);
+    for hit in &ss.field_positions {
+        if hit.y == visual_line && rel_col >= hit.x_start && rel_col < hit.x_end {
+            return Some((hit.category_index, hit.field_index, hit.workstation_index));
         }
     }
     None
@@ -1158,27 +1172,16 @@ pub fn handle_dialog_button_click(
         UiMode::ConfirmDialog => match btn_idx {
             0 => {
                 if let Some(callback) = state.confirm_callback.take() {
-                    let result =
-                        runtime
-                            .rt
-                            .block_on(crate::event_handler::command::execute_confirm_action(
-                                &callback,
-                                &mut *runtime.ipc,
-                                log_buffer,
-                            ));
-                    let mut ctx = crate::EventContext {
+                    let host = runtime.ipc.host().to_string();
+                    let port = runtime.ipc.port();
+                    crate::start_confirm_action_task(
+                        runtime.command_task.as_deref_mut(),
+                        callback,
+                        &host,
+                        port,
                         state,
                         log_buffer,
-                        ipc: runtime.ipc,
-                        check_task: None,
-                        daemon: runtime.daemon,
-                        worker: runtime.worker,
-                        rt: runtime.rt,
-                        project_dir: runtime.project_dir,
-                        full_quit: runtime.full_quit,
-                        full_quit_stop_sent: runtime.full_quit_stop_sent,
-                    };
-                    actions::handle_confirm_result(result, &mut ctx);
+                    );
                 }
                 state.ui_mode = UiMode::Normal;
                 state.confirm_message = None;
@@ -1396,5 +1399,126 @@ pub fn sb_horizontal_scroll_from_drag(
         sb.scroll_from_thumb_position(new_thumb_start, track_length) as u16
     } else {
         start_scroll
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{SettingsFieldHit, SettingsState};
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn detect_settings_field_returns_workstation_column_from_hit_bounds() {
+        let area = Rect::new(0, 0, 100, 40);
+        let dialog = ui::dialogs::centered_rect(90, 90, area);
+        let content_x = dialog.x + 1;
+        let content_y = dialog.y + 1 + 2;
+
+        let mut state = SettingsState::default_for_tests();
+        state.field_positions = vec![
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(0),
+                y: 5,
+                x_start: 20,
+                x_end: 40,
+            },
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(1),
+                y: 5,
+                x_start: 40,
+                x_end: 60,
+            },
+            SettingsFieldHit {
+                category_index: 1,
+                field_index: 0,
+                workstation_index: Some(2),
+                y: 5,
+                x_start: 60,
+                x_end: 80,
+            },
+        ];
+
+        assert_eq!(
+            detect_settings_field(content_x + 20, content_y + 5, area, &state),
+            Some((1, 0, Some(0)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 40, content_y + 5, area, &state),
+            Some((1, 0, Some(1)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 60, content_y + 5, area, &state),
+            Some((1, 0, Some(2)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 79, content_y + 5, area, &state),
+            Some((1, 0, Some(2)))
+        );
+        assert_eq!(
+            detect_settings_field(content_x + 80, content_y + 5, area, &state),
+            None
+        );
+    }
+
+    #[test]
+    fn shift_mouse_wheel_scrolls_settings_workstation_columns() {
+        let mut state = AppState::new();
+        state.open_settings();
+        let ss = state.settings_state.as_mut().expect("settings state");
+        ss.config.workstations = vec![
+            crate::settings::WorkstationConfig {
+                id: "WS-A".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-B".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-C".to_string(),
+                ..Default::default()
+            },
+            crate::settings::WorkstationConfig {
+                id: "WS-D".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        handle_scroll_down(
+            &mut state,
+            false,
+            false,
+            false,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            1
+        );
+
+        handle_scroll_up(
+            &mut state,
+            false,
+            false,
+            false,
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        assert_eq!(
+            state
+                .settings_state
+                .as_ref()
+                .expect("settings state")
+                .workstation_column_offset,
+            0
+        );
     }
 }

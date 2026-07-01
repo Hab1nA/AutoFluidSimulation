@@ -114,6 +114,20 @@ class SCProcessPool:
         self.last_error = reason
         return False
 
+    def _retire_persistent_slot_after_failure(self, slot: PersistentSlot, reason: str) -> None:
+        """Discard a persistent slot that can no longer be trusted."""
+        config_name = slot.current_config if slot.current_config is not None else -1
+        logger.warning(
+            "[SC-Pool] 常驻槽位%s 因 %s 被废弃并重启",
+            slot.slot_id,
+            reason,
+            extra=self._sc_log_extra(config_name, slot),
+        )
+        with self._lock:
+            if self._persistent_slots.get(slot.slot_id) is slot:
+                self._cleanup_persistent_slot(slot)
+                self._persistent_slots.pop(slot.slot_id, None)
+
     # ==================================================================
     # 执行入口
     # ==================================================================
@@ -209,7 +223,7 @@ class SCProcessPool:
             return result
         finally:
             with self._lock:
-                if slot.slot_id in self._persistent_slots:
+                if self._persistent_slots.get(slot.slot_id) is slot:
                     slot.status = "ready"
                     slot.current_config = None
 
@@ -459,6 +473,7 @@ class SCProcessPool:
             "--script", self._sc_script,
             "--cmddir", self._persistent_cmd_dir,
             "--slotid", str(slot.slot_id),
+            "--sc-exe", LOCAL_PATHS["sc_exe"],
         ]
 
         slot.status = "starting"
@@ -468,6 +483,7 @@ class SCProcessPool:
         sc_env["AUTOFLUID_SC_PERSISTENT"] = "1"
         sc_env["AUTOFLUID_SC_CMD_DIR"] = self._persistent_cmd_dir
         sc_env["AUTOFLUID_SC_SLOT_ID"] = str(slot.slot_id)
+        sc_env["AUTOFLUID_SC_EXE"] = str(LOCAL_PATHS["sc_exe"])
         bridge_log_dir = self._build_bridge_log_dir()
         sc_env["AUTOFLUID_SC_LOG_DIR"] = bridge_log_dir
 
@@ -674,6 +690,7 @@ class SCProcessPool:
                 )
                 logger.error(f"[SC-Pool] {reason}")
                 self._cleanup_run_files(slot.slot_id, run_id)
+                self._retire_persistent_slot_after_failure(slot, reason)
                 return self._fail(reason)
 
             # ---- 停止检查 ----
@@ -774,6 +791,7 @@ class SCProcessPool:
                 reason = f"构型{config_name} 超时 ({timeout}s), run={run_id}"
                 logger.error(f"[SC-Pool] {reason}", extra=self._sc_log_extra(config_name, slot))
                 self._cleanup_run_files(slot.slot_id, run_id)
+                self._retire_persistent_slot_after_failure(slot, reason)
                 return self._fail(reason)
 
             time.sleep(poll_interval)

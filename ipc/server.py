@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 from ipc.protocol import (
     deserialize, create_response, serialize,
-    CMD_START, CMD_PAUSE, CMD_STOP, CMD_CHECK,
+    CMD_START, CMD_PAUSE, CMD_STOP, CMD_STOP_STEP, CMD_CHECK,
     CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
     CMD_GET_LOG_ENTRIES, CMD_GET_DASHBOARD, CMD_RELOAD_CONFIG,
@@ -32,6 +32,16 @@ from utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 
+def _summarize_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _summarize_for_log(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_summarize_for_log(item) for item in value]
+    if isinstance(value, str) and len(value) > 512:
+        return f"<str len={len(value)} prefix={value[:64]!r}>"
+    return value
+
+
 class IPCServer:
     """
     IPC 服务器。
@@ -41,6 +51,7 @@ class IPCServer:
     """
 
     MAX_BUFFER_BYTES = 5 * 1024 * 1024
+    RECV_CHUNK_BYTES = 64 * 1024
 
     def __init__(
         self,
@@ -55,8 +66,8 @@ class IPCServer:
             host: 监听地址
             port: 监听端口
         """
-        self.host = host or IPC_CONFIG["host"]
-        self.port = port or IPC_CONFIG["port"]
+        self.host = IPC_CONFIG["host"] if host is None else host
+        self.port = IPC_CONFIG["port"] if port is None else port
         self._max_connections: int = IPC_CONFIG.get("max_connections", 10)
         self._auth_token = auth_token if auth_token is not None else IPC_CONFIG.get("auth_token", "")
         self._socket: socket.socket | None = None
@@ -64,6 +75,8 @@ class IPCServer:
         self._server_thread: threading.Thread | None = None
         self._active_connections: int = 0
         self._conn_lock = threading.Lock()
+        self._client_threads: set[threading.Thread] = set()
+        self._client_sockets: set[socket.socket] = set()
 
         # 命令处理器注册表
         self._handlers: dict[str, Callable] = {}
@@ -94,6 +107,7 @@ class IPCServer:
         self.register_handler(CMD_START, daemon.handle_start)
         self.register_handler(CMD_PAUSE, daemon.handle_pause)
         self.register_handler(CMD_STOP, daemon.handle_stop)
+        self.register_handler(CMD_STOP_STEP, daemon.handle_stop_step)
         self.register_handler(CMD_CHECK, daemon.handle_check)
 
         # 查询
@@ -161,8 +175,25 @@ class IPCServer:
             except OSError:
                 pass
             self._socket = None
+        with self._conn_lock:
+            client_sockets = list(self._client_sockets)
+        for client_sock in client_sockets:
+            try:
+                client_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                client_sock.close()
+            except OSError:
+                pass
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=3)
+        with self._conn_lock:
+            client_threads = list(self._client_threads)
+        current = threading.current_thread()
+        for client_thread in client_threads:
+            if client_thread is not current and client_thread.is_alive():
+                client_thread.join(timeout=3)
         logger.info("[IPC] IPC 服务器已停止")
 
     # ------------------------------------------------------------------
@@ -206,6 +237,9 @@ class IPCServer:
                     daemon=True,
                     name=f"IPC-Client-{addr[1]}"
                 )
+                with self._conn_lock:
+                    self._client_sockets.add(client_sock)
+                    self._client_threads.add(client_thread)
                 client_thread.start()
             except socket.timeout:
                 continue  # 超时后检查 _running 标志
@@ -222,14 +256,17 @@ class IPCServer:
         记录是否有过有效消息交互——从未发送有效消息的连接视为探测连接，
         断开时不写入 INFO 日志，避免端口探测工具造成日志噪音。
         """
-        client_sock.settimeout(30.0)
         buffer = b""
         has_sent_valid_message = False  # 是否曾处理过有效 IPC 消息
 
         try:
+            try:
+                client_sock.settimeout(30.0)
+            except OSError:
+                return
             while self._running:
                 try:
-                    data = client_sock.recv(4096)
+                    data = client_sock.recv(self.RECV_CHUNK_BYTES)
                     if not data:
                         break  # 客户端断开
                     buffer += data
@@ -261,11 +298,17 @@ class IPCServer:
                     break
         finally:
             try:
+                client_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
                 client_sock.close()
             except OSError:
                 pass
             with self._conn_lock:
                 self._active_connections = max(0, self._active_connections - 1)
+                self._client_sockets.discard(client_sock)
+                self._client_threads.discard(threading.current_thread())
             if has_sent_valid_message:
                 logger.debug(f"[IPC] IPC 客户端断开: {addr}", extra={"broadcast": False})
             else:
@@ -294,7 +337,7 @@ class IPCServer:
         params = msg.get("params", {})
         request_id = msg.get("request_id", "")
 
-        logger.debug(f"[IPC] 收到命令: {command}, params={params}")
+        logger.debug("[IPC] 收到命令: %s, params=%s", command, _summarize_for_log(params))
 
         if self._auth_token:
             incoming_token = msg.get("auth_token", "")

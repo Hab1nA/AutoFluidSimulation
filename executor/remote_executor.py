@@ -15,7 +15,8 @@ import os
 import re
 import time
 import threading
-from typing import Callable, TYPE_CHECKING
+from contextlib import AbstractContextManager
+from typing import Callable, NoReturn, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
@@ -28,11 +29,11 @@ from engine.config import (
     get_workstation_config, is_server_mode,
 )
 from engine.scheduler.utils import wait_unless_paused_or_stopped
+from executor.postprocess_paths import resolve_postprocess_paths
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-
-_DEFAULT_POSTPROCESS_ANIMATION_DIR = r"D:\xkz_1020\animation"
 
 
 def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
@@ -46,6 +47,21 @@ def _cmd_arg(value: object, *, force_quote: bool = False) -> str:
         for ch in escaped
     )
     return f'"{escaped}"' if needs_quote else escaped
+
+
+def _raise_infra_on_ssh_error(exc: Exception) -> "NoReturn":
+    """Wrap SSH/SFTP connection errors as infrastructure exceptions.
+
+    Call this in except blocks that catch ``(OSError, ConnectionError)`` to
+    convert them into :class:`InfrastructureUnavailableError` so the scheduler
+    knows the failure is not a business-logic error and should not consume the
+    config retry budget.
+
+    Raises:
+        InfrastructureUnavailableError: always
+    """
+    raise InfrastructureUnavailableError(str(exc)) from exc
+
 
 # 远程脚本文件列表（部署到 scripts_dir）
 REMOTE_SCRIPT_FILES = [
@@ -79,24 +95,40 @@ class RemoteExecutor:
     共享同一个 SSH 连接。
     """
 
-    def __init__(self, state_manager: StateManager, ssh_getter: Callable[..., "RemoteWorkstation"], ssh_lock: threading.RLock):
+    def __init__(
+        self,
+        state_manager: StateManager,
+        ssh_getter: Callable[..., "RemoteWorkstation"],
+        ssh_lock: threading.RLock,
+        ssh_locks: dict[str, threading.RLock] | None = None,
+        ssh_locks_guard: threading.Lock | None = None,
+    ):
         """初始化远程执行器。
 
         Args:
             state_manager: StateManager 实例
             ssh_getter: 可调用对象，返回 RemoteWorkstation 实例
             ssh_lock: SSH 连接的线程锁
+            ssh_locks: 可选的按工作站锁池，与 TaskRunner/Cleaner 共享
+            ssh_locks_guard: 保护共享锁池的锁
         """
         self.state = state_manager
         self._get_ssh = ssh_getter
         self._ssh_lock = ssh_lock
+        self._ssh_locks = ssh_locks if ssh_locks is not None else {}
+        self._ssh_locks.setdefault(DEFAULT_WORKSTATION_ID, ssh_lock)
+        self._ssh_locks_guard = ssh_locks_guard or threading.Lock()
         self._paused_event: threading.Event | None = None
         self._stopped_event: threading.Event | None = None
         # 跟踪远程后台任务名称（用于超时后终止）
         self._remote_tasks: dict[object, str] = {}
+        self._remote_tasks_lock = threading.RLock()
         self._sync_cache_lock = threading.Lock()
+        self._last_sync_paths_lock = threading.RLock()
         self._last_successful_sync_signature: tuple[object, ...] | None = None
         self._last_successful_sync_signatures: dict[str, tuple[object, ...]] = {}
+        self.last_meshing_error = ""
+        self.last_solver_error = ""
 
     # 步骤名 → 日志前缀映射（项目规范：中文消息 + 英文标签前缀）
     _STEP_LOG_PREFIX: dict[str, str] = {
@@ -158,6 +190,18 @@ class RemoteExecutor:
             if workstation_id != DEFAULT_WORKSTATION_ID:
                 raise
             return self._get_ssh()
+
+    def _ssh_guard(
+        self,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> AbstractContextManager[object]:
+        """Return the SSH lock that serializes operations for one workstation."""
+        with self._ssh_locks_guard:
+            lock = self._ssh_locks.get(workstation_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._ssh_locks[workstation_id] = lock
+            return lock
 
     @staticmethod
     def _remote_config_for_workstation(
@@ -247,7 +291,9 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> None:
         """Remember a remote scheduled task in memory."""
-        self._remote_tasks[self._remote_task_key(config_name, step_name, workstation_id)] = task_name
+        key = self._remote_task_key(config_name, step_name, workstation_id)
+        with self._remote_tasks_lock:
+            self._remote_tasks[key] = task_name
 
     def _pop_remote_task(
         self,
@@ -256,12 +302,13 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> str | None:
         """Remove one remembered remote scheduled task, accepting legacy int keys."""
-        task_name = self._remote_tasks.pop(
-            self._remote_task_key(config_name, step_name, workstation_id),
-            None,
-        )
-        if task_name is None and workstation_id == DEFAULT_WORKSTATION_ID:
-            task_name = self._remote_tasks.pop(config_name, None)
+        with self._remote_tasks_lock:
+            task_name = self._remote_tasks.pop(
+                self._remote_task_key(config_name, step_name, workstation_id),
+                None,
+            )
+            if task_name is None and workstation_id == DEFAULT_WORKSTATION_ID:
+                task_name = self._remote_tasks.pop(config_name, None)
         return task_name
 
     def _persist_remote_task(
@@ -272,6 +319,7 @@ class RemoteExecutor:
         step_name: str,
         task_name: str,
         flag_file: str,
+        error_flag_file: str | None = None,
     ) -> None:
         """保存远程计划任务元数据，供 daemon 重启后恢复。"""
         artifacts = self._remote_task_artifacts(task_name, flag_file)
@@ -281,7 +329,7 @@ class RemoteExecutor:
             step_name=step_name,
             task_name=task_name,
             flag_file=flag_file,
-            error_flag_file=f"{flag_file}.error",
+            error_flag_file=error_flag_file or f"{flag_file}.error",
             log_file=artifacts["log_file"],
             pid_file=artifacts["pid_file"],
             script_file=artifacts["script_file"],
@@ -290,15 +338,16 @@ class RemoteExecutor:
 
     def restore_remote_tasks_from_db(self) -> None:
         """Daemon 重启后从数据库恢复工作站/构型/步骤 → 计划任务名映射。"""
-        self._remote_tasks.clear()
-        for task in self.state.get_all_remote_tasks():
-            workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
-            config_name = int(str(task["config_name"]))
-            step_name = str(task["step_name"])
-            task_name = str(task["task_name"])
-            self._remote_tasks[
-                self._remote_task_key(config_name, step_name, workstation_id)
-            ] = task_name
+        with self._remote_tasks_lock:
+            self._remote_tasks.clear()
+            for task in self.state.get_all_remote_tasks():
+                workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
+                config_name = int(str(task["config_name"]))
+                step_name = str(task["step_name"])
+                task_name = str(task["task_name"])
+                self._remote_tasks[
+                    self._remote_task_key(config_name, step_name, workstation_id)
+                ] = task_name
 
     def forget_remote_task(
         self,
@@ -336,7 +385,7 @@ class RemoteExecutor:
         error_flag_file = str(task["error_flag_file"])
         task_name = str(task["task_name"])
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 if ssh.check_remote_file(flag_file):
@@ -344,25 +393,64 @@ class RemoteExecutor:
                 if ssh.check_remote_file(error_flag_file):
                     return "failed"
             except (OSError, ConnectionError) as e:
-                logger.warning(
-                    f"{self._log_prefix(step_name)} 构型{config_name} 远程 flag 检查状态未知: {e}"
-                )
-                return "unknown"
+                _raise_infra_on_ssh_error(e)
 
             try:
+                pid_running = self._remote_task_pid_running(ssh, task)
+                if pid_running is True:
+                    return "running"
                 query_cmd = f'schtasks /Query /TN "{task_name}" /FO CSV /NH'
                 _, _, exit_code = ssh.exec_command(query_cmd, timeout=30)
                 if exit_code == 0:
-                    pid_running = self._remote_task_pid_running(ssh, task)
                     if pid_running is False:
                         return "lost"
                     return "running"
+                if (
+                    step_name == "solver"
+                    and self._solver_progress_file_matches(
+                        ssh,
+                        config_name,
+                        workstation_id,
+                    )
+                    and self._workstation_has_fluent_process(ssh)
+                ):
+                    return "unknown"
                 return "lost"
             except (OSError, ConnectionError) as e:
-                logger.warning(
-                    f"{self._log_prefix(step_name)} 构型{config_name} 远程计划任务查询状态未知: {e}"
-                )
-                return "unknown"
+                _raise_infra_on_ssh_error(e)
+
+    def stop_remote_step(
+        self,
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+        reason: str = "",
+    ) -> bool:
+        """Terminate one tracked remote step without stopping the whole pipeline."""
+        wrote_error_flag = True
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
+        if task is not None:
+            error_flag = task.get("error_flag_file")
+            if error_flag:
+                wrote_error_flag = False
+                with self._ssh_guard(workstation_id):
+                    ssh = self._get_ssh_for_workstation(workstation_id)
+                    write_text = getattr(ssh, "_write_remote_text_file", None)
+                    if callable(write_text):
+                        try:
+                            write_text(str(error_flag), reason or "stop_step")
+                            wrote_error_flag = True
+                        except (OSError, ConnectionError) as e:
+                            logger.warning(
+                                "%s 构型%s 写入 stop_step 错误标志失败: %s",
+                                self._log_prefix(step_name),
+                                config_name,
+                                e,
+                            )
+                    else:
+                        wrote_error_flag = True
+        killed = self._kill_remote_task_for_config(config_name, step_name, workstation_id)
+        return bool(killed and wrote_error_flag)
 
     def _remote_task_pid_running(
         self,
@@ -387,6 +475,46 @@ class RemoteExecutor:
         if exit_code != 0:
             return None
         return re.search(rf"\b{pid}\b", out) is not None
+
+    def _solver_progress_file_matches(
+        self,
+        ssh: "RemoteWorkstation",
+        config_name: int,
+        workstation_id: str,
+    ) -> bool:
+        read_remote_text_file = getattr(ssh, "read_remote_text_file", None)
+        if not callable(read_remote_text_file):
+            return False
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+            progress_file = self._solver_progress_file(config_name, remote_config)
+        except ValueError:
+            return False
+        raw = read_remote_text_file(progress_file, timeout=5)
+        if not raw:
+            return False
+        try:
+            progress = json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(progress, dict):
+            return False
+        return progress.get("config_name") == config_name
+
+    def _workstation_has_fluent_process(self, ssh: "RemoteWorkstation") -> bool:
+        command = (
+            'tasklist /FI "IMAGENAME eq cx2410.exe" /FO CSV /NH & '
+            'tasklist /FI "IMAGENAME eq fluent.exe" /FO CSV /NH & '
+            'tasklist /FI "IMAGENAME eq mpiexec.exe" /FO CSV /NH'
+        )
+        out, _, exit_code = ssh.exec_command(command, timeout=30)
+        if exit_code != 0:
+            return False
+        lowered = out.lower()
+        return any(
+            process_name in lowered
+            for process_name in ("cx2410.exe", "fluent.exe", "mpiexec.exe")
+        )
 
     def _remote_task_start_time(
         self,
@@ -451,23 +579,24 @@ class RemoteExecutor:
         workstation_id: str = DEFAULT_WORKSTATION_ID,
     ) -> dict[str, str]:
         """Return last synced paths for one workstation."""
-        data = self._load_last_sync_paths()
-        nested = data.get("workstations")
-        if isinstance(nested, dict):
-            workstation_paths = nested.get(workstation_id)
-            if isinstance(workstation_paths, dict):
+        with self._last_sync_paths_lock:
+            data = self._load_last_sync_paths()
+            nested = data.get("workstations")
+            if isinstance(nested, dict):
+                workstation_paths = nested.get(workstation_id)
+                if isinstance(workstation_paths, dict):
+                    return {
+                        str(key): str(value)
+                        for key, value in workstation_paths.items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    }
+            if workstation_id == DEFAULT_WORKSTATION_ID:
                 return {
                     str(key): str(value)
-                    for key, value in workstation_paths.items()
-                    if isinstance(key, str) and isinstance(value, str)
+                    for key, value in data.items()
+                    if key in {"scripts_dir", "ref_files_dir"} and isinstance(value, str)
                 }
-        if workstation_id == DEFAULT_WORKSTATION_ID:
-            return {
-                str(key): str(value)
-                for key, value in data.items()
-                if key in {"scripts_dir", "ref_files_dir"} and isinstance(value, str)
-            }
-        return {}
+            return {}
 
     def _save_last_sync_paths(
         self,
@@ -480,20 +609,21 @@ class RemoteExecutor:
             "scripts_dir": str(config["scripts_dir"]),
             "ref_files_dir": str(config["ref_files_dir"]),
         }
-        state = self._load_last_sync_paths()
-        nested = state.get("workstations")
-        if not isinstance(nested, dict):
-            nested = {}
-        nested[workstation_id] = paths
-        state["workstations"] = nested
-        if workstation_id == DEFAULT_WORKSTATION_ID:
-            state.update(paths)
-        try:
-            with open(self._sync_state_path, 'w', encoding='utf-8') as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-            logger.debug(f"[Sync] 已保存同步状态: {state}")
-        except OSError as e:
-            logger.warning(f"[Sync] 保存同步状态失败: {e}")
+        with self._last_sync_paths_lock:
+            state = self._load_last_sync_paths()
+            nested = state.get("workstations")
+            if not isinstance(nested, dict):
+                nested = {}
+            nested[workstation_id] = paths
+            state["workstations"] = nested
+            if workstation_id == DEFAULT_WORKSTATION_ID:
+                state.update(paths)
+            try:
+                with open(self._sync_state_path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                logger.debug(f"[Sync] 已保存同步状态: {state}")
+            except OSError as e:
+                logger.error(f"[Sync] 保存同步状态失败: {e}")
 
     def _cleanup_remote_files(
         self,
@@ -513,7 +643,7 @@ class RemoteExecutor:
             label: 日志标签（如 "脚本"、"引用文件"）
         """
         logger.info(f"[Sync] 检测到{label}远程目录变更，清理旧路径: {remote_dir}")
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 for filename in filenames:
@@ -583,7 +713,7 @@ class RemoteExecutor:
             self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "文件传输超时")
             return False
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
 
@@ -645,12 +775,13 @@ class RemoteExecutor:
                     if self._paused_event is not None and self._paused_event.is_set():
                         logger.info(f"[Transfer] 构型{config_name} 上传因暂停中断")
                         return False
-                    self.state.set_step_status(config_name, "transfer", STATUS_ERROR, "SFTP 上传失败")
-                    return False
+                    raise InfrastructureUnavailableError(
+                        f"SFTP 上传失败（构型{config_name}）"
+                    )
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[Transfer] 文件传输异常: {e}")
-                self.state.set_step_status(config_name, "transfer", STATUS_ERROR, str(e))
-                return False
+                _raise_infra_on_ssh_error(e)
 
     # ------------------------------------------------------------------
     # 网格划分
@@ -795,6 +926,8 @@ class RemoteExecutor:
             str(config_name),
             "--mpi-bin-dir",
             _cmd_arg(config["mpi_bin_dir"], force_quote=True),
+            "--fluent-path",
+            _cmd_arg(config["fluent_path"], force_quote=True),
             "--workflow-path",
             _cmd_arg(f"{scripts_dir}/meshing_gen4.wft", force_quote=True),
             "--journal-path",
@@ -844,7 +977,7 @@ class RemoteExecutor:
         logger.info(f"{log_prefix} 启动远程网格划分: 构型{config_name}")
         logger.debug(f"{log_prefix} 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -870,9 +1003,10 @@ class RemoteExecutor:
                 else:
                     logger.error(f"{log_prefix} 网格划分远程任务启动失败: 构型{config_name}")
                 return success
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"{log_prefix} 网格划分启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def execute_meshing(
         self,
@@ -909,28 +1043,39 @@ class RemoteExecutor:
             workstation_id=workstation_id,
         )
 
-    def check_meshing_done(self, config_name: int) -> bool:
+    def check_meshing_done(
+        self,
+        config_name: int,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> bool:
         """检查网格划分是否已完成（标志文件是否存在）。
 
         若标志文件存在则清理并返回 True。使用短暂 SSH 锁。
         """
+        remote_config = self._remote_config_for_workstation(workstation_id)
         try:
-            flag_file = self._meshing_flag_file(config_name)
+            flag_file = self._meshing_flag_file(config_name, remote_config)
         except ValueError:
             logger.error(f"[Meshing] 无效的构型名称类型: {type(config_name).__name__}")
             return False
         try:
-            with self._ssh_lock:
-                ssh = self._get_ssh()
+            with self._ssh_guard(workstation_id):
+                ssh = self._get_ssh_for_workstation(workstation_id)
                 if ssh.check_remote_file(flag_file):
                     logger.info(f"[Meshing] 构型{config_name} 网格划分完成（检测到标志文件）")
                     ssh.delete_remote_file(flag_file)
-                    self._cleanup_completed_remote_task(config_name, "meshing", ssh)
+                    self._cleanup_completed_remote_task(
+                        config_name,
+                        "meshing",
+                        ssh,
+                        workstation_id,
+                    )
                     return True
             return False
+        except InfrastructureUnavailableError:
+            raise
         except (OSError, ConnectionError) as e:
-            logger.error(f"[Meshing] 检查网格划分状态异常: {e}")
-            return False
+            _raise_infra_on_ssh_error(e)
 
     def check_meshing_outputs_exist(
         self,
@@ -956,12 +1101,13 @@ class RemoteExecutor:
                 return bool(ssh.check_remote_file(remote_path))
 
         try:
-            with self._ssh_lock:
+            with self._ssh_guard(workstation_id):
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 return mesh_file is not None and _check_remote_file(ssh, mesh_file)
+        except InfrastructureUnavailableError:
+            raise
         except (OSError, ConnectionError) as e:
-            logger.warning(f"[Meshing] 检查远程输出文件异常: {e}")
-            return False
+            _raise_infra_on_ssh_error(e)
 
     def wait_meshing_completion(
         self, config_name: int,
@@ -990,6 +1136,7 @@ class RemoteExecutor:
             "meshing",
             workstation_id,
         )
+        self.last_meshing_error = ""
 
         logger.info(f"[Meshing] 开始轮询构型{config_name} 网格划分状态 (超时: {timeout}s)")
 
@@ -1009,11 +1156,20 @@ class RemoteExecutor:
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
+                        error_summary = self._read_remote_task_error_summary(
+                            ssh,
+                            config_name,
+                            "meshing",
+                            workstation_id,
+                            error_flag,
+                        )
+                        self.last_meshing_error = error_summary
                         logger.error(
-                            f"[Meshing] 构型{config_name} 网格划分远程任务执行失败"
+                            f"[Meshing] 构型{config_name} 网格划分远程任务执行失败: "
+                            f"{error_summary}"
                         )
                         ssh.delete_remote_file(error_flag)
                         self._cleanup_completed_remote_task(
@@ -1059,15 +1215,56 @@ class RemoteExecutor:
                                 workstation_id,
                             )
                             return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[Meshing] 轮询构型{config_name} 异常: {e}")
+                _raise_infra_on_ssh_error(e)
 
             time.sleep(poll_interval)
 
         logger.error(f"[Meshing] 构型{config_name} 网格划分超时 ({timeout}s)")
+        self.last_meshing_error = f"网格划分超时 ({timeout}s)"
         # 超时后终止远程进程，防止资源泄漏和重试冲突
         self._kill_remote_task_for_config(config_name, "meshing", workstation_id)
         return False
+
+    def _read_remote_task_error_summary(
+        self,
+        ssh: "RemoteWorkstation",
+        config_name: int,
+        step_name: str,
+        workstation_id: str,
+        error_flag: str,
+    ) -> str:
+        """Return a compact remote task error summary before cleanup removes markers."""
+        read_text = getattr(ssh, "read_remote_text_file", None)
+        if not callable(read_text):
+            return "远程任务失败（当前 SSH 客户端不支持读取错误详情）"
+
+        parts: list[str] = []
+        try:
+            error_text = read_text(error_flag, timeout=5)
+            if error_text:
+                parts.append(error_text.strip())
+        except (OSError, ConnectionError) as exc:
+            parts.append(f"读取错误标志失败: {exc}")
+
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
+        log_file = str((task or {}).get("log_file") or "")
+        if log_file:
+            try:
+                log_text = read_text(log_file, timeout=5)
+                if log_text:
+                    parts.append(log_text.strip())
+            except (OSError, ConnectionError) as exc:
+                parts.append(f"读取远程任务日志失败: {exc}")
+
+        summary = "\n".join(part for part in parts if part).strip()
+        if not summary:
+            return "远程任务失败（未读取到错误详情）"
+        lines = [line.strip() for line in summary.splitlines() if line.strip()]
+        tail = "\n".join(lines[-8:])
+        return tail[-1200:]
 
     # ------------------------------------------------------------------
     # 仿真求解
@@ -1100,40 +1297,15 @@ class RemoteExecutor:
         allow_config_override: bool = True,
     ) -> dict[str, str]:
         """Resolve workstation-local postprocess export directories."""
-        output_dir = str(
-            (config.get("postprocess_output_dir") if allow_config_override else None)
-            or ENGINE_CONFIG.get("postprocess_output_dir")
-            or config.get("result_dir")
-            or config.get("working_dir")
-            or ""
-        )
-        engine_animation_dir = ENGINE_CONFIG.get("postprocess_animation_dir")
-        config_postprocess_animation_dir = (
-            config.get("postprocess_animation_dir") if allow_config_override else None
-        )
-        if (
-            config_postprocess_animation_dir
-            and config_postprocess_animation_dir != engine_animation_dir
-        ):
-            animation_source = config_postprocess_animation_dir
-        elif allow_config_override and config.get("animation_dir"):
-            animation_source = config.get("animation_dir")
-        elif engine_animation_dir == _DEFAULT_POSTPROCESS_ANIMATION_DIR and config.get("animation_dir"):
-            animation_source = config.get("animation_dir")
-        else:
-            animation_source = engine_animation_dir or config.get("animation_dir") or ""
-        animation_dir = str(
-            animation_source
-        )
-        metrics_dir = str(
-            (config.get("postprocess_metrics_dir") if allow_config_override else None)
-            or ENGINE_CONFIG.get("postprocess_metrics_dir")
-            or (f"{output_dir}/metrics" if output_dir else "")
+        paths = resolve_postprocess_paths(
+            config,
+            allow_config_override=allow_config_override,
+            metrics_fallback_to_output_subdir=True,
         )
         return {
-            "output_dir": output_dir,
-            "animation_dir": animation_dir,
-            "metrics_dir": metrics_dir,
+            "output_dir": paths["output_dir"].replace("/", "\\"),
+            "animation_dir": paths["animation_dir"].replace("/", "\\"),
+            "metrics_dir": paths["metrics_dir"].replace("/", "\\"),
         }
 
     @staticmethod
@@ -1189,6 +1361,8 @@ class RemoteExecutor:
             str(config_name),
             "--mpi-bin-dir",
             _cmd_arg(config["mpi_bin_dir"], force_quote=True),
+            "--fluent-path",
+            _cmd_arg(config["fluent_path"], force_quote=True),
             "--journal-path",
             _cmd_arg(f"{scripts_dir}/solver_gen4.jou", force_quote=True),
             "--msh-dir",
@@ -1258,6 +1432,8 @@ class RemoteExecutor:
             "-u",
             _cmd_arg(f"{scripts_dir}/batch_postprocess_gen4.py", force_quote=True),
             str(config_name),
+            "--fluent-path",
+            _cmd_arg(config["fluent_path"], force_quote=True),
             "--case-dir",
             _cmd_arg(config["result_dir"], force_quote=True),
             "--post-journal-path",
@@ -1299,7 +1475,7 @@ class RemoteExecutor:
         deleted = 0
         failed = 0
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 list_remote_directory = getattr(ssh, "list_remote_directory", None)
@@ -1364,7 +1540,7 @@ class RemoteExecutor:
         logger.info(f"[Solver] 启动远程仿真求解: 构型{config_name}")
         logger.debug(f"[Solver] 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -1391,9 +1567,10 @@ class RemoteExecutor:
                 else:
                     logger.error(f"[Solver] 远程求解启动失败: 构型{config_name}")
                     return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[Solver] 仿真求解启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def execute_postprocess(
         self,
@@ -1442,7 +1619,7 @@ class RemoteExecutor:
         logger.info(f"[PostProcess] 启动独立远程后处理: 构型{config_name}")
         logger.debug(f"[PostProcess] 远程命令: {command}")
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 success, task_name = ssh.exec_background(
@@ -1469,9 +1646,10 @@ class RemoteExecutor:
                     return True
                 logger.error(f"[PostProcess] 独立后处理远程任务启动失败: 构型{config_name}")
                 return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.error(f"[PostProcess] 独立后处理启动异常: {e}")
-                return False
+                _raise_infra_on_ssh_error(e)
 
     def _register_postprocess_from_solver(
         self,
@@ -1491,16 +1669,17 @@ class RemoteExecutor:
             logger.error(f"[PostProcess] 远程后处理 flag 构建失败: {e}")
             return False
 
-        solver_task_name = self._remote_tasks.get(
-            self._remote_task_key(config_name, "solver", workstation_id),
-        )
-        if solver_task_name is None:
-            solver_task = self._get_remote_task_from_state(
-                config_name,
-                "solver",
-                workstation_id,
+        with self._remote_tasks_lock:
+            solver_task_name = self._remote_tasks.get(
+                self._remote_task_key(config_name, "solver", workstation_id),
             )
-            if solver_task is not None:
+        solver_task = self._get_remote_task_from_state(
+            config_name,
+            "solver",
+            workstation_id,
+        )
+        if solver_task is not None:
+            if solver_task_name is None:
                 solver_task_name = str(solver_task["task_name"])
         if not solver_task_name:
             logger.warning(
@@ -1508,6 +1687,17 @@ class RemoteExecutor:
                 "将尝试启动独立后处理"
             )
             return False
+
+        solver_error_flag = None
+        if solver_task is not None:
+            raw_error_flag = solver_task.get("error_flag_file")
+            if raw_error_flag:
+                solver_error_flag = str(raw_error_flag)
+        if solver_error_flag is None:
+            try:
+                solver_error_flag = f"{self._solver_flag_file(config_name, remote_config)}.error"
+            except ValueError:
+                solver_error_flag = None
 
         self._remember_remote_task(
             config_name,
@@ -1521,6 +1711,7 @@ class RemoteExecutor:
             step_name="postprocess",
             task_name=solver_task_name,
             flag_file=flag_file,
+            error_flag_file=solver_error_flag,
         )
         logger.info(
             f"[PostProcess] 构型{config_name} 已接管 Solver Fluent 会话，等待后处理完成"
@@ -1532,26 +1723,26 @@ class RemoteExecutor:
         ssh: "RemoteWorkstation",
         progress_file: str,
         config_name: int,
-    ) -> None:
+    ) -> bool:
         """读取远程 Solver progress JSON 并写入状态。"""
         read_remote_text_file = getattr(ssh, "read_remote_text_file", None)
         if not callable(read_remote_text_file):
-            return
+            return False
         raw = read_remote_text_file(progress_file, timeout=5)
         if not raw:
-            return
+            return False
         try:
             progress = json.loads(raw)
         except json.JSONDecodeError:
             logger.debug(f"[Solver] progress JSON 暂不可读，忽略本轮: {progress_file}")
-            return
+            return False
         if not isinstance(progress, dict):
-            return
+            return False
         if progress.get("config_name") != config_name:
             logger.debug(
                 f"[Solver] progress 构型不匹配，忽略: {progress.get('config_name')} != {config_name}"
             )
-            return
+            return False
         sanitized = {
             key: progress[key]
             for key in (
@@ -1563,19 +1754,30 @@ class RemoteExecutor:
             )
             if key in progress
         }
+        set_by_config = getattr(self.state, "set_solver_progress_by_config", None)
+        if callable(set_by_config):
+            set_by_config(config_name, sanitized)
+            return True
         set_solver_progress = getattr(self.state, "set_solver_progress", None)
         if callable(set_solver_progress):
             set_solver_progress(sanitized)
+            return True
+        return False
 
     def _clear_solver_progress(
         self,
         progress_file: str,
         ssh: RemoteWorkstation | None = None,
+        config_name: int | None = None,
     ) -> None:
         """清理本地与远程 Solver progress。"""
-        clear_solver_progress = getattr(self.state, "clear_solver_progress", None)
-        if callable(clear_solver_progress):
-            clear_solver_progress()
+        clear_by_config = getattr(self.state, "clear_solver_progress_by_config", None)
+        if config_name is not None and callable(clear_by_config):
+            clear_by_config(config_name)
+        else:
+            clear_solver_progress = getattr(self.state, "clear_solver_progress", None)
+            if callable(clear_solver_progress):
+                clear_solver_progress()
         if ssh is None:
             return
         delete_remote_file = getattr(ssh, "delete_remote_file", None)
@@ -1611,6 +1813,10 @@ class RemoteExecutor:
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
 
         timeout = ENGINE_CONFIG["solver_timeout"]
+        startup_timeout_value = ENGINE_CONFIG.get("solver_startup_timeout", 900)
+        if not isinstance(startup_timeout_value, str | int | float):
+            startup_timeout_value = 900
+        startup_timeout = float(startup_timeout_value)
         poll_interval = 30
         start_time = self._remote_task_start_time(
             config_name,
@@ -1619,6 +1825,8 @@ class RemoteExecutor:
         )
         file_grace_period = 60
         first_file_seen_time: float | None = None
+        progress_seen = False
+        self.last_solver_error = ""
 
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
 
@@ -1627,7 +1835,7 @@ class RemoteExecutor:
             if paused_event is not None:
                 pause_start = time.time()
                 if not wait_unless_paused_or_stopped(paused_event, stopped_event or threading.Event()):
-                    self._clear_solver_progress(progress_file)
+                    self._clear_solver_progress(progress_file, config_name=config_name)
                     return False
                 # 暂停补偿：将超时计时器和文件宽限计时器向后推移暂停时长
                 pause_duration = time.time() - pause_start
@@ -1636,26 +1844,37 @@ class RemoteExecutor:
                     if first_file_seen_time is not None:
                         first_file_seen_time += pause_duration
             if stopped_event is not None and stopped_event.is_set():
-                self._clear_solver_progress(progress_file)
+                self._clear_solver_progress(progress_file, config_name=config_name)
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if ssh.check_remote_file(error_flag):
-                        logger.error(
-                            f"[Solver] 构型{config_name} 仿真求解远程任务执行失败"
-                        )
-                        ssh.delete_remote_file(error_flag)
-                        self._clear_solver_progress(progress_file, ssh)
-                        self._cleanup_completed_remote_task(
+                        error_summary = self._read_remote_task_error_summary(
+                            ssh,
                             config_name,
                             "solver",
-                            ssh,
+                            workstation_id,
+                            error_flag,
+                        )
+                        self.last_solver_error = error_summary
+                        logger.error(
+                            f"[Solver] 构型{config_name} 仿真求解远程任务执行失败: "
+                            f"{error_summary}"
+                        )
+                        ssh.delete_remote_file(error_flag)
+                        self._clear_solver_progress(progress_file, ssh, config_name)
+                        self._kill_remote_task_for_config(
+                            config_name,
+                            "solver",
                             workstation_id,
                         )
                         return False
-                    self._read_solver_progress(ssh, progress_file, config_name)
+                    progress_seen = (
+                        self._read_solver_progress(ssh, progress_file, config_name)
+                        or progress_seen
+                    )
                     if ssh.check_remote_file(flag_file):
                         # 标志文件存在，验证输出文件
                         cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
@@ -1663,7 +1882,7 @@ class RemoteExecutor:
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
-                            self._clear_solver_progress(progress_file, ssh)
+                            self._clear_solver_progress(progress_file, ssh, config_name)
                             logger.info(f"[Solver] 构型{config_name} 仿真求解完成（cas+dat 均已保存）")
                             return True
 
@@ -1691,6 +1910,9 @@ class RemoteExecutor:
                                 f"[Solver] 构型{config_name}: {', '.join(missing)} "
                                 f"{file_grace_period}s 内未生成，判定为导出错误"
                             )
+                            self.last_solver_error = (
+                                f"{', '.join(missing)} {file_grace_period}s 内未生成"
+                            )
                             # 清理部分文件 + 标志文件，确保 retry 从干净状态开始
                             if cas_exists and cas_file:
                                 ssh.delete_remote_file(cas_file)
@@ -1699,28 +1921,46 @@ class RemoteExecutor:
                                 ssh.delete_remote_file(dat_file)
                                 logger.info(f"[Solver] 构型{config_name}: 已清理部分文件 {dat_file}")
                             ssh.delete_remote_file(flag_file)
-                            self._clear_solver_progress(progress_file, ssh)
-                            self._cleanup_completed_remote_task(
+                            self._clear_solver_progress(progress_file, ssh, config_name)
+                            self._kill_remote_task_for_config(
                                 config_name,
                                 "solver",
-                                ssh,
                                 workstation_id,
                             )
                             return False
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[Solver] 轮询构型{config_name} 求解状态异常: {e}")
+                _raise_infra_on_ssh_error(e)
+
+            if not progress_seen and time.time() - start_time >= startup_timeout:
+                status = self.query_remote_task_status(
+                    config_name,
+                    "solver",
+                    workstation_id=workstation_id,
+                )
+                if status in {"lost", "failed", "running"}:
+                    self.last_solver_error = (
+                        f"Solver 启动失败: 远程任务状态为 {status}，"
+                        "启动窗口内未产生进度"
+                    )
+                    logger.error("[Solver] 构型%s %s", config_name, self.last_solver_error)
+                    self._kill_remote_task_for_config(config_name, "solver", workstation_id)
+                    self._clear_solver_progress(progress_file, config_name=config_name)
+                    return False
 
             time.sleep(poll_interval)
 
         logger.error(f"[Solver] 构型{config_name} 仿真求解超时 ({timeout}s)")
+        self.last_solver_error = f"仿真求解超时 ({timeout}s)"
         # 超时后终止远程进程，防止资源泄漏和重试冲突
         self._kill_remote_task_for_config(config_name, "solver", workstation_id)
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                self._clear_solver_progress(progress_file, ssh)
+                self._clear_solver_progress(progress_file, ssh, config_name)
             except (OSError, ConnectionError):
-                self._clear_solver_progress(progress_file)
+                self._clear_solver_progress(progress_file, config_name=config_name)
         return False
 
     def wait_postprocess_completion(
@@ -1741,7 +1981,18 @@ class RemoteExecutor:
         except ValueError:
             logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
             return False
-        error_flag = f"{flag_file}.error"
+        error_flags = [f"{flag_file}.error"]
+        task = self._get_remote_task_from_state(config_name, "postprocess", workstation_id)
+        if task is not None:
+            task_error_flag = task.get("error_flag_file")
+            if task_error_flag and str(task_error_flag) not in error_flags:
+                error_flags.insert(0, str(task_error_flag))
+        try:
+            solver_wrapper_error = f"{self._solver_flag_file(config_name, remote_config)}.error"
+            if solver_wrapper_error not in error_flags:
+                error_flags.append(solver_wrapper_error)
+        except ValueError:
+            pass
 
         timeout = ENGINE_CONFIG["postprocess_timeout"]
         poll_interval = 30
@@ -1765,10 +2016,15 @@ class RemoteExecutor:
                 return False
 
             try:
-                with self._ssh_lock:
+                with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
-                    if ssh.check_remote_file(error_flag):
-                        logger.error(f"[PostProcess] 构型{config_name} 后处理远程任务执行失败")
+                    for error_flag in error_flags:
+                        if not ssh.check_remote_file(error_flag):
+                            continue
+                        logger.error(
+                            f"[PostProcess] 构型{config_name} 后处理远程任务执行失败"
+                            f"（错误标志: {error_flag}）"
+                        )
                         ssh.delete_remote_file(error_flag)
                         self._cleanup_completed_remote_task(
                             config_name,
@@ -1780,8 +2036,10 @@ class RemoteExecutor:
                     if ssh.check_remote_file(flag_file):
                         logger.info(f"[PostProcess] 构型{config_name} 后处理完成")
                         return True
+            except InfrastructureUnavailableError:
+                raise
             except (OSError, ConnectionError) as e:
-                logger.warning(f"[PostProcess] 轮询构型{config_name} 后处理状态异常: {e}")
+                _raise_infra_on_ssh_error(e)
 
             time.sleep(poll_interval)
 
@@ -1802,7 +2060,7 @@ class RemoteExecutor:
             logger.error(f"[PostProcess] 无效的构型名称类型: {type(config_name).__name__}")
             return
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 ssh.delete_remote_file(flag_file)
@@ -1825,7 +2083,7 @@ class RemoteExecutor:
         config_name: int,
         step_name: str,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
-    ) -> None:
+    ) -> bool:
         """超时后终止远程后台任务。
 
         从 _remote_tasks 中取出任务名称，调用 SSH kill_remote_task 终止。
@@ -1835,19 +2093,71 @@ class RemoteExecutor:
             config_name: 构型编号
             step_name: 步骤名（用于日志）
         """
+        task = self._get_remote_task_from_state(config_name, step_name, workstation_id)
         task_name = self._pop_remote_task(config_name, step_name, workstation_id)
         self._delete_remote_task_from_state(config_name, step_name, workstation_id)
         if not task_name:
             logger.debug(f"{self._log_prefix(step_name)} 构型{config_name} 无远程任务记录，跳过终止")
-            return
+            return True
 
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                ssh.kill_remote_task(task_name)
+                killed = bool(ssh.kill_remote_task(task_name))
+                if not killed:
+                    logger.warning(
+                        f"{self._log_prefix(step_name)} 构型{config_name} 远程任务终止失败: {task_name}"
+                    )
+                    return False
+                cleanup_fluent = getattr(ssh, "cleanup_fluent_processes_for_task", None)
+                fluent_cleaned = True
+                if step_name in {"solver", "postprocess"} and callable(cleanup_fluent):
+                    fluent_cleaned = bool(cleanup_fluent(task or {
+                        "config_name": config_name,
+                        "step_name": step_name,
+                        "task_name": task_name,
+                    }))
                 logger.info(f"{self._log_prefix(step_name)} 构型{config_name} 已请求终止远程任务: {task_name}")
+                return fluent_cleaned
             except (OSError, ConnectionError) as e:
                 logger.warning(f"{self._log_prefix(step_name)} 构型{config_name} 终止远程任务异常: {e}")
+                return False
+
+    def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+        """Terminate every persisted remote task and clear its tracking record."""
+        tasks = list(self.state.get_all_remote_tasks())
+        results = {"cancelled": 0, "failed": 0}
+        for task in tasks:
+            try:
+                config_name = int(str(task["config_name"]))
+                step_name = str(task["step_name"])
+                workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning("[RemoteTask] 跳过无效远程任务记录: %s (%s)", task, e)
+                results["failed"] += 1
+                continue
+
+            before_failed = results["failed"]
+            try:
+                killed = self._kill_remote_task_for_config(config_name, step_name, workstation_id)
+            except Exception as e:
+                logger.warning(
+                    "[RemoteTask] 取消远程任务异常: config=%s step=%s workstation=%s error=%s",
+                    config_name,
+                    step_name,
+                    workstation_id,
+                    e,
+                )
+                results["failed"] += 1
+            else:
+                if killed and results["failed"] == before_failed:
+                    results["cancelled"] += 1
+                else:
+                    results["failed"] += 1
+
+        if tasks:
+            logger.info("[RemoteTask] 已取消持久化远程任务: %s", results)
+        return results
 
     def _cleanup_completed_remote_task(
         self,
@@ -2076,7 +2386,7 @@ class RemoteExecutor:
 
         # ---- 阶段 1: 第一级校验 —— 组合哈希快速比对（1 次 SSH 调用） ----
         local_combined = self._compute_combined_hash(local_hashes)
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_combined = ssh.get_remote_combined_file_hash(
@@ -2097,7 +2407,7 @@ class RemoteExecutor:
         )
 
         # ---- 阶段 2: 第二级校验 —— 逐文件比对（N 次 SSH 调用） ----
-        with self._ssh_lock:
+        with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
                 remote_hashes = ssh.get_remote_file_hashes(remote_dir, filenames)
@@ -2139,7 +2449,7 @@ class RemoteExecutor:
 
             # ★ 逐文件获取 SSH 锁，上传完成后立即释放，
             #   允许 Transfer 等操作在文件间插入执行
-            with self._ssh_lock:
+            with self._ssh_guard(workstation_id):
                 try:
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     if os.path.splitext(filename)[1] in path_aware_exts:

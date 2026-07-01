@@ -12,9 +12,15 @@ const DASHBOARD_TIMEOUT: Duration = Duration::from_secs(2);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// reset 可能同步清理 SC/SW 资源或等待 LocalWorker，不能使用普通轮询级超时。
 const RESET_TIMEOUT: Duration = Duration::from_secs(60);
+/// clean 可能跨多台工作站执行 SSH 文件删除，不能使用普通轮询级超时。
+const CLEAN_TIMEOUT: Duration = Duration::from_secs(60);
+/// worker start/restart 会触发多工作站 SSH 探测，不能使用普通轮询级超时。
+const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024; // 1MB 行长度上限
 /// 自动重连冷却时间：防止 daemon 不可用时频繁重连。
 const RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
+/// 命令失败路径上的即时重连不能阻塞 TUI 主循环太久。
+const AUTO_RECONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct IpcClient {
     host: String,
@@ -22,7 +28,7 @@ pub struct IpcClient {
     stream: Option<TcpStream>,
     /// 上次重连尝试时间，用于冷却。
     last_reconnect: Option<Instant>,
-    /// 连续重连失败次数，用于分级冷却。
+    /// 连续自动重连失败次数，用于日志和未来退避扩展。
     consecutive_failures: u32,
 }
 
@@ -298,21 +304,18 @@ impl IpcClient {
     /// 已被 `take()` 取出放入 `BufReader`。重连会创建全新连接，旧连接的清理
     /// 依赖 `BufReader` 的 drop——短暂窗口内服务端可能看到两个活跃连接。
     async fn auto_reconnect(&mut self, reason: &str) {
-        // 仅当存在连续失败时才应用冷却
-        if self.consecutive_failures > 0 {
-            if let Some(last) = self.last_reconnect {
-                if last.elapsed() < RECONNECT_COOLDOWN {
-                    log::debug!("{}，重连冷却中，跳过", reason);
-                    return;
-                }
+        if let Some(last) = self.last_reconnect {
+            if last.elapsed() < RECONNECT_COOLDOWN {
+                log::debug!("{}，重连冷却中，跳过", reason);
+                return;
             }
         }
         self.last_reconnect = Some(Instant::now());
         log::info!("{}，尝试自动重连...", reason);
-        // connect() 内部会先 disconnect()，确保 self.stream 中的旧连接被关闭。
+        // connect_with_timeout() 内部会先 disconnect()，确保 self.stream 中的旧连接被关闭。
         // 注意：send_request_with_timeout 中 take() 取出的 stream 不受此影响，
         // 旧 stream 的关闭由 BufReader 的 drop 保证。
-        match self.connect().await {
+        match self.connect_with_timeout(AUTO_RECONNECT_TIMEOUT).await {
             Ok(()) => {
                 self.consecutive_failures = 0; // 成功重连，重置失败计数
                 log::info!("自动重连成功")
@@ -410,10 +413,41 @@ impl IpcClient {
         if let Some(cn) = config_name {
             params.insert("config_name".to_string(), cn);
         }
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_CLEAN_STEP,
-            serde_json::Value::Object(params),
-        ))
+        self.send_request_with_timeout(
+            &IpcRequest::with_params(
+                super::protocol::CMD_CLEAN_STEP,
+                serde_json::Value::Object(params),
+            ),
+            CLEAN_TIMEOUT,
+        )
+        .await
+    }
+
+    pub async fn stop_step(
+        &mut self,
+        config_name: serde_json::Value,
+        step_name: &str,
+        reason: Option<&str>,
+    ) -> Result<IpcResponse, String> {
+        let mut params = serde_json::Map::new();
+        params.insert("config_name".to_string(), config_name);
+        params.insert(
+            "step_name".to_string(),
+            serde_json::Value::String(step_name.to_string()),
+        );
+        if let Some(reason) = reason {
+            params.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            );
+        }
+        self.send_request_with_timeout(
+            &IpcRequest::with_params(
+                super::protocol::CMD_STOP_STEP,
+                serde_json::Value::Object(params),
+            ),
+            RESET_TIMEOUT,
+        )
         .await
     }
 
@@ -422,52 +456,16 @@ impl IpcClient {
             .await
     }
 
-    #[allow(dead_code)]
-    pub async fn worker_register(
-        &mut self,
-        worker_id: &str,
-        capabilities: serde_json::Value,
-    ) -> Result<IpcResponse, String> {
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "worker_id".to_string(),
-            serde_json::Value::String(worker_id.to_string()),
-        );
-        params.insert("capabilities".to_string(), capabilities);
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_WORKER_REGISTER,
-            serde_json::Value::Object(params),
-        ))
-        .await
-    }
-
-    #[allow(dead_code)]
-    pub async fn worker_heartbeat(&mut self, worker_id: &str) -> Result<IpcResponse, String> {
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "worker_id".to_string(),
-            serde_json::Value::String(worker_id.to_string()),
-        );
-        self.send_request(&IpcRequest::with_params(
-            super::protocol::CMD_WORKER_HEARTBEAT,
-            serde_json::Value::Object(params),
-        ))
-        .await
-    }
-
     pub async fn worker_start(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_START))
-            .await
+        self.send_request_with_timeout(
+            &IpcRequest::new(super::protocol::CMD_WORKER_START),
+            WORKER_TIMEOUT,
+        )
+        .await
     }
 
     pub async fn worker_stop(&mut self) -> Result<IpcResponse, String> {
         self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_STOP))
-            .await
-    }
-
-    #[allow(dead_code)]
-    pub async fn worker_restart(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_RESTART))
             .await
     }
 }
@@ -817,6 +815,57 @@ mod tests {
     }
 
     #[test]
+    fn command_timeout_does_not_add_default_reconnect_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"running"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut start = String::new();
+            reader.read_line(&mut start).expect("read start");
+            let request: Value = serde_json::from_str(start.trim()).expect("start json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_START)
+            );
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_secs(3));
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let started = Instant::now();
+        let result = rt.block_on(client.start_pipeline());
+
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < DEFAULT_TIMEOUT + Duration::from_secs(2),
+            "command timeout should not add another default reconnect timeout"
+        );
+        assert!(!client.is_connected());
+        server.join().expect("server thread");
+    }
+
+    #[test]
     fn reset_step_accepts_response_after_default_timeout_window() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let port = listener.local_addr().expect("listener address").port();
@@ -870,6 +919,127 @@ mod tests {
         assert!(
             result.is_ok(),
             "reset should not use the default IPC timeout"
+        );
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn clean_step_accepts_response_after_default_timeout_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut clean = String::new();
+            reader.read_line(&mut clean).expect("read clean");
+            let request: Value = serde_json::from_str(clean.trim()).expect("clean json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_CLEAN_STEP)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":null,"message":"已清理 all 步骤的文件","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write clean response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.clean_step("all", None));
+
+        assert!(
+            result.is_ok(),
+            "clean should not use the default IPC timeout"
+        );
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn worker_start_accepts_response_after_default_timeout_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"stopped"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut worker_start = String::new();
+            reader
+                .read_line(&mut worker_start)
+                .expect("read worker start");
+            let request: Value =
+                serde_json::from_str(worker_start.trim()).expect("worker start json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_WORKER_START)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":{{"ssh_checks":{{"WS-A":"ok"}}}},"message":"Worker ready","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write worker start response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.worker_start());
+
+        assert!(
+            result.is_ok(),
+            "worker start should not use the default IPC timeout"
         );
         rt.block_on(client.disconnect());
         server.join().expect("server thread");

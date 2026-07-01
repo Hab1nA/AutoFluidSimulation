@@ -152,3 +152,62 @@ def test_local_worker_adapter_delegates_stage_cleanup() -> None:
     thread.join(timeout=2.0)
 
     assert result_holder == {"ok": True}
+
+
+def test_local_worker_adapter_ensures_workstation_tunnel() -> None:
+    from engine.local_worker_adapter import LocalWorkerAdapter
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    registry = LocalWorkerRegistry(timeout_seconds=90.0, clock=lambda: 100.0)
+    registry.register("local-pc-01", {"workstation_tunnel": True})
+    adapter = LocalWorkerAdapter(registry, result_poll_interval=0.01)
+    result_holder: dict[str, dict] = {}
+
+    def wait_for_result() -> None:
+        result_holder["result"] = adapter.ensure_workstation_tunnel(
+            "WS-C",
+            timeout_seconds=2.0,
+        )
+
+    thread = threading.Thread(target=wait_for_result)
+    thread.start()
+
+    task = registry.poll_task("local-pc-01")
+    assert task is not None
+    assert task["step"] == "workstation_tunnel_ensure"
+    assert task["params"] == {"workstation_id": "WS-C"}
+    assert task["timeout_seconds"] == 2.0
+
+    registry.complete_task(
+        str(task["task_id"]),
+        "local-pc-01",
+        {"ok": True, "results": [{"id": "WS-C", "ok": True}]},
+    )
+    thread.join(timeout=2.0)
+
+    assert result_holder == {"result": {"ok": True, "results": [{"id": "WS-C", "ok": True}]}}
+
+
+def test_local_worker_adapter_fails_quickly_when_assigned_worker_goes_offline() -> None:
+    from engine.local_worker_adapter import LocalWorkerAdapter
+    from engine.local_worker_registry import LocalWorkerRegistry
+
+    now = 100.0
+    registry = LocalWorkerRegistry(timeout_seconds=0.05, clock=lambda: now)
+    registry.register("local-pc-01", {"sw": True})
+    adapter = LocalWorkerAdapter(registry, result_poll_interval=0.01)
+    result_holder: dict[str, bool] = {}
+
+    def wait_for_result() -> None:
+        result_holder["ok"] = adapter.execute_sw_per_config(1, timeout_seconds=2.0)
+
+    thread = threading.Thread(target=wait_for_result)
+    thread.start()
+
+    task = registry.poll_task("local-pc-01")
+    assert task is not None
+    now = 101.0
+    thread.join(timeout=1.0)
+
+    assert result_holder == {"ok": False}
+    assert "LocalWorker 离线" in adapter.last_error

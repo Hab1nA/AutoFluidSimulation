@@ -1,5 +1,7 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// 将字符索引转换为字节索引（UTF-8 安全）。
@@ -119,7 +121,7 @@ fn find_project_dir_from(start: &std::path::Path) -> Option<PathBuf> {
     }
 }
 
-fn parse_env_content(content: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_env_content(content: &str) -> Vec<(String, String)> {
     content.lines().filter_map(parse_env_assignment).collect()
 }
 
@@ -179,6 +181,30 @@ fn sync_endpoint_env() {
     }
 }
 
+fn spawn_output_reader<R>(mut reader: R) -> JoinHandle<Result<Vec<u8>, std::io::Error>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+fn collect_output_reader(
+    handle: Option<JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    match handle {
+        Some(handle) => match handle.join() {
+            Ok(Ok(bytes)) => Ok(bytes),
+            Ok(Err(e)) => Err(format!("读取命令{}失败: {}", label, e)),
+            Err(_) => Err(format!("读取命令{}线程异常", label)),
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
 pub fn run_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -187,24 +213,34 @@ pub fn run_command_with_timeout(
     let mut child = command
         .spawn()
         .map_err(|e| format!("启动命令失败: {}", e))?;
+    let mut stdout_reader = child.stdout.take().map(spawn_output_reader);
+    let mut stderr_reader = child.stderr.take().map(spawn_output_reader);
     let deadline = Instant::now() + timeout;
 
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|e| format!("读取命令输出失败: {}", e));
+            Ok(Some(status)) => {
+                let stdout = collect_output_reader(stdout_reader.take(), "stdout")?;
+                let stderr = collect_output_reader(stderr_reader.take(), "stderr")?;
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
             }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
+                let _ = collect_output_reader(stdout_reader.take(), "stdout");
+                let _ = collect_output_reader(stderr_reader.take(), "stderr");
                 return Err(format!("命令执行超时 ({}s)", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => {
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
+                let _ = collect_output_reader(stdout_reader.take(), "stdout");
+                let _ = collect_output_reader(stderr_reader.take(), "stderr");
                 return Err(format!("检查命令状态失败: {}", e));
             }
         }
@@ -250,16 +286,177 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+pub fn wait_for_pid_dead(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    !is_pid_alive(pid)
+}
+
+// ------------------------------------------------------------------
+// 环境变量辅助
+// ------------------------------------------------------------------
+
+/// 返回环境变量值（去首尾空白后非空）。
+pub(crate) fn env_non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+// ------------------------------------------------------------------
+// 工作站环境标识符
+// ------------------------------------------------------------------
+
+/// 将工作站 ID 转换为大写、下划线分隔的环境标识符。
+///
+/// 非字母数字字符折叠为单个 `_`，首尾 `_` 会被移除。
+/// 空输入返回 `"DEFAULT"`。
+pub(crate) fn workstation_env_token(workstation_id: &str) -> String {
+    let mut token = String::new();
+    let mut last_was_separator = false;
+    for ch in workstation_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch.to_ascii_uppercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !token.is_empty() {
+            token.push('_');
+            last_was_separator = true;
+        }
+    }
+    while token.ends_with('_') {
+        token.pop();
+    }
+    if token.is_empty() {
+        "DEFAULT".to_string()
+    } else {
+        token
+    }
+}
+
+// ------------------------------------------------------------------
+// PowerShell 候选路径
+// ------------------------------------------------------------------
+
+/// 返回要尝试的 PowerShell 可执行文件列表。
+///
+/// 若环境变量 `AUTOFLUID_POWERSHELL_EXE` 已设置且非空则仅返回该值，
+/// 否则依次尝试 `pwsh.exe`（PowerShell 7+）和 `powershell.exe`（Windows PowerShell）。
+#[cfg(target_os = "windows")]
+pub(crate) fn powershell_candidates() -> Vec<String> {
+    if let Some(value) = env_non_empty("AUTOFLUID_POWERSHELL_EXE") {
+        return vec![value];
+    }
+    vec!["pwsh.exe".to_string(), "powershell.exe".to_string()]
+}
+
+/// 返回默认的 PowerShell 可执行文件（`powershell_candidates()` 的第一个）。
+///
+/// 在非 Windows 平台上返回 `"sh"`。
+pub(crate) fn resolve_powershell_exe() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        powershell_candidates()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "powershell.exe".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "sh".to_string()
+    }
+}
+
+// ------------------------------------------------------------------
+// 进程命令行查询
+// ------------------------------------------------------------------
+
+/// 查询给定 PID 的进程命令行（Windows 使用 CIM，Unix 使用 `ps`）。
+///
+/// Windows 上依次尝试 `powershell_candidates()` 中的每个 PowerShell 可执行文件，
+/// 第一个成功返回结果的即被采用，从而提高鲁棒性。
+pub(crate) fn process_command_line(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for powershell in powershell_candidates() {
+            let Ok(output) = Command::new(&powershell)
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' | Select-Object -ExpandProperty CommandLine"
+                    ),
+                ])
+                .output()
+            else {
+                continue;
+            };
+            if output.status.success() {
+                let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !command_line.is_empty() {
+                    return Some(command_line);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let command_line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if command_line.is_empty() {
+            None
+        } else {
+            Some(command_line)
+        }
+    }
+}
+
 pub fn kill_process_tree(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
-        Command::new("taskkill")
+        let taskkill_ok = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .map(|status| status.success())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if taskkill_ok {
+            return true;
+        }
+
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let terminated = TerminateProcess(handle, 1) != 0;
+            CloseHandle(handle);
+            terminated
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -279,6 +476,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_command_with_timeout_drains_large_stdout() {
+        let mut command = large_stdout_command();
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(5))
+            .expect("large stdout command should finish without pipe deadlock");
+
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() > 128 * 1024,
+            "expected large stdout, got {} bytes",
+            output.stdout.len()
+        );
+    }
+
+    #[cfg(windows)]
+    fn large_stdout_command() -> Command {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            "for /L %i in (1,1,5000) do @echo 0123456789012345678901234567890123456789",
+        ]);
+        command
+    }
+
+    #[cfg(not(windows))]
+    fn large_stdout_command() -> Command {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "yes 0123456789012345678901234567890123456789 | head -c 200000",
+        ]);
+        command
+    }
+
+    #[test]
     fn parse_env_content_reads_server_ipc_settings() {
         let values = parse_env_content(
             "# comment\n\
@@ -296,6 +527,70 @@ mod tests {
                 ("AUTOFLUID_IPC_PORT".to_string(), "19527".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn workstation_env_token_normalizes_edge_cases() {
+        let cases = [
+            ("", "DEFAULT"),
+            ("  ", "DEFAULT"),
+            ("___", "DEFAULT"),
+            ("WS-A", "WS_A"),
+            ("WS--A", "WS_A"),
+            ("-WS-A", "WS_A"),
+            ("WS_A_", "WS_A"),
+            ("my__ws", "MY_WS"),
+            ("WS 01", "WS_01"),
+            ("ws.a", "WS_A"),
+            ("alpha/beta", "ALPHA_BETA"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(super::workstation_env_token(input), expected);
+        }
+    }
+
+    #[test]
+    fn env_non_empty_returns_none_for_unset_or_blank() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        let key = format!(
+            "AUTOFLUID_TEST_ENV_NON_EMPTY_{}",
+            crate::generate_request_id()
+        );
+        std::env::remove_var(&key);
+        assert!(super::env_non_empty(&key).is_none());
+
+        std::env::set_var(&key, "   ");
+        assert!(super::env_non_empty(&key).is_none());
+
+        std::env::set_var(&key, " hello ");
+        assert_eq!(super::env_non_empty(&key).as_deref(), Some("hello"));
+
+        std::env::remove_var(&key);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_candidates_uses_env_override() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        let key = "AUTOFLUID_POWERSHELL_EXE";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "C:\\custom\\pwsh.exe");
+        let candidates = super::powershell_candidates();
+        assert_eq!(candidates, vec!["C:\\custom\\pwsh.exe"]);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_candidates_defaults_to_pwsh_then_powershell() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("lock env");
+        std::env::remove_var("AUTOFLUID_POWERSHELL_EXE");
+        let candidates = super::powershell_candidates();
+        assert_eq!(candidates, vec!["pwsh.exe", "powershell.exe"]);
     }
 
     #[test]

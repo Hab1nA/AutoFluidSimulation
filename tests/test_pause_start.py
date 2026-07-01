@@ -24,6 +24,7 @@ Pause/Start 功能验证测试脚本
   python tests/test_pause_start.py
 ===============================================================================
 """
+import atexit
 import os
 import sys
 import time
@@ -31,16 +32,15 @@ import threading
 import tempfile
 import shutil
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="sw_test_ps_")
 _TEST_LOG_DIR = os.path.join(_TEST_TMP_ROOT, "logs")
 os.makedirs(_TEST_LOG_DIR, exist_ok=True)
 os.environ["AUTOFLUID_LOG_DIR"] = _TEST_LOG_DIR
+atexit.register(lambda: shutil.rmtree(_TEST_TMP_ROOT, ignore_errors=True) if os.path.exists(_TEST_TMP_ROOT) else None)
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED,
-    ENGINE_CONFIG, IPC_CONFIG,
+    DEFAULT_WORKSTATION_ID, ENGINE_CONFIG, IPC_CONFIG,
 )
 from engine.state_manager import StateManager
 
@@ -335,12 +335,6 @@ class MockStepFileMonitor:
                         if cn is not None:
                             self.on_file_ready(cn, fpath)
 
-    def get_pending_configs(self) -> list[tuple[int, str]]:
-        """返回待处理的构型列表（委托给原始实现）。"""
-        # ★ 不能 from engine.file_monitor import StepFileMonitor（已被 mock 替换），
-        #    使用 teardown_mock_environment 前保存的 _OriginalStepFileMonitor 引用
-        return _OriginalStepFileMonitor.get_pending_configs(self)
-
     @staticmethod
     def parse_config_name(filename: str) -> int | None:
         """从文件名解析构型编号（委托给原始实现）。"""
@@ -372,6 +366,15 @@ class TestContext:
 
         self._orig_db_path = IPC_CONFIG["db_path"]
         IPC_CONFIG["db_path"] = self.db_path
+        import engine.scheduler.barrier as barrier_module
+        import engine.scheduler.main as scheduler_main_module
+        self._barrier_module = barrier_module
+        self._scheduler_main_module = scheduler_main_module
+        self._orig_barrier_workstations = barrier_module.WORKSTATIONS
+        self._orig_scheduler_workstations = scheduler_main_module.WORKSTATIONS
+        legacy_workstations = [{"id": DEFAULT_WORKSTATION_ID}]
+        barrier_module.WORKSTATIONS = legacy_workstations
+        scheduler_main_module.WORKSTATIONS = legacy_workstations
 
         # 确保 mock 环境已设置（pytest 直接运行时不会调用 main()）
         setup_mock_environment()
@@ -402,6 +405,8 @@ class TestContext:
             self.scheduler.stop()
         finally:
             IPC_CONFIG["db_path"] = self._orig_db_path
+            self._barrier_module.WORKSTATIONS = self._orig_barrier_workstations
+            self._scheduler_main_module.WORKSTATIONS = self._orig_scheduler_workstations
             teardown_mock_environment()
             if os.path.exists(self.tmpdir):
                 shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -857,9 +862,9 @@ def test_resume_triggers_immediate_scan():
         ctx.cleanup()
 
 
-def test_start_dispatches_solver_serially_when_barrier_already_met():
+def test_start_dispatches_solver_serially_per_workstation_when_barrier_already_met():
     print("\n" + "=" * 60)
-    print("测试 10.1: 屏障已通过时 start 串行分发 Solver")
+    print("测试 10.1: 屏障已通过时 start 在同一工作站串行分发 Solver")
     print("=" * 60)
 
     ctx = TestContext(num_configs=3)
@@ -885,7 +890,7 @@ def test_start_dispatches_solver_serially_when_barrier_already_met():
             cn for cn in ctx.state.get_all_configs()
             if ctx.state.get_step_status(cn, "solver") == STATUS_RUNNING
         ]
-        assert running == [1], f"Solver 应串行执行，当前 Running={running}"
+        assert running == [1], f"同一工作站 Solver 应串行执行，当前 Running={running}"
 
         ok = ctx.wait_for_condition(
             lambda: sorted(ctx.runner._solver_dispatched) == [1, 2, 3]
@@ -896,11 +901,11 @@ def test_start_dispatches_solver_serially_when_barrier_already_met():
             timeout=5,
         )
         assert ok, (
-            "屏障已通过且 Solver=Waiting 时，start 后应串行完成所有 Solver "
+            "屏障已通过且 Solver=Waiting 时，start 后应在同一工作站串行完成所有 Solver "
             f"(实际: {ctx.runner._solver_dispatched})"
         )
         assert ctx.runner._solver_max_active_count == 1, (
-            "Solver 不允许并行执行，"
+            "同一工作站 Solver 不允许并行执行，"
             f"实际最大并发={ctx.runner._solver_max_active_count}"
         )
 
@@ -967,7 +972,10 @@ def main():
         ("暂停后文件监控停止扫描", test_file_monitor_paused_on_pause),
         ("暂停期间STEP文件不被捕捉", test_pause_blocks_step_file_callback),
         ("恢复后立即触发完整轮询", test_resume_triggers_immediate_scan),
-        ("屏障已通过时start串行分发Solver", test_start_dispatches_solver_serially_when_barrier_already_met),
+        (
+            "屏障已通过时start在同一工作站串行分发Solver",
+            test_start_dispatches_solver_serially_per_workstation_when_barrier_already_met,
+        ),
         ("多次pause-start状态切换", test_multiple_pause_start_cycles),
     ]
 

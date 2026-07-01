@@ -10,17 +10,27 @@ import os
 import re
 import sys
 import logging
-from typing import Any, TypedDict, cast
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict, cast
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+
+@dataclass(frozen=True)
+class ConfigValidationIssue:
+    """One startup configuration validation item and its daemon log level."""
+
+    message: str
+    log_level: Literal["info", "warning"]
+
 # 加载 .env 文件中的环境变量（需 python-dotenv）
 try:
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
     _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     load_dotenv(_env_path)
 except ImportError:
+    dotenv_values = None  # type: ignore[assignment]
     pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
 
 # ============================================================================
@@ -41,11 +51,14 @@ def _load_toml_at_startup() -> dict[str, Any]:
         if sys.version_info >= (3, 11):
             import tomllib
             with open(toml_path, "rb") as f:
-                return cast(dict[str, Any], tomllib.load(f))
+                return tomllib.load(f)
         else:
             import toml
             return cast(dict[str, Any], toml.load(toml_path))
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("TOML 配置文件解析失败 (%s): %s", toml_path, exc)
         return {}
 
 
@@ -109,15 +122,17 @@ class RemoteConfig(TypedDict):
     flag_dir: str
     conda_env: str
     conda_exe: str
+    fluent_path: str
     mpi_bin_dir: str
 
 
 class WorkstationConfig(RemoteConfig, total=False):
     id: str
+    auth_method: str
+    key_filename: str
     reachable_host: str
     reachable_port: int
     connectivity_mode: str
-    postprocess_script: str
     postprocess_output_dir: str
     postprocess_animation_dir: str
     postprocess_metrics_dir: str
@@ -162,6 +177,7 @@ class EngineConfig(TypedDict):
     meshing_timeout: int
     meshing_processor_count: int
     solver_timeout: int
+    solver_startup_timeout: int
     solver_processor_count: int
     solver_iteration_count: int
     postprocess_timeout: int
@@ -171,12 +187,17 @@ class EngineConfig(TypedDict):
     postprocess_exit_to_throat_area_ratio: float
     postprocess_cstar_reference: float
     max_retries: int
+    remote_unknown_max_retries: int
+    solver_workstation_max_consecutive_failures: int
+    solver_workstation_quarantine_minutes: int
     state_refresh_interval: float
     sc_max_slots: int
     sc_persistent_enabled: bool
     sc_persistent_ready_timeout: int
     sc_oneshot_fallback_enabled: bool
     sc_scdoc_stable_seconds: float
+    log_max_bytes: int
+    log_backup_count: int
 
 
 # ============================================================================
@@ -191,17 +212,38 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SolidWorks 初始模型文件
     "sw_model": _env_override(
         "AUTOFLUID_SW_MODEL",
-        _toml_or_default("local_paths", "sw_model", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.SLDPRT"),
+        _toml_or_default(
+            "local_paths",
+            "sw_model",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "model.SLDPRT",
+            ),
+        ),
     ),
     # 外部 Excel 参数表（唯一数据源）
     "excel": _env_override(
         "AUTOFLUID_SW_EXCEL",
-        _toml_or_default("local_paths", "excel", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\model_gen4.xlsx"),
+        _toml_or_default(
+            "local_paths",
+            "excel",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "model.xlsx",
+            ),
+        ),
     ),
     # STEP 文件输出目录（直接 COM 调用导出 STEP 到此）
     "step_dir": _env_override(
         "AUTOFLUID_STEP_DIR",
-        _toml_or_default("local_paths", "step_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\step"),
+        _toml_or_default(
+            "local_paths",
+            "step_dir",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "step",
+            ),
+        ),
     ),
     # SpaceClaim 可执行文件
     "sc_exe": _env_override(
@@ -224,7 +266,14 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SCDOC 文件输出目录（SC 脚本将 scdoc 文件保存到此）
     "scdoc_dir": _env_override(
         "AUTOFLUID_SCDOC_DIR",
-        _toml_or_default("local_paths", "scdoc_dir", r"C:\Users\XKZ\Documents\000ansys_data\Graduation_Project(RE0.)\solidworks_models\scdoc"),
+        _toml_or_default(
+            "local_paths",
+            "scdoc_dir",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "data", "scdoc",
+            ),
+        ),
     ),
     # 日志目录（固定位于项目 logs/ 目录下）
     "log_dir": os.path.join(
@@ -248,11 +297,11 @@ REMOTE_CONFIG: RemoteConfig = {
     "host": os.environ.get("AUTOFLUID_SSH_HOST", _toml_or_default("remote_config", "host", "172.17.135.240")),
     "port": int(os.environ.get("AUTOFLUID_SSH_PORT", _toml_or_default("remote_config", "port", "22"))),
     "username": os.environ.get("AUTOFLUID_SSH_USER", _toml_or_default("remote_config", "username", "ps")),
-    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", _toml_or_default("remote_config", "password", "")),
+    "password": os.environ.get("AUTOFLUID_SSH_PASSWORD", ""),
     # 仿真工作目录
     "working_dir": _toml_or_default("remote_config", "working_dir", r"D:\xkz_1020\workingdir"),
     # 远程脚本部署目录（.jou/.set/.wft/.py 上传目标）
-    "scripts_dir": _toml_or_default("remote_config", "scripts_dir", r"D:\xkz_1020"),
+    "scripts_dir": _toml_or_default("remote_config", "scripts_dir", r"D:\xkz_1020\scripts"),
     # 仿真引用文件目录（pdf/fla/chemkin 文件）
     "ref_files_dir": _toml_or_default("remote_config", "ref_files_dir", r"D:\xkz_1020\fluent_chemkin_files"),
     # 远程 SCDOC 接收目录
@@ -269,7 +318,9 @@ REMOTE_CONFIG: RemoteConfig = {
     "conda_env": _toml_or_default("remote_config", "conda_env", "pyfluent"),
     # Conda 可执行文件完整路径（SSH 非交互会话中 PATH 不含 conda，需用完整路径）
     "conda_exe": _toml_or_default("remote_config", "conda_exe", r"C:\ProgramData\anaconda3\Scripts\conda.exe"),
-    # 远程 ANSYS 安装根目录
+    # Fluent 可执行文件完整路径（用于 PyFluent 显式启动，避免依赖 AWP_ROOT241）
+    "fluent_path": os.environ.get("AUTOFLUID_REMOTE_FLUENT_PATH", _toml_or_default("remote_config", "fluent_path", r"C:\Program Files\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")),
+    # 远程 ANSYS MPI bin 目录
     "mpi_bin_dir": os.environ.get("AUTOFLUID_REMOTE_MPI_BIN_DIR", _toml_or_default("remote_config", "mpi_bin_dir", r"C:\Program Files\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin")),
 }
 
@@ -288,25 +339,96 @@ def _workstation_from_remote_config(
 WORKSTATIONS: list[WorkstationConfig] = [_workstation_from_remote_config()]
 
 
+def _workstation_env_token(workstation_id: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "_", workstation_id).strip("_").upper()
+    return token or "DEFAULT"
+
+
+def _is_runtime_workstation_env_key(key: str, value: str) -> bool:
+    if key in {
+        "AUTOFLUID_SSH_REACHABLE_HOST",
+        "AUTOFLUID_SSH_REACHABLE_PORT",
+        "AUTOFLUID_SSH_CONNECTIVITY_MODE",
+    }:
+        return True
+    if not key.startswith("AUTOFLUID_WS_"):
+        return False
+    if key.endswith(
+        ("_SSH_REACHABLE_HOST", "_SSH_REACHABLE_PORT", "_SSH_CONNECTIVITY_MODE")
+    ):
+        return True
+    return key.endswith("_SSH_PASSWORD") and value == ""
+
+
+def _reload_workstation_reachable_env_from_dotenv() -> None:
+    """Refresh tunnel keys written by the TUI into the server .env."""
+    if dotenv_values is None:
+        return
+    try:
+        values = dotenv_values(_env_path)
+    except Exception as exc:  # pragma: no cover - defensive logging only
+        logger.warning("[Config] 重新加载 .env reachable 配置失败: %s", exc)
+        return
+    for key, value in values.items():
+        if value is not None and _is_runtime_workstation_env_key(key, value):
+            if key.endswith("_SSH_PASSWORD") and key in os.environ:
+                continue
+            os.environ[key] = value
+
+
+def _first_env_value(env_names: tuple[str, ...]) -> str | None:
+    for env_name in env_names:
+        env_val = os.environ.get(env_name)
+        if env_val:
+            return env_val
+    return None
+
+
+def _apply_workstation_reachable_env(
+    workstation: WorkstationConfig,
+    *,
+    include_legacy: bool = False,
+) -> None:
+    """Apply per-workstation server reachability overrides from environment."""
+    token = _workstation_env_token(str(workstation.get("id", DEFAULT_WORKSTATION_ID)))
+    env_groups: dict[str, tuple[str, ...]] = {
+        "reachable_host": (f"AUTOFLUID_{token}_SSH_REACHABLE_HOST",),
+        "reachable_port": (f"AUTOFLUID_{token}_SSH_REACHABLE_PORT",),
+        "connectivity_mode": (f"AUTOFLUID_{token}_SSH_CONNECTIVITY_MODE",),
+    }
+    if include_legacy:
+        env_groups = {
+            "reachable_host": (
+                *env_groups["reachable_host"],
+                "AUTOFLUID_SSH_REACHABLE_HOST",
+            ),
+            "reachable_port": (
+                *env_groups["reachable_port"],
+                "AUTOFLUID_SSH_REACHABLE_PORT",
+            ),
+            "connectivity_mode": (
+                *env_groups["connectivity_mode"],
+                "AUTOFLUID_SSH_CONNECTIVITY_MODE",
+            ),
+        }
+
+    for key, env_names in env_groups.items():
+        env_val = _first_env_value(env_names)
+        if env_val is None:
+            continue
+        if key == "reachable_host":
+            workstation["reachable_host"] = env_val
+        elif key == "reachable_port":
+            workstation["reachable_port"] = int(env_val)
+        elif key == "connectivity_mode":
+            workstation["connectivity_mode"] = env_val
+
+
 def _sync_default_workstation_reachable_env() -> None:
     """Apply server-reachable env overrides to the legacy default workstation."""
     if not WORKSTATIONS:
         return
-    default_workstation = WORKSTATIONS[0]
-    for key, env_name in [
-        ("reachable_host", "AUTOFLUID_SSH_REACHABLE_HOST"),
-        ("reachable_port", "AUTOFLUID_SSH_REACHABLE_PORT"),
-        ("connectivity_mode", "AUTOFLUID_SSH_CONNECTIVITY_MODE"),
-    ]:
-        env_val = os.environ.get(env_name)
-        if not env_val:
-            continue
-        if key == "reachable_host":
-            default_workstation["reachable_host"] = env_val
-        elif key == "reachable_port":
-            default_workstation["reachable_port"] = int(env_val)
-        else:
-            default_workstation["connectivity_mode"] = env_val
+    _apply_workstation_reachable_env(WORKSTATIONS[0], include_legacy=True)
 
 
 _sync_default_workstation_reachable_env()
@@ -361,10 +483,19 @@ STATUS_WAITING   = "Waiting"       # 等待中
 STATUS_RUNNING   = "Running"       # 运行中
 STATUS_PAUSED    = "Paused"        # 已暂停（用户手动暂停）
 STATUS_RETRYING  = "Retrying"      # 重试中
+STATUS_UNKNOWN_REMOTE = "UnknownRemote"  # 远程任务状态未知，等待受控恢复/清理
 STATUS_COMPLETED = "Completed"     # 已完成
 STATUS_ERROR     = "Error"         # 出错
 
-ALL_STATUSES = [STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_RETRYING, STATUS_COMPLETED, STATUS_ERROR]
+ALL_STATUSES = [
+    STATUS_WAITING,
+    STATUS_RUNNING,
+    STATUS_PAUSED,
+    STATUS_RETRYING,
+    STATUS_UNKNOWN_REMOTE,
+    STATUS_COMPLETED,
+    STATUS_ERROR,
+]
 
 # ============================================================================
 # 步骤对应的文件扩展名（用于 clean 命令）
@@ -429,14 +560,8 @@ OPERATION_TIMEOUTS: OperationTimeoutsConfig = {
     # 进程出现后等待主窗口可交互的最大秒数
     "sc_gui_ready_timeout": _toml_or_default("spaceclaim", "sc_gui_ready_timeout", 30),
     # 主窗口就绪后额外等待后台加载稳定的秒数
-    "sc_gui_stable_delay": _toml_or_default("spaceclaim", "sc_gui_stable_delay", 15),
+    "sc_gui_stable_delay": _toml_or_default("spaceclaim", "sc_gui_stable_delay", 5),
 }
-
-# ============================================================================
-# 配置指纹与数据库分片（实际实现已迁入 config_fingerprint.py）
-# ============================================================================
-from engine.config_fingerprint import compute_config_fingerprint, get_db_path_for_fingerprint  # noqa: F401
-
 
 # ============================================================================
 # 调度引擎配置
@@ -462,17 +587,19 @@ ENGINE_CONFIG: EngineConfig = {
     # 文件传输超时（秒）
     "transfer_timeout": _toml_or_default("global_settings", "transfer_timeout", 120),
     # 网格划分超时（秒）
-    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 600),
+    "meshing_timeout": _toml_or_default("meshing", "meshing_timeout", 7200),
     # Fluent Meshing 并行核心数。高核心数在体网格拓扑准备阶段可能更慢或不稳定。
     "meshing_processor_count": _toml_or_default("meshing", "meshing_processor_count", 8),
     # 求解超时（秒）
-    "solver_timeout": _toml_or_default("solver", "solver_timeout", 7200),
+    "solver_timeout": _toml_or_default("solver", "solver_timeout", 28800),
+    # Fluent Solver 启动无进度容忍窗口（秒）。慢工作站首次加载 Fluent/MPI 可能超过 5 分钟。
+    "solver_startup_timeout": _toml_or_default("solver", "solver_startup_timeout", 900),
     # Fluent Solver 并行核心数。求解阶段通常可使用更多核心。
     "solver_processor_count": _toml_or_default("solver", "solver_processor_count", 128),
     # Fluent Solver 每构型迭代次数。传递给 batch_solver_gen4.py --iterate-count。
     "solver_iteration_count": _toml_or_default("solver", "solver_iteration_count", 1000),
     # 后处理超时（秒）。后处理是工作站本地结果生成，不包含后续服务器上传。
-    "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 3600),
+    "postprocess_timeout": _toml_or_default("postprocess", "postprocess_timeout", 14400),
     # 后处理工作站导出目录。TOML 中使用 [postprocess].output_dir / animation_dir / metrics_dir。
     "postprocess_output_dir": _toml_or_default(
         "postprocess",
@@ -501,12 +628,28 @@ ENGINE_CONFIG: EngineConfig = {
     ),
     # 最大重试次数
     "max_retries": _toml_or_default("global_settings", "max_retries", 3),
+    # 远程任务 unknown/orphan 探测的独立预算，不消耗执行重试次数。
+    "remote_unknown_max_retries": _toml_or_default("global_settings", "remote_unknown_max_retries", 3),
+    # 同一工作站 Solver 连续失败后隔离，防止 Fluent/MPI 进程风暴放大。
+    "solver_workstation_max_consecutive_failures": _toml_or_default(
+        "solver",
+        "workstation_max_consecutive_failures",
+        2,
+    ),
+    "solver_workstation_quarantine_minutes": _toml_or_default(
+        "solver",
+        "workstation_quarantine_minutes",
+        30,
+    ),
     # 全局状态刷新间隔（秒）
     "state_refresh_interval": _toml_or_default("global_settings", "state_refresh_interval", 0.5),
+    # 日志轮转配置。环境变量 AUTOFLUID_LOG_MAX_BYTES / AUTOFLUID_LOG_BACKUP_COUNT 仍可覆盖。
+    "log_max_bytes": _toml_or_default("global_settings", "log_max_bytes", 20 * 1024 * 1024),
+    "log_backup_count": _toml_or_default("global_settings", "log_backup_count", 10),
     # SC 常驻进程就绪超时（秒）—— 等待 SpaceClaim 启动和脚本初始化的最长时间
-    "sc_persistent_ready_timeout": 180,
+    "sc_persistent_ready_timeout": _toml_or_default("spaceclaim", "sc_persistent_ready_timeout", 180),
     # SC SCDOC 文件大小稳定判定窗口（秒）—— SaveAs 完成的判定依据
-    "sc_scdoc_stable_seconds": 3.0,
+    "sc_scdoc_stable_seconds": _toml_or_default("spaceclaim", "sc_scdoc_stable_seconds", 3.0),
 }
 
 
@@ -537,9 +680,9 @@ def ensure_directories() -> None:
         try:
             os.makedirs(path, exist_ok=True)
         except PermissionError as e:
-            logger.warning("权限不足，无法创建目录: %s: %s", path, e)
+            logger.error("权限不足，无法创建目录: %s: %s", path, e)
         except OSError as e:
-            logger.warning("无法创建目录 %s: %s", path, e)
+            logger.error("无法创建目录 %s: %s", path, e)
 
 
 def _apply_env_overrides():
@@ -573,6 +716,10 @@ def _apply_env_overrides():
     remote_env_overrides: dict[str, str | int] = {}
     for key, env_name in _env_remote_keys:
         env_val = os.environ.get(env_name)
+        if key == "password":
+            REMOTE_CONFIG[key] = env_val or ""
+            remote_env_overrides[key] = REMOTE_CONFIG[key]
+            continue
         if env_val:
             if key in {"port", "reachable_port"}:
                 REMOTE_CONFIG[key] = int(env_val)
@@ -633,11 +780,14 @@ def load_toml_config(toml_path: str | None = None) -> dict[str, Any]:
         if sys.version_info >= (3, 11):
             import tomllib
             with open(toml_path, "rb") as f:
-                return cast(dict[str, Any], tomllib.load(f))
+                return tomllib.load(f)
         else:
             import toml
             return cast(dict[str, Any], toml.load(toml_path))
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning("TOML 配置文件解析失败 (%s): %s", toml_path, exc)
         return {}
 
 
@@ -700,11 +850,37 @@ def _apply_postprocess_defaults_to_workstation(workstation: WorkstationConfig) -
         str(ENGINE_CONFIG.get("postprocess_metrics_dir") or ""),
     )
 
+
+def _workstation_password_env_names(workstation_id: str) -> tuple[str, ...]:
+    token = _workstation_env_token(workstation_id)
+    return (f"AUTOFLUID_{token}_SSH_PASSWORD",)
+
+
+def _workstation_password_from_env(workstation_id: str) -> tuple[bool, str]:
+    for env_name in _workstation_password_env_names(workstation_id):
+        if env_name in os.environ:
+            return True, os.environ[env_name]
+    return False, ""
+
+
 def _normalize_workstation_config(raw: dict[str, Any], index: int) -> WorkstationConfig:
     """Merge a TOML workstation entry with legacy defaults."""
     merged: dict[str, Any] = dict(REMOTE_CONFIG)
     merged.update(raw)
     merged["id"] = str(merged.get("id") or f"WS-{index + 1}")
+    merged["password"] = ""
+    auth_method = str(merged.get("auth_method") or "password").lower()
+    merged["auth_method"] = auth_method
+    env_password_present, env_password = _workstation_password_from_env(merged["id"])
+    if env_password_present:
+        merged["password"] = env_password
+        if env_password.strip():
+            merged["auth_method"] = "password"
+        elif auth_method != "key":
+            merged["auth_method"] = "none"
+    if str(merged.get("auth_method") or "").lower() in {"key", "none"}:
+        merged["password"] = ""
+    _apply_workstation_reachable_env(cast(WorkstationConfig, merged))
     for port_key in ("port", "reachable_port"):
         if port_key in merged:
             merged[port_key] = int(merged[port_key])
@@ -716,16 +892,26 @@ def _normalize_workstation_config(raw: dict[str, Any], index: int) -> Workstatio
 def reload_config_from_toml() -> bool:
     """重新加载 TOML 配置文件并合并到全局配置。环境变量保持最高优先级。
 
-    TOML 中支持 ${VAR} 语法引用环境变量（如 ``password = "${AUTOFLUID_SSH_PASSWORD}"``）。
+    密码只从环境变量读取，不从 TOML 读取。
     """
+    _reload_workstation_reachable_env_from_dotenv()
     toml_data = load_toml_config()
     if toml_data:
-        # 展开 ${VAR} 环境变量引用（如 password = "${AUTOFLUID_SSH_PASSWORD}"）
+        # 展开非密码配置中的 ${VAR} 环境变量引用。
         toml_data = cast(dict[str, Any], _expand_config_value(toml_data))
         if "local_paths" in toml_data:
             LOCAL_PATHS.update(toml_data["local_paths"])
         if "remote_config" in toml_data:
-            REMOTE_CONFIG.update(toml_data["remote_config"])
+            REMOTE_CONFIG.update(
+                cast(
+                    RemoteConfig,
+                    {
+                        key: value
+                        for key, value in toml_data["remote_config"].items()
+                        if key != "password"
+                    },
+                )
+            )
         if "ipc_config" in toml_data:
             ipc_updates = {
                 key: value
@@ -812,14 +998,16 @@ def reload_config_from_toml() -> bool:
 # reload_config_from_toml()
 
 
-def validate_config() -> list[str]:
-    """验证配置完整性，返回警告信息列表。"""
-    warnings: list[str] = []
+def validate_config_details() -> list[ConfigValidationIssue]:
+    """验证配置完整性，返回带日志级别的启动提示。"""
+    issues: list[ConfigValidationIssue] = []
 
     if not REMOTE_CONFIG["password"]:
-        warnings.append(
-            "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD，"
-            "或在 config.py 中配置 password 字段"
+        issues.append(
+            ConfigValidationIssue(
+                "SSH 密码未设置！请设置环境变量 AUTOFLUID_SSH_PASSWORD",
+                "info",
+            )
         )
 
     if is_server_mode():
@@ -829,30 +1017,45 @@ def validate_config() -> list[str]:
             raw_port = int(workstation.get("port", 22) or 22)
             reachable_host = str(workstation.get("reachable_host", "")).strip()
             if not reachable_host:
-                warnings.append(
-                    f"工作站 {ws_id} 在 server 模式下缺少 "
-                    f"AUTOFLUID_SSH_REACHABLE_HOST，将检查原始地址 "
-                    f"{raw_host}:{raw_port}"
+                issues.append(
+                    ConfigValidationIssue(
+                        f"工作站 {ws_id} 在 server 模式下缺少 "
+                        f"AUTOFLUID_SSH_REACHABLE_HOST，将检查原始地址 "
+                        f"{raw_host}:{raw_port}",
+                        "warning",
+                    )
                 )
                 continue
             if "reachable_port" not in workstation:
-                warnings.append(
-                    f"工作站 {ws_id} 在 server 模式下缺少 "
-                    f"AUTOFLUID_SSH_REACHABLE_PORT，将使用原始端口 {raw_port}"
+                issues.append(
+                    ConfigValidationIssue(
+                        f"工作站 {ws_id} 在 server 模式下缺少 "
+                        f"AUTOFLUID_SSH_REACHABLE_PORT，将使用原始端口 {raw_port}",
+                        "warning",
+                    )
                 )
-        return warnings
+        return issues
 
     if not os.path.exists(LOCAL_PATHS["sw_model"]):
-        warnings.append(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}")
+        issues.append(ConfigValidationIssue(f"SW 模型文件不存在: {LOCAL_PATHS['sw_model']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["excel"]):
-        warnings.append(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}")
+        issues.append(ConfigValidationIssue(f"Excel 参数表不存在: {LOCAL_PATHS['excel']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["sc_exe"]):
-        warnings.append(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}")
+        issues.append(ConfigValidationIssue(f"SpaceClaim 可执行文件不存在: {LOCAL_PATHS['sc_exe']}", "info"))
 
     if not os.path.exists(LOCAL_PATHS["sw_exe"]):
-        warnings.append(f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动")
+        issues.append(
+            ConfigValidationIssue(
+                f"SolidWorks 可执行文件不存在: {LOCAL_PATHS['sw_exe']} —— 将仅通过 COM 方式启动",
+                "info",
+            )
+        )
 
-    return warnings
+    return issues
 
+
+def validate_config() -> list[str]:
+    """验证配置完整性，返回兼容旧调用方的提示文本列表。"""
+    return [issue.message for issue in validate_config_details()]

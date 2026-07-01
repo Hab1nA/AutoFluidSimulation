@@ -185,6 +185,7 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "scdoc_dir", r"D:\scdoc")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 8)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -206,6 +207,7 @@ class TestBuildMeshingCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "meshing_processor_count", 4)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -220,6 +222,7 @@ class TestBuildMeshingCommand:
         assert "--output-dir" in command
         assert '--working-dir "D:\\working"' in command
         assert "--processor-count 4" in command
+        assert r'--fluent-path "D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"' in command
 
     def test_command_quotes_spaces_and_escapes_percent(self, monkeypatch):
         """路径参数按 cmd 脚本语义转义，避免空格和百分号破坏命令。"""
@@ -325,6 +328,7 @@ class TestBuildSolverCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\mpi")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"E:\Fluent\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 128)
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -339,6 +343,7 @@ class TestBuildSolverCommand:
         assert "--extra-post-journal-path" in command
         assert "postprocess_extra_gen4.jou" in command
         assert "--postprocess-flag-file D:/flags/postprocess_done_2.txt" in command
+        assert r'--fluent-path "E:\Fluent\v241\fluent\ntbin\win64\fluent.exe"' in command
 
 
 class TestBuildPostprocessCommand:
@@ -365,6 +370,7 @@ class TestBuildPostprocessCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\working")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "fluent_path", r"F:\Ansys\v241\fluent\ntbin\win64\fluent.exe")
         monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
@@ -379,6 +385,7 @@ class TestBuildPostprocessCommand:
         assert "postprocess_extra_gen4.jou" in command
         assert '--postprocess-output-dir "D:\\post"' in command
         assert "--flag-file D:/flags/postprocess_done_2.txt" in command
+        assert r'--fluent-path "F:\Ansys\v241\fluent\ntbin\win64\fluent.exe"' in command
         assert flag_file == "D:/flags/postprocess_done_2.txt"
 
     def test_solver_and_postprocess_commands_use_postprocess_config(self, monkeypatch):
@@ -409,6 +416,21 @@ class TestBuildPostprocessCommand:
             assert "--metrics-exit-to-throat-area-ratio 8.5" in command
             assert "--metrics-cstar-reference 1900.0" in command
             assert '"D:\\post\\animation"' in command
+
+    def test_postprocess_path_config_prefers_engine_animation_over_legacy_animation_dir(self, monkeypatch):
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+
+        paths = RemoteExecutor._postprocess_path_config(
+            {
+                "result_dir": r"D:\case",
+                "working_dir": r"D:\working",
+                "animation_dir": r"D:\legacy\animation",
+            }
+        )
+
+        assert paths["animation_dir"] == r"D:\post\animation"
 
     def test_workstation_postprocess_paths_override_global_defaults(self, monkeypatch):
         monkeypatch.setitem(REMOTE_CONFIG, "conda_env", "pyfluent")
@@ -462,11 +484,13 @@ class TestBuildPostprocessCommand:
         monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\Auto Fluid\flags")
         monkeypatch.setitem(REMOTE_CONFIG, "working_dir", r"D:\Auto Fluid\work%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\Auto Fluid\animation%ROOT%")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\Auto Fluid\animation%ROOT%")
         monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\Auto Fluid\msh")
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\Auto Fluid\result")
         monkeypatch.setitem(REMOTE_CONFIG, "mpi_bin_dir", r"C:\Program Files\MPI")
         monkeypatch.setitem(ENGINE_CONFIG, "solver_processor_count", 64)
         monkeypatch.setitem(ENGINE_CONFIG, "solver_iteration_count", 500)
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\Auto Fluid\animation%ROOT%")
 
         executor = RemoteExecutor(_StateRecorder(), lambda: None, threading.RLock())
         command, _ = executor._build_solver_command(3)
@@ -813,6 +837,9 @@ class TestExecutePostprocess:
         assert state.remote_tasks[(3, "postprocess")]["flag_file"] == (
             "D:/flags/postprocess_done_3.txt"
         )
+        assert state.remote_tasks[(3, "postprocess")]["error_flag_file"] == (
+            "D:/flags/solver_done_3.txt.error"
+        )
 
     def test_execute_postprocess_starts_standalone_task_when_solver_task_missing(self, monkeypatch):
         """Solver task 已清理时，PostProcess 应能独立启动恢复。"""
@@ -926,3 +953,45 @@ class TestExecutePostprocess:
 
         assert executor.wait_postprocess_completion(4) is False
         assert deleted == ["D:/flags/postprocess_done_4.txt.error"]
+
+    def test_wait_postprocess_completion_detects_solver_wrapper_error_flag(
+        self,
+        monkeypatch,
+    ):
+        """同一 Solver 会话内后处理失败会由 wrapper 写入 solver .error。"""
+        monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+        monkeypatch.setitem(ENGINE_CONFIG, "postprocess_timeout", 30)
+
+        checked: list[str] = []
+        deleted: list[str] = []
+
+        class _SSH:
+            def check_remote_file(self, path: str) -> bool:
+                checked.append(path)
+                return path == "D:/flags/solver_done_2.txt.error"
+
+            def delete_remote_file(self, path: str) -> bool:
+                deleted.append(path)
+                return True
+
+            def cleanup_remote_task_entry(
+                self,
+                task_name: str,
+                pid_file: str | None = None,
+            ) -> bool:
+                return True
+
+        state = _StateRecorder()
+        state.remote_tasks[(2, "postprocess")] = {
+            "config_name": 2,
+            "step_name": "postprocess",
+            "task_name": "AutoFluid_solver_wrapper_task",
+            "flag_file": "D:/flags/postprocess_done_2.txt",
+            "error_flag_file": "D:/flags/solver_done_2.txt.error",
+            "started_at": time.time(),
+        }
+        executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+        assert executor.wait_postprocess_completion(2) is False
+        assert checked == ["D:/flags/solver_done_2.txt.error"]
+        assert deleted == ["D:/flags/solver_done_2.txt.error"]

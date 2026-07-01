@@ -20,6 +20,11 @@ SPACECLAIM_TRANSIT_SOURCE = (
     / "executor"
     / "spaceclaim_transit.py"
 )
+DEPLOY_SCRIPT_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "deploy_linux_server.sh"
+)
 
 
 def _source() -> str:
@@ -54,6 +59,15 @@ def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
     assert "spaceclaim_transit_{}.log" in source
 
 
+def test_linux_daemon_unit_declares_lifecycle_boundaries() -> None:
+    source = DEPLOY_SCRIPT_SOURCE.read_text(encoding="utf-8")
+
+    assert "KillMode=control-group" in source
+    assert "TimeoutStopSec=30" in source
+    assert "Restart=on-failure" in source
+    assert "RestartSec=5" in source
+
+
 def test_daemon_service_logs_use_structured_service_paths() -> None:
     source = (Path(__file__).resolve().parents[1] / "engine" / "daemon.py").read_text(
         encoding="utf-8"
@@ -84,11 +98,73 @@ def test_bridge_treats_pre_gui_exit_with_scdoc_as_success() -> None:
     assert "SpaceClaim exited before GUI ready but SCDOC exists" in source
 
 
+def test_bridge_only_accepts_fresh_nonempty_scdoc_outputs() -> None:
+    source = _source()
+
+    assert "private static bool IsFreshScdocFile" in source
+    assert "LastWriteTimeUtc" in source
+    assert "launchBaseline" in source
+    assert "fi.Length <= 0" in source
+
+    execute_start = source.index("private static int Execute")
+    execute_end = source.index("private static void PrepareSpaceClaimEnvironment", execute_start)
+    execute_block = source[execute_start:execute_end]
+
+    assert "if (IsFreshScdocFile(scdocFile, launchBaseline))" in execute_block
+    assert "if (File.Exists(scdocFile))" not in execute_block
+    gui_failure_start = execute_block.index("catch (InvalidOperationException ex)")
+    gui_failure_block = execute_block[gui_failure_start:]
+    assert "TryReturnSuccessIfScdocExists(" in gui_failure_block
+    assert "launchBaseline" in gui_failure_block
+
+
+def test_bridge_kills_oneshot_spaceclaim_on_failure_before_dispose() -> None:
+    source = _source()
+    execute_start = source.index("private static int Execute")
+    execute_end = source.index("private static void PrepareSpaceClaimEnvironment", execute_start)
+    execute_block = source[execute_start:execute_end]
+
+    assert "private static void TryKillWorkingProcess" in source
+    assert 'TryKillWorkingProcess(workingProcess, "one-shot timed out")' in execute_block
+    assert (
+        'TryKillWorkingProcess(workingProcess, "SpaceClaim exited without fresh SCDOC")'
+        in execute_block
+    )
+    assert (
+        'TryKillWorkingProcess(workingProcess, "SpaceClaim GUI ready detection failed")'
+        in execute_block
+    )
+    assert execute_block.index(
+        'TryKillWorkingProcess(workingProcess, "one-shot timed out")'
+    ) < execute_block.index("return (int)ExitCode.Timeout;")
+    assert "process.Kill();" in source
+
+
+def test_resolve_started_spaceclaim_disposes_unusable_started_handle() -> None:
+    source = _source()
+    resolve_start = source.index("private static Process? ResolveStartedSpaceClaimProcess")
+    resolve_end = source.index("private static string GetStepFilePath", resolve_start)
+    resolve_block = source[resolve_start:resolve_end]
+
+    assert "startedProcess.Dispose();" in resolve_block
+    assert resolve_block.index("startedProcess.Dispose();") < resolve_block.index(
+        "return WaitForProcessAppear"
+    )
+
 def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
     source = _source()
 
     assert "NormalizePathEnvironmentVariables" in source
-    assert source.count("PrepareSpaceClaimEnvironment(psi);") >= 2
+    assert "private static Process? LaunchAndResolve" in source
+    assert source.count("LaunchAndResolve(") >= 3
+    launch_start = source.index("private static Process? LaunchAndResolve")
+    launch_end = source.index("private static void PrepareSpaceClaimEnvironment", launch_start)
+    launch_block = source[launch_start:launch_end]
+    assert "PrepareSpaceClaimEnvironment(psi);" in launch_block
+    assert "configureEnvironment(psi);" in launch_block
+    assert launch_block.index("PrepareSpaceClaimEnvironment(psi);") < launch_block.index(
+        "configureEnvironment(psi);"
+    )
     normalize_start = source.index("private static void NormalizePathEnvironmentVariables")
     normalize_block = source[normalize_start:source.index("private static int? TryReturnSuccessIfScdocExists", normalize_start)]
     current_env_call = normalize_block.index("NormalizeCurrentProcessPathEnvironment();")
@@ -130,6 +206,17 @@ def test_persistent_loop_checks_process_before_quit_command() -> None:
     quit_check = source.index("检测 quit 命令文件", loop_start)
 
     assert process_check < quit_check
+
+
+def test_persistent_bridge_quit_has_deadline() -> None:
+    source = _source()
+
+    assert "PersistentQuitTimeoutSeconds" in source
+    assert "Stopwatch? quitTimer = null;" in source
+    assert "quitTimer = Stopwatch.StartNew();" in source
+    assert re.search(r"quitTimer\.Elapsed\.TotalSeconds\s*>=\s*PersistentQuitTimeoutSeconds", source)
+    assert 'TryKillWorkingProcess(workingProcess, "persistent quit timeout")' in source
+    assert "exitCode = (int)ExitCode.Timeout;" in source
 
 
 def test_bridge_source_has_defensive_file_and_json_helpers() -> None:

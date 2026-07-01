@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import time
 
 
@@ -46,7 +47,7 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
         "ensure_directories",
         lambda: config_events.append("ensure"),
     )
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: released.append(True))
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -66,6 +67,58 @@ def test_server_mode_starts_control_plane_when_excel_is_missing(monkeypatch, tmp
     assert config_events == ["reload", "ensure"]
     assert released == [True]
     assert not (tmp_path / "server-mode.db").exists()
+
+
+def test_daemon_start_logs_config_issues_by_severity(monkeypatch, tmp_path, caplog) -> None:
+    from engine import daemon as daemon_module
+    from engine.config import ConfigValidationIssue
+    from engine.daemon import PipelineDaemon
+
+    class _FakeIPCServer:
+        def __init__(self) -> None:
+            self._daemon: PipelineDaemon | None = None
+
+        def register_default_handlers(self, daemon: PipelineDaemon) -> None:
+            self._daemon = daemon
+
+        def start(self) -> None:
+            assert self._daemon is not None
+            self._daemon._stop_event.set()
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
+    monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
+    monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
+    monkeypatch.setattr(
+        daemon_module,
+        "validate_config_details",
+        lambda: [
+            ConfigValidationIssue("local path missing", "info"),
+            ConfigValidationIssue("reachable host missing", "warning"),
+        ],
+    )
+    monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
+    monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
+    monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
+    monkeypatch.setattr(PipelineDaemon, "_setup_signal_handlers", lambda self: None)
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "excel", str(tmp_path / "missing.xlsx"))
+    monkeypatch.setitem(daemon_module.LOCAL_PATHS, "data_dir", str(tmp_path / "data"))
+
+    daemon = PipelineDaemon()
+    with caplog.at_level(logging.INFO):
+        daemon.start()
+
+    config_records = [
+        record for record in caplog.records
+        if record.name == "PipelineDaemon" and record.getMessage().startswith("[CONFIG]")
+    ]
+    assert [(record.levelno, record.getMessage()) for record in config_records] == [
+        (logging.INFO, "[CONFIG] local path missing"),
+        (logging.WARNING, "[CONFIG] reachable host missing"),
+    ]
+    assert daemon._config_warnings == ["local path missing", "reachable host missing"]
 
 
 def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path) -> None:
@@ -119,7 +172,7 @@ def test_server_mode_starts_alert_watcher_after_ipc_start(monkeypatch, tmp_path)
     monkeypatch.setenv("AUTOFLUID_OPENCLAW_WEBHOOK_URL", "http://127.0.0.1/webhook")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -196,6 +249,228 @@ def test_shutdown_stops_alert_watcher_before_ipc_server() -> None:
     assert daemon._alert_watcher_process is None
 
 
+def test_shutdown_preserves_remote_tasks_by_default_when_scheduler_stop_fails() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Scheduler:
+        def stop(self, *, cancel_remote_tasks: bool = True) -> None:
+            assert cancel_remote_tasks is False
+            raise RuntimeError("stop failed before remote cleanup")
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+            self.cancel_calls += 1
+            return {"cancelled": 1, "failed": 0}
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.scheduler = _Scheduler()
+    daemon.runner = _Runner(remote_executor)
+    daemon.ipc_server = None
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = None
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
+
+    daemon.shutdown()
+
+    assert remote_executor.cancel_calls == 0
+
+
+def test_shutdown_cancels_remote_tasks_only_for_full_stop_after_scheduler_stop_succeeds() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Scheduler:
+        def __init__(self) -> None:
+            self.stop_calls = 0
+            self.cancel_remote_tasks_args: list[bool] = []
+
+        def stop(self, *, cancel_remote_tasks: bool = True) -> None:
+            self.stop_calls += 1
+            self.cancel_remote_tasks_args.append(cancel_remote_tasks)
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.cancel_calls = 0
+
+        def cancel_all_tracked_remote_tasks(self) -> dict[str, int]:
+            self.cancel_calls += 1
+            return {"cancelled": 1, "failed": 0}
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    scheduler = _Scheduler()
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.scheduler = scheduler
+    daemon.runner = _Runner(remote_executor)
+    daemon.ipc_server = None
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = None
+    daemon._stop_event = type("_StopEvent", (), {"set": lambda self: None})()
+
+    daemon.shutdown(preserve_pipeline=False)
+
+    assert scheduler.stop_calls == 1
+    assert scheduler.cancel_remote_tasks_args == [True]
+    assert remote_executor.cancel_calls == 1
+
+
+def test_worker_restart_preserves_remote_tasks() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.disconnect_calls = 0
+
+        def disconnect_ssh(self) -> None:
+            self.disconnect_calls += 1
+
+    class _State:
+        def __init__(self) -> None:
+            self.delete_all_remote_tasks_calls = 0
+
+        def delete_all_remote_tasks(self) -> None:
+            self.delete_all_remote_tasks_calls += 1
+
+    runner = _Runner()
+    state = _State()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = runner
+    daemon.state = state
+    daemon.local_worker_registry = type(
+        "_Registry",
+        (),
+        {
+            "clear_online_workers": lambda self: None,
+            "clear_pending_tasks": lambda self: None,
+        },
+    )()
+    daemon._last_worker_ssh_checks = {"WS-A": "ok"}
+    daemon._stop_workstation_ssh_health_monitor = lambda: None
+    daemon._start_workstation_ssh_health_monitor = lambda: None
+    daemon.handle_worker_start = lambda params=None: (True, {"started": True}, "started")
+
+    ok, data, message = daemon.handle_worker_restart()
+
+    assert ok is True
+    assert message == "所有 Worker 已重启"
+    assert runner.disconnect_calls == 1
+    assert state.delete_all_remote_tasks_calls == 0
+    assert data["stop"]["remote_tasks_cleared"] is False
+
+
+def test_daemon_restores_remote_tasks_from_db_when_components_created() -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _RemoteExecutor:
+        def __init__(self) -> None:
+            self.restore_calls = 0
+
+        def restore_remote_tasks_from_db(self) -> None:
+            self.restore_calls += 1
+
+    class _Runner:
+        def __init__(self, remote_executor: _RemoteExecutor) -> None:
+            self.remote_executor = remote_executor
+
+        def get_remote_executor(self) -> _RemoteExecutor:
+            return self.remote_executor
+
+    remote_executor = _RemoteExecutor()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = _Runner(remote_executor)
+
+    daemon._restore_remote_tasks_from_db()
+
+    assert remote_executor.restore_calls == 1
+
+
+def test_child_health_restarts_exited_alert_watcher(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._alert_watcher_process = _DeadProcess()
+    daemon._local_worker_process = None
+    daemon._last_child_health_check = 0.0
+    daemon._child_health_check_interval_seconds = 0.0
+    daemon._alert_watcher_last_start_attempt = 0.0
+    daemon._local_worker_last_start_attempt = 0.0
+    calls = []
+
+    monkeypatch.setattr("engine.daemon.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(daemon, "_start_alert_watcher", lambda: calls.append("alert"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == ["alert"]
+    assert daemon._alert_watcher_process is None
+
+
+def test_child_health_restarts_exited_local_worker(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon._alert_watcher_process = None
+    daemon._local_worker_process = _DeadProcess()
+    daemon._last_child_health_check = 0.0
+    daemon._child_health_check_interval_seconds = 0.0
+    daemon._alert_watcher_last_start_attempt = 0.0
+    daemon._local_worker_last_start_attempt = 0.0
+    calls = []
+
+    monkeypatch.setattr("engine.daemon.time.monotonic", lambda: 100.0)
+    monkeypatch.setattr(daemon, "_ensure_local_worker_autostarted", lambda: calls.append("worker"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == ["worker"]
+    assert daemon._local_worker_process is None
+
+
+def test_child_health_does_not_restart_children_after_stop_requested(monkeypatch) -> None:
+    from engine.daemon import PipelineDaemon
+
+    class _DeadProcess:
+        def poll(self):
+            return 1
+
+    daemon = PipelineDaemon()
+    daemon._stop_event.set()
+    daemon._alert_watcher_process = _DeadProcess()
+    daemon._local_worker_process = _DeadProcess()
+    calls = []
+
+    monkeypatch.setattr(daemon, "_start_alert_watcher", lambda: calls.append("alert"))
+    monkeypatch.setattr(daemon, "_ensure_local_worker_autostarted", lambda: calls.append("worker"))
+
+    daemon._check_child_process_health_once()
+
+    assert calls == []
+
+
 def test_signal_handler_only_requests_main_loop_shutdown(monkeypatch) -> None:
     from engine.daemon import PipelineDaemon
 
@@ -251,7 +526,7 @@ def test_server_mode_uses_latest_existing_state_db_when_excel_is_missing(
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
     monkeypatch.setattr(daemon_module, "IPCServer", _FakeIPCServer)
@@ -293,7 +568,7 @@ def test_server_mode_does_not_read_local_excel_on_start(monkeypatch, tmp_path) -
     monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
     monkeypatch.setattr("engine.config.reload_config_from_toml", lambda: None)
     monkeypatch.setattr(daemon_module, "ensure_directories", lambda: None)
-    monkeypatch.setattr(daemon_module, "validate_config", lambda: [])
+    monkeypatch.setattr(daemon_module, "validate_config_details", lambda: [])
     monkeypatch.setattr(daemon_module, "read_model_configs", fail_read_model_configs)
     monkeypatch.setattr(daemon_module, "acquire_process_lock", lambda: True)
     monkeypatch.setattr(daemon_module, "release_process_lock", lambda: None)
@@ -374,6 +649,46 @@ def test_server_mode_does_not_require_worker_after_local_steps_completed(monkeyp
     daemon.local_worker_adapter = None
 
     assert daemon._server_mode_requires_worker() is False
+
+
+def test_check_summary_does_not_fail_when_local_worker_not_required() -> None:
+    from engine.daemon import PipelineDaemon
+
+    results = {
+        "summary": {"passed": 1, "failed": 0, "warnings": 0},
+        "health": {
+            "local_worker_online": False,
+            "local_worker_required": False,
+            "server_to_local_ssh": "unknown",
+            "workstation_ssh_details": {"WS-A": "ok"},
+        },
+    }
+
+    PipelineDaemon._refresh_check_summary_from_health(results)
+
+    assert results["summary"] == {"passed": 2, "failed": 0, "warnings": 0}
+    assert results["overall_ok"] is True
+    assert results["status"] == "passed"
+
+
+def test_check_summary_treats_stale_workstation_ssh_as_warning() -> None:
+    from engine.daemon import PipelineDaemon
+
+    results = {
+        "summary": {"passed": 1, "failed": 0, "warnings": 0},
+        "health": {
+            "local_worker_online": False,
+            "local_worker_required": False,
+            "server_to_local_ssh": "unknown",
+            "workstation_ssh_details": {"WS-A": "stale"},
+        },
+    }
+
+    PipelineDaemon._refresh_check_summary_from_health(results)
+
+    assert results["summary"] == {"passed": 1, "failed": 0, "warnings": 1}
+    assert results["overall_ok"] is True
+    assert results["status"] == "warning"
 
 
 def test_server_mode_worker_register_configs_unblocks_pipeline_start(monkeypatch, tmp_path) -> None:

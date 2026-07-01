@@ -55,7 +55,16 @@ def test_local_worker_builds_register_and_heartbeat_requests(monkeypatch) -> Non
     }
     assert heartbeat["command"] == CMD_WORKER_HEARTBEAT
     assert heartbeat["auth_token"] == "secret"
-    assert heartbeat["params"] == {"worker_id": "local-pc-01"}
+    assert heartbeat["params"] == {
+        "worker_id": "local-pc-01",
+        "capabilities": {"sw": True, "sc_slots": 1},
+        "network": {
+            "candidate_hosts": ["172.17.135.240", "100.64.1.20"],
+            "reachable_host": "100.64.1.20",
+            "connectivity_mode": "tailscale",
+            "ssh_port": 22,
+        },
+    }
 
     poll = worker.build_poll_request()
     assert poll["command"] == CMD_WORKER_POLL
@@ -640,6 +649,94 @@ def test_local_worker_run_forever_retries_initial_register(monkeypatch) -> None:
     assert sleeps == [2.0, worker.config.poll_interval]
 
 
+def test_local_worker_register_retry_budget_cools_down_without_exiting(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    calls: list[str] = []
+    sleeps: list[float] = []
+    monotonic_values = iter([0.0, 1.0, 2.0, 123.0, 124.0])
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            "local-pc-01",
+            "127.0.0.1",
+            19527,
+            register_retry_interval=2.0,
+            register_max_consecutive_failures=3,
+            register_max_recovery_seconds=120.0,
+            register_failure_cooldown_seconds=30.0,
+        )
+    )
+
+    def fake_register() -> dict[str, object]:
+        calls.append("register")
+        if len(calls) <= 3:
+            raise RuntimeError("daemon is not ready")
+        return {"status": "ok"}
+
+    def fake_run_once() -> str:
+        calls.append("run_once")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(worker, "register_once", fake_register)
+    monkeypatch.setattr(worker, "run_once", fake_run_once)
+    monkeypatch.setattr("engine.local_worker.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("engine.local_worker.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    try:
+        worker.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == ["register", "register", "register", "register", "run_once"]
+    assert sleeps == [2.0, 2.0, 30.0, worker.config.poll_interval]
+
+
+def test_local_worker_register_retry_warning_is_rate_limited(monkeypatch, caplog) -> None:
+    import logging
+
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    now_values = iter([0.0, 1.0, 2.0, 3.0, 4.0])
+    worker = LocalWorker(
+        LocalWorkerConfig(
+            "local-pc-01",
+            "127.0.0.1",
+            19527,
+            register_retry_interval=1.0,
+            register_max_consecutive_failures=4,
+            register_max_recovery_seconds=120.0,
+            register_log_repeat_seconds=60.0,
+        )
+    )
+
+    def fake_register() -> dict[str, object]:
+        raise RuntimeError("daemon is not ready")
+
+    monkeypatch.setattr(worker, "register_once", fake_register)
+    monkeypatch.setattr("engine.local_worker.time.monotonic", lambda: next(now_values))
+    monkeypatch.setattr("engine.local_worker.time.sleep", lambda _seconds: None)
+
+    with caplog.at_level(logging.WARNING):
+        try:
+            worker.run_forever()
+        except StopIteration:
+            pass
+
+    retry_logs = [
+        record
+        for record in caplog.records
+        if record.message == "daemon is not ready"
+    ]
+    exhausted_logs = [
+        record
+        for record in caplog.records
+        if record.message.startswith("LocalWorker 注册重试预算耗尽:")
+    ]
+    recovery_logs = [record for record in caplog.records if "注册恢复窗口失败" in record.message]
+    assert len(retry_logs) == 2
+    assert len(exhausted_logs) == 1
+    assert len(recovery_logs) == 1
+
 def test_local_worker_run_forever_recovers_after_runtime_ipc_error(monkeypatch) -> None:
     from engine.local_worker import LocalWorker, LocalWorkerConfig
 
@@ -870,6 +967,37 @@ def test_local_worker_default_handlers_support_stage_cleanup(monkeypatch) -> Non
         "ok": True,
     }
     assert calls == ["sw_final", "sc_final", "sw_shutdown", "sc_shutdown"]
+
+
+def test_local_worker_default_handler_runs_targeted_workstation_tunnel_ensure(monkeypatch) -> None:
+    from engine.local_worker import LocalWorker, LocalWorkerConfig
+
+    specs = [object()]
+    configured_calls = []
+    run_calls = []
+
+    def fake_configured_specs(**kwargs):
+        configured_calls.append(kwargs)
+        return specs
+
+    def fake_run_for_specs(action, specs_arg, **kwargs):
+        run_calls.append({"action": action, "specs": specs_arg, **kwargs})
+        return [{"id": "WS-C", "ok": True, "status": "ok"}]
+
+    monkeypatch.setattr(
+        "tools.workstation_tunnel.configured_workstation_specs",
+        fake_configured_specs,
+    )
+    monkeypatch.setattr("tools.workstation_tunnel.run_for_specs", fake_run_for_specs)
+
+    worker = LocalWorker(LocalWorkerConfig("local-pc-01", "ocar", 9527))
+
+    assert worker._execute_task("workstation_tunnel_ensure", {"workstation_id": "WS-C"}) == {
+        "ok": True,
+        "results": [{"id": "WS-C", "ok": True, "status": "ok"}],
+    }
+    assert configured_calls == [{"workstation_id": "WS-C"}]
+    assert run_calls == [{"action": "ensure", "specs": specs, "jobs": 1}]
 
 
 def test_local_worker_sc_timeout_task_runs_in_process_to_reuse_pool(monkeypatch) -> None:

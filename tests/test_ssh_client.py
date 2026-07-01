@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import stat
 import socket
 from unittest.mock import patch
 
@@ -7,6 +8,431 @@ import pytest
 
 import utils.ssh_client as ssh_client_module
 from utils.ssh_client import RemoteWorkstation
+
+
+def test_clear_remote_directory_falls_back_to_shell_rmdir_when_sftp_rmdir_denied():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Entry:
+        filename = "run"
+        st_mode = stat.S_IFDIR
+
+    class _Sftp:
+        def listdir_attr(self, remote_dir: str):
+            if remote_dir == "D:/metrics/model_gen4_1":
+                return [_Entry()]
+            if remote_dir == "D:/metrics/model_gen4_1/run":
+                return []
+            raise AssertionError(remote_dir)
+
+        @staticmethod
+        def rmdir(_path: str) -> None:
+            raise PermissionError("Permission denied")
+
+    host._sftp = _Sftp()
+    commands: list[str] = []
+
+    def _exec_command(command: str, timeout: int = 30):
+        commands.append(command)
+        return ("", "", 0)
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=_exec_command):
+            deleted, failed = host.clear_remote_directory("D:/metrics/model_gen4_1")
+
+    assert (deleted, failed) == (1, 0)
+    assert commands == ['cmd /c rmdir "D:\\metrics\\model_gen4_1\\run"']
+
+
+def test_clear_remote_directory_tolerates_empty_child_dir_locked_by_windows():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Entry:
+        filename = "run"
+        st_mode = stat.S_IFDIR
+
+    class _Sftp:
+        def listdir_attr(self, remote_dir: str):
+            if remote_dir == "D:/metrics/model_gen4_1":
+                return [_Entry()]
+            if remote_dir == "D:/metrics/model_gen4_1/run":
+                return []
+            raise AssertionError(remote_dir)
+
+        @staticmethod
+        def rmdir(_path: str) -> None:
+            raise PermissionError("Permission denied")
+
+    host._sftp = _Sftp()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(
+            host,
+            "exec_command",
+            return_value=("", "另一个程序正在使用此文件，进程无法访问。", 32),
+        ):
+            deleted, failed = host.clear_remote_directory("D:/metrics/model_gen4_1")
+
+    assert (deleted, failed) == (0, 0)
+
+
+def test_connect_uses_password_auth_when_password_is_configured(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "secret")
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "secret",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
+
+
+def test_connect_uses_configured_ssh_connection_timeout(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+    monkeypatch.setitem(ssh_client_module.OPERATION_TIMEOUTS, "ssh_connection", 30)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "secret")
+
+    assert host.connect() is True
+    assert calls[0]["timeout"] == 30
+
+
+def test_connect_allows_key_auth_when_password_is_empty(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "")
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": None,
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": True,
+        "allow_agent": True,
+    }]
+
+
+def test_connect_returns_false_and_clears_connection_on_socket_timeout(monkeypatch):
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **_kwargs: object) -> None:
+            raise socket.timeout("connect timed out")
+
+        def close(self) -> None:
+            pass
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    assert host.connect() is False
+    assert host._ssh is None
+    assert host._sftp is None
+
+
+def test_connect_can_suppress_expected_failure_logs(monkeypatch, caplog):
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **_kwargs: object) -> None:
+            raise socket.timeout("connect timed out")
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    with caplog.at_level("ERROR"):
+        assert host.connect(log_failure=False) is False
+
+    assert not any("SSH 连接失败" in record.getMessage() for record in caplog.records)
+
+
+def test_connect_uses_configured_key_file(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation(
+        "127.0.0.1",
+        22,
+        "user",
+        "",
+        key_filename=r"C:\Users\XKZ\.ssh\id_ed25519",
+    )
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": None,
+        "key_filename": r"C:\Users\XKZ\.ssh\id_ed25519",
+        "timeout": 10,
+        "look_for_keys": True,
+        "allow_agent": True,
+    }]
+
+
+def test_connect_supports_passwordless_auth_as_empty_password(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
+
+    assert host.connect() is True
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
+
+
+def test_passwordless_auth_ignores_configured_key_file(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _Transport:
+        def set_keepalive(self, _seconds: int) -> None:
+            pass
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+
+        def get_transport(self):
+            return _Transport()
+
+        def open_sftp(self):
+            return object()
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation(
+        "127.0.0.1",
+        22,
+        "user",
+        "",
+        key_filename=r"${USERPROFILE}\.ssh\id_ed25519",
+        auth_method="none",
+    )
+
+    assert host.connect() is True
+    assert calls[0]["password"] == ""
+    assert calls[0]["key_filename"] is None
+    assert calls[0]["look_for_keys"] is False
+    assert calls[0]["allow_agent"] is False
+
+
+def test_connect_rejects_passwordless_auth_without_key_fallback(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class _SSHClient:
+        def set_missing_host_key_policy(self, _policy: object) -> None:
+            pass
+
+        def connect(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+            raise _Paramiko.SSHException("passwordless rejected")
+
+        def get_transport(self):
+            return None
+
+        def close(self) -> None:
+            pass
+
+        def open_sftp(self):
+            raise AssertionError("open_sftp should not be reached")
+
+    class _Paramiko:
+        SSHException = Exception
+        SSHClient = _SSHClient
+
+        class AutoAddPolicy:
+            pass
+
+    monkeypatch.setattr(ssh_client_module, "paramiko", _Paramiko)
+
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "", auth_method="none")
+
+    assert host.connect() is False
+    assert calls == [{
+        "hostname": "127.0.0.1",
+        "port": 22,
+        "username": "user",
+        "password": "",
+        "key_filename": None,
+        "timeout": 10,
+        "look_for_keys": False,
+        "allow_agent": False,
+    }]
 
 
 def _decode_encoded_command(script: str) -> str:
@@ -43,10 +469,9 @@ def test_build_background_cmd_script_interactive_calls_command_directly():
     )
     assert "call conda run python script.py" in script
     assert "Start-Process" not in script
-    assert "wmic process where" in script
-    assert "AF_WRAPPER_PID" in script
-    assert "ParentProcessId" not in script
-    assert r'> "%AF_PID_FILE%"' in script
+    assert "wmic process where" not in script
+    assert "AF_WRAPPER_PID" not in script
+    assert r'> "%AF_PID_FILE%"' not in script
 
 
 def test_build_background_cmd_script_with_working_dir():
@@ -474,6 +899,29 @@ def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
     assert timeouts == [11, None]
 
 
+def test_get_remote_file_size_raises_when_remote_file_is_missing():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Channel:
+        def settimeout(self, timeout):
+            pass
+
+    class _SFTP:
+        channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            raise FileNotFoundError(remote_path)
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with pytest.raises(FileNotFoundError):
+            host.get_remote_file_size("D:/remote/missing.scdoc", timeout=11)
+
+
 def test_read_remote_text_file_applies_timeout_and_decodes_utf8():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     timeouts: list[float | None] = []
@@ -624,3 +1072,158 @@ def test_get_remote_combined_file_hash_uses_cmd_batch_hashes():
 
     assert combined == expected
     batch_hashes.assert_called_once_with(r"D:\remote", ["alpha.txt", "missing.txt"])
+
+
+def test_check_system_reports_configured_paths_when_reconnect_fails():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+    with patch.object(host, "is_connected", return_value=True):
+        with patch.object(host, "ensure_connected", return_value=False):
+            result = host.check_system(
+                conda_exe=r"C:\ProgramData\miniconda3\Scripts\conda.exe",
+                conda_env="pyfluent",
+                remote_dirs={"仿真工作目录": r"D:\AutoFluid\work"},
+                fluent_path=fluent_path,
+                mpi_bin_dir=mpi_bin_dir,
+            )
+
+    assert result["ssh_connected"] is False
+    assert {
+        "label": "仿真工作目录",
+        "path": r"D:\AutoFluid\work",
+        "exists": None,
+    } in result["remote_dirs"]
+    assert {
+        "label": "Fluent可执行文件",
+        "path": fluent_path,
+        "exists": None,
+    } in result["remote_programs"]
+    assert {
+        "label": "MPI安装目录",
+        "path": mpi_bin_dir,
+        "exists": None,
+    } in result["remote_programs"]
+    assert result["scripts_status"] == {"status": "skipped", "message": "SSH 未连接，未检查"}
+
+
+def test_is_connected_disconnects_when_heartbeat_times_out():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return True
+
+        @staticmethod
+        def send_ignore() -> None:
+            raise socket.timeout("heartbeat timed out")
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_is_connected_disconnects_when_transport_inactive():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return False
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_is_connected_disconnects_when_heartbeat_raises_unknown_exception():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Transport:
+        @staticmethod
+        def is_active() -> bool:
+            return True
+
+        @staticmethod
+        def send_ignore() -> None:
+            raise RuntimeError("transport heartbeat failed")
+
+    class _SSH:
+        @staticmethod
+        def get_transport():
+            return _Transport()
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    assert host.is_connected() is False
+    assert host._ssh is None
+
+
+def test_exec_command_disconnects_on_socket_timeout():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _SSH:
+        @staticmethod
+        def exec_command(command: str, timeout: int = 30):
+            raise socket.timeout("command timed out")
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        out, err, code = host.exec_command("hostname", timeout=1)
+
+    assert (out, err, code) == ("", "命令执行超时", -1)
+    assert host._ssh is None
+
+
+def test_exec_command_disconnects_on_unknown_exception():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _SSH:
+        @staticmethod
+        def exec_command(command: str, timeout: int = 30):
+            raise RuntimeError("transport corrupted")
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    host._ssh = _SSH()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        out, err, code = host.exec_command("hostname", timeout=1)
+
+    assert out == ""
+    assert err == "transport corrupted"
+    assert code == -1
+    assert host._ssh is None

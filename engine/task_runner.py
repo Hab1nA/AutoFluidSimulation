@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 from engine import config as config_module
 from engine.config import (
     DEFAULT_WORKSTATION_ID, LOCAL_PATHS,
-    STATUS_ERROR, get_step_filename,
+    STATUS_COMPLETED, STATUS_ERROR, get_step_filename,
     get_workstation_config,
     is_server_mode,
 )
@@ -38,6 +38,8 @@ from utils.logger import setup_logger
 from utils.ssh_client import RemoteWorkstation
 
 logger = setup_logger(__name__)
+
+LOCAL_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 class TaskRunner:
@@ -60,6 +62,7 @@ class TaskRunner:
         self._ssh_locks: dict[str, threading.RLock] = {
             DEFAULT_WORKSTATION_ID: self._ssh_lock,
         }
+        self._ssh_locks_guard = threading.Lock()
 
         self._sc_pool = SCProcessPool()
 
@@ -69,6 +72,7 @@ class TaskRunner:
         self._local_worker_adapter = local_worker_adapter
         self.last_sw_error = ""
         self.last_sc_error = ""
+        self.last_solver_error = ""
 
         # ---- 子执行器 ----
         self._sw_executor = SWExecutor(self.state)
@@ -76,12 +80,16 @@ class TaskRunner:
             self.state,
             ssh_getter=self.get_ssh,
             ssh_lock=self._ssh_lock,
+            ssh_locks=self._ssh_locks,
+            ssh_locks_guard=self._ssh_locks_guard,
         )
         self._remote_executor.restore_remote_tasks_from_db()
         self._cleaner = FileCleaner(
             self.state,
             ssh_getter=self.get_ssh,
             ssh_lock=self._ssh_lock,
+            ssh_locks=self._ssh_locks,
+            ssh_locks_guard=self._ssh_locks_guard,
         )
 
     def set_control_events(
@@ -117,9 +125,23 @@ class TaskRunner:
     def get_ssh(
         self,
         workstation_id: str = DEFAULT_WORKSTATION_ID,
+        *,
+        connect: bool = True,
+        log_failure: bool = True,
     ) -> RemoteWorkstation:
-        """获取（或创建）SSH 客户端实例。线程安全。"""
-        lock = self._ssh_locks.setdefault(workstation_id, threading.RLock())
+        """获取（或创建）SSH 客户端实例。线程安全。
+
+        Args:
+            workstation_id: 工作站 ID。
+            connect: True 时确保连接可用；False 时只返回缓存/新建客户端，不发起网络连接。
+            log_failure: False 时将预期的连接失败保留为返回状态，不输出 WARNING+ 日志。
+        """
+        locks_guard = getattr(self, "_ssh_locks_guard", None)
+        if locks_guard is None:
+            locks_guard = threading.Lock()
+            self._ssh_locks_guard = locks_guard
+        with locks_guard:
+            lock = self._ssh_locks.setdefault(workstation_id, threading.RLock())
         with lock:
             ssh = self._ssh_pool.get(workstation_id)
             if ssh is None:
@@ -129,16 +151,48 @@ class TaskRunner:
                     port=remote_config["port"],
                     username=remote_config["username"],
                     password=remote_config["password"],
+                    key_filename=str(remote_config.get("key_filename") or "") or None,
+                    auth_method=str(remote_config.get("auth_method") or "password"),
                 )
                 self._ssh_pool[workstation_id] = ssh
                 if workstation_id == DEFAULT_WORKSTATION_ID:
                     self._ssh = ssh
+            if not connect:
+                return ssh
             if not ssh.is_connected():
-                if not ssh.connect():
-                    logger.error("SSH 重连失败: %s", workstation_id)
+                stopped_event = getattr(self, "_stopped_event", None)
+                if stopped_event is not None and stopped_event.is_set():
+                    logger.debug("调度器已停止，跳过 SSH 重连: %s", workstation_id)
+                    return ssh
+                try:
+                    connected = ssh.connect(log_failure=log_failure)
+                except TypeError as e:
+                    if "log_failure" not in str(e):
+                        raise
+                    connected = ssh.connect()
+                if not connected:
+                    if log_failure:
+                        logger.error("SSH 重连失败: %s", workstation_id)
+                    else:
+                        logger.debug("SSH 重连失败: %s", workstation_id)
             return ssh
 
-    def disconnect_ssh(self, workstation_id: str | None = None) -> None:
+    def _acquire_ssh_lock(
+        self,
+        lock: threading.RLock,
+        lock_timeout: float | None,
+    ) -> bool:
+        """Acquire an SSH lock, optionally using a timeout for shutdown cleanup."""
+        if lock_timeout is None:
+            lock.acquire()
+            return True
+        return bool(lock.acquire(timeout=lock_timeout))
+
+    def disconnect_ssh(
+        self,
+        workstation_id: str | None = None,
+        lock_timeout: float | None = None,
+    ) -> None:
         """断开 SSH 连接。"""
         ssh_pool = getattr(self, "_ssh_pool", None)
         ssh_locks = getattr(self, "_ssh_locks", None)
@@ -150,13 +204,24 @@ class TaskRunner:
             return
 
         if workstation_id is not None:
-            lock = ssh_locks.setdefault(workstation_id, threading.RLock())
-            with lock:
+            locks_guard = getattr(self, "_ssh_locks_guard", None)
+            if locks_guard is None:
+                locks_guard = threading.Lock()
+                self._ssh_locks_guard = locks_guard
+            with locks_guard:
+                lock = ssh_locks.setdefault(workstation_id, threading.RLock())
+            acquired = self._acquire_ssh_lock(lock, lock_timeout)
+            if not acquired:
+                logger.warning("SSH 锁忙，跳过断开连接: %s", workstation_id)
+                return
+            try:
                 ssh = ssh_pool.pop(workstation_id, None)
                 if ssh:
                     ssh.disconnect()
                 if workstation_id == DEFAULT_WORKSTATION_ID:
                     self._ssh = None
+            finally:
+                lock.release()
             return
 
         with self._ssh_lock:
@@ -169,11 +234,23 @@ class TaskRunner:
                 default_pooled.disconnect()
 
         for current_id in list(ssh_pool):
-            lock = ssh_locks.setdefault(current_id, threading.RLock())
-            with lock:
+            locks_guard = getattr(self, "_ssh_locks_guard", None)
+            if locks_guard is None:
+                locks_guard = threading.Lock()
+                self._ssh_locks_guard = locks_guard
+            with locks_guard:
+                lock = ssh_locks.setdefault(current_id, threading.RLock())
+            acquired = self._acquire_ssh_lock(lock, lock_timeout)
+            if not acquired:
+                logger.warning("SSH 锁忙，跳过断开连接: %s", current_id)
+                continue
+            try:
                 pooled = ssh_pool.pop(current_id, None)
                 if pooled:
                     pooled.disconnect()
+            finally:
+                lock.release()
+
 
     def _workstation_for_config(self, config_name: int) -> str:
         """Return assigned workstation for a config, falling back to legacy default."""
@@ -392,12 +469,16 @@ class TaskRunner:
         stopped_event: threading.Event | None = None,
     ) -> bool:
         """等待求解完成（委托给 RemoteExecutor）。"""
-        return self._remote_executor.wait_solver_completion(
+        result = self._remote_executor.wait_solver_completion(
             config_name,
             paused_event,
             stopped_event,
             workstation_id=self._workstation_for_config(config_name),
         )
+        self.last_solver_error = str(
+            getattr(self._remote_executor, "last_solver_error", "")
+        )
+        return result
 
     # ------------------------------------------------------------------
     # 阶段 6: 后处理（委托给 RemoteExecutor）
@@ -464,23 +545,83 @@ class TaskRunner:
         """执行系统自检（委托给 FileCleaner）。"""
         result = self._cleaner.run_system_check()
         if self._should_delegate_local_steps():
-            local_worker_result = self._local_worker_adapter.check_local_environment()
-            if local_worker_result is None:
-                message = str(
-                    getattr(self._local_worker_adapter, "last_error", "")
-                    or "LocalWorker 主动自检未完成或失败"
-                )
+            if self._local_worker_required_for_system_check():
+                local_worker_result = self._local_worker_adapter.check_local_environment()
+                if local_worker_result is None:
+                    message = str(
+                        getattr(self._local_worker_adapter, "last_error", "")
+                        or "LocalWorker 主动自检未完成或失败"
+                    )
+                    result["local_worker_checks"] = {
+                        "active_check": {
+                            "exists": False,
+                            "message": message,
+                        }
+                    }
+                else:
+                    result["local_worker_checks"] = dict(
+                        local_worker_result.get("local_checks", local_worker_result)
+                    )
+                self._refresh_system_check_summary(result)
+            else:
                 result["local_worker_checks"] = {
                     "active_check": {
-                        "exists": False,
-                        "message": message,
-                    }
+                        "status": "skipped",
+                        "message": "所有 SW/SC 步骤已完成，LocalWorker 非必需",
+                    },
+                    "ok": True,
+                    "status": "skipped",
+                    "summary": {"passed": 0, "failed": 0, "warnings": 0},
                 }
-            else:
-                result["local_worker_checks"] = dict(
-                    local_worker_result.get("local_checks", local_worker_result)
-                )
         return result
+
+    def _local_worker_required_for_system_check(self) -> bool:
+        try:
+            config_names = list(self.state.get_all_configs())
+            if not config_names:
+                return True
+            for config_name in config_names:
+                if self.state.get_step_status(config_name, "sw") != STATUS_COMPLETED:
+                    return True
+                if self.state.get_step_status(config_name, "sc") != STATUS_COMPLETED:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug("[LocalWorker] 判断自检需求失败，保守执行主动自检: %s", e)
+            return True
+
+    @staticmethod
+    def _refresh_system_check_summary(result: dict) -> None:
+        passed = int(result.get("summary", {}).get("passed", 0) or 0)
+        failed = int(result.get("summary", {}).get("failed", 0) or 0)
+        warnings = int(result.get("summary", {}).get("warnings", 0) or 0)
+        local_worker_checks = result.get("local_worker_checks")
+        if isinstance(local_worker_checks, dict):
+            lw_passed = 0
+            lw_failed = 0
+            for key, value in local_worker_checks.items():
+                if key in {"ok", "status", "summary"} or not isinstance(value, dict):
+                    continue
+                state = value.get("ok")
+                if not isinstance(state, bool):
+                    state = value.get("exists")
+                if isinstance(state, bool):
+                    if state:
+                        lw_passed += 1
+                    else:
+                        lw_failed += 1
+            local_worker_checks["ok"] = lw_failed == 0
+            local_worker_checks["status"] = "failed" if lw_failed else ("passed" if lw_passed else "skipped")
+            local_worker_checks["summary"] = {
+                "passed": lw_passed,
+                "failed": lw_failed,
+                "warnings": 0,
+            }
+            passed += lw_passed
+            failed += lw_failed
+        result["summary"] = {"passed": passed, "failed": failed, "warnings": warnings}
+        result["overall_ok"] = failed == 0
+        result["status"] = "failed" if failed else ("warning" if warnings else "passed")
 
     def run_local_system_check(self) -> dict:
         """执行 LocalWorker 本地系统自检（委托给 FileCleaner）。"""
@@ -538,7 +679,10 @@ class TaskRunner:
         cleanup_stage = getattr(self._local_worker_adapter, "cleanup_stage", None)
         if not callable(cleanup_stage):
             return
-        ok = bool(cleanup_stage(step_name, phase))
+        kwargs: dict[str, float] = {}
+        if phase == "shutdown":
+            kwargs["timeout_seconds"] = LOCAL_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECONDS
+        ok = bool(cleanup_stage(step_name, phase, **kwargs))
         if not ok:
             error = str(getattr(self._local_worker_adapter, "last_error", ""))
             logger.warning(

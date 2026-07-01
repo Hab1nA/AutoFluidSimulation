@@ -48,6 +48,52 @@ class _LockProbe:
         return False
 
 
+def test_postprocess_cleanup_uses_engine_animation_dir_when_it_differs_from_legacy_animation_dir(monkeypatch):
+    """清理路径应使用 ENGINE_CONFIG 后处理动画目录，而不是重复硬编码旧默认值。"""
+    from engine.config import ENGINE_CONFIG
+    from executor.cleaner import _postprocess_cleanup_paths
+
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+
+    paths = _postprocess_cleanup_paths(
+        {
+            "flag_dir": r"D:\flags",
+            "result_dir": r"D:\case",
+            "animation_dir": r"D:\legacy\animation",
+        },
+        7,
+    )
+
+    assert "D:/post/animation/t_gen4_7.mp4" in paths
+    assert "D:/post/animation/v_gen4_7.mp4" in paths
+    assert "D:/legacy/animation/t_gen4_7.mp4" not in paths
+
+
+def test_postprocess_cleanup_uses_workstation_postprocess_animation_override(monkeypatch):
+    """工作站显式 postprocess_animation_dir 应优先于全局 ENGINE_CONFIG。"""
+    from engine.config import ENGINE_CONFIG
+    from executor.cleaner import _postprocess_cleanup_paths
+
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", r"D:\post\output")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", r"D:\post\metrics")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", r"D:\post\animation")
+
+    paths = _postprocess_cleanup_paths(
+        {
+            "flag_dir": r"D:\flags",
+            "result_dir": r"D:\case",
+            "animation_dir": r"D:\legacy\animation",
+            "postprocess_animation_dir": r"E:\ws\animation",
+        },
+        7,
+    )
+
+    assert "E:/ws/animation/t_gen4_7.mp4" in paths
+    assert "D:/post/animation/t_gen4_7.mp4" not in paths
+
+
 class TestFileCleanerSystemCheck:
     """验证 FileCleaner.run_system_check 本地路径检查。"""
 
@@ -81,7 +127,7 @@ class TestFileCleanerSystemCheck:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             # 提供一个返回 "未连接" 的 SSH getter，避免 None 调用
@@ -94,13 +140,17 @@ class TestFileCleanerSystemCheck:
 
             assert "local_checks" in result
             for name, info in result["local_checks"].items():
+                if name in {"ok", "status", "summary"}:
+                    continue
                 assert info["exists"] is True, f"{name}: {info['path']} should exist"
-            # SSH 未连接时应报告连接失败
-            assert result["remote_checks"]["ssh"] == "连接失败"
+            remote_checks = result["remote_checks"]
+            assert remote_checks["status"] == "failed"
+            assert remote_checks["ok"] is False
+            assert remote_checks["workstations"]["default"]["ssh"] == "连接失败"
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_remote_system_check_holds_ssh_lock(self, tmp_path):
+    def test_remote_system_check_holds_ssh_lock(self, tmp_path, monkeypatch):
         """远端系统自检应在共享 SSH 锁内执行。"""
         from executor.cleaner import FileCleaner
         from engine.state_manager import StateManager
@@ -120,7 +170,7 @@ class TestFileCleanerSystemCheck:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -131,6 +181,268 @@ class TestFileCleanerSystemCheck:
 
             assert ssh.check_system_saw_lock is True
             assert lock.entries == 1
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_remote_system_check_reports_each_configured_workstation(self, tmp_path, monkeypatch):
+        """系统自检应逐台工作站检查 SSH/远端环境，不能只检查第一台。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _SSH:
+            def __init__(self, workstation_id: str, connected: bool) -> None:
+                self.workstation_id = workstation_id
+                self._connected = connected
+
+            def is_connected(self) -> bool:
+                return self._connected
+
+            def check_system(self, **_kwargs: object) -> dict[str, object]:
+                return {
+                    "ssh_connected": True,
+                    "python_version": f"python-on-{self.workstation_id}",
+                }
+
+        seen: list[str] = []
+
+        def _get_ssh(workstation_id: str = "default") -> _SSH:
+            seen.append(workstation_id)
+            return _SSH(workstation_id, workstation_id not in {"WS-C", "WS-D"})
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        WORKSTATIONS[:] = [
+            {**REMOTE_CONFIG, "id": "WS-A", "host": "172.17.135.240"},
+            {**REMOTE_CONFIG, "id": "WS-B", "host": "172.17.135.89"},
+            {**REMOTE_CONFIG, "id": "WS-C", "host": "172.17.135.254"},
+            {**REMOTE_CONFIG, "id": "WS-D", "host": "172.17.135.200"},
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, _get_ssh)
+
+            result = cleaner.run_system_check()
+
+            assert seen == ["WS-A", "WS-B", "WS-C", "WS-D"]
+            per_workstation = result["remote_checks"]["workstations"]
+            assert per_workstation["WS-A"]["ssh"] == "连接成功"
+            assert per_workstation["WS-B"]["python_version"] == "python-on-WS-B"
+            assert per_workstation["WS-C"]["ssh"] == "连接失败"
+            assert per_workstation["WS-D"]["ssh"] == "连接失败"
+            assert result["remote_checks"]["status"] == "partial"
+            assert result["remote_checks"]["ok"] is False
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_reports_configured_fluent_path_per_workstation(self, tmp_path, monkeypatch):
+        """CHECK 返回内容应包含每台工作站配置的 Fluent 可执行文件路径。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+        class _SSH:
+            def __init__(self) -> None:
+                self.kwargs: dict[str, object] = {}
+
+            def is_connected(self) -> bool:
+                return True
+
+            def check_system(self, **kwargs: object) -> dict[str, object]:
+                self.kwargs = kwargs
+                return {
+                    "ssh_connected": True,
+                    "remote_programs": [
+                        {
+                            "label": "Fluent可执行文件",
+                            "path": kwargs["fluent_path"],
+                            "exists": True,
+                        }
+                    ],
+                }
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+                "mpi_bin_dir": mpi_bin_dir,
+            }
+        ]
+        ssh = _SSH()
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": ssh)
+
+            result = cleaner.run_system_check()
+
+            assert ssh.kwargs["fluent_path"] == fluent_path
+            programs = result["remote_checks"]["workstations"]["WS-C"]["remote_programs"]
+            assert {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": True,
+            } in programs
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_reports_configured_paths_when_workstation_disconnected(self, tmp_path, monkeypatch):
+        """即使 SSH 断开，CHECK 也应显示配置的 Fluent/MPI 路径为未检查。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+        mpi_bin_dir = r"D:\ANSYS Inc\v241\fluent\fluent24.1.0\multiport\mpi\win64\intel2021\bin"
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+                "mpi_bin_dir": mpi_bin_dir,
+            }
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            dirs = result["remote_checks"]["workstations"]["WS-C"]["remote_dirs"]
+            work_dir = next(p for p in dirs if p["label"] == "仿真工作目录")
+            assert work_dir["path"] == REMOTE_CONFIG["working_dir"]
+            assert work_dir["exists"] is None
+            programs = result["remote_checks"]["workstations"]["WS-C"]["remote_programs"]
+            fluent_program = next(p for p in programs if p["label"] == "Fluent可执行文件")
+            mpi_program = next(p for p in programs if p["label"] == "MPI安装目录")
+            assert fluent_program == {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": None,
+            }
+            assert mpi_program["path"] == mpi_bin_dir
+            assert mpi_program["exists"] is None
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_marks_reconnect_failure_as_failed(self, tmp_path, monkeypatch):
+        """SSH 检查中途重连失败时，CHECK 不应把工作站误计为成功。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+
+        class _StaleSSH:
+            def is_connected(self) -> bool:
+                return True
+
+            def check_system(self, **kwargs: object) -> dict[str, object]:
+                return {
+                    "ssh_connected": False,
+                    "remote_programs": [
+                        {
+                            "label": "Fluent可执行文件",
+                            "path": kwargs["fluent_path"],
+                            "exists": None,
+                        }
+                    ],
+                    "remote_dirs": [
+                        {
+                            "label": "仿真工作目录",
+                            "path": kwargs["remote_dirs"]["仿真工作目录"],
+                            "exists": None,
+                        }
+                    ],
+                }
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        original_workstations = [dict(ws) for ws in WORKSTATIONS]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        WORKSTATIONS[:] = [
+            {
+                **REMOTE_CONFIG,
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "fluent_path": fluent_path,
+            }
+        ]
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda _workstation_id="default": _StaleSSH())
+
+            result = cleaner.run_system_check()
+
+            checks = result["remote_checks"]
+            ws_check = checks["workstations"]["WS-C"]
+            assert checks["status"] == "failed"
+            assert checks["ok"] is False
+            assert ws_check["ssh"] == "连接失败"
+            assert ws_check["ok"] is False
+            assert {
+                "label": "Fluent可执行文件",
+                "path": fluent_path,
+                "exists": None,
+            } in ws_check["remote_programs"]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+            WORKSTATIONS[:] = original_workstations
+
+    def test_system_check_returns_structured_summary(self, tmp_path, monkeypatch):
+        """CHECK 应返回可直接驱动新版页面的结构化总览。"""
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        class _DisconnectedSSH:
+            def is_connected(self) -> bool:
+                return False
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        try:
+            state = StateManager(db_path=db_path)
+            cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
+
+            result = cleaner.run_system_check()
+
+            assert result["overall_ok"] is False
+            assert result["summary"]["failed"] >= 1
+            assert result["summary"]["passed"] >= 1
+            assert result["summary"]["warnings"] == 0
+            assert result["remote_checks"]["ok"] is False
+            assert result["remote_checks"]["status"] == "failed"
+            assert result["remote_checks"]["workstations"]["default"]["ok"] is False
+            deployment = result["remote_checks"]["workstations"]["default"]["scripts_status"]
+            assert deployment["status"] == "skipped"
+            assert deployment["message"] == "SSH 未连接，未检查"
+            assert result["daemon_checks"]["ok"] in {True, False}
+            assert result["local_checks"]["ok"] in {True, False}
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
@@ -147,7 +459,7 @@ class TestFileCleanerSystemCheck:
         original_db_path = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -186,14 +498,16 @@ class TestFileCleanerSystemCheck:
         import engine.config as cfg
         original_db_path = cfg.IPC_CONFIG["db_path"]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         try:
             state = StateManager(db_path=cfg.IPC_CONFIG["db_path"])
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
 
             result = cleaner.run_system_check()
 
-            assert result["local_checks"] == {}
+            assert result["local_checks"]["status"] == "skipped"
+            assert result["local_checks"]["summary"] == {"passed": 0, "failed": 0, "warnings": 0}
+            assert "SW可执行文件" not in result["local_checks"]
             assert result["daemon_checks"]["server_mode"]["value"] is True
             assert "scdoc_dir" in result["daemon_checks"]
             assert "workstation_checks" in result
@@ -213,7 +527,7 @@ class TestFileCleanerSystemCheck:
         original_db_path = cfg.IPC_CONFIG["db_path"]
         original_workstations = [dict(ws) for ws in WORKSTATIONS]
         monkeypatch.setenv("AUTOFLUID_SERVER_MODE", "server")
-        cfg.IPC_CONFIG["db_path"] = str(tmp_path / "test.db")
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", str(tmp_path / "test.db"))
         WORKSTATIONS[:] = [
             {
                 **REMOTE_CONFIG,
@@ -260,7 +574,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -287,7 +601,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -313,7 +627,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -344,7 +658,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh = _ConnectedSSH()
@@ -418,7 +732,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh_by_id = {ws["id"]: _ConnectedSSH(str(ws["id"])) for ws in workstations}
@@ -464,7 +778,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -478,7 +792,7 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_clean_all_cache_fails_when_workstation_ssh_disconnected(self, tmp_path):
+    def test_clean_all_cache_fails_when_workstation_ssh_disconnected(self, tmp_path, monkeypatch):
         """clean all cache 不应在远程工作站不可达时静默成功。"""
 
         class _DisconnectedSSH:
@@ -491,13 +805,109 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             cleaner = FileCleaner(state, lambda: _DisconnectedSSH())
 
             with pytest.raises(RuntimeError, match="远程缓存清理未完成"):
                 cleaner.clean_all_cache()
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
+    def test_clean_all_continues_other_steps_after_offline_workstation(
+        self, tmp_path, monkeypatch
+    ):
+        """单个工作站离线时，clean all 仍应尽量清理在线构型的后续步骤。"""
+        workstations = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\ws_a\working",
+                "scripts_dir": r"D:\ws_a\scripts",
+                "ref_files_dir": r"D:\ws_a\refs",
+                "scdoc_dir": r"D:\ws_a\scdoc",
+                "msh_dir": r"D:\ws_a\msh",
+                "result_dir": r"D:\ws_a\case",
+                "flag_dir": r"D:\ws_a\flags",
+                "postprocess_output_dir": r"D:\ws_a\post",
+                "postprocess_metrics_dir": r"D:\ws_a\metrics",
+                "animation_dir": r"D:\ws_a\animation",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+            {
+                "id": "WS-B",
+                "host": "10.0.0.2",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"E:\ws_b\working",
+                "scripts_dir": r"E:\ws_b\scripts",
+                "ref_files_dir": r"E:\ws_b\refs",
+                "scdoc_dir": r"E:\ws_b\scdoc",
+                "msh_dir": r"E:\ws_b\msh",
+                "result_dir": r"E:\ws_b\case",
+                "flag_dir": r"E:\ws_b\flags",
+                "postprocess_output_dir": r"E:\ws_b\post",
+                "postprocess_metrics_dir": r"E:\ws_b\metrics",
+                "animation_dir": r"E:\ws_b\animation",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+        ]
+        monkeypatch.setattr("engine.config.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.get_workstation_config", lambda wid: next(
+            dict(ws) for ws in workstations if ws["id"] == wid
+        ))
+
+        class _SSH:
+            def __init__(self, connected: bool) -> None:
+                self.connected = connected
+                self.deleted: list[str] = []
+                self.cleared: list[str] = []
+
+            def is_connected(self) -> bool:
+                return self.connected
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+            def clear_remote_directory(self, remote_dir: str) -> tuple[int, int]:
+                self.cleared.append(remote_dir)
+                return (1, 0)
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+        orig = cfg.IPC_CONFIG["db_path"]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({1: [1.0, 2.0, 3.0, 4.0], 2: [5.0, 6.0, 7.0, 8.0]})
+            state.set_config_workstation(1, "WS-A")
+            state.set_config_workstation(2, "WS-B")
+            ssh_by_id = {"WS-A": _SSH(True), "WS-B": _SSH(False)}
+
+            cleaner = FileCleaner(state, lambda workstation_id="default": ssh_by_id[workstation_id])
+
+            with pytest.raises(RuntimeError, match="远程文件清理未完成"):
+                cleaner.clean_step_files("all")
+
+            assert any(path.endswith("meshing_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_progress_1.json") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("solver_progress_1.json.transcript") for path in ssh_by_id["WS-A"].deleted)
+            assert any(path.endswith("postprocess_done_1.txt") for path in ssh_by_id["WS-A"].deleted)
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
@@ -523,7 +933,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             lock = _LockProbe()
@@ -537,7 +947,7 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
-    def test_remote_step_file_cleanup_fails_when_ssh_disconnected(self, tmp_path):
+    def test_remote_step_file_cleanup_fails_when_ssh_disconnected(self, tmp_path, monkeypatch):
         """远程步骤文件清理不可达时应失败，避免 clean 指令误报成功。"""
 
         class _DisconnectedSSH:
@@ -550,7 +960,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -599,7 +1009,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -624,6 +1034,100 @@ class TestFileCleanerCleanStepFiles:
         finally:
             cfg.IPC_CONFIG["db_path"] = orig
 
+    def test_remote_step_file_cleanup_unassigned_config_cleans_all_workstations(
+        self, tmp_path, monkeypatch
+    ):
+        """多工作站模式下，未分配构型的远程清理应覆盖所有工作站。"""
+        workstations = [
+            {
+                "id": "WS-A",
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"D:\ws_a\working",
+                "scripts_dir": r"D:\ws_a\scripts",
+                "ref_files_dir": r"D:\ws_a\refs",
+                "scdoc_dir": r"D:\ws_a\scdoc",
+                "msh_dir": r"D:\ws_a\msh",
+                "result_dir": r"D:\ws_a\case",
+                "flag_dir": r"D:\ws_a\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+            {
+                "id": "WS-B",
+                "host": "10.0.0.2",
+                "port": 22,
+                "username": "ps",
+                "password": "pw",
+                "working_dir": r"E:\ws_b\working",
+                "scripts_dir": r"E:\ws_b\scripts",
+                "ref_files_dir": r"E:\ws_b\refs",
+                "scdoc_dir": r"E:\ws_b\scdoc",
+                "msh_dir": r"E:\ws_b\msh",
+                "result_dir": r"E:\ws_b\case",
+                "flag_dir": r"E:\ws_b\flags",
+                "conda_env": "pyfluent",
+                "conda_exe": r"C:\conda.exe",
+                "mpi_bin_dir": r"C:\mpi",
+            },
+        ]
+        monkeypatch.setattr("engine.config.WORKSTATIONS", workstations)
+        monkeypatch.setattr("executor.cleaner.WORKSTATIONS", workstations)
+        monkeypatch.setattr(
+            "executor.cleaner.get_workstation_config",
+            lambda wid: next(dict(ws) for ws in workstations if ws["id"] == wid),
+        )
+
+        class _ConnectedSSH:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def is_connected(self) -> bool:
+                return True
+
+            def delete_remote_file(self, remote_path: str) -> bool:
+                self.deleted.append(remote_path)
+                return True
+
+        from executor.cleaner import FileCleaner
+        from engine.state_manager import StateManager
+
+        db_path = str(tmp_path / "test.db")
+        import engine.config as cfg
+
+        orig = cfg.IPC_CONFIG["db_path"]
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
+        try:
+            state = StateManager(db_path=db_path)
+            state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
+            ssh_by_id = {"WS-A": _ConnectedSSH(), "WS-B": _ConnectedSSH()}
+            requested_ids: list[str] = []
+
+            def get_ssh(workstation_id: str = "default") -> _ConnectedSSH:
+                requested_ids.append(workstation_id)
+                return ssh_by_id[workstation_id]
+
+            cleaner = FileCleaner(state, get_ssh)
+
+            cleaner.clean_step_files("meshing", config_name=2)
+
+            assert requested_ids == ["WS-A", "WS-B"]
+            assert ssh_by_id["WS-A"].deleted == [
+                "D:/ws_a/msh/model_gen4_2.msh.h5",
+                "D:/ws_a/flags/meshing_done_2.txt",
+                "D:/ws_a/flags/meshing_done_2.txt.error",
+            ]
+            assert ssh_by_id["WS-B"].deleted == [
+                "E:/ws_b/msh/model_gen4_2.msh.h5",
+                "E:/ws_b/flags/meshing_done_2.txt",
+                "E:/ws_b/flags/meshing_done_2.txt.error",
+            ]
+        finally:
+            cfg.IPC_CONFIG["db_path"] = orig
+
     def test_clean_postprocess_deletes_metrics_animation_and_runtime_artifacts(
         self, tmp_path, monkeypatch
     ):
@@ -632,6 +1136,7 @@ class TestFileCleanerCleanStepFiles:
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\case")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\remote\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\remote\metrics")
 
         class _ConnectedSSH:
@@ -656,7 +1161,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -693,6 +1198,7 @@ class TestFileCleanerCleanStepFiles:
         monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\remote\case")
         monkeypatch.setitem(REMOTE_CONFIG, "animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\remote\post")
+        monkeypatch.setitem(REMOTE_CONFIG, "postprocess_animation_dir", r"D:\remote\animation")
         monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\remote\metrics")
 
         class _ConnectedSSH:
@@ -717,7 +1223,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -757,7 +1263,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             state.load_configs({2: [1.0, 2.0, 3.0, 4.0]})
@@ -793,7 +1299,7 @@ class TestFileCleanerCleanStepFiles:
         db_path = str(tmp_path / "test.db")
         import engine.config as cfg
         orig = cfg.IPC_CONFIG["db_path"]
-        cfg.IPC_CONFIG["db_path"] = db_path
+        monkeypatch.setitem(cfg.IPC_CONFIG, "db_path", db_path)
         try:
             state = StateManager(db_path=db_path)
             ssh = _ConnectedSSH()
@@ -847,6 +1353,18 @@ class TestProcessUtils:
         pid_file = tmp_path / "bad.pid"
         pid_file.write_text("not_a_number", encoding="utf-8")
         assert read_pid_file(str(pid_file)) is None
+
+    def test_read_reserved_pid_file_returns_none(self, tmp_path):
+        """PID 1 属于系统 init，不应被 PID 文件逻辑当作可管理进程。"""
+        from utils.process_utils import read_pid_file
+        pid_file = tmp_path / "reserved.pid"
+        pid_file.write_text("1", encoding="utf-8")
+        assert read_pid_file(str(pid_file)) is None
+
+    def test_is_process_alive_rejects_reserved_pid(self):
+        """PID 1 即使存在也必须视为不可由 AutoFluid 管理。"""
+        from utils.process_utils import is_process_alive
+        assert is_process_alive(1) is False
 
     def test_remove_nonexistent_pid_file_no_error(self, tmp_path):
         """删除不存在的 PID 文件不抛异常。"""
@@ -917,11 +1435,18 @@ class TestProcessUtils:
         monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 3333)
         monkeypatch.setattr(
             process_utils,
+            "worker_process_is_owned",
+            lambda kind, pid: kind == "tunnel_workstation" and pid == 3333,
+        )
+        monkeypatch.setattr(
+            process_utils,
             "run_taskkill",
             lambda pid, timeout=5: killed.append(pid) or True,
         )
 
-        result = process_utils.cleanup_worker_processes_from_pid_files()
+        result = process_utils.cleanup_worker_processes_from_pid_files(
+            include_workstation=True,
+        )
 
         assert result == {
             "local_worker": {"pid": 2222, "status": "stale"},
@@ -930,6 +1455,73 @@ class TestProcessUtils:
         assert killed == [3333]
         assert not stale_pid.exists()
         assert not live_pid.exists()
+
+    def test_cleanup_worker_pid_files_skips_workstation_tunnel_by_default(
+        self, tmp_path, monkeypatch
+    ):
+        """工作站自持有隧道不应被本机/服务器默认 worker stop 清理。"""
+        from utils import process_utils
+
+        live_pid = tmp_path / "tunnel_workstation.pid"
+        live_pid.write_text("3333", encoding="utf-8")
+
+        monkeypatch.setattr(
+            process_utils,
+            "worker_pid_file",
+            lambda kind: str(tmp_path / f"{kind}.pid"),
+        )
+        monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 3333)
+        monkeypatch.setattr(
+            process_utils,
+            "worker_process_is_owned",
+            lambda kind, pid: kind == "tunnel_workstation" and pid == 3333,
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "run_taskkill",
+            lambda pid, timeout=5: pytest.fail("workstation tunnel should not be killed"),
+        )
+
+        result = process_utils.cleanup_worker_processes_from_pid_files()
+
+        assert "tunnel_workstation" not in result
+        assert live_pid.exists()
+
+    def test_cleanup_worker_pid_files_skips_live_processes_without_owner_evidence(
+        self, tmp_path, monkeypatch
+    ):
+        """PID 文件指向非 AutoFluid 进程时不能误杀。"""
+        from utils import process_utils
+
+        killed: list[int] = []
+        pid_file = tmp_path / "local_worker.pid"
+        pid_file.write_text("4444", encoding="utf-8")
+
+        monkeypatch.setattr(process_utils, "WORKER_PID_KINDS", ("local_worker",))
+        monkeypatch.setattr(
+            process_utils,
+            "worker_pid_file",
+            lambda kind: str(tmp_path / f"{kind}.pid"),
+        )
+        monkeypatch.setattr(process_utils, "is_process_alive", lambda pid: pid == 4444)
+        monkeypatch.setattr(
+            process_utils,
+            "worker_process_is_owned",
+            lambda _kind, _pid: False,
+        )
+        monkeypatch.setattr(
+            process_utils,
+            "run_taskkill",
+            lambda pid, timeout=5: killed.append(pid) or True,
+        )
+
+        result = process_utils.cleanup_worker_processes_from_pid_files()
+
+        assert result == {
+            "local_worker": {"pid": 4444, "status": "skipped_not_owned"}
+        }
+        assert killed == []
+        assert pid_file.exists()
 
 
 class TestCheckIpcReady:
@@ -998,6 +1590,28 @@ class TestExcelReader:
         from utils.excel_reader import read_model_configs
         with pytest.raises(FileNotFoundError):
             read_model_configs("/nonexistent/path.xlsx")
+
+    def test_read_duplicate_config_id_fails(self, tmp_path):
+        """重复构型编号应失败，避免静默覆盖导致少跑构型。"""
+        try:
+            import openpyxl
+        except ImportError:
+            pytest.skip("openpyxl 未安装")
+
+        from utils.excel_reader import read_model_configs
+
+        excel_file = tmp_path / "test.xlsx"
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Name", "P1", "P2", "P3", "P4"])
+        ws.append(["", "", "", "", ""])
+        ws.append([1, 1.0, 2.0, 3.0, 4.0])
+        ws.append([1, 5.0, 6.0, 7.0, 8.0])
+        wb.save(str(excel_file))
+        wb.close()
+
+        with pytest.raises(ValueError, match="重复构型编号: 1"):
+            read_model_configs(str(excel_file))
 
     def test_read_empty_rows_stops(self, tmp_path):
         """遇到空行停止读取。"""

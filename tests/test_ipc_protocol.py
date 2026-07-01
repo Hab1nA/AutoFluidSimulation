@@ -66,6 +66,7 @@ _EXPECTED_COMMANDS = frozenset({
     "start",
     "pause",
     "stop",
+    "stop_step",
     "check",
     "reset_step",
     "clean_step",

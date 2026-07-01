@@ -1,6 +1,6 @@
 # 🚀 AutoFluid — 火箭发动机 CFD 仿真全自动流水线
 
-> **Pipeline Daemon Engine v2.8.3** — Client/Server 分离架构的批量仿真调度系统
+> **Pipeline Daemon Engine v3.0.0** — Client/Server 分离架构的批量仿真调度系统
 
 ---
 
@@ -10,14 +10,15 @@ AutoFluid 是一个**全自动 CFD 仿真流水线控制系统**，用于批量�
 
 ### 核心特性
 
-- **全自动五阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解全流程
+- **全自动六阶段流水线**: 从 Excel 参数表读取构型，自动完成建模→转换→传输→网格→求解→后处理全流程
 - **C/S 分离架构**: Python 后台守护进程 (Daemon) + Rust TUI 终端界面，独立部署、独立重启
 - **直接 COM API**: 通过 `win32com` 直接调用 SolidWorks COM 接口导出 STEP，无需宏文件
-- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（10 分类 55 字段在线编辑）
+- **TOML 配置体系**: 通过 `autofluid_config.toml` 集中管理所有路径和参数，TUI 内置可视化设置页面（10 分类 60 字段在线编辑）
 - **SQLite WAL 持久化**: 状态实时落盘，支持断点续传，Daemon 重启不丢失进度
 - **DAG 异步调度**: Producer-Consumer 队列 + 全局 Barrier，边导出边处理的并行流水线
 - **SCProcessPool**: 1 槽位常驻进程池管理 SpaceClaim 并发调用（可通过 sc_max_slots 扩展），含等待队列与断点续传
 - **C# Bridge**: SpaceClaim 通过 C# `SpaceClaimBridge.exe` 进程检测模式调用，三相 GUI 就绪检测
+- **多工作站并行**: 支持最多 4 台远程工作站并行网格划分与求解，`[[workstations]]` TOML 数组独立配置每台主机的 SSH/路径/Conda 参数
 - **远程编排**: SSH + PowerShell `Start-Process` 在远程工作站启动独立后台进程
 - **优雅关闭**: `quit full` 安全退出，自动断开 SSH、停止监控、清理残留进程
 - **Worker 生命周期管理**: TUI 内 `worker start/stop/restart` 统一管理本地 Worker 进程和工作站 SSH 隧道
@@ -81,7 +82,7 @@ graph TB
 | 组件                        | 职责                                        | 技术                             |
 | --------------------------- | ------------------------------------------- | -------------------------------- |
 | **PipelineDaemon**    | 后台常驻进程，协调所有子系统                | Python 多线程                    |
-| **PipelineScheduler** | DAG 调度、Barrier 控制、SW 重试编排         | Producer-Consumer 队列           |
+| **PipelineScheduler** | DAG 调度、Barrier 控制、多工作站槽位分配、SW 重试编排 | Producer-Consumer 队列           |
 | **StateManager**      | 持久化状态，并发读写，增量同步              | SQLite WAL                       |
 | **TaskRunner**        | 各阶段执行（SW/SC/Transfer/Meshing/Solver） | win32com / paramiko / subprocess |
 | **SCProcessPool**     | SpaceClaim 1 槽位常驻池 + 等待队列          | C# Bridge 进程检测模式           |
@@ -98,7 +99,7 @@ graph TB
 ## 流水线工作流
 
 ```
-SW 导出 → SC 转换 → Transfer 传输 → Meshing 网格 → Solver 求解
+SW 导出 → SC 转换 → Transfer 传输 → Meshing 网格 → Solver 求解 → PostProcess 后处理
 ```
 
 | 阶段               | 操作                                              | 输入                | 输出                      | 执行方式             |
@@ -108,13 +109,16 @@ SW 导出 → SC 转换 → Transfer 传输 → Meshing 网格 → Solver 求解
 | **Transfer** | SFTP 上传                                         | `.scdoc`          | 远程 `.scdoc`           | paramiko SFTP        |
 | **Meshing**  | 远程后台网格划分                                  | `.scdoc`          | `.msh.h5`               | SSH + PowerShell     |
 | **Solver**   | Barrier 解锁后并行求解                            | `.msh.h5`         | `.cas.h5` + `.dat.h5` | SSH + PowerShell     |
+| **PostProcess** | 后处理指标计算（`BarrierCoordinator` 自动调度） | `.cas.h5` + `.dat.h5` | 指标 CSV              | SSH + PowerShell     |
 
 ### 调度策略
 
 1. **SW 阶段**: 串行遍历所有构型，导出同时文件监控器并行推送下游
 2. **SC → Transfer → Meshing**: SC + Transfer 各 1 个 Worker 线程组成流水线
-3. **全局 Barrier**: 所有 Meshing 完成后统一解锁 Solver
-4. **Solver 阶段**: 所有构型并行启动求解
+3. **多工作站调度**: Meshing 和 Solver 任务按槽位分配到多台远程工作站并行执行
+4. **全局 Barrier**: 所有 Meshing 完成后统一解锁 Solver
+5. **Solver 阶段**: 所有构型跨工作站并行启动求解
+6. **PostProcess 阶段**: Solver 完成后自动触发后处理指标计算
 
 ### 状态流转
 
@@ -141,7 +145,6 @@ AutoFluidSimulation/
 │   ├── config.py            # 配置中心（路径、SSH、引擎参数）
 │   ├── config_fingerprint.py # 配置指纹（数据库分片）
 │   ├── daemon.py            # PipelineDaemon 守护进程
-│   ├── config_assigner.py    # ConfigAssigner 构型→工作站分配
 │   ├── local_worker.py       # LocalWorker 本地 Worker 客户端
 │   ├── local_worker_registry.py # LocalWorkerRegistry 注册与心跳
 │   ├── local_worker_adapter.py  # LocalWorkerAdapter Daemon 侧代理
@@ -152,12 +155,15 @@ AutoFluidSimulation/
 │   │   ├── sw_phase.py      # SW 阶段处理器
 │   │   ├── worker_pool.py   # Worker 线程池管理
 │   │   ├── work_queue.py    # 工作队列
+│   │   ├── workstation_slots.py # 多工作站槽位管理
 │   │   ├── meshing_monitor.py # 网格阶段监控
 │   │   ├── retry.py         # 重试管理器
 │   │   └── utils.py         # 调度工具函数
+│   ├── scheduler.py         # 调度器兼容入口
 │   ├── task_runner.py       # TaskRunner 任务执行器
 │   ├── state_manager.py     # StateManager SQLite 状态管理
 │   ├── sc_process_pool.py   # SCProcessPool SpaceClaim 并发池
+│   ├── workstation_ssh_recovery.py # 工作站SSH恢复
 │   └── file_monitor.py      # StepFileMonitor 文件监控
 │
 ├── ipc/                     # 进程间通信
@@ -169,6 +175,7 @@ AutoFluidSimulation/
 │   ├── sw_executor.py        # SolidWorks COM 执行器
 │   ├── remote_executor.py    # 远程 SSH 执行器
 │   ├── cleaner.py            # 中间文件清理器
+│   ├── postprocess_paths.py  # 后处理路径管理
 │   └── remote_scripts/       # 远程部署脚本
 │
 ├── bridge/                  # C# SpaceClaim 桥接
@@ -181,9 +188,11 @@ AutoFluidSimulation/
 │
 ├── utils/                   # 工具模块
 │   ├── excel_reader.py      # Excel 读取
-│   ├── ssh_client.py        # SSH/SFTP 封装
+│   ├── infrastructure.py    # 基础设施工具
 │   ├── logger.py            # 日志工具
+│   ├── log_paths.py         # 日志路径管理
 │   ├── process_utils.py     # 进程工具
+│   ├── ssh_client.py        # SSH/SFTP 封装
 │   └── tui_launcher.py      # TUI 二进制查找
 │
 ├── autofluid-tui/           # Rust TUI 前端
@@ -199,7 +208,7 @@ AutoFluidSimulation/
 │       ├── ipc/             # IPC 通信（client.rs / protocol.rs）
 │       ├── state.rs         # 应用状态模块入口
 │       ├── state/           # 应用状态（app_state / filter / log_buffer）
-│       ├── settings/        # 设置页面（10 分类 55 字段）
+│       ├── settings/        # 设置页面（10 分类 60 字段）
 │       ├── text_buffer.rs   # 文本缓冲区
 │       ├── theme.rs         # 主题配色
 │       ├── ui.rs            # UI 渲染模块入口
@@ -212,12 +221,13 @@ AutoFluidSimulation/
 │   ├── check_remote_env.ps1 # 远程工作站环境检查（通过 SSH）
 │   ├── setup_remote_workstation.ps1 # 远程工作站一键部署
 │   ├── verify_remote_setup.ps1     # 远程环境快速验证
-│   ├── start_autofluid_preflight.ps1 # 预检 + 启动 Daemon
+│   ├── start_autofluid_preflight.ps1 # 启动前预检
 │   ├── start_client_window.ps1     # TUI 客户端启动窗口
 │   ├── start_daemon_window.ps1     # Daemon 启动窗口
 │   ├── start_local_worker_window.ps1 # 本地 Worker 启动窗口
 │   ├── start_server_ipc_tunnel.ps1 # 服务器 IPC 隧道
 │   ├── start_workstation_reverse_tunnel.ps1 # 工作站反向 SSH 隧道
+│   ├── start_workstation_owned_reverse_tunnel.ps1 # 工作站自主反向隧道
 │   └── deploy_linux_server.sh # Linux 服务器部署脚本
 │
 ├── tools/                   # 服务器 CLI 工具
@@ -227,12 +237,11 @@ AutoFluidSimulation/
 │   ├── code-style-guide.md  # 代码规范
 │   ├── architecture-refactoring-plan.md # 远期架构改进计划
 │   ├── current-daemon-architecture.md # 当前 Daemon 架构说明
-│   ├── solver-remaining-time-design.md # 求解器剩余时间估算
-│   ├── test-failure-investigation-2026-06-17.md # 测试失败分析
-│   ├── workstation-tunnel-recovery-plan.md # 工作站隧道自恢复方案
+│   ├── log-directory-structure-design.md # 日志目录结构设计
+│   ├── tunnel-watchdog-architecture.md # 隧道 Watchdog 架构
 │   └── Fluent仿真数据采集与五项研究指标计算报告.md # 仿真数据采集报告
 │
-└── tests/                   # 测试（43 个测试文件）
+└── tests/                   # 测试（46 个测试文件）
 ```
 
 ---
@@ -249,7 +258,7 @@ AutoFluidSimulation/
 | **C# Bridge**  | .NET Framework 4.8 / MSBuild                         |
 | **COM 自动化** | pywin32 → SolidWorks COM API                        |
 | **远程连接**   | paramiko SSH/SFTP                                    |
-| **外部依赖**   | SolidWorks 2020+, SpaceClaim 2023 R1, Fluent 2023 R1 |
+| **外部依赖**   | SolidWorks 2020+, SpaceClaim 2023 R1, Fluent 2024 R1 |
 
 ### Python 依赖
 
@@ -431,7 +440,9 @@ python -c "import win32com.client; sw = win32com.client.Dispatch('SldWorks.Appli
 | **OpenSSH Server 已启用并运行**                         | 用于 SFTP 传输和远程命令执行                        |
 | **网络连通**                                            | 本地与远程之间 TCP 22 端口可达，防火墙放行          |
 | **Conda 环境 `pyfluent`**                             | 包含 PyFluent 的 Conda 虚拟环境，用于网格划分和求解 |
-| **ANSYS Fluent 2023 R1+**                               | CFD 求解器，需通过 `pyfluent` Conda 环境调用      |
+| **ANSYS Fluent 2024 R1+**                               | CFD 求解器，需通过 `pyfluent` Conda 环境调用      |
+
+> **多工作站支持**：v3.0 起支持通过 `[[workstations]]` TOML 数组配置多台远程工作站（最多 4 台）。每台工作站可独立配置 SSH 连接、Conda 路径、Fluent 路径和工作目录。调度器按槽位自动分配任务到可用工作站。兼容旧版 `[remote_config]` 单工作站配置。
 
 **远程 SSH 配置检查清单**：
 
@@ -635,7 +646,7 @@ python main.py --all           # 同时启动
 | ---------------------- | ------------- | ------------------------------------------------------------------- |
 | **▶ Start**     | `start`     | 启动/继续流水线                                                     |
 | **⏸ Pause**     | `pause`     | 暂停流水线                                                          |
-| **⚙ Settings**  | `settings`  | 可视化配置（10 分类 55 字段在线编辑）                                |
+| **⚙ Settings**  | `settings`  | 可视化配置（10 分类 60 字段在线编辑）                                |
 | **🔧 Check**     | `check`     | 系统自检（弹出结果对话框）                                          |
 | **📊 Status**    | `status`    | 统计摘要（引擎状态/各步骤完成数）                                   |
 | **😈 Daemon**    | 下拉菜单      | 展开子菜单：`daemon start` / `daemon stop` / `daemon restart` |
@@ -655,6 +666,8 @@ python main.py --all           # 同时启动
 | `status`                      | 显示引擎状态和各步骤统计摘要             | `status`                             |
 | `reset <构型\|all> <步骤\|all>` | 重置构型步骤状态（弹出确认对话框）       | `reset 5 sw`、`reset all all`      |
 | `clean <构型\|all> <步骤\|all>` | 清理步骤产生的中间文件（弹出确认对话框） | `clean 5 all`、`clean all meshing` |
+| `clean <步骤>`                 | 清理所有构型指定步骤的中间文件（弹出确认对话框） | `clean meshing`、`clean postprocess` |
+| `clean all cache`              | 清理远程工作站临时缓存文件（弹出确认对话框） | `clean all cache`                  |
 | `settings`                    | 打开可视化设置页面                       | `settings`                           |
 
 #### Daemon 生命周期
@@ -725,7 +738,7 @@ python main.py --all           # 同时启动
 
 ### 设置页面（Settings）
 
-输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **10 大分类 55 个字段**：
+输入 `settings` 或点击 **⚙ Settings** 按钮进入全屏设置对话框。共 **10 大分类 60 个字段**：
 
 | 分类                     | 字段数 | 内容                                                                                    |
 | ------------------------ | ------ | --------------------------------------------------------------------------------------- |
@@ -734,11 +747,11 @@ python main.py --all           # 同时启动
 | **远程执行目录**   | 11     | 工作目录、脚本/引用文件目录、SCDOC/网格/结果/标志/动画目录、Conda 环境名/路径、MPI 目录      |
 | **步骤文件模板**   | 6      | SW / SC / Meshing / Solver / SolverData / PostProcess 各步骤输出文件命名模式（`{config}` 占位） |
 | **SolidWorks**     | 5      | 宏超时、完成后关闭文档、显示窗口、启动超时、调度启动延迟                                |
-| **SpaceClaim**     | 8      | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待、最大槽位、常驻模式、单次回退  |
+| **SpaceClaim**     | 10     | 脚本超时、轮询间隔、进程出现等待、窗口就绪超时、窗口稳定等待、最大槽位、常驻模式、单次回退、常驻就绪超时、SCDOC稳定检测 |
 | **网格划分**       | 2      | 网格超时、网格核心数                                                                    |
 | **仿真求解**       | 3      | 求解超时、求解核心数、求解迭代次数                                                      |
-| **后处理**         | 3      | 后处理超时、输出目录、指标目录                                                          |
-| **全局设置**       | 7      | 看门狗间隔、状态刷新间隔、传输超时、SSH 连接/上传重试、最大重试、目录递归深度           |
+| **后处理**         | 4      | 后处理超时、输出目录、动画目录、指标目录                                                |
+| **全局设置**       | 9      | 看门狗间隔、状态刷新间隔、传输超时、SSH连接超时、最大重试、上传重试、目录递归深度、日志最大字节、日志备份数 |
 
 **设置页面操作**：
 
@@ -765,7 +778,8 @@ python main.py --all           # 同时启动
 | 配置节                   | 说明                                                        |
 | ------------------------ | ----------------------------------------------------------- |
 | `[local_paths]`        | 本地路径（SW/SC 可执行文件、模型、Excel、输出目录等）       |
-| `[remote_config]`      | SSH 连接 + 远程目录和脚本路径                               |
+| `[remote_config]`      | SSH 连接 + 远程目录和脚本路径（单工作站默认配置）           |
+| `[[workstations]]`     | 多工作站配置（数组，每项含独立 SSH/路径/Conda 参数）        |
 | `[step_file_patterns]` | 各步骤输出文件命名模式                                      |
 | `[solidworks]`         | SolidWorks 自动化参数（宏超时、窗口控制、启动延迟等）       |
 | `[spaceclaim]`         | SpaceClaim 自动化参数（脚本超时、轮询间隔、GUI 就绪检测等） |
@@ -773,8 +787,10 @@ python main.py --all           # 同时启动
 | `[solver]`             | 求解器参数（超时、处理器数、迭代数）                         |
 | `[postprocess]`        | 后处理参数（超时、输出目录、面积比、C*参考值等）            |
 | `[global_settings]`    | 全局引擎参数（看门狗、各阶段超时、重试、SSH 上传等）        |
+| `[ipc_config]`         | IPC 通信参数（主机、端口、超时、最大连接数）                |
+| `[server]`             | 服务器模式参数（项目目录等）                                |
 
-> **向后兼容**：Python 侧硬编码默认值仍使用 `[engine_config]` 和 `[operation_timeouts]` 键名，TOML 中使用上述新键名即可覆盖。
+> **向后兼容**：Python 侧硬编码默认值仍使用 `[engine_config]` 和 `[operation_timeouts]` 键名，TOML 中使用上述新键名即可覆盖。`[[workstations]]` 为 v3.0 新增的多工作站配置，`[remote_config]` 保留作为默认/回退配置。
 
 敏感信息（SSH 密码）通过 `.env` 文件设置：
 
@@ -801,6 +817,7 @@ TUI ↔ Daemon 通过 TCP `127.0.0.1:9527` 通信，JSON 文本协议（`\n` 分
 | `start`             | 启动/继续流水线          |
 | `pause`             | 暂停流水线               |
 | `stop`              | 完全停止引擎             |
+| `stop_step`         | 停止指定步骤             |
 | `check`             | 系统自检                 |
 | `get_all_status`    | 获取所有构型状态         |
 | `get_statistics`    | 获取统计信息             |
@@ -810,8 +827,8 @@ TUI ↔ Daemon 通过 TCP `127.0.0.1:9527` 通信，JSON 文本协议（`\n` 分
 | `reset_step`        | 重置步骤状态             |
 | `clean_step`        | 清理步骤文件             |
 | `reload_config`     | 重载 TOML 配置           |
-| `worker_start`      | 启动所有 Worker          |
-| `worker_stop`       | 停止所有 Worker          |
+| `worker_start`      | 启动所有 Worker（含多工作站SSH隧道） |
+| `worker_stop`       | 停止所有 Worker（含SSH隧道关闭）   |
 | `worker_restart`    | 重启所有 Worker          |
 | `worker_register`   | LocalWorker 注册         |
 | `worker_heartbeat`  | LocalWorker 心跳         |
@@ -879,10 +896,11 @@ compile_noref.bat    # 免引用版本
 - 编码规范见 `docs/code-style-guide.md`
 - 远期架构规划见 `docs/architecture-refactoring-plan.md`
 - Daemon 拆分实现见 `docs/current-daemon-architecture.md`
-- 求解器剩余时间设计见 `docs/solver-remaining-time-design.md`
+- 日志目录结构见 `docs/log-directory-structure-design.md`
+- 隧道 Watchdog 见 `docs/tunnel-watchdog-architecture.md`
 - Python: ruff linting + mypy 类型检查
 - Rust: `cargo check` + `cargo clippy`
 
 ---
 
-> **版本**: v2.8.3 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-06 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）
+> **版本**: v3.0.0 &nbsp;|&nbsp; **周期**: 2025-04 — 2026-07 &nbsp;|&nbsp; **用途**: 学术研究（毕业设计）

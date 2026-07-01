@@ -42,6 +42,7 @@ logger = setup_logger(__name__)
 CMD_START = "start"             # 启动/继续流水线
 CMD_PAUSE = "pause"             # 暂停流水线
 CMD_STOP = "stop"               # 停止引擎（full_quit）
+CMD_STOP_STEP = "stop_step"     # 停止指定构型指定远程步骤
 CMD_CHECK = "check"             # 系统自检
 
 # ---- 状态操作命令 ----

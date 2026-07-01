@@ -20,15 +20,18 @@ DAG 任务调度器 (Pipeline Scheduler)
 """
 import threading
 import os
+from typing import Any
 
 from engine.config import (
     STEP_INDEX, STEP_NAMES, ENGINE_CONFIG, REMOTE_CONFIG, DEFAULT_WORKSTATION_ID,
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, get_step_filename, get_workstation_config, is_server_mode,
+    STATUS_UNKNOWN_REMOTE,
+    LOCAL_PATHS, WORKSTATIONS, get_step_filename, get_workstation_config, is_server_mode,
 )
 from engine.state_manager import StateManager
 from engine.task_runner import TaskRunner
 from engine.file_monitor import StepFileMonitor
+from utils.infrastructure import InfrastructureUnavailableError
 from utils.logger import setup_logger
 
 from .worker_pool import WorkerPoolManager
@@ -36,6 +39,7 @@ from .barrier import BarrierCoordinator
 from .sw_phase import SWPhaseHandler
 from .retry import RetryManager
 from .meshing_monitor import MeshingMonitor
+from .workstation_slots import WorkstationSlotCoordinator
 from .utils import check_step_output_exists, PauseGuard
 from .work_queue import UniqueWorkQueue
 from .control import PipelineControl
@@ -94,6 +98,16 @@ class PipelineScheduler:
             paused_event=self._paused,
             stopped_event=self._stopped,
         )
+        workstation_ids = [
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        ] or [DEFAULT_WORKSTATION_ID]
+        self.workstation_slots = WorkstationSlotCoordinator(
+            self.state,
+            workstation_ids,
+        )
+        self.workstation_slots.seed_from_state()
         self.worker_pool = WorkerPoolManager(
             state_manager=self.state,
             task_runner=self.runner,
@@ -103,6 +117,7 @@ class PipelineScheduler:
             barrier_passed_event=self._barrier_passed,
             retry_manager=self.retry_manager,
             get_reset_generation=self._current_reset_generation,
+            workstation_slots=self.workstation_slots,
         )
         self.barrier_coordinator = BarrierCoordinator(
             state_manager=self.state,
@@ -121,6 +136,7 @@ class PipelineScheduler:
             stopped_event=self._stopped,
             get_reset_generation=self._current_reset_generation,
             on_meshing_completed=self._on_meshing_completed,
+            workstation_slots=self.workstation_slots,
         )
         self.sw_phase_handler = SWPhaseHandler(
             state_manager=self.state,
@@ -152,6 +168,17 @@ class PipelineScheduler:
             self._barrier_passed.set()
 
         logger.info("流水线调度器初始化完成")
+
+    def refresh_workstation_slots(self) -> None:
+        """Refresh Transfer-to-Meshing slot IDs from the current configuration."""
+        workstation_ids = [
+            str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        ] or [DEFAULT_WORKSTATION_ID]
+        self.workstation_slots.update_workstation_ids(workstation_ids)
+        self.worker_pool._workstation_slots = self.workstation_slots
+        self.meshing_monitor._workstation_slots = self.workstation_slots
 
     def _current_reset_generation(self, config_name: int, step_name: str) -> int:
         """Return reset generation for a config step."""
@@ -281,7 +308,7 @@ class PipelineScheduler:
         # ---- 步骤 4: 写回运行态并收口屏障 ----
         # 与 pause() 共用控制锁，避免 pause() 返回后后台启动线程再写回 running
         # 或继续触发 Solver 分发。
-        with self._control.external_start() as can_finalize:
+        with self._control.finalize_external_start() as can_finalize:
             if not can_finalize:
                 logger.info("流水线组件已就绪，但暂停/停止标志已置位，跳过后续启动")
                 if self._paused.is_set():
@@ -331,6 +358,8 @@ class PipelineScheduler:
         self.worker_pool.join_worker_threads(timeout=3)
 
         try:
+            self.runner.disconnect_ssh(lock_timeout=1.0)
+        except TypeError:
             self.runner.disconnect_ssh()
         except Exception as e:
             logger.warning(f"[Scheduler] 自然收尾断开 SSH 异常: {e}")
@@ -481,11 +510,11 @@ class PipelineScheduler:
         （Completed/Error），避免 pause→resume 时步骤被重复入队。
         """
         logger.info("收到暂停指令")
-        self._control.pause()
-        # 不再调用 set_all_running_to_paused()，让正在运行的步骤自然完成
-        self.state.set_engine_status("paused")
-        if self._file_monitor is not None:
-            self._file_monitor.pause()
+        with self._control.pause_transition():
+            # 不再调用 set_all_running_to_paused()，让正在运行的步骤自然完成
+            self.state.set_engine_status("paused")
+            if self._file_monitor is not None:
+                self._file_monitor.pause()
         logger.info("流水线已暂停，正在运行的步骤将继续执行直到完成")
 
     @property
@@ -528,6 +557,7 @@ class PipelineScheduler:
         - PAUSED    → 检查输出文件是否存在，存在则标记完成继续，否则优先入队
         - WAITING   → 普通入队
         - ERROR/RETRYING → 检查重试次数，未达上限则重置为 WAITING 并入队，否则保留 ERROR
+        - UnknownRemote → 跳过（由远程任务轮询恢复或清理）
         """
         step_dir = LOCAL_PATHS.get("step_dir", "")
         scdoc_dir = LOCAL_PATHS.get("scdoc_dir", "")
@@ -543,10 +573,10 @@ class PipelineScheduler:
 
                 if status == STATUS_COMPLETED:
                     if (
-                        step in {"sw", "sc", "meshing", "solver"}
-                        and not self._completed_step_output_exists(
+                        step in {"sw", "sc", "transfer", "meshing", "solver", "postprocess"}
+                        and self._completed_step_output_exists(
                             cn, step, step_dir, scdoc_dir
-                        )
+                        ) is False
                     ):
                         logger.warning(
                             f"{log_prefix} 构型{cn} [{step}] 状态为 Completed "
@@ -587,11 +617,18 @@ class PipelineScheduler:
                     if step in ("meshing", "solver", "postprocess"):
                         remote_executor = self.runner.get_remote_executor()
                         workstation_id = self._workstation_for_config(cn)
-                        remote_status = remote_executor.query_remote_task_status(
-                            cn,
-                            step,
-                            workstation_id=workstation_id,
-                        )
+                        try:
+                            remote_status = remote_executor.query_remote_task_status(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
+                        except InfrastructureUnavailableError as e:
+                            logger.warning(
+                                "[Resume] 构型%s %s 查询远程状态时基础设施不可用: %s",
+                                cn, step, e,
+                            )
+                            break
                         if remote_status == "completed":
                             self.state.set_step_status(cn, step, STATUS_COMPLETED)
                             if step == "solver":
@@ -731,8 +768,13 @@ class PipelineScheduler:
         Returns True when the step has been marked Error.
         """
         retry_count = self.state.increment_retry(config_name, step_name)
-        max_retries = int(ENGINE_CONFIG["max_retries"])
+        max_retries = int(ENGINE_CONFIG.get("remote_unknown_max_retries", 3))
+        workstation_id = self._workstation_for_config(config_name)
         if retry_count >= max_retries:
+            remote_executor = self.runner.get_remote_executor()
+            kill_remote_task = getattr(remote_executor, "_kill_remote_task_for_config", None)
+            if callable(kill_remote_task):
+                kill_remote_task(config_name, step_name, workstation_id)
             self.state.set_step_status(
                 config_name,
                 step_name,
@@ -746,8 +788,14 @@ class PipelineScheduler:
                 step_name,
             )
             return True
+        self.state.set_step_status(
+            config_name,
+            step_name,
+            STATUS_UNKNOWN_REMOTE,
+            f"远程 {step_name} 状态 unknown，等待恢复探测 ({retry_count}/{max_retries})",
+        )
         logger.warning(
-            "%s 构型%s [%s] 远程状态 unknown，保留 Running 等待后续重试 (%s/%s)",
+            "%s 构型%s [%s] 远程状态 unknown，标记 UnknownRemote 等待后续重试 (%s/%s)",
             log_prefix,
             config_name,
             step_name,
@@ -774,48 +822,67 @@ class PipelineScheduler:
 
     def _completed_step_output_exists(
         self, cn: int, step: str, step_dir: str, scdoc_dir: str
-    ) -> bool:
+    ) -> bool | None:
         """Validate Completed status against durable artifacts, not only flags."""
         if step in {"sw", "sc"}:
             if is_server_mode():
                 return True
             return self._check_step_output_exists(cn, step, step_dir, scdoc_dir)
+        if step == "transfer":
+            return self._remote_files_exist(cn, ("transfer",))
         if step == "meshing":
             return self._remote_files_exist(cn, ("meshing",))
         if step == "solver":
             return self._remote_files_exist(cn, ("solver", "solverdata"))
         if step == "postprocess":
-            return True
+            return self._remote_files_exist(cn, ("postprocess",))
         return True
 
-    def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool:
+    def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool | None:
+        """Return True/False for confirmed remote output state, or None if SSH is indeterminate."""
         workstation_id = self._workstation_for_config(cn)
-        remote_config = self._remote_config_for_workstation(workstation_id)
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+        except Exception:
+            return None
         ssh = None
         try:
             ssh = self.runner.get_ssh(workstation_id)
         except Exception:
-            return False
+            return None
 
         try:
             if not ssh.is_connected():
-                return False
+                return None
         except Exception:
-            return False
+            return None
 
         for output_step in output_steps:
-            filename = get_step_filename(output_step, cn)
+            if output_step == "postprocess":
+                postprocess_exists = self._postprocess_artifact_exists(cn, remote_config, ssh)
+                if postprocess_exists is None:
+                    return None
+                if not postprocess_exists:
+                    return False
+                continue
+            filename_step = "sc" if output_step == "transfer" else output_step
+            filename = get_step_filename(filename_step, cn)
             if not filename:
                 return False
-            directory_key = "msh_dir" if output_step == "meshing" else "result_dir"
-            if output_step == "postprocess":
-                directory_key = "flag_dir"
+            if output_step == "transfer":
+                directory_key = "scdoc_dir"
+            elif output_step == "meshing":
+                directory_key = "msh_dir"
+            else:
+                directory_key = "result_dir"
             remote_dir = str(remote_config[directory_key]).replace("\\", "/")
             remote_path = f"{remote_dir}/{filename}"
             try:
                 if hasattr(ssh, "get_remote_file_size"):
                     size = ssh.get_remote_file_size(remote_path, timeout=5.0)
-                    if size is None or size <= 0:
+                    if size is None:
+                        return None
+                    if size <= 0:
                         return False
                     continue
                 if not ssh.check_remote_file(remote_path, timeout=5.0):
@@ -823,9 +890,68 @@ class PipelineScheduler:
             except TypeError:
                 if not ssh.check_remote_file(remote_path):
                     return False
-            except Exception:
+            except FileNotFoundError:
                 return False
+            except Exception:
+                return None
         return True
+
+    def _postprocess_artifact_exists(
+        self,
+        cn: int,
+        remote_config: dict[str, object],
+        ssh: Any,
+    ) -> bool | None:
+        """Return postprocess output state, or None when SSH probing cannot be trusted."""
+        output_dir = str(
+            remote_config.get("postprocess_output_dir")
+            or ENGINE_CONFIG.get("postprocess_output_dir")
+            or remote_config.get("result_dir", "")
+        ).replace("\\", "/").rstrip("/")
+        metrics_dir = str(
+            remote_config.get("postprocess_metrics_dir")
+            or ENGINE_CONFIG.get("postprocess_metrics_dir")
+            or output_dir
+        ).replace("\\", "/").rstrip("/")
+        animation_dir = str(
+            remote_config.get("postprocess_animation_dir")
+            or ENGINE_CONFIG.get("postprocess_animation_dir")
+            or remote_config.get("animation_dir", "")
+        ).replace("\\", "/").rstrip("/")
+        candidates = []
+        if output_dir:
+            candidates.extend([
+                f"{output_dir}/model_gen4_{cn}.csv",
+                f"{output_dir}/model_gen4_{cn}.json",
+            ])
+        if metrics_dir:
+            candidates.append(f"{metrics_dir}/model_gen4_{cn}.csv")
+        if animation_dir:
+            candidates.extend([
+                f"{animation_dir}/t_gen4_{cn}.mp4",
+                f"{animation_dir}/v_gen4_{cn}.mp4",
+            ])
+        saw_unknown = False
+        for remote_path in candidates:
+            try:
+                if hasattr(ssh, "get_remote_file_size"):
+                    size = ssh.get_remote_file_size(remote_path, timeout=5.0)
+                    if size is None:
+                        saw_unknown = True
+                        continue
+                    if size > 0:
+                        return True
+                    continue
+                if ssh.check_remote_file(remote_path, timeout=5.0):
+                    return True
+            except TypeError:
+                if ssh.check_remote_file(remote_path):
+                    return True
+            except FileNotFoundError:
+                continue
+            except Exception:
+                return None
+        return None if saw_unknown else False
 
     def _forget_completed_config_remote_tasks(self, cn: int) -> None:
         """清理已完成构型残留的远程任务元数据。"""
@@ -869,6 +995,9 @@ class PipelineScheduler:
         elif step == "transfer":
             return self.worker_pool.is_transfer_in_flight(cn)
         elif step == "meshing":
+            is_config_in_flight = getattr(self.meshing_monitor, "is_config_in_flight", None)
+            if callable(is_config_in_flight):
+                return bool(is_config_in_flight(cn))
             return (
                 self.meshing_monitor is not None
                 and self.meshing_monitor.get_in_flight_config() == cn
@@ -923,7 +1052,7 @@ class PipelineScheduler:
         #   （resume_and_reset 会清空 _processed_files 导致重复入队）。
         # 与 pause() 共用控制锁，避免新的 pause() 到达后 resume() 继续唤醒
         # 或分发 Solver。
-        with self._control.external_start() as can_finalize:
+        with self._control.finalize_external_start() as can_finalize:
             if not can_finalize:
                 logger.info("resume 组件启动后收到 pause/stop 指令，跳过后续启动")
                 if self._paused.is_set():
@@ -950,7 +1079,7 @@ class PipelineScheduler:
 
         logger.info("流水线已恢复运行")
 
-    def stop(self) -> None:
+    def stop(self, *, cancel_remote_tasks: bool = True) -> None:
         """停止流水线。"""
         logger.info("收到停止指令")
         self._control.stop()
@@ -959,10 +1088,12 @@ class PipelineScheduler:
         #   防止重启后孤立 RUNNING 步骤导致构型卡死。
         #   注意：pause() 不再调用此方法（允许 running 步骤自然完成），
         #   但 stop() 仍需调用，因为停止意味着强制终止所有活动。
-        self.state.set_all_running_to_paused()
+        if cancel_remote_tasks:
+            self.state.set_all_running_to_paused()
 
         # ★ 立即重置引擎状态，确保无论后续清理是否挂起/异常，状态都已正确归零
-        self.state.set_engine_status("stopped")
+        if cancel_remote_tasks:
+            self.state.set_engine_status("stopped")
 
         # 清理本地 CAD 进程（容错：任何清理步骤失败不阻断整体停止流程）
         shutdown_sw_processes = getattr(self.runner, "shutdown_sw_processes", None)
@@ -978,6 +1109,16 @@ class PipelineScheduler:
             logger.debug(f"SCPool 停止清理异常: {e}")
 
         try:
+            remote_executor = self.runner.get_remote_executor()
+            cancel_all_remote_tasks = getattr(remote_executor, "cancel_all_tracked_remote_tasks", None)
+            if cancel_remote_tasks and callable(cancel_all_remote_tasks):
+                results = cancel_all_remote_tasks()
+                if results.get("cancelled") or results.get("failed"):
+                    logger.info("[Scheduler] 停止时远程任务清理结果: %s", results)
+        except Exception as e:
+            logger.warning(f"远程任务停止清理异常（已忽略）: {e}")
+
+        try:
             # 停止文件监控，避免 stop 清队列期间 STEP 回调重新入队。
             if self._file_monitor:
                 self._file_monitor.stop()
@@ -987,6 +1128,7 @@ class PipelineScheduler:
 
             # 等待关键线程退出
             self.worker_pool.join_worker_threads(timeout=3)
+            self.meshing_monitor.join_worker_threads(timeout=3)
             if self._barrier_thread and self._barrier_thread.is_alive():
                 self._barrier_thread.join(timeout=3)
             self.barrier_coordinator.join_solver_threads(timeout=3)
@@ -995,6 +1137,8 @@ class PipelineScheduler:
 
         try:
             # 断开 SSH
+            self.runner.disconnect_ssh(lock_timeout=1.0)
+        except TypeError:
             self.runner.disconnect_ssh()
         except Exception as e:
             logger.debug(f"SSH 断开异常（已忽略）: {e}")
@@ -1063,6 +1207,7 @@ class PipelineScheduler:
 
         # 全量重置（所有构型 + 所有步骤）需要额外清除引擎全局状态
         if config_name == "all" and step_name is None:
+            self.workstation_slots.clear()
             self.state.reset_all()
             self._barrier_passed.clear()
             self.barrier_coordinator.clear_all_workstation_barriers()
@@ -1074,6 +1219,8 @@ class PipelineScheduler:
                 _monitor_reset_method()
             self._sc_queue.clear()
         elif config_name == "all":
+            if need_barrier_clear:
+                self.workstation_slots.clear()
             for cn in self.state.get_all_configs():
                 self.state.reset_config_steps(cn, step_name)
             if need_barrier_clear:
@@ -1089,6 +1236,8 @@ class PipelineScheduler:
             self._sc_queue.clear()
         else:
             reset_workstation_id = self._workstation_for_config(int(config_name))
+            if need_barrier_clear:
+                self.workstation_slots.release_config(int(config_name))
             self.state.reset_config_steps(config_name, step_name)
             if need_barrier_clear:
                 self._barrier_passed.clear()

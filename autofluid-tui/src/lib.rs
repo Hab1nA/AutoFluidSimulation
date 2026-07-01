@@ -18,21 +18,30 @@ use crossterm::event::{
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 
 use event_handler::command;
 use event_handler::key_handler;
 use ipc::client::IpcClient;
 use ipc::protocol::IpcResponse;
-use state::app_state::{ScrollbarInfo, UiMode};
+use state::app_state::{ConfirmAction, ScrollbarInfo, UiMode};
 use state::app_state::{STATUS_COMPLETED, STEP_DISPLAY};
 use state::log_buffer::LogEntry;
 use state::{AppState, LogBuffer};
 use ui::layout::AppLayout;
 
 pub use utils::format_local_time;
+
+const MIN_TERMINAL_WIDTH: u16 = 80;
+const MIN_TERMINAL_HEIGHT: u16 = 16;
+const WORKER_HEALTH_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 
 fn format_log_record(
     buf: &mut env_logger::fmt::Formatter,
@@ -252,6 +261,9 @@ pub(crate) fn apply_dashboard_response(
         state.update_status_data(statuses);
         announce_completed_status_transitions(statuses, &previous_statuses, log_buffer);
     }
+    if let Some(config_workstations) = data_obj.get("config_workstations") {
+        state.update_config_workstations(config_workstations);
+    }
     if let Some(engine) = data_obj.get("engine") {
         state.update_engine_info(engine);
     }
@@ -304,35 +316,15 @@ fn announce_completed_status_transitions(
     }
 }
 
-fn refresh_dashboard_once(
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
-    state: &mut AppState,
-    log_buffer: &mut LogBuffer,
-) -> bool {
-    if !ipc.is_connected() {
-        return false;
-    }
-    match rt.block_on(ipc.get_dashboard(state.last_log_id, 50)) {
-        Ok(resp) if resp.is_ok() => {
-            if let Some(data_obj) = resp.data.as_object() {
-                apply_dashboard_response(data_obj, state, log_buffer);
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
 fn handle_startup_connect_failure(
     daemon: &mut daemon_mgr::DaemonManager,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
+    project_dir: &str,
     ipc_host: &str,
 ) {
     state.update_local_ipc_tunnel(ipc_host, false);
+    daemon.begin_server_ipc_tunnel_for_reconnect(project_dir, log_buffer);
     daemon.begin_ipc_reconnect_wait(state);
     log_buffer.push_info(
         "❌ 暂未连接到后台引擎，正在后台自动重连；请检查远端 daemon 和 IPC 隧道".to_string(),
@@ -354,6 +346,7 @@ fn handle_dashboard_poll_connection_state(
     daemon: &mut daemon_mgr::DaemonManager,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
+    project_dir: &str,
     ipc_host: &str,
     was_connected: bool,
     is_connected: bool,
@@ -361,23 +354,38 @@ fn handle_dashboard_poll_connection_state(
     state.connected = is_connected;
     state.update_local_ipc_tunnel(ipc_host, is_connected);
     if was_connected && !is_connected {
+        daemon.begin_server_ipc_tunnel_for_reconnect(project_dir, log_buffer);
         daemon.begin_ipc_reconnect_wait(state);
         log_buffer.push_info("⚠️ 连接中断，正在后台自动重连...".to_string());
     }
 }
 
-/// 非阻塞地尝试刷新一次 Worker 健康信息。
-///
-/// 启动 Worker 后立即调用，将最新状态拉取到 UI。
-/// 若健康信息尚未就绪，正常的 1 秒 IPC 轮询会自动捕获后续更新，
-/// 无需阻塞事件循环等待。
-fn try_refresh_worker_health_once(
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
-    state: &mut AppState,
+fn poll_worker_health_watchdog(
+    worker: &mut worker_mgr::WorkerManager,
+    state: &AppState,
     log_buffer: &mut LogBuffer,
 ) {
-    refresh_dashboard_once(rt, ipc, state, log_buffer);
+    let managed_process_down = worker.has_exited_managed_process();
+    let worker_offline = state.health_info.local_worker_online == Some(false);
+    let local_tunnel_down = matches!(
+        state.health_info.server_to_local_ssh.as_deref(),
+        Some("disconnected") | Some("error")
+    );
+    let workstation_tunnel_down = matches!(
+        state.health_info.server_to_workstation_ssh.as_deref(),
+        Some("disconnected") | Some("error")
+    );
+    if !(managed_process_down || worker_offline || local_tunnel_down || workstation_tunnel_down) {
+        return;
+    }
+    let warning = "⚠️ Worker 或 SSH 隧道异常，请确认工作站状态；需要恢复时执行 worker restart";
+    if !log_buffer
+        .info_messages
+        .iter()
+        .any(|message| message == warning)
+    {
+        log_buffer.push_info(warning.to_string());
+    }
 }
 
 #[cfg(test)]
@@ -420,6 +428,9 @@ pub(crate) struct EventContext<'a> {
     log_buffer: &'a mut LogBuffer,
     ipc: &'a mut IpcClient,
     check_task: Option<&'a mut Option<CheckTask>>,
+    command_task: Option<&'a mut Option<CommandTask>>,
+    daemon_task: Option<&'a mut Option<DaemonLifecycleTask>>,
+    worker_task: Option<&'a mut Option<WorkerLifecycleTask>>,
     daemon: &'a mut daemon_mgr::DaemonManager,
     worker: &'a mut worker_mgr::WorkerManager,
     rt: &'a tokio::runtime::Runtime,
@@ -430,6 +441,127 @@ pub(crate) struct EventContext<'a> {
 
 struct CheckTask {
     receiver: Receiver<Result<IpcResponse, String>>,
+}
+
+struct DashboardPollTask {
+    receiver: Receiver<Result<IpcResponse, String>>,
+}
+
+pub(crate) struct CommandTask {
+    receiver: Receiver<CommandTaskResult>,
+}
+
+struct CommandTaskResult {
+    result: command::CommandResult,
+    logs: Vec<String>,
+    state: AppState,
+    state_update: CommandStateUpdate,
+    full_quit_stop_sent: bool,
+}
+
+enum CommandStateUpdate {
+    Submit(String),
+    ConfirmAction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DashboardPollState {
+    Idle,
+    InFlight,
+}
+
+impl DashboardPollState {
+    fn can_spawn(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DaemonLifecycleAction {
+    Stop,
+    Restart,
+}
+
+impl DaemonLifecycleAction {
+    fn running_message(self) -> &'static str {
+        match self {
+            Self::Stop => "🛑 Daemon 停止已转入后台，界面可继续操作...",
+            Self::Restart => "🔄 Daemon 重启已转入后台，界面可继续操作...",
+        }
+    }
+
+    fn duplicate_message(self) -> &'static str {
+        match self {
+            Self::Stop => "ℹ Daemon 生命周期任务正在运行，请等待当前停止完成",
+            Self::Restart => "ℹ Daemon 生命周期任务正在运行，请等待当前重启完成",
+        }
+    }
+
+    fn failure_message(self) -> &'static str {
+        match self {
+            Self::Stop => "❌ Daemon 后台停止失败，详情见上方日志",
+            Self::Restart => "❌ Daemon 后台重启失败，详情见上方日志",
+        }
+    }
+}
+
+struct DaemonLifecycleResult {
+    action: DaemonLifecycleAction,
+    success: bool,
+    logs: Vec<String>,
+}
+
+pub(crate) struct DaemonLifecycleTask {
+    receiver: Receiver<DaemonLifecycleResult>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl WorkerLifecycleAction {
+    fn running_message(self) -> &'static str {
+        match self {
+            Self::Start => "🔧 Worker 启动已转入后台，界面可继续操作...",
+            Self::Stop => "🛑 Worker 停止已转入后台，界面可继续操作...",
+            Self::Restart => "🔄 Worker 重启已转入后台，界面可继续操作...",
+        }
+    }
+
+    fn duplicate_message(self) -> &'static str {
+        match self {
+            Self::Start => "ℹ Worker 生命周期任务正在运行，请等待当前启动完成",
+            Self::Stop => "ℹ Worker 生命周期任务正在运行，请等待当前停止完成",
+            Self::Restart => "ℹ Worker 生命周期任务正在运行，请等待当前重启完成",
+        }
+    }
+
+    fn failure_message(self) -> &'static str {
+        match self {
+            Self::Start => "❌ Worker 后台启动失败，详情见上方日志",
+            Self::Stop => "❌ Worker 后台停止失败，详情见上方日志",
+            Self::Restart => "❌ Worker 后台重启失败，详情见上方日志",
+        }
+    }
+}
+
+struct WorkerLifecycleResult {
+    action: WorkerLifecycleAction,
+    success: bool,
+}
+
+pub(crate) struct WorkerLifecycleTask {
+    receiver: Receiver<WorkerLifecycleMessage>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+pub(crate) enum WorkerLifecycleMessage {
+    Progress(String),
+    Finished(WorkerLifecycleResult),
 }
 
 pub(crate) fn apply_check_response(
@@ -476,6 +608,260 @@ fn spawn_check_task(host: &str, port: u16) -> CheckTask {
     CheckTask { receiver }
 }
 
+fn spawn_dashboard_poll_task(
+    host: &str,
+    port: u16,
+    since_log_id: u64,
+    log_limit: u64,
+) -> DashboardPollTask {
+    let (sender, receiver) = mpsc::channel();
+    let host = host.to_string();
+    thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .and_then(|rt| {
+                rt.block_on(async {
+                    let mut ipc = IpcClient::new(Some(&host), Some(port));
+                    ipc.connect().await?;
+                    let result = ipc.get_dashboard(since_log_id, log_limit).await;
+                    ipc.disconnect().await;
+                    result
+                })
+            });
+        let _ = sender.send(result);
+    });
+    DashboardPollTask { receiver }
+}
+
+fn poll_dashboard_task(
+    dashboard_task: &mut Option<DashboardPollTask>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) -> Option<bool> {
+    let task = dashboard_task.as_ref()?;
+    match task.receiver.try_recv() {
+        Ok(Ok(resp)) if resp.is_ok() => {
+            *dashboard_task = None;
+            if let Some(data_obj) = resp.data.as_object() {
+                apply_dashboard_response(data_obj, state, log_buffer);
+                state.needs_redraw = true;
+                Some(true)
+            } else {
+                Some(true)
+            }
+        }
+        Ok(Ok(_)) | Ok(Err(_)) => {
+            *dashboard_task = None;
+            state.needs_redraw = true;
+            Some(false)
+        }
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            *dashboard_task = None;
+            state.needs_redraw = true;
+            Some(false)
+        }
+    }
+}
+
+fn spawn_command_task(
+    cmd: String,
+    ipc_host: String,
+    ipc_port: u16,
+    mut state: AppState,
+    mut log_buffer: LogBuffer,
+) -> CommandTask {
+    let (sender, receiver) = mpsc::channel();
+    let initial_info_len = log_buffer.info_messages.len();
+    thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .map(|rt| {
+                let mut ipc = IpcClient::new(Some(&ipc_host), Some(ipc_port));
+                let _ = rt.block_on(ipc.connect());
+                let dispatch =
+                    command::dispatch_command(&cmd, &mut ipc, &mut state, &mut log_buffer);
+                let result = rt.block_on(dispatch);
+                rt.block_on(ipc.disconnect());
+                result
+            });
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                log_buffer.push_info(format!("❌ 命令后台任务创建运行时失败: {error}"));
+                command::CommandResult::None
+            }
+        };
+        let logs = log_buffer
+            .info_messages
+            .iter()
+            .skip(initial_info_len)
+            .cloned()
+            .collect();
+        let _ = sender.send(CommandTaskResult {
+            result,
+            logs,
+            state,
+            state_update: CommandStateUpdate::Submit(cmd),
+            full_quit_stop_sent: false,
+        });
+    });
+    CommandTask { receiver }
+}
+
+pub(crate) fn start_confirm_action_task(
+    command_task: Option<&mut Option<CommandTask>>,
+    action: ConfirmAction,
+    ipc_host: &str,
+    ipc_port: u16,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(command_task) = command_task else {
+        log_buffer.push_info("❌ 命令后台任务通道不可用".to_string());
+        state.needs_redraw = true;
+        return;
+    };
+    if command_task.is_some() {
+        log_buffer.push_info("ℹ 命令后台任务正在运行，请等待当前操作完成".to_string());
+        state.needs_redraw = true;
+        return;
+    }
+
+    let mut command_state = state.clone();
+    let command_log_buffer = log_buffer.clone();
+    command_state.confirm_callback = Some(action.clone());
+    *command_task = Some(spawn_confirm_action_task(
+        action,
+        ipc_host.to_string(),
+        ipc_port,
+        command_state,
+        command_log_buffer,
+    ));
+    log_buffer.push_info("⏳ 确认操作已转入后台执行...".to_string());
+    state.needs_redraw = true;
+}
+
+fn spawn_confirm_action_task(
+    action: ConfirmAction,
+    ipc_host: String,
+    ipc_port: u16,
+    mut state: AppState,
+    mut log_buffer: LogBuffer,
+) -> CommandTask {
+    let (sender, receiver) = mpsc::channel();
+    let initial_info_len = log_buffer.info_messages.len();
+    thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+            .map(|rt| {
+                let mut ipc = IpcClient::new(Some(&ipc_host), Some(ipc_port));
+                let _ = rt.block_on(ipc.connect());
+                let confirm = command::execute_confirm_action(&action, &mut ipc, &mut log_buffer);
+                let result = rt.block_on(confirm);
+                let mut full_quit_stop_sent = false;
+                if matches!(result, command::CommandResult::FullQuit) && ipc.is_connected() {
+                    match rt.block_on(ipc.full_quit()) {
+                        Ok(resp) if resp.is_ok() => {
+                            full_quit_stop_sent = true;
+                            log_buffer.push_info(format!("✅ {}", resp.message));
+                        }
+                        Ok(resp) => {
+                            log_buffer.push_info(format!("❌ {}", resp.message));
+                        }
+                        Err(e) => {
+                            log_buffer.push_info(format!("❌ 停止后台引擎通信失败: {}", e));
+                        }
+                    }
+                }
+                rt.block_on(ipc.disconnect());
+                (result, full_quit_stop_sent)
+            });
+        let (result, full_quit_stop_sent) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                log_buffer.push_info(format!("❌ 确认后台任务创建运行时失败: {error}"));
+                (command::CommandResult::None, false)
+            }
+        };
+        state.confirm_callback = None;
+        let logs = log_buffer
+            .info_messages
+            .iter()
+            .skip(initial_info_len)
+            .cloned()
+            .collect();
+        let _ = sender.send(CommandTaskResult {
+            result,
+            logs,
+            state,
+            state_update: CommandStateUpdate::ConfirmAction,
+            full_quit_stop_sent,
+        });
+    });
+    CommandTask { receiver }
+}
+
+fn apply_command_state_snapshot(
+    state: &mut AppState,
+    snapshot: AppState,
+    update: CommandStateUpdate,
+) {
+    match update {
+        CommandStateUpdate::Submit(cmd) => {
+            let command = cmd.split_whitespace().next().map(str::to_ascii_lowercase);
+            if command.as_deref() == Some("filter") {
+                state.log_filter_level = snapshot.log_filter_level;
+                state.log_filter_source = snapshot.log_filter_source;
+            }
+            if command.as_deref() == Some("settings") && snapshot.settings_state.is_some() {
+                state.ui_mode = snapshot.ui_mode.clone();
+                state.settings_state = snapshot.settings_state;
+            }
+            if snapshot.confirm_callback.is_some() {
+                state.ui_mode = snapshot.ui_mode.clone();
+                state.confirm_message = snapshot.confirm_message;
+                state.confirm_callback = snapshot.confirm_callback;
+                state.dialog_scroll = snapshot.dialog_scroll;
+            }
+        }
+        CommandStateUpdate::ConfirmAction => {}
+    }
+    state.needs_redraw = true;
+}
+
+fn poll_command_task(command_task: &mut Option<CommandTask>, ctx: &mut EventContext) {
+    let Some(task) = command_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(result) => {
+            *command_task = None;
+            for message in result.logs {
+                ctx.log_buffer.push_info(message);
+            }
+            if result.full_quit_stop_sent {
+                *ctx.full_quit_stop_sent = true;
+            }
+            apply_command_state_snapshot(ctx.state, result.state, result.state_update);
+            handle_command_result(result.result, ctx);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            *command_task = None;
+            ctx.log_buffer
+                .push_info("❌ 命令后台任务异常结束".to_string());
+            ctx.state.needs_redraw = true;
+        }
+    }
+}
+
 fn poll_check_task(
     check_task: &mut Option<CheckTask>,
     state: &mut AppState,
@@ -498,6 +884,387 @@ fn poll_check_task(
     }
 }
 
+pub(crate) fn start_daemon_lifecycle_task(
+    daemon_task: Option<&mut Option<DaemonLifecycleTask>>,
+    action: DaemonLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+    state: &mut AppState,
+) {
+    let Some(daemon_task) = daemon_task else {
+        log_buffer.push_info("❌ Daemon 后台任务通道不可用".to_string());
+        state.needs_redraw = true;
+        return;
+    };
+    if daemon_task.is_some() {
+        log_buffer.push_info(action.duplicate_message().to_string());
+        state.needs_redraw = true;
+        return;
+    }
+
+    log_buffer.push_info(action.running_message().to_string());
+    *daemon_task = Some(spawn_daemon_lifecycle_task(
+        action,
+        project_dir.to_string(),
+        ipc_host.to_string(),
+        ipc_port,
+    ));
+    state.needs_redraw = true;
+}
+
+fn spawn_daemon_lifecycle_task(
+    action: DaemonLifecycleAction,
+    project_dir: String,
+    ipc_host: String,
+    ipc_port: u16,
+) -> DaemonLifecycleTask {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut log_buffer = LogBuffer::new();
+        let success =
+            run_daemon_lifecycle_action(action, &project_dir, &ipc_host, ipc_port, &mut log_buffer);
+        let logs = log_buffer.info_messages.iter().cloned().collect();
+        let _ = sender.send(DaemonLifecycleResult {
+            action,
+            success,
+            logs,
+        });
+    });
+    DaemonLifecycleTask {
+        receiver,
+        handle: Some(handle),
+    }
+}
+
+fn run_daemon_lifecycle_action(
+    action: DaemonLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        log_buffer.push_info("❌ Daemon 后台任务创建运行时失败".to_string());
+        return false;
+    };
+    let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+    let _ = rt.block_on(ipc.connect());
+    let mut state = AppState::new();
+    let mut daemon = daemon_mgr::DaemonManager::new();
+    match action {
+        DaemonLifecycleAction::Stop => {
+            daemon.stop_with_ipc(&mut ipc, &rt, &mut state, log_buffer, project_dir)
+        }
+        DaemonLifecycleAction::Restart => {
+            daemon.restart_with_ipc(&mut ipc, &rt, &mut state, log_buffer, project_dir)
+        }
+    }
+}
+
+fn finish_daemon_lifecycle_result(
+    result: DaemonLifecycleResult,
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    for message in result.logs {
+        log_buffer.push_info(message);
+    }
+    if !result.success {
+        log_buffer.push_info(result.action.failure_message().to_string());
+    }
+    match result.action {
+        DaemonLifecycleAction::Stop if result.success => state.mark_daemon_stopped(),
+        DaemonLifecycleAction::Restart if result.success => daemon.begin_ipc_reconnect_wait(state),
+        _ => {}
+    }
+    state.needs_redraw = true;
+}
+
+fn poll_daemon_lifecycle_task(
+    daemon_task: &mut Option<DaemonLifecycleTask>,
+    daemon: &mut daemon_mgr::DaemonManager,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(task) = daemon_task.as_ref() else {
+        return;
+    };
+    match task.receiver.try_recv() {
+        Ok(result) => {
+            if let Some(mut task) = daemon_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            finish_daemon_lifecycle_result(result, daemon, state, log_buffer);
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            if let Some(mut task) = daemon_task.take() {
+                if let Some(handle) = task.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            log_buffer.push_info("❌ Daemon 后台任务异常结束".to_string());
+            state.needs_redraw = true;
+        }
+    }
+}
+
+pub(crate) fn start_worker_lifecycle_task(
+    worker_task: Option<&mut Option<WorkerLifecycleTask>>,
+    action: WorkerLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+    state: &mut AppState,
+) {
+    let Some(worker_task) = worker_task else {
+        log_buffer.push_info("❌ Worker 后台任务通道不可用".to_string());
+        state.needs_redraw = true;
+        return;
+    };
+    if worker_task.is_some() {
+        log_buffer.push_info(action.duplicate_message().to_string());
+        state.needs_redraw = true;
+        return;
+    }
+
+    log_buffer.push_info(action.running_message().to_string());
+    *worker_task = Some(spawn_worker_lifecycle_task(
+        action,
+        project_dir.to_string(),
+        ipc_host.to_string(),
+        ipc_port,
+    ));
+    state.needs_redraw = true;
+}
+
+fn spawn_worker_lifecycle_task(
+    action: WorkerLifecycleAction,
+    project_dir: String,
+    ipc_host: String,
+    ipc_port: u16,
+) -> WorkerLifecycleTask {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let progress_sender = sender.clone();
+        log_buffer.set_info_tap(Arc::new(move |message| {
+            let _ = progress_sender.send(WorkerLifecycleMessage::Progress(message.to_string()));
+        }));
+        let success = run_worker_lifecycle_action(
+            action,
+            &project_dir,
+            &ipc_host,
+            ipc_port,
+            &mut worker,
+            &mut log_buffer,
+        );
+        let _ = sender.send(WorkerLifecycleMessage::Finished(WorkerLifecycleResult {
+            action,
+            success,
+        }));
+    });
+    WorkerLifecycleTask {
+        receiver,
+        handle: Some(handle),
+    }
+}
+
+fn run_worker_lifecycle_action(
+    action: WorkerLifecycleAction,
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    worker: &mut worker_mgr::WorkerManager,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    match action {
+        WorkerLifecycleAction::Start => {
+            start_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer)
+        }
+        WorkerLifecycleAction::Stop => {
+            stop_remote_workers_in_background(ipc_host, ipc_port, log_buffer);
+            worker.stop_workers_for_project(Some(project_dir), log_buffer)
+        }
+        WorkerLifecycleAction::Restart => {
+            stop_remote_workers_in_background(ipc_host, ipc_port, log_buffer);
+            let stopped = worker.stop_workers_for_project(Some(project_dir), log_buffer);
+            let started =
+                start_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer);
+            stopped && started
+        }
+    }
+}
+
+fn start_workers_in_background(
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    worker: &mut worker_mgr::WorkerManager,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+        prepare_remote_workers_in_background(ipc_host, ipc_port, buffer)
+    })
+}
+
+fn prepare_remote_workers_in_background(
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => {
+            let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+            match rt.block_on(ipc.connect()) {
+                Ok(()) => {
+                    let ok = worker_mgr::prepare_remote_workers(&mut ipc, &rt, log_buffer);
+                    rt.block_on(ipc.disconnect());
+                    ok
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ Worker 后台任务连接后台引擎失败: {}", e));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ Worker 后台任务创建运行时失败: {}", e));
+            false
+        }
+    }
+}
+
+fn stop_remote_workers_in_background(ipc_host: &str, ipc_port: u16, log_buffer: &mut LogBuffer) {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        log_buffer
+            .push_info("⚠️ Worker 后台任务创建运行时失败，跳过 daemon worker_stop".to_string());
+        return;
+    };
+    let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+    rt.block_on(async {
+        match ipc.connect().await {
+            Ok(()) => {
+                match ipc.worker_stop().await {
+                    Ok(resp) if resp.is_ok() => {
+                        log_buffer.push_info(format!("✅ {}", resp.message))
+                    }
+                    Ok(resp) => log_buffer.push_info(format!("❌ {}", resp.message)),
+                    Err(e) => log_buffer.push_info(format!("❌ 通信失败: {}", e)),
+                }
+                ipc.disconnect().await;
+            }
+            Err(e) => {
+                log_buffer.push_info(format!(
+                    "⚠️ Worker 后台任务连接后台引擎失败，跳过 daemon worker_stop: {}",
+                    e
+                ));
+            }
+        }
+    });
+}
+
+fn finish_worker_lifecycle_result(
+    result: WorkerLifecycleResult,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    if !result.success {
+        log_buffer.push_info(result.action.failure_message().to_string());
+    }
+    state.needs_redraw = true;
+}
+
+fn poll_worker_lifecycle_task(
+    worker_task: &mut Option<WorkerLifecycleTask>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let mut finished = None;
+    loop {
+        let Some(task) = worker_task.as_ref() else {
+            return;
+        };
+        match task.receiver.try_recv() {
+            Ok(WorkerLifecycleMessage::Progress(message)) => {
+                log_buffer.push_info(message);
+                state.needs_redraw = true;
+            }
+            Ok(WorkerLifecycleMessage::Finished(result)) => {
+                finished = Some(result);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let Some(mut task) = worker_task.take() {
+                    if let Some(handle) = task.handle.take() {
+                        let _ = handle.join();
+                    }
+                }
+                log_buffer.push_info("❌ Worker 后台任务异常结束".to_string());
+                state.needs_redraw = true;
+                return;
+            }
+        }
+    }
+
+    if let Some(result) = finished {
+        if let Some(mut task) = worker_task.take() {
+            if let Some(handle) = task.handle.take() {
+                let _ = handle.join();
+            }
+        }
+        finish_worker_lifecycle_result(result, state, log_buffer);
+    }
+}
+
+fn finish_pending_worker_lifecycle_task(
+    worker_task: &mut Option<WorkerLifecycleTask>,
+    state: &mut AppState,
+    log_buffer: &mut LogBuffer,
+) {
+    let Some(mut task) = worker_task.take() else {
+        return;
+    };
+    log_buffer.push_info("ℹ 等待正在运行的 Worker 生命周期任务收尾...".to_string());
+    if let Some(handle) = task.handle.take() {
+        let _ = handle.join();
+    }
+    let mut finished = None;
+    while let Ok(message) = task.receiver.try_recv() {
+        match message {
+            WorkerLifecycleMessage::Progress(message) => {
+                log_buffer.push_info(message);
+                state.needs_redraw = true;
+            }
+            WorkerLifecycleMessage::Finished(result) => finished = Some(result),
+        }
+    }
+    match finished {
+        Some(result) => finish_worker_lifecycle_result(result, state, log_buffer),
+        None => {
+            log_buffer.push_info("❌ Worker 后台任务未返回结果".to_string());
+            state.needs_redraw = true;
+        }
+    }
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -514,6 +1281,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let mut daemon = daemon_mgr::DaemonManager::new();
     let mut worker = worker_mgr::WorkerManager::new();
     let mut check_task: Option<CheckTask> = None;
+    let mut dashboard_task: Option<DashboardPollTask> = None;
+    let mut command_task: Option<CommandTask> = None;
+    let mut daemon_task: Option<DaemonLifecycleTask> = None;
+    let mut worker_task: Option<WorkerLifecycleTask> = None;
 
     log_buffer.push_info("欢迎使用液氧甲烷火箭发动机仿真总控程序！".to_string());
     log_buffer.push_info("正在连接后台引擎...".to_string());
@@ -530,7 +1301,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
             handle_startup_connect_success(&mut state, &mut log_buffer, ipc.host());
         }
         Err(_) => {
-            handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, ipc.host());
+            handle_startup_connect_failure(
+                &mut daemon,
+                &mut state,
+                &mut log_buffer,
+                &project_dir,
+                ipc.host(),
+            );
         }
     }
 
@@ -540,12 +1317,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
     let clock_interval = Duration::from_millis(500);
     let mut last_ipc_poll = initial_ipc_poll_timestamp();
     let mut last_clock_refresh = Instant::now();
+    let mut last_worker_health_watchdog = Instant::now();
 
     let mut ctx = EventContext {
         state: &mut state,
         log_buffer: &mut log_buffer,
         ipc: &mut ipc,
         check_task: Some(&mut check_task),
+        command_task: Some(&mut command_task),
+        daemon_task: Some(&mut daemon_task),
+        worker_task: Some(&mut worker_task),
         daemon: &mut daemon,
         worker: &mut worker,
         rt: &rt,
@@ -563,11 +1344,46 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         if let Some(check_task) = ctx.check_task.as_deref_mut() {
             poll_check_task(check_task, ctx.state, ctx.log_buffer);
         }
+        if let Some(command_task) = ctx.command_task.take() {
+            poll_command_task(command_task, &mut ctx);
+            ctx.command_task = Some(command_task);
+        }
+        if let Some(daemon_task) = ctx.daemon_task.as_deref_mut() {
+            poll_daemon_lifecycle_task(daemon_task, ctx.daemon, ctx.state, ctx.log_buffer);
+        }
+        if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
+            poll_worker_lifecycle_task(worker_task, ctx.state, ctx.log_buffer);
+        }
+        if let Some(is_connected) =
+            poll_dashboard_task(&mut dashboard_task, ctx.state, ctx.log_buffer)
+        {
+            let was_connected = ctx.state.connected;
+            handle_dashboard_poll_connection_state(
+                ctx.daemon,
+                ctx.state,
+                ctx.log_buffer,
+                ctx.project_dir,
+                ctx.ipc.host(),
+                was_connected,
+                is_connected,
+            );
+        }
 
         if let Some(cmd) = ctx.state.pending_command.take() {
             let source = ctx.state.pending_command_source.take().unwrap_or("program");
-            let result = submit_command(&cmd, source, ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            handle_command_result(result, &mut ctx);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            if let Some(command_task) = ctx.command_task.as_deref_mut() {
+                submit_command(
+                    &cmd,
+                    source,
+                    &host,
+                    port,
+                    command_task,
+                    ctx.state,
+                    ctx.log_buffer,
+                );
+            }
         }
 
         let first_poll_timeout = Duration::from_millis(50);
@@ -587,24 +1403,32 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         }
 
         ctx.daemon
+            .poll_server_ipc_tunnel_reconnect(ctx.state, ctx.log_buffer);
+
+        ctx.daemon
             .poll_ipc_reconnect(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
 
-        // ★ 主线程直接轮询 IPC 状态（1s 间隔，非阻塞）
+        if last_worker_health_watchdog.elapsed() >= WORKER_HEALTH_WATCHDOG_INTERVAL {
+            poll_worker_health_watchdog(ctx.worker, ctx.state, ctx.log_buffer);
+            last_worker_health_watchdog = Instant::now();
+        }
+
+        // ★ 后台轮询 IPC 状态（1s 间隔，避免阻塞主事件循环）
         if should_poll_ipc(last_ipc_poll, ipc_poll_interval) {
-            // 批量拉取表格状态、引擎状态和日志增量，避免多条轮询命令刷屏。
-            let was_connected = ctx.ipc.is_connected();
-            refresh_dashboard_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            let is_connected = ctx.ipc.is_connected();
-            handle_dashboard_poll_connection_state(
-                ctx.daemon,
-                ctx.state,
-                ctx.log_buffer,
-                ctx.ipc.host(),
-                was_connected,
-                is_connected,
-            );
+            let poll_state = if dashboard_task.is_some() {
+                DashboardPollState::InFlight
+            } else {
+                DashboardPollState::Idle
+            };
+            if poll_state.can_spawn() {
+                dashboard_task = Some(spawn_dashboard_poll_task(
+                    ctx.ipc.host(),
+                    ctx.ipc.port(),
+                    ctx.state.last_log_id,
+                    50,
+                ));
+            }
             last_ipc_poll = Instant::now();
-            ctx.state.needs_redraw = true;
         }
 
         if last_clock_refresh.elapsed() >= clock_interval {
@@ -615,9 +1439,28 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
 
     ctx.rt.block_on(ctx.ipc.disconnect());
 
+    finish_app_shutdown(&mut ctx);
+
+    Ok(())
+}
+
+fn finish_app_shutdown(ctx: &mut EventContext) {
     if *ctx.full_quit {
+        if let Some(worker_task) = ctx.worker_task.as_deref_mut() {
+            finish_pending_worker_lifecycle_task(worker_task, ctx.state, ctx.log_buffer);
+        }
         ctx.worker
             .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+        if !worker_mgr::WorkerManager::uninstall_workstation_owned_tunnels_for_project(
+            ctx.project_dir,
+            ctx.log_buffer,
+        ) {
+            log::warn!("完全退出时工作站自持有 SSH 隧道卸载不完整");
+            ctx.log_buffer.push_info(
+                "⚠️ 完全退出时工作站自持有 SSH 隧道卸载不完整，请检查工作站计划任务和 SSH 进程"
+                    .to_string(),
+            );
+        }
         let result = if *ctx.full_quit_stop_sent {
             ctx.daemon.finish_after_successful_ipc_stop(ctx.project_dir)
         } else {
@@ -626,23 +1469,35 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), 
         if let Err(e) = result {
             log::warn!("完全退出清理后台引擎失败: {}", e);
         }
+    } else {
+        log::info!("普通退出仅关闭 TUI，保留 server IPC 隧道供 LocalWorker 继续运行");
     }
-
-    Ok(())
 }
 
 fn submit_command(
     cmd: &str,
     source: &str,
-    rt: &tokio::runtime::Runtime,
-    ipc: &mut IpcClient,
+    ipc_host: &str,
+    ipc_port: u16,
+    command_task: &mut Option<CommandTask>,
     state: &mut AppState,
     log_buffer: &mut LogBuffer,
-) -> command::CommandResult {
+) {
     log::info!("用户命令: source={source}, command={cmd:?}");
+    if command_task.is_some() {
+        log_buffer.push_info("ℹ 命令后台任务正在运行，请等待当前操作完成".to_string());
+        state.needs_redraw = true;
+        return;
+    }
     log_buffer.push_info(format!("> {}", cmd));
+    *command_task = Some(spawn_command_task(
+        cmd.to_string(),
+        ipc_host.to_string(),
+        ipc_port,
+        state.clone(),
+        log_buffer.clone(),
+    ));
     state.needs_redraw = true;
-    rt.block_on(command::dispatch_command(cmd, ipc, state, log_buffer))
 }
 
 fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext) {
@@ -653,21 +1508,6 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
         command::CommandResult::FullQuit => {
             log::info!("收到完全退出请求，准备停止后台引擎并关闭界面");
             *ctx.full_quit = true;
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.full_quit()) {
-                    Ok(resp) if resp.is_ok() => {
-                        *ctx.full_quit_stop_sent = true;
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer
-                            .push_info(format!("❌ 停止后台引擎通信失败: {}", e));
-                    }
-                }
-            }
             ctx.state.should_quit = true;
         }
         command::CommandResult::StartCheck => {
@@ -693,69 +1533,69 @@ fn handle_command_result(result: command::CommandResult, ctx: &mut EventContext)
                 .start_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
         }
         command::CommandResult::RestartDaemon => {
-            ctx.daemon.restart_with_ipc(
-                ctx.ipc,
-                ctx.rt,
-                ctx.state,
-                ctx.log_buffer,
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_daemon_lifecycle_task(
+                ctx.daemon_task.as_deref_mut(),
+                DaemonLifecycleAction::Restart,
                 ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
             );
         }
         command::CommandResult::StopDaemon => {
-            ctx.daemon
-                .stop_with_ipc(ctx.ipc, ctx.rt, ctx.state, ctx.log_buffer, ctx.project_dir);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_daemon_lifecycle_task(
+                ctx.daemon_task.as_deref_mut(),
+                DaemonLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::StartWorkers => {
-            let started =
-                ctx.worker
-                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
-                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
-                    });
-            if started {
-                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            }
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Start,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::StopWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Stop,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::RestartWorkers => {
-            if ctx.ipc.is_connected() {
-                match ctx.rt.block_on(ctx.ipc.worker_stop()) {
-                    Ok(resp) if resp.is_ok() => {
-                        ctx.log_buffer.push_info(format!("✅ {}", resp.message));
-                    }
-                    Ok(resp) => {
-                        ctx.log_buffer.push_info(format!("❌ {}", resp.message));
-                    }
-                    Err(e) => {
-                        ctx.log_buffer.push_info(format!("❌ 通信失败: {}", e));
-                    }
-                }
-            }
-            ctx.worker
-                .stop_workers_for_project(Some(ctx.project_dir), ctx.log_buffer);
-            let started =
-                ctx.worker
-                    .start_workers_with_prepare(ctx.project_dir, ctx.log_buffer, |buffer| {
-                        worker_mgr::prepare_remote_workers(ctx.ipc, ctx.rt, buffer)
-                    });
-            if started {
-                try_refresh_worker_health_once(ctx.rt, ctx.ipc, ctx.state, ctx.log_buffer);
-            }
+            let host = ctx.ipc.host().to_string();
+            let port = ctx.ipc.port();
+            start_worker_lifecycle_task(
+                ctx.worker_task.as_deref_mut(),
+                WorkerLifecycleAction::Restart,
+                ctx.project_dir,
+                &host,
+                port,
+                ctx.log_buffer,
+                ctx.state,
+            );
         }
         command::CommandResult::None => {}
     }
@@ -770,24 +1610,34 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                     ctx.state.should_quit = true;
                 }
                 key_handler::AppAction::SubmitCommand(cmd) => {
-                    let result = submit_command(
-                        &cmd,
-                        "keyboard",
-                        ctx.rt,
-                        ctx.ipc,
-                        ctx.state,
-                        ctx.log_buffer,
-                    );
-                    handle_command_result(result, ctx);
+                    let host = ctx.ipc.host().to_string();
+                    let port = ctx.ipc.port();
+                    if let Some(command_task) = ctx.command_task.as_deref_mut() {
+                        submit_command(
+                            &cmd,
+                            "keyboard",
+                            &host,
+                            port,
+                            command_task,
+                            ctx.state,
+                            ctx.log_buffer,
+                        );
+                    }
                 }
                 key_handler::AppAction::Confirm => {
                     if let Some(callback) = ctx.state.confirm_callback.take() {
-                        let result = ctx.rt.block_on(command::execute_confirm_action(
-                            &callback,
-                            ctx.ipc,
-                            ctx.log_buffer,
-                        ));
-                        event_handler::actions::handle_confirm_result(result, ctx);
+                        let host = ctx.ipc.host().to_string();
+                        let port = ctx.ipc.port();
+                        if let Some(command_task) = ctx.command_task.as_deref_mut() {
+                            start_confirm_action_task(
+                                Some(command_task),
+                                callback,
+                                &host,
+                                port,
+                                ctx.state,
+                                ctx.log_buffer,
+                            );
+                        }
                     }
                 }
                 key_handler::AppAction::Cancel | key_handler::AppAction::DismissDialog => {}
@@ -813,11 +1663,7 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
                 event_handler::mouse::MouseRuntime {
                     ipc: ctx.ipc,
                     rt: ctx.rt,
-                    daemon: ctx.daemon,
-                    worker: ctx.worker,
-                    project_dir: ctx.project_dir,
-                    full_quit: ctx.full_quit,
-                    full_quit_stop_sent: ctx.full_quit_stop_sent,
+                    command_task: ctx.command_task.as_deref_mut(),
                 },
             );
         }
@@ -829,6 +1675,28 @@ fn process_event(event: CrosstermEvent, ctx: &mut EventContext) {
     }
 }
 
+fn terminal_too_small(area: Rect) -> bool {
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT
+}
+
+fn render_terminal_too_small(frame: &mut ratatui::Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "终端窗口过小",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("当前 {}x{}", area.width, area.height)),
+        Line::from(format!(
+            "至少需要 {}x{}",
+            MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT
+        )),
+    ];
+    let widget = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    frame.render_widget(widget, area);
+}
+
 fn do_redraw(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut AppState,
@@ -837,20 +1705,24 @@ fn do_redraw(
     terminal
         .draw(|frame| {
             let area = frame.area();
+            if terminal_too_small(area) {
+                render_terminal_too_small(frame, area);
+                return;
+            }
+
             let layout = AppLayout::new(area);
 
             state.clamp_table_scroll(layout.status_table.height.saturating_sub(3));
 
-            let info_lines = ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
-            let info_visual_count = info_lines.0.len();
-            let info_max_width = info_lines.1;
-            let detail_lines = ui::logs::compute_detail_lines_no_wrap(
+            let (info_lines, info_max_width) =
+                ui::logs::compute_info_lines_no_wrap(log_buffer, &state.theme);
+            let info_visual_count = info_lines.len();
+            let (detail_lines, detail_max_width) = ui::logs::compute_detail_lines_no_wrap(
                 log_buffer,
                 &state.log_filter_level,
                 &state.log_filter_source,
             );
-            let detail_visual_count = detail_lines.0.len();
-            let detail_max_width = detail_lines.1;
+            let detail_visual_count = detail_lines.len();
 
             let info_inner_height = layout.info_panel.height.saturating_sub(2) as usize;
             let detail_inner_height = layout.detail_panel.height.saturating_sub(2) as usize;
@@ -1024,21 +1896,21 @@ fn do_redraw(
             ui::header::render_header(frame, layout.header, state);
             ui::header::render_info_bar(frame, layout.info_bar, state);
             ui::table::render_table(frame, layout.status_table, state);
-            ui::logs::render_info_panel(
+            ui::logs::render_info_panel_with_lines(
                 frame,
                 layout.info_panel,
-                log_buffer,
+                info_lines,
+                info_max_width,
                 state.info_log_scroll,
                 state.focus_zone,
                 state.info_log_hscroll,
                 state.info_log_auto_scroll,
                 &state.theme,
             );
-            ui::logs::render_detail_panel(
+            ui::logs::render_detail_panel_with_lines(
                 frame,
                 layout.detail_panel,
                 &ui::logs::DetailPanelParams {
-                    log_buffer,
                     level_filter: &state.log_filter_level,
                     source_filter: &state.log_filter_source,
                     scroll_offset: state.detail_log_scroll,
@@ -1049,6 +1921,8 @@ fn do_redraw(
                     hscroll: state.detail_log_hscroll,
                     theme: &state.theme,
                 },
+                detail_lines,
+                detail_max_width,
             );
             ui::command_bar::render_command_bar(
                 frame,
@@ -1180,6 +2054,88 @@ mod tests {
             .expect("write ipc response");
     }
 
+    fn fake_tunnel_uninstall_python(
+        project_dir: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_python_uninstall.cmd");
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_python_uninstall");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake python metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake python");
+            path
+        }
+    }
+
+    fn fake_failing_tunnel_uninstall_python(
+        project_dir: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join("fake_python_uninstall_fail.cmd");
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_removed\"}}]}}\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join("fake_python_uninstall_fail");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_removed\"}}]}}'\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake python");
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake python metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake python");
+            path
+        }
+    }
+
+    fn read_marker(marker: &std::path::Path) -> String {
+        std::fs::read_to_string(marker).expect("read marker")
+    }
+
     #[test]
     fn test_format_local_time_time_format() {
         let result = format_local_time("%H:%M:%S");
@@ -1212,6 +2168,14 @@ mod tests {
         assert!(month >= 1 && month <= 12, "月份应在1-12之间");
         let day: u32 = parts[0][6..8].parse().expect("日期应为数字");
         assert!(day >= 1 && day <= 31, "日期应在1-31之间");
+    }
+
+    #[test]
+    fn terminal_size_guard_matches_layout_minimum() {
+        assert!(terminal_too_small(Rect::new(0, 0, 79, 24)));
+        assert!(terminal_too_small(Rect::new(0, 0, 120, 15)));
+        assert!(!terminal_too_small(Rect::new(0, 0, 80, 16)));
+        assert!(!terminal_too_small(Rect::new(0, 0, 120, 30)));
     }
 
     #[test]
@@ -1316,7 +2280,7 @@ mod tests {
         let mut state = AppState::new();
         let mut log_buffer = LogBuffer::new();
 
-        handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, "127.0.0.1");
+        handle_startup_connect_failure(&mut daemon, &mut state, &mut log_buffer, "", "127.0.0.1");
 
         assert!(!state.connected);
         assert!(state.needs_redraw);
@@ -1340,6 +2304,7 @@ mod tests {
             &mut daemon,
             &mut state,
             &mut log_buffer,
+            "",
             "127.0.0.1",
             true,
             false,
@@ -1354,6 +2319,180 @@ mod tests {
             .any(|message| message.contains("后台自动重连")));
     }
 
+    #[test]
+    fn start_worker_lifecycle_task_rejects_duplicate_operation() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut worker_task = Some(WorkerLifecycleTask {
+            receiver,
+            handle: None,
+        });
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        start_worker_lifecycle_task(
+            Some(&mut worker_task),
+            WorkerLifecycleAction::Start,
+            "C:\\tmp",
+            "127.0.0.1",
+            9527,
+            &mut log_buffer,
+            &mut state,
+        );
+
+        assert!(worker_task.is_some());
+        assert!(state.needs_redraw);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("生命周期任务正在运行")));
+    }
+
+    #[test]
+    fn poll_worker_lifecycle_task_displays_progress_before_finished() {
+        let (sender, receiver) = mpsc::channel();
+        let mut worker_task = Some(WorkerLifecycleTask {
+            receiver,
+            handle: None,
+        });
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+
+        sender
+            .send(WorkerLifecycleMessage::Progress(
+                "工作站 WS-A: SSH 隧道已就绪，跳过修复".to_string(),
+            ))
+            .expect("send progress");
+        poll_worker_lifecycle_task(&mut worker_task, &mut state, &mut log_buffer);
+
+        assert!(worker_task.is_some());
+        assert!(state.needs_redraw);
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("跳过修复")));
+    }
+
+    #[test]
+    fn worker_health_watchdog_warns_without_requesting_restart() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = Some(false);
+        state.health_info.server_to_local_ssh = Some("disconnected".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        assert!(log_buffer
+            .info_messages
+            .iter()
+            .any(|message| message.contains("worker restart")));
+        assert!(state.pending_command.is_none());
+    }
+
+    #[test]
+    fn worker_health_watchdog_deduplicates_repeated_warning() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = Some(false);
+        state.health_info.server_to_local_ssh = Some("disconnected".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        let warning_count = log_buffer
+            .info_messages
+            .iter()
+            .filter(|message| message.contains("Worker 或 SSH 隧道异常"))
+            .count();
+        assert_eq!(warning_count, 1);
+    }
+
+    #[test]
+    fn worker_health_watchdog_does_not_warn_on_unknown_health() {
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut state = AppState::default();
+        state.health_info.local_worker_online = None;
+        state.health_info.server_to_local_ssh = Some("unknown".to_string());
+        state.health_info.server_to_workstation_ssh = Some("unknown".to_string());
+        let mut log_buffer = LogBuffer::new();
+
+        poll_worker_health_watchdog(&mut worker, &state, &mut log_buffer);
+
+        assert!(log_buffer.info_messages.is_empty());
+    }
+
+    #[test]
+    fn worker_lifecycle_commands_do_not_start_workers_inline() {
+        let source = include_str!("lib.rs");
+        let start_arm = source
+            .split("command::CommandResult::StartWorkers => {")
+            .nth(1)
+            .expect("start workers arm should exist")
+            .split("command::CommandResult::StopWorkers => {")
+            .next()
+            .expect("start workers arm should end before stop workers arm");
+        assert!(
+            start_arm.contains("start_worker_lifecycle_task"),
+            "worker start should hand off to a background lifecycle task"
+        );
+        assert!(
+            !start_arm.contains("start_workers_with_prepare"),
+            "worker start must not run the blocking startup chain on the TUI event loop"
+        );
+
+        let restart_arm = source
+            .split("command::CommandResult::RestartWorkers => {")
+            .nth(1)
+            .expect("restart workers arm should exist")
+            .split("command::CommandResult::None => {}")
+            .next()
+            .expect("restart workers arm should end before none arm");
+        assert!(
+            restart_arm.contains("start_worker_lifecycle_task"),
+            "worker restart should hand off to a background lifecycle task"
+        );
+        assert!(
+            !restart_arm.contains("start_workers_with_prepare"),
+            "worker restart must not run the blocking startup chain on the TUI event loop"
+        );
+    }
+
+    #[test]
+    fn daemon_lifecycle_commands_do_not_stop_or_restart_inline() {
+        let source = include_str!("lib.rs");
+        let restart_arm = source
+            .split("command::CommandResult::RestartDaemon => {")
+            .nth(1)
+            .expect("restart daemon arm should exist")
+            .split("command::CommandResult::StopDaemon => {")
+            .next()
+            .expect("restart daemon arm should end before stop daemon arm");
+        assert!(
+            restart_arm.contains("start_daemon_lifecycle_task"),
+            "daemon restart should hand off to a background lifecycle task"
+        );
+        assert!(
+            !restart_arm.contains("restart_with_ipc"),
+            "daemon restart must not run the blocking restart chain on the TUI event loop"
+        );
+
+        let stop_arm = source
+            .split("command::CommandResult::StopDaemon => {")
+            .nth(1)
+            .expect("stop daemon arm should exist")
+            .split("command::CommandResult::StartWorkers => {")
+            .next()
+            .expect("stop daemon arm should end before start workers arm");
+        assert!(
+            stop_arm.contains("start_daemon_lifecycle_task"),
+            "daemon stop should hand off to a background lifecycle task"
+        );
+        assert!(
+            !stop_arm.contains("stop_with_ipc"),
+            "daemon stop must not run the blocking stop chain on the TUI event loop"
+        );
+    }
     #[test]
     fn test_dashboard_poll_connection_loss_reconnects_to_finished_daemon() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
@@ -1406,23 +2545,29 @@ mod tests {
         let mut state = AppState::default();
         let mut log_buffer = LogBuffer::new();
 
-        rt.block_on(ipc.connect()).expect("initial connect");
         state.connected = true;
-        let was_connected = ipc.is_connected();
-        assert!(!refresh_dashboard_once(
-            &rt,
-            &mut ipc,
-            &mut state,
-            &mut log_buffer
-        ));
-        let after_dashboard = ipc.is_connected();
+        let mut dashboard_task = Some(spawn_dashboard_poll_task("127.0.0.1", port, 0, 50));
+        let mut after_dashboard = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(is_connected) =
+                poll_dashboard_task(&mut dashboard_task, &mut state, &mut log_buffer)
+            {
+                after_dashboard = Some(is_connected);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(after_dashboard, Some(false));
+        let was_connected = state.connected;
         handle_dashboard_poll_connection_state(
             &mut daemon,
             &mut state,
             &mut log_buffer,
+            "",
             ipc.host(),
             was_connected,
-            after_dashboard,
+            false,
         );
         assert!(daemon.has_pending_ipc_reconnect());
 
@@ -1447,21 +2592,113 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_poll_state_prevents_overlapping_polls() {
+        assert!(DashboardPollState::Idle.can_spawn());
+        assert!(!DashboardPollState::InFlight.can_spawn());
+    }
+
+    #[test]
+    fn command_confirm_snapshot_does_not_restore_dismissed_dialog() {
+        let mut live_state = AppState {
+            ui_mode: UiMode::Normal,
+            confirm_message: None,
+            confirm_callback: None,
+            dialog_scroll: 0,
+            log_filter_level: Some("warning".to_string()),
+            ..Default::default()
+        };
+        let snapshot = AppState {
+            ui_mode: UiMode::ConfirmDialog,
+            confirm_message: Some("stale dialog".to_string()),
+            confirm_callback: Some(ConfirmAction::StopDaemon),
+            dialog_scroll: 9,
+            log_filter_level: Some("info".to_string()),
+            ..Default::default()
+        };
+
+        apply_command_state_snapshot(&mut live_state, snapshot, CommandStateUpdate::ConfirmAction);
+
+        assert_eq!(live_state.ui_mode, UiMode::Normal);
+        assert!(live_state.confirm_message.is_none());
+        assert!(live_state.confirm_callback.is_none());
+        assert_eq!(live_state.dialog_scroll, 0);
+        assert_eq!(live_state.log_filter_level.as_deref(), Some("warning"));
+    }
+
+    #[test]
+    fn command_submit_snapshot_applies_new_confirm_dialog() {
+        let mut live_state = AppState::default();
+        let snapshot = AppState {
+            ui_mode: UiMode::ConfirmDialog,
+            confirm_message: Some("confirm reset".to_string()),
+            confirm_callback: Some(ConfirmAction::ResetStep {
+                config_name: "all".to_string(),
+                step_name: None,
+            }),
+            dialog_scroll: 0,
+            ..Default::default()
+        };
+
+        apply_command_state_snapshot(
+            &mut live_state,
+            snapshot,
+            CommandStateUpdate::Submit("reset all all".to_string()),
+        );
+
+        assert_eq!(live_state.ui_mode, UiMode::ConfirmDialog);
+        assert_eq!(live_state.confirm_message.as_deref(), Some("confirm reset"));
+        assert!(matches!(
+            live_state.confirm_callback,
+            Some(ConfirmAction::ResetStep { .. })
+        ));
+    }
+
+    #[test]
+    fn dashboard_poll_ok_non_object_keeps_connection_state() {
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(IpcResponse {
+                status: "ok".to_string(),
+                data: serde_json::json!(null),
+                message: "ok".to_string(),
+                request_id: "test".to_string(),
+            }))
+            .expect("send dashboard response");
+        let mut task = Some(DashboardPollTask { receiver });
+        let mut state = AppState {
+            connected: true,
+            ..Default::default()
+        };
+        let mut log_buffer = LogBuffer::new();
+
+        let result = poll_dashboard_task(&mut task, &mut state, &mut log_buffer);
+
+        assert_eq!(result, Some(true));
+        assert!(state.connected);
+        assert!(task.is_none());
+    }
+
+    #[test]
     fn test_submit_command_marks_redraw_for_immediate_repaint() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
         let mut state = AppState {
             needs_redraw: false,
             ..Default::default()
         };
         let mut log_buffer = LogBuffer::new();
+        let mut command_task = None;
 
-        let result = submit_command("help", "test", &rt, &mut ipc, &mut state, &mut log_buffer);
+        submit_command(
+            "help",
+            "test",
+            ipc.host(),
+            ipc.port(),
+            &mut command_task,
+            &mut state,
+            &mut log_buffer,
+        );
 
-        assert!(matches!(result, command::CommandResult::None));
+        assert!(command_task.is_some());
         assert!(
             state.needs_redraw,
             "submitting a command must repaint log/input changes without waiting for resize"
@@ -1496,6 +2733,9 @@ mod tests {
             log_buffer: &mut log_buffer,
             ipc: &mut ipc,
             check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
             daemon: &mut daemon,
             worker: &mut worker,
             rt: &rt,
@@ -1514,6 +2754,245 @@ mod tests {
         );
 
         std::fs::remove_dir_all(project_dir).ok();
+    }
+
+    #[test]
+    fn normal_quit_preserves_server_ipc_tunnel_for_detached_worker() {
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-normal-quit-preserves-tunnel-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let pid_file = project_dir.join("data").join("server_ipc_tunnel.pid");
+
+        #[cfg(target_os = "windows")]
+        let child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 30 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live tunnel process");
+
+        #[cfg(not(target_os = "windows"))]
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn live tunnel process");
+
+        let pid = child.id();
+        std::fs::write(&pid_file, pid.to_string()).expect("write tunnel pid");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = false;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(
+            pid_file.exists(),
+            "normal quit must keep the IPC tunnel pid file"
+        );
+        assert!(
+            crate::utils::is_pid_alive(pid),
+            "normal quit must not terminate the IPC tunnel process"
+        );
+
+        let killed = crate::utils::kill_process_tree(pid);
+        assert!(
+            !crate::utils::is_pid_alive(pid)
+                || (killed && crate::utils::wait_for_pid_dead(pid, Duration::from_secs(2)))
+        );
+        std::fs::remove_dir_all(project_dir).ok();
+    }
+
+    #[test]
+    fn full_quit_shutdown_uninstalls_workstation_owned_tunnels() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-full-quit-uninstalls-workstation-tunnels-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = true;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        let marker_text = read_marker(&marker);
+        assert!(marker_text.contains("-m tools.workstation_tunnel uninstall --all"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("工作站自持有 SSH 隧道计划任务和进程已全部卸载")
+        }));
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn normal_quit_shutdown_does_not_uninstall_workstation_owned_tunnels() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-normal-quit-keeps-workstation-tunnels-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = false;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(
+            !marker.exists(),
+            "normal quit must not uninstall workstation-owned tunnels"
+        );
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
+    fn full_quit_shutdown_warns_when_workstation_tunnel_uninstall_fails() {
+        let _guard = TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        std::env::remove_var("AUTOFLUID_SERVER_MODE");
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-full-quit-uninstall-warning-{}",
+            generate_request_id()
+        ));
+        std::fs::create_dir_all(project_dir.join("data")).expect("create data dir");
+        let marker = project_dir.join("workstation-uninstall-marker.txt");
+        let python = fake_failing_tunnel_uninstall_python(&project_dir, &marker);
+        std::env::set_var("PYTHON", &python);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut ipc = IpcClient::new(Some("127.0.0.1"), Some(9));
+        let mut state = AppState::new();
+        let mut log_buffer = LogBuffer::new();
+        let mut daemon = daemon_mgr::DaemonManager::new();
+        let mut worker = worker_mgr::WorkerManager::new();
+        let mut full_quit = true;
+        let mut full_quit_stop_sent = false;
+        let project_dir_string = project_dir.to_string_lossy().to_string();
+
+        let mut ctx = EventContext {
+            state: &mut state,
+            log_buffer: &mut log_buffer,
+            ipc: &mut ipc,
+            check_task: None,
+            command_task: None,
+            daemon_task: None,
+            worker_task: None,
+            daemon: &mut daemon,
+            worker: &mut worker,
+            rt: &rt,
+            project_dir: &project_dir_string,
+            full_quit: &mut full_quit,
+            full_quit_stop_sent: &mut full_quit_stop_sent,
+        };
+
+        finish_app_shutdown(&mut ctx);
+
+        assert!(read_marker(&marker).contains("-m tools.workstation_tunnel uninstall --all"));
+        assert!(log_buffer.info_messages.iter().any(|message| {
+            message.contains("完全退出时工作站自持有 SSH 隧道卸载不完整")
+        }));
+
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
     }
 
     #[test]
@@ -1608,6 +3087,9 @@ mod tests {
             "statuses": {
                 "2": {"sw": "Running"}
             },
+            "config_workstations": {
+                "2": "WS-B"
+            },
             "engine": {
                 "engine_status": "running",
                 "sw_macro_started": true,
@@ -1654,6 +3136,8 @@ mod tests {
         apply_dashboard_response(obj, &mut state, &mut log_buffer);
 
         assert_eq!(state.get_step_status("2", "sw"), "Running");
+        assert_eq!(state.config_cell_text("2"), "2");
+        assert_eq!(state.work_location_cell_text("2"), "本地");
         assert_eq!(state.engine_info.engine_status, "running");
         assert!(state.engine_info.sw_macro_started);
         assert_eq!(state.engine_info.daemon_started_at, Some(1718000000.0));

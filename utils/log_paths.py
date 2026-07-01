@@ -47,10 +47,18 @@ def service_log_file(component: str, filename: str) -> str:
 
 
 def tunnel_log_dir(kind: str) -> str:
-    """Return the local tunnel log directory for a tunnel kind."""
+    """Return the local tunnel log directory for a tunnel kind.
+
+    .. note:: Reserved API — currently unused in production but kept for
+              future tunnel logging support.
+    """
     return os.path.join(get_log_root(), "local", "tunnels", kind)
 
 
 def export_log_dir() -> str:
-    """Return the local TUI export log directory."""
+    """Return the local TUI export log directory.
+
+    .. note:: Reserved API — currently unused in production but kept for
+              future TUI export log support.
+    """
     return os.path.join(get_log_root(), "local", "exports")

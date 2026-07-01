@@ -242,6 +242,7 @@ class SWExecutor:
 
         logger.info(f"[SW] 构型{config_name}: 开始导出 STEP...")
         cn_str = str(config_name)
+        design_table_snapshot = self._capture_design_table_snapshot()
 
         try:
             doc.ShowConfiguration2(cn_str)
@@ -324,6 +325,9 @@ class SWExecutor:
                 )
                 self._terminate_sw_processes()
             return False
+        finally:
+            if not self._restore_design_table_snapshot(design_table_snapshot):
+                return False
 
     def disconnect_sw_cached(self) -> None:
         """清理通过 export_sw_per_config 缓存的 SW 连接。"""
@@ -520,9 +524,10 @@ class SWExecutor:
                     logger.info("[SW-Cleanup] ✓ 残留 SolidWorks 进程已终止，等待 3 秒...")
                     time.sleep(3)
                 else:
+                    stderr = kill_result.stderr or ""
                     logger.warning(
                         f"[SW-Cleanup] taskkill 返回非零码 {kill_result.returncode}: "
-                        f"{kill_result.stderr.strip()}"
+                        f"{stderr.strip()}"
                     )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"[SW-Cleanup] 检查/终止 SW 进程时异常: {e}")
@@ -540,7 +545,8 @@ class SWExecutor:
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.debug(f"[SW-Cleanup] 检查 SolidWorks 进程时异常: {e}")
             return False
-        return "SLDWORKS.exe" in result.stdout
+        stdout = result.stdout or ""
+        return "SLDWORKS.exe" in stdout
 
     @staticmethod
     def _is_com_rpc_failure(exc: Exception | None) -> bool:
@@ -619,7 +625,7 @@ class SWExecutor:
             doc = sw_app.OpenDoc6(
                 sw_model,
                 doc_type,
-                self._SW_OPEN_SILENT,
+                self._SW_OPEN_SILENT | self._SW_OPEN_READONLY,
                 "",
                 open_errors,
                 open_warnings,
@@ -660,6 +666,43 @@ class SWExecutor:
 
         logger.info(f"[SW-COM] 模型已打开: {os.path.basename(sw_model)}")
         return doc
+
+    @staticmethod
+    def _capture_design_table_snapshot() -> tuple[str, bytes] | None:
+        """读取外部设计表快照，防止 SolidWorks 回写污染源参数表。"""
+        excel_path = str(LOCAL_PATHS.get("excel") or "")
+        if not excel_path or not os.path.exists(excel_path):
+            return None
+        try:
+            with open(excel_path, "rb") as f:
+                return excel_path, f.read()
+        except OSError as e:
+            logger.warning(f"[SW-DesignTable] 无法读取源 Excel 快照: {excel_path}: {e}")
+            return None
+
+    def _restore_design_table_snapshot(self, snapshot: tuple[str, bytes] | None) -> bool:
+        """如果 SW 修改了外部设计表，立即恢复导出前的源 Excel。"""
+        if snapshot is None:
+            return True
+        excel_path, original_bytes = snapshot
+        try:
+            current_bytes = b""
+            if os.path.exists(excel_path):
+                with open(excel_path, "rb") as f:
+                    current_bytes = f.read()
+            if current_bytes == original_bytes:
+                return True
+            with open(excel_path, "wb") as f:
+                f.write(original_bytes)
+            logger.warning(
+                "[SW-DesignTable] SolidWorks 修改了源 Excel 参数表，"
+                f"已恢复原始内容: {excel_path}"
+            )
+            return True
+        except OSError as e:
+            self.last_error = f"[SW-DesignTable] 恢复源 Excel 参数表失败: {excel_path}: {e}"
+            logger.error(self.last_error)
+            return False
 
     def _disconnect_sw(self, sw_app, doc, sw_model: str):
         """清理 SW COM 资源：关闭文档 → 释放 COM。
