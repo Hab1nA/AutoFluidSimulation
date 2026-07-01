@@ -388,10 +388,19 @@ class RemoteExecutor:
         with self._ssh_guard(workstation_id):
             try:
                 ssh = self._get_ssh_for_workstation(workstation_id)
-                if ssh.check_remote_file(flag_file):
-                    return "completed"
-                if ssh.check_remote_file(error_flag_file):
-                    return "failed"
+                if step_name == "solver":
+                    if self._check_remote_file(ssh, error_flag_file, quiet=True):
+                        return "failed"
+                    flag_exists = self._check_remote_file(ssh, flag_file, quiet=True)
+                    if self._solver_outputs_exist(ssh, config_name, workstation_id):
+                        return "completed"
+                    if flag_exists:
+                        return "running"
+                else:
+                    if self._check_remote_file(ssh, flag_file, quiet=True):
+                        return "completed"
+                    if self._check_remote_file(ssh, error_flag_file, quiet=True):
+                        return "failed"
             except (OSError, ConnectionError) as e:
                 _raise_infra_on_ssh_error(e)
 
@@ -466,7 +475,10 @@ class RemoteExecutor:
         if not callable(read_pid):
             return None
 
-        pid = read_pid(str(pid_file))
+        try:
+            pid = read_pid(str(pid_file), quiet=True)
+        except TypeError:
+            pid = read_pid(str(pid_file))
         if pid is None:
             return None
 
@@ -475,6 +487,26 @@ class RemoteExecutor:
         if exit_code != 0:
             return None
         return re.search(rf"\b{pid}\b", out) is not None
+
+    @staticmethod
+    def _check_remote_file(
+        ssh: "RemoteWorkstation",
+        remote_path: str,
+        *,
+        timeout: float | None = None,
+        quiet: bool = False,
+    ) -> bool:
+        try:
+            if timeout is None:
+                return bool(ssh.check_remote_file(remote_path, quiet=quiet))
+            return bool(ssh.check_remote_file(remote_path, timeout=timeout, quiet=quiet))
+        except TypeError:
+            if timeout is None:
+                return bool(ssh.check_remote_file(remote_path))
+            try:
+                return bool(ssh.check_remote_file(remote_path, timeout=timeout))
+            except TypeError:
+                return bool(ssh.check_remote_file(remote_path))
 
     def _solver_progress_file_matches(
         self,
@@ -500,6 +532,29 @@ class RemoteExecutor:
         if not isinstance(progress, dict):
             return False
         return progress.get("config_name") == config_name
+
+    def _solver_outputs_exist(
+        self,
+        ssh: "RemoteWorkstation",
+        config_name: int,
+        workstation_id: str,
+    ) -> bool:
+        """Return whether both durable Solver outputs exist for a config."""
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+        except ValueError:
+            return False
+        result_dir = str(remote_config["result_dir"]).replace("\\", "/")
+        cas_name = get_step_filename("solver", config_name)
+        dat_name = get_step_filename("solverdata", config_name)
+        if not cas_name or not dat_name:
+            return False
+        cas_file = f"{result_dir}/{cas_name}"
+        dat_file = f"{result_dir}/{dat_name}"
+        return bool(
+            self._check_remote_file(ssh, cas_file, quiet=True)
+            and self._check_remote_file(ssh, dat_file, quiet=True)
+        )
 
     def _workstation_has_fluent_process(self, ssh: "RemoteWorkstation") -> bool:
         command = (
@@ -729,9 +784,16 @@ class RemoteExecutor:
                         remote_size = ssh.get_remote_file_size(
                             remote_file,
                             timeout=remote_check_timeout,
+                            quiet=True,
                         )
                     except TypeError:
-                        remote_size = ssh.get_remote_file_size(remote_file)
+                        try:
+                            remote_size = ssh.get_remote_file_size(
+                                remote_file,
+                                timeout=remote_check_timeout,
+                            )
+                        except TypeError:
+                            remote_size = ssh.get_remote_file_size(remote_file)
                     if remote_size == local_size:
                         logger.info(
                             f"[Transfer] 远程 SCDOC 已存在 ({remote_size} bytes)，"
@@ -1158,7 +1220,7 @@ class RemoteExecutor:
             try:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
-                    if ssh.check_remote_file(error_flag):
+                    if self._check_remote_file(ssh, error_flag, quiet=True):
                         error_summary = self._read_remote_task_error_summary(
                             ssh,
                             config_name,
@@ -1179,10 +1241,10 @@ class RemoteExecutor:
                             workstation_id,
                         )
                         return False
-                    if ssh.check_remote_file(flag_file):
+                    if self._check_remote_file(ssh, flag_file, quiet=True):
                         mesh_exists = (
                             mesh_file is not None
-                            and ssh.check_remote_file(mesh_file)
+                            and self._check_remote_file(ssh, mesh_file, quiet=True)
                         )
                         if mesh_exists:
                             logger.info(f"[Meshing] 构型{config_name} 网格划分完成")
@@ -1850,7 +1912,7 @@ class RemoteExecutor:
             try:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
-                    if ssh.check_remote_file(error_flag):
+                    if self._check_remote_file(ssh, error_flag, quiet=True):
                         error_summary = self._read_remote_task_error_summary(
                             ssh,
                             config_name,
@@ -1875,10 +1937,18 @@ class RemoteExecutor:
                         self._read_solver_progress(ssh, progress_file, config_name)
                         or progress_seen
                     )
-                    if ssh.check_remote_file(flag_file):
+                    if self._check_remote_file(ssh, flag_file, quiet=True):
                         # 标志文件存在，验证输出文件
-                        cas_exists = cas_file is not None and ssh.check_remote_file(cas_file)
-                        dat_exists = dat_file is not None and ssh.check_remote_file(dat_file)
+                        cas_exists = cas_file is not None and self._check_remote_file(
+                            ssh,
+                            cas_file,
+                            quiet=True,
+                        )
+                        dat_exists = dat_file is not None and self._check_remote_file(
+                            ssh,
+                            dat_file,
+                            quiet=True,
+                        )
 
                         if cas_exists and dat_exists:
                             ssh.delete_remote_file(flag_file)
@@ -2019,7 +2089,7 @@ class RemoteExecutor:
                 with self._ssh_guard(workstation_id):
                     ssh = self._get_ssh_for_workstation(workstation_id)
                     for error_flag in error_flags:
-                        if not ssh.check_remote_file(error_flag):
+                        if not self._check_remote_file(ssh, error_flag, quiet=True):
                             continue
                         logger.error(
                             f"[PostProcess] 构型{config_name} 后处理远程任务执行失败"
@@ -2033,7 +2103,7 @@ class RemoteExecutor:
                             workstation_id,
                         )
                         return False
-                    if ssh.check_remote_file(flag_file):
+                    if self._check_remote_file(ssh, flag_file, quiet=True):
                         logger.info(f"[PostProcess] 构型{config_name} 后处理完成")
                         return True
             except InfrastructureUnavailableError:

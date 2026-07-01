@@ -4670,6 +4670,36 @@ class TestBarrierCoordinator:
         assert self.state.get_step_status(1, "solver") == STATUS_WAITING
         assert self.state.get_step_status(3, "solver") == STATUS_WAITING
 
+    def test_dispatch_solver_tasks_does_not_repeat_banner_for_live_thread(self, caplog):
+        """start 恢复看到已有工作站调度线程时不应重复输出调度横幅。"""
+        self._use_multi_workstation_barrier()
+        keep_alive = threading.Event()
+
+        def _wait_until_released() -> None:
+            keep_alive.wait(timeout=5)
+
+        existing_thread = threading.Thread(
+            target=_wait_until_released,
+            name="SolverDispatcher-WS-A-test",
+            daemon=True,
+        )
+        existing_thread.start()
+        self.coordinator._solver_threads.append(existing_thread)
+        self.coordinator._solver_thread_workstations[existing_thread] = "WS-A"
+
+        try:
+            with caplog.at_level(logging.INFO):
+                started = self.coordinator._dispatch_solver_tasks({"WS-A"})
+        finally:
+            keep_alive.set()
+            existing_thread.join(timeout=5)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert started is True
+        assert messages.count("开始按工作站调度仿真求解任务...") == 0
+        assert any("工作站 WS-A 调度线程已在运行，跳过重复启动" in msg for msg in messages)
+        assert len(self.coordinator._solver_threads) == 1
+
     def test_barrier_waits_when_paused(self):
         """暂停期间屏障监控等待，恢复后继续。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -5913,6 +5943,158 @@ class TestUtilsExtended:
             remote_check_timeout=7,
         ) is False
         assert all(timeout == 7 for _, timeout in calls)
+
+    def test_remote_output_check_passes_quiet_to_transfer_size_probe(self):
+        """恢复扫描的远程文件大小探测应可安静处理预期缺失/瞬时异常。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        calls: list[tuple[str, float | None, bool]] = []
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            def get_remote_file_size(
+                self,
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+                quiet: bool = False,
+            ) -> int | None:
+                calls.append((remote_path, timeout, quiet))
+                return None
+
+        assert check_step_output_exists(
+            3,
+            "transfer",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+            quiet=True,
+        ) is False
+        assert calls == [("D:/scdoc/model_gen4_3.scdoc", 7, True)]
+
+    def test_remote_output_check_passes_quiet_to_solver_file_probes(self):
+        """Solver 输出恢复扫描应向 done flag 和 cas/dat 探测传递 quiet。"""
+        from engine.scheduler.utils import check_step_output_exists
+
+        calls: list[tuple[str, float | None, bool]] = []
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            def check_remote_file(
+                self,
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+                quiet: bool = False,
+            ) -> bool:
+                calls.append((remote_path, timeout, quiet))
+                return False
+
+        assert check_step_output_exists(
+            4,
+            "solver",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+            quiet=True,
+        ) is False
+        assert calls == [
+            ("D:/flags/solver_done_4.txt.error", 7, True),
+            ("D:/flags/solver_done_4.txt", 7, True),
+            ("D:/result/model_gen4_4.cas.h5", 7, True),
+            ("D:/result/model_gen4_4.dat.h5", 7, True),
+        ]
+
+    def test_remote_output_check_does_not_treat_solver_done_as_output_without_case_data(self):
+        """Solver done flag alone cannot mark Solver complete without cas/dat."""
+        from engine.scheduler.utils import check_step_output_exists
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def check_remote_file(
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+                quiet: bool = False,
+            ) -> bool:
+                return remote_path == "D:/flags/solver_done_4.txt"
+
+        assert check_step_output_exists(
+            4,
+            "solver",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+            quiet=True,
+        ) is False
+
+    def test_remote_output_check_treats_solver_case_data_as_completed_without_done_flag(self):
+        """cas/dat durable outputs are sufficient for pause/start recovery."""
+        from engine.scheduler.utils import check_step_output_exists
+
+        class _SSH:
+            @staticmethod
+            def is_connected() -> bool:
+                return True
+
+            @staticmethod
+            def check_remote_file(
+                remote_path: str,
+                *,
+                timeout: float | None = None,
+                quiet: bool = False,
+            ) -> bool:
+                return remote_path in {
+                    "D:/result/model_gen4_4.cas.h5",
+                    "D:/result/model_gen4_4.dat.h5",
+                }
+
+        assert check_step_output_exists(
+            4,
+            "solver",
+            "",
+            "",
+            {
+                "flag_dir": "D:/flags",
+                "msh_dir": "D:/msh",
+                "scdoc_dir": "D:/scdoc",
+                "result_dir": "D:/result",
+            },
+            _SSH(),
+            remote_check_timeout=7,
+            quiet=True,
+        ) is True
 
     def test_remote_output_check_treats_meshing_error_flag_as_terminal(self):
         """Meshing .error flag 应被视为终结输出，避免恢复时重复启动。"""

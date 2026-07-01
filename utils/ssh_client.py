@@ -308,6 +308,7 @@ class RemoteWorkstation:
         remote_path: str,
         *,
         timeout: float | None = None,
+        quiet: bool = False,
     ) -> int | None:
         """返回远程文件大小；连接/探测异常时返回 None，文件不存在时抛 FileNotFoundError。"""
         if not self.ensure_connected():
@@ -319,7 +320,8 @@ class RemoteWorkstation:
         except FileNotFoundError:
             raise
         except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
-            logger.warning(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
+            log = logger.debug if quiet else logger.warning
+            log(f"[SSH] 获取远程文件大小异常: {remote_path}: {e}")
             return None
 
     def read_remote_text_file(
@@ -398,6 +400,7 @@ class RemoteWorkstation:
         remote_path: str,
         *,
         timeout: float | None = None,
+        quiet: bool = False,
     ) -> bool:
         """检查远程文件是否存在。"""
         if not self.ensure_connected():
@@ -410,7 +413,8 @@ class RemoteWorkstation:
         except FileNotFoundError:
             return False
         except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
-            logger.warning(f"[SSH] 检查远程文件异常: {remote_path}: {e}")
+            log = logger.debug if quiet else logger.warning
+            log(f"[SSH] 检查远程文件异常: {remote_path}: {e}")
             return False
 
     def delete_remote_file(self, remote_path: str) -> bool:
@@ -770,7 +774,7 @@ class RemoteWorkstation:
         pid_file = self._task_pid_files.pop(task_name, None)
         try:
             if pid_file:
-                pid = self._read_remote_pid_file(pid_file)
+                pid = self._read_remote_pid_file(pid_file, quiet=True)
                 if pid is not None:
                     kill_cmd = f"taskkill /PID {pid} /T /F"
                     out, err, kill_code = self.exec_command(kill_cmd, timeout=60)
@@ -898,7 +902,7 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 清理远程任务条目异常 {task_name}: {e}")
             return False
 
-    def read_remote_pid_file(self, pid_file: str) -> int | None:
+    def read_remote_pid_file(self, pid_file: str, *, quiet: bool = False) -> int | None:
         """读取远程 wrapper 记录的子进程 PID（公共接口）。
 
         供 RemoteExecutor 等外部模块在需要验证远程进程存活时调用，
@@ -910,14 +914,15 @@ class RemoteWorkstation:
         Returns:
             解析到的 PID 整数；无法读取或格式无效时返回 None
         """
-        return self._read_remote_pid_file(pid_file)
+        return self._read_remote_pid_file(pid_file, quiet=quiet)
 
-    def _read_remote_pid_file(self, pid_file: str) -> int | None:
+    def _read_remote_pid_file(self, pid_file: str, *, quiet: bool = False) -> int | None:
         """读取远程 wrapper 记录的子进程 PID。"""
         cmd_pid_file = pid_file.replace("/", "\\")
         out, err, code = self.exec_command(f'cmd /c type "{cmd_pid_file}"', timeout=15)
         if code != 0:
-            logger.warning(f"[SSH] 读取远程任务 PID 失败: {pid_file}: {err or out}")
+            log = logger.debug if quiet else logger.warning
+            log(f"[SSH] 读取远程任务 PID 失败: {pid_file}: {err or out}")
             return None
         cleaned = out.replace("\x00", "").replace("\ufeff", "").strip()
         match = re.search(r"\b\d+\b", cleaned)

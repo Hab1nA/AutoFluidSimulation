@@ -477,10 +477,6 @@ class BarrierCoordinator:
             logger.warning("Solver 分发前检测到停止标志，取消分发")
             return False
 
-        logger.info("=" * 60)
-        logger.info("开始按工作站调度仿真求解任务...")
-        logger.info("=" * 60)
-
         allowed_snapshot = (
             set(allowed_workstations)
             if allowed_workstations is not None
@@ -513,6 +509,10 @@ class BarrierCoordinator:
                 if self._next_solver_config(workstation_scope) is None:
                     continue
 
+                if not started_any:
+                    logger.info("=" * 60)
+                    logger.info("开始按工作站调度仿真求解任务...")
+                    logger.info("=" * 60)
                 t = threading.Thread(
                     target=self._solver_dispatch_loop,
                     args=(workstation_scope,),

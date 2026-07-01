@@ -693,6 +693,24 @@ def test_kill_remote_task_kills_recorded_child_pid():
     assert deleted == [r"D:/flags/autofluid_bg_job.pid"]
 
 
+def test_kill_remote_task_quietly_handles_missing_recorded_pid(caplog):
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    host._task_pid_files["AutoFluid_done"] = r"D:/flags/autofluid_bg_done.pid"
+
+    def fake_exec(command: str, timeout: int = 30):
+        if command == r'cmd /c type "D:\flags\autofluid_bg_done.pid"':
+            return "", "The system cannot find the file specified.", 1
+        return "", "", 0
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=fake_exec):
+            with patch.object(host, "delete_remote_file", return_value=True):
+                with caplog.at_level("WARNING"):
+                    assert host.kill_remote_task("AutoFluid_done") is True
+
+    assert not any("读取远程任务 PID 失败" in record.getMessage() for record in caplog.records)
+
+
 def test_cleanup_remote_task_entry_deletes_task_without_reading_pid():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
     calls: list[tuple[str, int]] = []
@@ -899,6 +917,64 @@ def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
     assert timeouts == [11, None]
 
 
+def test_get_remote_file_size_quiet_suppresses_warning_on_probe_timeout(caplog):
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Channel:
+        def settimeout(self, timeout):
+            pass
+
+    class _SFTP:
+        channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            raise socket.timeout()
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with caplog.at_level("WARNING"):
+            assert host.get_remote_file_size(
+                "D:/remote/model_gen4_1032.csv",
+                timeout=5,
+                quiet=True,
+            ) is None
+
+    assert not any("获取远程文件大小异常" in record.getMessage() for record in caplog.records)
+
+
+def test_check_remote_file_quiet_suppresses_warning_on_probe_timeout(caplog):
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    class _Channel:
+        def settimeout(self, timeout):
+            pass
+
+    class _SFTP:
+        channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            raise socket.timeout()
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with caplog.at_level("WARNING"):
+            assert host.check_remote_file(
+                "D:/flags/solver_done_1070.txt",
+                timeout=5,
+                quiet=True,
+            ) is False
+
+    assert not any("检查远程文件异常" in record.getMessage() for record in caplog.records)
+
+
 def test_get_remote_file_size_raises_when_remote_file_is_missing():
     host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
 
@@ -920,6 +996,24 @@ def test_get_remote_file_size_raises_when_remote_file_is_missing():
     with patch.object(host, "ensure_connected", return_value=True):
         with pytest.raises(FileNotFoundError):
             host.get_remote_file_size("D:/remote/missing.scdoc", timeout=11)
+
+
+def test_read_remote_pid_file_quiet_suppresses_missing_pid_warning(caplog):
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+
+    def _exec_command(command: str, timeout: int = 15):
+        assert command == 'cmd /c type "D:\\flags\\autofluid_bg_done.pid"'
+        return "", "The system cannot find the file specified.", 1
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        with patch.object(host, "exec_command", side_effect=_exec_command):
+            with caplog.at_level("WARNING"):
+                assert host.read_remote_pid_file(
+                    "D:/flags/autofluid_bg_done.pid",
+                    quiet=True,
+                ) is None
+
+    assert not any("读取远程任务 PID 失败" in record.getMessage() for record in caplog.records)
 
 
 def test_read_remote_text_file_applies_timeout_and_decodes_utf8():

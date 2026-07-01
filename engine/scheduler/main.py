@@ -817,7 +817,7 @@ class PipelineScheduler:
             except Exception:
                 pass
         return check_step_output_exists(
-            cn, step, step_dir, scdoc_dir, remote_config, ssh
+            cn, step, step_dir, scdoc_dir, remote_config, ssh, quiet=True
         )
 
     def _completed_step_output_exists(
@@ -879,13 +879,20 @@ class PipelineScheduler:
             remote_path = f"{remote_dir}/{filename}"
             try:
                 if hasattr(ssh, "get_remote_file_size"):
-                    size = ssh.get_remote_file_size(remote_path, timeout=5.0)
+                    try:
+                        size = ssh.get_remote_file_size(
+                            remote_path,
+                            timeout=5.0,
+                            quiet=True,
+                        )
+                    except TypeError:
+                        size = ssh.get_remote_file_size(remote_path, timeout=5.0)
                     if size is None:
                         return None
                     if size <= 0:
                         return False
                     continue
-                if not ssh.check_remote_file(remote_path, timeout=5.0):
+                if not ssh.check_remote_file(remote_path, timeout=5.0, quiet=True):
                     return False
             except TypeError:
                 if not ssh.check_remote_file(remote_path):
@@ -935,14 +942,21 @@ class PipelineScheduler:
         for remote_path in candidates:
             try:
                 if hasattr(ssh, "get_remote_file_size"):
-                    size = ssh.get_remote_file_size(remote_path, timeout=5.0)
+                    try:
+                        size = ssh.get_remote_file_size(
+                            remote_path,
+                            timeout=5.0,
+                            quiet=True,
+                        )
+                    except TypeError:
+                        size = ssh.get_remote_file_size(remote_path, timeout=5.0)
                     if size is None:
                         saw_unknown = True
                         continue
                     if size > 0:
                         return True
                     continue
-                if ssh.check_remote_file(remote_path, timeout=5.0):
+                if ssh.check_remote_file(remote_path, timeout=5.0, quiet=True):
                     return True
             except TypeError:
                 if ssh.check_remote_file(remote_path):

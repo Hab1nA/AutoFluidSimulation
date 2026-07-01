@@ -466,7 +466,15 @@ class SWPhaseHandler:
                 if step in ("transfer", "meshing", "solver", "postprocess") and ssh is None:
                     continue
 
-                if check_step_output_exists(cn, step, step_dir, scdoc_dir, REMOTE_CONFIG, ssh):
+                if check_step_output_exists(
+                    cn,
+                    step,
+                    step_dir,
+                    scdoc_dir,
+                    REMOTE_CONFIG,
+                    ssh,
+                    quiet=True,
+                ):
                     self.state.set_step_status(cn, step, STATUS_COMPLETED)
                     skipped_count += 1
 

@@ -1279,6 +1279,50 @@ def test_query_remote_task_status_returns_running_when_task_entry_missing_but_pi
     assert commands == ['tasklist /FI "PID eq 4321" /FO CSV /NH']
 
 
+def test_query_remote_task_status_returns_completed_when_solver_outputs_exist(monkeypatch):
+    state = _StateRecorder()
+    state.remote_tasks[(2, "solver")] = {
+        "config_name": 2,
+        "step_name": "solver",
+        "task_name": "AutoFluid_solver_outputs",
+        "flag_file": "D:/flags/solver_done_2.txt",
+        "error_flag_file": "D:/flags/solver_done_2.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_solver_outputs.pid",
+        "started_at": 100.0,
+    }
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", "D:/case")
+    checked: list[tuple[str, bool | None]] = []
+
+    class _SSH:
+        def check_remote_file(
+            self,
+            remote_path: str,
+            *,
+            quiet: bool | None = None,
+        ) -> bool:
+            checked.append((remote_path, quiet))
+            return remote_path in {
+                "D:/case/model_gen4_2.cas.h5",
+                "D:/case/model_gen4_2.dat.h5",
+            }
+
+        def read_remote_pid_file(self, pid_file: str, *, quiet: bool = False) -> int:
+            raise AssertionError("completed outputs should avoid PID probing")
+
+        def exec_command(self, command: str, timeout: int = 30):
+            raise AssertionError(command)
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+
+    assert executor.query_remote_task_status(2, "solver") == "completed"
+    assert checked == [
+        ("D:/flags/solver_done_2.txt.error", True),
+        ("D:/flags/solver_done_2.txt", True),
+        ("D:/case/model_gen4_2.cas.h5", True),
+        ("D:/case/model_gen4_2.dat.h5", True),
+    ]
+
+
 def test_query_remote_task_status_returns_unknown_for_orphaned_solver_progress(monkeypatch):
     state = _StateRecorder()
     state.remote_tasks[(2, "solver")] = {

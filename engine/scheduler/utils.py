@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import time
 import threading
-from typing import Any
+from typing import Any, cast
 
 from engine.config import get_step_filename, STATUS_PAUSED
 from utils.logger import setup_logger
@@ -180,6 +180,7 @@ def check_step_output_exists(
     remote_config: Any,
     ssh: Any | None = None,
     remote_check_timeout: float | None = None,
+    quiet: bool = False,
 ) -> bool:
     """
     检查某构型某步骤的输出文件是否已存在。
@@ -196,6 +197,7 @@ def check_step_output_exists(
         remote_config: 远程配置字典（需含 scdoc_dir/flag_dir/msh_dir/result_dir）
         ssh: 可选的 SSH 连接对象（需有 check_remote_file 方法）
         remote_check_timeout: 远程 SFTP stat 检查超时（秒）
+        quiet: 预期探测失败时是否降低 SSH helper 日志等级
 
     Returns:
         True 表示输出文件已存在且大小 > 0
@@ -227,12 +229,50 @@ def check_step_output_exists(
         return False
 
     def _check_remote_file(remote_path: str) -> bool:
-        if remote_check_timeout is None:
-            return bool(ssh.check_remote_file(remote_path))
         try:
-            return bool(ssh.check_remote_file(remote_path, timeout=remote_check_timeout))
+            if remote_check_timeout is None:
+                return bool(ssh.check_remote_file(remote_path, quiet=quiet))
+            return bool(
+                ssh.check_remote_file(
+                    remote_path,
+                    timeout=remote_check_timeout,
+                    quiet=quiet,
+                )
+            )
         except TypeError:
-            return bool(ssh.check_remote_file(remote_path))
+            if remote_check_timeout is None:
+                return bool(ssh.check_remote_file(remote_path))
+            try:
+                return bool(ssh.check_remote_file(remote_path, timeout=remote_check_timeout))
+            except TypeError:
+                return bool(ssh.check_remote_file(remote_path))
+
+    def _get_remote_file_size(remote_path: str) -> int | None:
+        if remote_check_timeout is None:
+            try:
+                return cast(int | None, ssh.get_remote_file_size(remote_path, quiet=quiet))
+            except TypeError:
+                return cast(int | None, ssh.get_remote_file_size(remote_path))
+        try:
+            return cast(
+                int | None,
+                ssh.get_remote_file_size(
+                    remote_path,
+                    timeout=remote_check_timeout,
+                    quiet=quiet,
+                ),
+            )
+        except TypeError:
+            try:
+                return cast(
+                    int | None,
+                    ssh.get_remote_file_size(
+                        remote_path,
+                        timeout=remote_check_timeout,
+                    ),
+                )
+            except TypeError:
+                return cast(int | None, ssh.get_remote_file_size(remote_path))
 
     if step_name == "transfer":
         filename = get_step_filename("sc", config_name)
@@ -242,16 +282,7 @@ def check_step_output_exists(
         remote_scdoc = f"{scdoc_dir}/{filename}"
         try:
             if hasattr(ssh, "get_remote_file_size"):
-                if remote_check_timeout is None:
-                    size = ssh.get_remote_file_size(remote_scdoc)
-                else:
-                    try:
-                        size = ssh.get_remote_file_size(
-                            remote_scdoc,
-                            timeout=remote_check_timeout,
-                        )
-                    except TypeError:
-                        size = ssh.get_remote_file_size(remote_scdoc)
+                size = _get_remote_file_size(remote_scdoc)
                 return size is not None and size > 0
             return _check_remote_file(remote_scdoc)
         except Exception:
@@ -282,10 +313,13 @@ def check_step_output_exists(
         cas_file = f"{result_dir}/{cas_name}" if cas_name else None
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
         try:
-            if _check_remote_file(flag_file) or _check_remote_file(error_flag):
+            if _check_remote_file(error_flag):
                 return True
+            flag_exists = _check_remote_file(flag_file)
             cas_exists = cas_file is not None and _check_remote_file(cas_file)
             dat_exists = dat_file is not None and _check_remote_file(dat_file)
+            if flag_exists and not (cas_exists and dat_exists):
+                return False
             return cas_exists and dat_exists
         except Exception:
             return False
