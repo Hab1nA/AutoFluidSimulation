@@ -697,6 +697,66 @@ class PipelineScheduler:
                         break
 
                 if status == STATUS_PAUSED:
+                    if step in ("solver", "postprocess"):
+                        remote_executor = self.runner.get_remote_executor()
+                        workstation_id = self._workstation_for_config(cn)
+                        try:
+                            remote_status = remote_executor.query_remote_task_status(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
+                        except InfrastructureUnavailableError as e:
+                            logger.warning(
+                                "%s 构型%s %s 查询远程状态时基础设施不可用: %s",
+                                log_prefix,
+                                cn,
+                                step,
+                                e,
+                            )
+                            break
+                        if remote_status == "running":
+                            self.state.set_step_status(cn, step, STATUS_RUNNING)
+                            logger.warning(
+                                f"{log_prefix} 构型{cn} [{step}] 状态=Paused，"
+                                "远程状态=running，恢复为 Running 并跳过重启"
+                            )
+                            break
+                        if remote_status == "completed":
+                            self.state.set_step_status(cn, step, STATUS_COMPLETED)
+                            if step == "solver":
+                                if not self.runner.register_postprocess_from_solver(cn):
+                                    self.state.set_step_status(
+                                        cn,
+                                        "postprocess",
+                                        STATUS_ERROR,
+                                        "无法接管远程 Solver 任务进行后处理",
+                                    )
+                                    break
+                                self.state.set_step_status(cn, "postprocess", STATUS_RUNNING)
+                            remote_executor.forget_remote_task(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
+                            continue
+                        if remote_status == "failed":
+                            self.state.set_step_status(
+                                cn,
+                                step,
+                                STATUS_ERROR,
+                                f"远程 {step} 任务失败",
+                            )
+                            remote_executor.forget_remote_task(
+                                cn,
+                                step,
+                                workstation_id=workstation_id,
+                            )
+                            break
+                        if remote_status == "unknown":
+                            self._record_unknown_remote_status(cn, step, log_prefix)
+                            break
+
                     if self._check_step_output_exists(cn, step, step_dir, scdoc_dir):
                         self.state.set_step_status(cn, step, STATUS_COMPLETED)
                         self._forget_completed_remote_task_if_tracked(cn, step)

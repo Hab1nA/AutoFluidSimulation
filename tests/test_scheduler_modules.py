@@ -2175,6 +2175,78 @@ class TestPipelineSchedulerStartRecovery:
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
         assert self.runner._remote_executor._forgotten_remote_tasks == [(1, "solver", "default")]
 
+    def test_resume_scan_paused_remote_solver_running_marks_running_without_restart(self):
+        """Paused Solver 远端仍运行时应回写 Running，避免 UI/DB 卡在 Paused。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_PAUSED, "引擎已停止")
+        self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True, meshing=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "solver", "default")
+        ]
+        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.runner._remote_executor._forgotten_remote_tasks == []
+        assert self.runner._solver_dispatched == []
+
+    def test_resume_scan_paused_remote_postprocess_running_marks_running(self):
+        """Paused PostProcess 远端仍运行时应回写 Running，避免状态卡在 Paused。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_PAUSED, "引擎已停止")
+        self.runner._remote_executor._remote_task_status = "running"
+        self._record_remote_outputs(1, transfer=True, meshing=True, solver=True)
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "postprocess", "default")
+        ]
+        assert self.state.get_step_status(1, "postprocess") == STATUS_RUNNING
+        assert self.runner._remote_executor._forgotten_remote_tasks == []
+
+    def test_resume_scan_paused_remote_solver_completed_hands_off_postprocess(self):
+        """Paused Solver 远端已完成时应接管后处理，不重新启动 Solver。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_PAUSED, "引擎已停止")
+        self._record_remote_outputs(1, transfer=True, meshing=True)
+
+        def query_remote_task_status(
+            config_name: int,
+            step_name: str,
+            workstation_id: str = "default",
+        ) -> str:
+            self.runner._remote_executor._remote_task_status_checks.append(
+                (config_name, step_name, workstation_id)
+            )
+            if step_name == "solver":
+                return "completed"
+            return "running"
+
+        self.runner._remote_executor.query_remote_task_status = query_remote_task_status
+
+        self.scheduler._resume_paused_steps(log_prefix="[Test]")
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "solver", "default"),
+            (1, "postprocess", "default"),
+        ]
+        assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
+        assert self.state.get_step_status(1, "postprocess") == STATUS_RUNNING
+        assert self.runner._remote_executor._postprocess_handoffs == [(1, "default")]
+        assert self.runner._remote_executor._remote_task_events[:2] == [
+            ("handoff", 1, "postprocess", "default"),
+            ("forget", 1, "solver", "default"),
+        ]
+        assert self.runner._solver_dispatched == []
+
     def test_resume_scan_completed_config_forgets_stale_remote_tasks(self):
         """全步骤 Completed 但仍有远程任务元数据时应清理残留记录。"""
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
@@ -5317,6 +5389,15 @@ class TestBarrierCoordinator:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
         self.state.set_step_status(1, "solver", STATUS_PAUSED)
         self.runner._remote_executor._remote_task_status = "running"
+        observed_statuses: list[str] = []
+
+        def wait_solver_completion(config_name: int, paused_event=None, stopped_event=None) -> bool:
+            self.runner._solver_wait_count += 1
+            observed_statuses.append(self.state.get_step_status(config_name, "solver"))
+            self.state.set_step_status(config_name, "solver", STATUS_COMPLETED)
+            return True
+
+        self.runner.wait_solver_completion = wait_solver_completion
 
         assert self.coordinator.dispatch_solver_if_ready() is True
         self.coordinator.join_solver_threads(timeout=5)
@@ -5324,6 +5405,7 @@ class TestBarrierCoordinator:
         assert self.runner._remote_executor._remote_task_status_checks == [(1, "solver", "default")]
         assert self.runner._solver_dispatched == []
         assert self.runner._solver_wait_count == 1
+        assert observed_statuses == [STATUS_RUNNING]
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 
     def test_running_solver_completed_hands_off_postprocess_before_forget(self):
@@ -5352,6 +5434,38 @@ class TestBarrierCoordinator:
             "WS-A",
         )
         assert self.runner._postprocess_dispatched == []
+        assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
+
+    def test_paused_postprocess_with_remote_task_recovers_running_status(self):
+        """Paused PostProcess 远端仍运行时屏障调度应回写 Running 并恢复轮询。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing", "solver"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "postprocess", STATUS_PAUSED)
+        self.runner._remote_executor._remote_task_status = "running"
+        observed_statuses: list[str] = []
+
+        def wait_postprocess_completion(
+            config_name: int,
+            paused_event=None,
+            stopped_event=None,
+        ) -> bool:
+            self.runner._postprocess_wait_count += 1
+            observed_statuses.append(self.state.get_step_status(config_name, "postprocess"))
+            self.state.set_step_status(config_name, "postprocess", STATUS_COMPLETED)
+            return True
+
+        self.runner.wait_postprocess_completion = wait_postprocess_completion
+
+        assert self.coordinator.dispatch_solver_if_ready() is True
+        self.coordinator.join_solver_threads(timeout=5)
+
+        assert self.runner._remote_executor._remote_task_status_checks == [
+            (1, "postprocess", "default")
+        ]
+        assert self.runner._postprocess_dispatched == []
+        assert self.runner._postprocess_wait_count == 1
+        assert observed_statuses == [STATUS_RUNNING]
         assert self.state.get_step_status(1, "postprocess") == STATUS_COMPLETED
 
     def test_running_solver_remote_recovery_uses_assigned_workstation(self):

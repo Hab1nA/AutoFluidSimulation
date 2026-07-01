@@ -722,6 +722,7 @@ class BarrierCoordinator:
                 return True
             if remote_status == "running":
                 logger.info(f"[Solver] 构型{config_name} 远程任务仍在运行，恢复轮询")
+                self.state.set_step_status(config_name, "solver", STATUS_RUNNING)
                 self._wait_for_solver_completion(config_name)
                 if self._is_stale_step_result(config_name, "solver", generation):
                     self._discard_stale_step_result(config_name, "solver")
@@ -846,6 +847,7 @@ class BarrierCoordinator:
                 return
             if remote_status == "running":
                 logger.info(f"[PostProcess] 构型{config_name} 远程任务仍在运行，恢复轮询")
+                self.state.set_step_status(config_name, "postprocess", STATUS_RUNNING)
                 self._wait_for_postprocess_completion(config_name)
                 return
             if remote_status == "unknown":

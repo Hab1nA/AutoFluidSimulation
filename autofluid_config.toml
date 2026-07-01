@@ -147,8 +147,7 @@ meshing_timeout = 7200
 meshing_processor_count = 16
 
 [solver]
-solver_timeout = 28800
-solver_startup_timeout = 1800
+solver_timeout = 54000
 solver_processor_count = 127
 solver_iteration_count = 1000
 
