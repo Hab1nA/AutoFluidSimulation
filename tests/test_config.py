@@ -142,7 +142,7 @@ print(json.dumps({
         assert snapshot["operation_timeouts"]["sc_gui_stable_delay"] == 5
         assert snapshot["engine_config"]["meshing_timeout"] == 7200
         assert snapshot["engine_config"]["solver_timeout"] == 28800
-        assert snapshot["engine_config"]["solver_startup_timeout"] == 900
+        assert snapshot["engine_config"]["solver_startup_timeout"] == 1800
         assert snapshot["engine_config"]["postprocess_timeout"] == 14400
 
 

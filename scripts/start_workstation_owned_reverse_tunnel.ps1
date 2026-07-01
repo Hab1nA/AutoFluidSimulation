@@ -15,7 +15,7 @@ param(
     [int]$ProbeIntervalSeconds = 5,
     [int]$RemoteProbeFailureThreshold = 3,
     [int]$LogRepeatSeconds = 60,
-    [int]$SshCommandTimeoutSeconds = 15
+    [int]$SshCommandTimeoutSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -220,40 +220,60 @@ function Test-RemoteTunnelEndpoint {
     }
 }
 
+function ConvertTo-WindowsCommandArgument {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    return '"' + $Value.Replace('"', '\"') + '"'
+}
+
 function Invoke-OwnedTunnelSshCommand {
     param(
         [string]$SshExe,
         [string[]]$Arguments,
         [int]$TimeoutSeconds = $SshCommandTimeoutSeconds
     )
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
     $process = $null
     try {
-        $process = Start-Process -FilePath $SshExe `
-            -ArgumentList $Arguments `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath `
-            -PassThru
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $SshExe
+        $startInfo.Arguments = ($Arguments | ForEach-Object { ConvertTo-WindowsCommandArgument -Value $_ }) -join " "
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        [void]$process.Start()
         if (-not $process.WaitForExit([Math]::Max(1, $TimeoutSeconds) * 1000)) {
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            try {
+                $process.Kill()
+            }
+            catch {
+            }
             return @{
                 ExitCode = 124
                 TimedOut = $true
-                Stdout = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-                Stderr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+                Stdout = ""
+                Stderr = ""
             }
         }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
         return @{
             ExitCode = $process.ExitCode
             TimedOut = $false
-            Stdout = (Get-Content -LiteralPath $stdoutPath -Raw -ErrorAction SilentlyContinue)
-            Stderr = (Get-Content -LiteralPath $stderrPath -Raw -ErrorAction SilentlyContinue)
+            Stdout = $stdout
+            Stderr = $stderr
         }
     }
     finally {
-        Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
     }
 }
 
@@ -302,9 +322,6 @@ function Wait-RemoteTunnelEndpoint {
         $probeStatus = Test-RemoteTunnelEndpoint -SshExe $SshExe
         if ($probeStatus -eq "ready") {
             return "ready"
-        }
-        if ($probeStatus -eq "remote-probe-timeout") {
-            return "startup-probe-timeout"
         }
         Start-Sleep -Seconds $ProbeIntervalSeconds
     }
@@ -492,7 +509,7 @@ function Start-OwnedTunnelMonitor {
             $startupStatus = Wait-RemoteTunnelEndpoint `
                 -SshExe $sshExe `
                 -SshProcess $sshProcess `
-                -TimeoutSeconds ([Math]::Max(30, $RestartDelaySeconds * 6))
+                -TimeoutSeconds ([Math]::Max(60, [Math]::Max($RestartDelaySeconds * 6, $SshCommandTimeoutSeconds * 2)))
             if ($startupStatus -eq "ready") {
                 Reset-TunnelFailureBudget -FailureState $failureState
                 Write-OwnedTunnelStatus -State "ready" -LastReason "" -SshProcess $sshProcess

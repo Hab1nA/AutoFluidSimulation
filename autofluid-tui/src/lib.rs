@@ -1097,10 +1097,9 @@ fn run_worker_lifecycle_action(
             worker.stop_workers_for_project(Some(project_dir), log_buffer)
         }
         WorkerLifecycleAction::Restart => {
-            stop_remote_workers_in_background(ipc_host, ipc_port, log_buffer);
             let stopped = worker.stop_workers_for_project(Some(project_dir), log_buffer);
             let started =
-                start_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer);
+                restart_workers_in_background(project_dir, ipc_host, ipc_port, worker, log_buffer);
             stopped && started
         }
     }
@@ -1115,6 +1114,18 @@ fn start_workers_in_background(
 ) -> bool {
     worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
         prepare_remote_workers_in_background(ipc_host, ipc_port, buffer)
+    })
+}
+
+fn restart_workers_in_background(
+    project_dir: &str,
+    ipc_host: &str,
+    ipc_port: u16,
+    worker: &mut worker_mgr::WorkerManager,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    worker.start_workers_with_prepare(project_dir, log_buffer, |buffer| {
+        restart_remote_workers_in_background(ipc_host, ipc_port, buffer)
     })
 }
 
@@ -1134,6 +1145,52 @@ fn prepare_remote_workers_in_background(
                     let ok = worker_mgr::prepare_remote_workers(&mut ipc, &rt, log_buffer);
                     rt.block_on(ipc.disconnect());
                     ok
+                }
+                Err(e) => {
+                    log_buffer.push_info(format!("❌ Worker 后台任务连接后台引擎失败: {}", e));
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            log_buffer.push_info(format!("❌ Worker 后台任务创建运行时失败: {}", e));
+            false
+        }
+    }
+}
+
+fn restart_remote_workers_in_background(
+    ipc_host: &str,
+    ipc_port: u16,
+    log_buffer: &mut LogBuffer,
+) -> bool {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => {
+            let mut ipc = IpcClient::new(Some(ipc_host), Some(ipc_port));
+            match rt.block_on(ipc.connect()) {
+                Ok(()) => {
+                    let result = rt.block_on(async {
+                        let result = ipc.worker_restart().await;
+                        ipc.disconnect().await;
+                        result
+                    });
+                    match result {
+                        Ok(resp) if resp.is_ok() => {
+                            log_buffer.push_info(format!("✅ {}", resp.message));
+                            true
+                        }
+                        Ok(resp) => {
+                            log_buffer.push_info(format!("❌ {}", resp.message));
+                            false
+                        }
+                        Err(e) => {
+                            log_buffer.push_info(format!("❌ 通信失败: {}", e));
+                            false
+                        }
+                    }
                 }
                 Err(e) => {
                     log_buffer.push_info(format!("❌ Worker 后台任务连接后台引擎失败: {}", e));
@@ -2455,6 +2512,38 @@ mod tests {
         assert!(
             !restart_arm.contains("start_workers_with_prepare"),
             "worker restart must not run the blocking startup chain on the TUI event loop"
+        );
+    }
+
+    #[test]
+    fn worker_restart_uses_daemon_restart_not_plain_stop() {
+        let source = include_str!("lib.rs");
+        let restart_arm = source
+            .split("WorkerLifecycleAction::Restart => {")
+            .nth(1)
+            .expect("worker restart lifecycle arm should exist")
+            .split("}")
+            .next()
+            .expect("worker restart lifecycle arm should end");
+
+        assert!(
+            restart_arm.contains("restart_workers_in_background"),
+            "worker restart should use the restart-specific startup path"
+        );
+        assert!(
+            !restart_arm.contains("stop_remote_workers_in_background"),
+            "worker restart must not send plain worker_stop because that clears remote task records"
+        );
+        let restart_helper = source
+            .split("fn restart_workers_in_background(")
+            .nth(1)
+            .expect("worker restart helper should exist")
+            .split("fn prepare_remote_workers_in_background(")
+            .next()
+            .expect("worker restart helper should end before regular start helper");
+        assert!(
+            restart_helper.contains("restart_remote_workers_in_background"),
+            "worker restart should ask daemon to run worker_restart so remote task records are preserved"
         );
     }
 

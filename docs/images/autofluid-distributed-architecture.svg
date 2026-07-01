@@ -1,0 +1,239 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200" role="img" aria-labelledby="title desc">
+  <title id="title">AutoFluidSimulation 分布式仿真流水线架构</title>
+  <desc id="desc">以 ocar Linux 服务器 daemon 为中心的分布式仿真流水线架构图，展示本机 Windows PC、移动端通知、四台 Windows 工作站之间的交互。</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,3 L0,6 Z" fill="#16a34a"/>
+    </marker>
+    <style>
+      .bg { fill: #ffffff; }
+      .title { font: 700 42px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .caption { font: 500 22px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #1f2937; }
+      .col-title { font: 700 30px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; }
+      .panel-title { font: 700 26px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; }
+      .box-title { font: 700 21px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; }
+      .text { font: 500 18px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .small { font: 500 15px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .tiny { font: 500 12px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #111827; }
+      .arrow-label { font: 600 13px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #1d4ed8; }
+      .green-label { font: 600 13px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #15803d; }
+      .purple-label { font: 600 13px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #6d28d9; }
+      .left-panel { fill: #eff6ff; stroke: #1d4ed8; stroke-width: 2.2; rx: 10; }
+      .left-box { fill: #ffffff; stroke: #2563eb; stroke-width: 1.8; rx: 8; }
+      .server-panel { fill: #faf5ff; stroke: #7c3aed; stroke-width: 2.2; rx: 10; }
+      .server-box { fill: #ffffff; stroke: #7c3aed; stroke-width: 1.8; rx: 8; }
+      .ws-panel { fill: #eff6ff; stroke: #2563eb; stroke-width: 2.2; rx: 10; }
+      .ws-box { fill: #ffffff; stroke: #2563eb; stroke-width: 1.6; rx: 7; }
+      .mobile-panel { fill: #f0fdf4; stroke: #16a34a; stroke-width: 2.2; rx: 10; }
+      .mobile-box { fill: #ffffff; stroke: #16a34a; stroke-width: 1.7; rx: 8; }
+      .chip { fill: #eef2ff; stroke: #4f46e5; stroke-width: 1.4; rx: 8; }
+      .stage { fill: #fff7ed; stroke: #f97316; stroke-width: 1.4; rx: 7; }
+      .arrow-blue { stroke: #2563eb; stroke-width: 2.4; fill: none; marker-end: url(#arrow-blue); }
+      .arrow-purple { stroke: #7c3aed; stroke-width: 2.4; fill: none; marker-end: url(#arrow-purple); }
+      .arrow-green { stroke: #16a34a; stroke-width: 2.4; fill: none; marker-end: url(#arrow-green); }
+      .arrow-blue-dash { stroke: #2563eb; stroke-width: 2.2; fill: none; stroke-dasharray: 8 6; marker-end: url(#arrow-blue); }
+      .arrow-green-dash { stroke: #16a34a; stroke-width: 2.2; fill: none; stroke-dasharray: 8 6; marker-end: url(#arrow-green); }
+      .icon { font: 700 26px "Segoe UI Symbol", "Microsoft YaHei", sans-serif; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1200"/>
+  <text class="title" x="800" y="56" text-anchor="middle">AutoFluidSimulation 分布式仿真流水线架构</text>
+
+  <!-- Mobile notifications -->
+  <rect class="mobile-panel" x="790" y="86" width="350" height="110"/>
+  <text class="col-title" x="965" y="120" text-anchor="middle" fill="#15803d">移动端通知</text>
+  <rect class="mobile-box" x="825" y="138" width="130" height="42"/>
+  <text class="text" x="890" y="166" text-anchor="middle">QQBot</text>
+  <rect class="mobile-box" x="980" y="138" width="130" height="42"/>
+  <text class="text" x="1045" y="166" text-anchor="middle">微信</text>
+
+  <!-- Left column -->
+  <rect class="left-panel" x="28" y="210" width="310" height="835"/>
+  <text class="col-title" x="183" y="252" text-anchor="middle" fill="#1d4ed8">本机 Windows PC</text>
+
+  <rect class="left-box" x="52" y="285" width="262" height="220"/>
+  <text class="icon" x="78" y="326" fill="#1d4ed8">▣</text>
+  <text class="panel-title" x="181" y="326" text-anchor="middle" fill="#1d4ed8">前端界面</text>
+  <text class="text" x="75" y="368">• Rust TUI / IPC Client</text>
+  <text class="text" x="75" y="408">• 启动 / 暂停 / 检查 / 状态</text>
+  <text class="text" x="75" y="448">• 日志查看 / 设置编辑</text>
+
+  <rect class="left-box" x="52" y="640" width="262" height="300"/>
+  <text class="icon" x="76" y="683" fill="#1d4ed8">⚙</text>
+  <text class="panel-title" x="185" y="683" text-anchor="middle" fill="#1d4ed8">LocalWorker</text>
+  <text class="text" x="76" y="730">• 本地 worker</text>
+  <text class="text" x="76" y="770">• SolidWorks</text>
+  <text class="text" x="76" y="810">• SpaceClaim Bridge</text>
+  <text class="text" x="76" y="850">• SW / SC Windows-only 阶段</text>
+  <text class="text" x="76" y="890">• SCDOC 上传</text>
+
+  <!-- Server column -->
+  <rect class="server-panel" x="432" y="210" width="600" height="835"/>
+  <text class="col-title" x="732" y="252" text-anchor="middle" fill="#6d28d9">ocar Linux 服务器</text>
+
+  <rect class="server-box" x="456" y="285" width="552" height="425"/>
+  <text class="icon" x="585" y="329" fill="#6d28d9">⚙</text>
+  <text class="panel-title" x="748" y="329" text-anchor="middle" fill="#6d28d9">daemon 核心控制面</text>
+
+  <rect class="chip" x="482" y="360" width="154" height="54"/>
+  <text class="small" x="559" y="393" text-anchor="middle">PipelineDaemon</text>
+  <rect class="chip" x="646" y="360" width="154" height="54"/>
+  <text class="small" x="723" y="393" text-anchor="middle">IPCServer</text>
+  <rect class="chip" x="810" y="360" width="172" height="54"/>
+  <text class="small" x="896" y="383" text-anchor="middle">StateManager</text>
+  <text class="small" x="896" y="402" text-anchor="middle">SQLite</text>
+
+  <rect class="chip" x="482" y="430" width="154" height="54"/>
+  <text class="small" x="559" y="463" text-anchor="middle">PipelineScheduler</text>
+  <rect class="chip" x="646" y="430" width="154" height="54"/>
+  <text class="small" x="723" y="463" text-anchor="middle">TaskRunner</text>
+  <rect class="chip" x="810" y="430" width="172" height="54"/>
+  <text class="small" x="896" y="463" text-anchor="middle">RemoteExecutor</text>
+
+  <rect class="chip" x="482" y="500" width="220" height="54"/>
+  <text class="small" x="592" y="533" text-anchor="middle">服务器侧 SCDOC 缓存</text>
+  <rect class="chip" x="720" y="500" width="262" height="54"/>
+  <text class="small" x="851" y="533" text-anchor="middle">日志广播缓冲区</text>
+
+  <rect class="stage" x="482" y="585" width="50" height="70"/>
+  <text class="box-title" x="507" y="628" text-anchor="middle">SW</text>
+  <text class="text" x="538" y="628">→</text>
+  <rect class="stage" x="557" y="585" width="50" height="70"/>
+  <text class="box-title" x="582" y="628" text-anchor="middle">SC</text>
+  <text class="text" x="613" y="628">→</text>
+  <rect class="stage" x="632" y="585" width="80" height="70"/>
+  <text class="box-title" x="672" y="628" text-anchor="middle">Transfer</text>
+  <text class="text" x="718" y="628">→</text>
+  <rect class="stage" x="737" y="585" width="80" height="70"/>
+  <text class="box-title" x="777" y="628" text-anchor="middle">Meshing</text>
+  <text class="text" x="823" y="628">→</text>
+  <rect class="stage" x="842" y="585" width="60" height="70"/>
+  <text class="small" x="872" y="628" text-anchor="middle">Solver</text>
+  <text class="text" x="908" y="628">→</text>
+  <rect class="stage" x="927" y="585" width="82" height="70"/>
+  <text class="small" x="968" y="628" text-anchor="middle">PostProcess</text>
+
+  <rect class="server-box" x="456" y="755" width="552" height="140"/>
+  <text class="icon" x="580" y="800" fill="#6d28d9">⚠</text>
+  <text class="panel-title" x="740" y="800" text-anchor="middle" fill="#6d28d9">alert watcher</text>
+  <rect class="chip" x="482" y="820" width="150" height="50"/>
+  <text class="small" x="557" y="842" text-anchor="middle">WARNING+ 日志拉取</text>
+  <text class="small" x="557" y="861" text-anchor="middle">IPC 拉取</text>
+  <rect class="chip" x="650" y="820" width="150" height="50"/>
+  <text class="small" x="725" y="852" text-anchor="middle">指纹去重 / 冷却</text>
+  <rect class="chip" x="818" y="820" width="164" height="50"/>
+  <text class="small" x="900" y="852" text-anchor="middle">Webhook POST</text>
+
+  <rect class="server-box" x="456" y="925" width="552" height="95"/>
+  <text class="icon" x="590" y="980" fill="#6d28d9">↗</text>
+  <text class="panel-title" x="750" y="980" text-anchor="middle" fill="#6d28d9">OpenClaw 通知网关</text>
+  <text class="text" x="620" y="1007">会话路由 / 告警转发</text>
+
+  <!-- Workstation column -->
+  <rect class="ws-panel" x="1165" y="210" width="405" height="835"/>
+  <text class="col-title" x="1367" y="252" text-anchor="middle" fill="#1d4ed8">四台 Windows 工作站</text>
+  <text class="arrow-label" x="1368" y="285" text-anchor="middle">反向 SSH：2222 / 2224 / 2225 / 2226</text>
+
+  <g id="ws-a">
+    <rect class="ws-box" x="1190" y="310" width="355" height="150"/>
+    <rect class="chip" x="1205" y="326" width="75" height="34"/>
+    <text class="box-title" x="1242" y="350" text-anchor="middle" fill="#1d4ed8">WS-A</text>
+    <text class="tiny" x="1212" y="385">Reverse Tunnel Monitor</text>
+    <text class="tiny" x="1212" y="414">OpenSSH Server</text>
+    <text class="tiny" x="1212" y="443">schtasks wrapper</text>
+    <text class="tiny" x="1370" y="385">ANSYS Fluent / PyFluent</text>
+    <text class="tiny" x="1370" y="414">flag / log / pid</text>
+    <text class="tiny" x="1370" y="443">scdoc / msh / case / metrics</text>
+  </g>
+
+  <g id="ws-b">
+    <rect class="ws-box" x="1190" y="495" width="355" height="150"/>
+    <rect class="chip" x="1205" y="511" width="75" height="34"/>
+    <text class="box-title" x="1242" y="535" text-anchor="middle" fill="#1d4ed8">WS-B</text>
+    <text class="tiny" x="1212" y="570">Reverse Tunnel Monitor</text>
+    <text class="tiny" x="1212" y="599">OpenSSH Server</text>
+    <text class="tiny" x="1212" y="628">schtasks wrapper</text>
+    <text class="tiny" x="1370" y="570">ANSYS Fluent / PyFluent</text>
+    <text class="tiny" x="1370" y="599">flag / log / pid</text>
+    <text class="tiny" x="1370" y="628">scdoc / msh / case / metrics</text>
+  </g>
+
+  <g id="ws-c">
+    <rect class="ws-box" x="1190" y="680" width="355" height="150"/>
+    <rect class="chip" x="1205" y="696" width="75" height="34"/>
+    <text class="box-title" x="1242" y="720" text-anchor="middle" fill="#1d4ed8">WS-C</text>
+    <text class="tiny" x="1212" y="755">Reverse Tunnel Monitor</text>
+    <text class="tiny" x="1212" y="784">OpenSSH Server</text>
+    <text class="tiny" x="1212" y="813">schtasks wrapper</text>
+    <text class="tiny" x="1370" y="755">ANSYS Fluent / PyFluent</text>
+    <text class="tiny" x="1370" y="784">flag / log / pid</text>
+    <text class="tiny" x="1370" y="813">scdoc / msh / case / metrics</text>
+  </g>
+
+  <g id="ws-d">
+    <rect class="ws-box" x="1190" y="865" width="355" height="150"/>
+    <rect class="chip" x="1205" y="881" width="75" height="34"/>
+    <text class="box-title" x="1242" y="905" text-anchor="middle" fill="#1d4ed8">WS-D</text>
+    <text class="tiny" x="1212" y="940">Reverse Tunnel Monitor</text>
+    <text class="tiny" x="1212" y="969">OpenSSH Server</text>
+    <text class="tiny" x="1212" y="998">schtasks wrapper</text>
+    <text class="tiny" x="1370" y="940">ANSYS Fluent / PyFluent</text>
+    <text class="tiny" x="1370" y="969">flag / log / pid</text>
+    <text class="tiny" x="1370" y="998">scdoc / msh / case / metrics</text>
+  </g>
+
+  <!-- Cross-column arrows -->
+  <path class="arrow-blue" d="M314 390 L432 390"/>
+  <text class="arrow-label" x="374" y="350" text-anchor="middle">JSON IPC</text>
+  <text class="arrow-label" x="374" y="372" text-anchor="middle">控制 / 状态 / 日志</text>
+
+  <path class="arrow-blue" d="M314 760 L432 760"/>
+  <path class="arrow-blue" d="M432 815 L314 815"/>
+  <text class="arrow-label" x="373" y="720" text-anchor="middle">worker IPC</text>
+  <text class="arrow-label" x="373" y="742" text-anchor="middle">注册 / 心跳 / 轮询</text>
+  <text class="arrow-label" x="373" y="847" text-anchor="middle">SW/SC 任务 / 结果</text>
+
+  <path class="arrow-blue-dash" d="M314 930 C365 930, 380 930, 432 930"/>
+  <text class="arrow-label" x="374" y="895" text-anchor="middle">SSH 本地端口转发</text>
+  <text class="arrow-label" x="374" y="917" text-anchor="middle">19527 → 9527</text>
+
+  <path class="arrow-purple" d="M1008 455 C1065 455, 1095 455, 1165 455"/>
+  <text class="purple-label" x="1082" y="380" text-anchor="middle">SSH/SFTP</text>
+  <text class="purple-label" x="1082" y="402" text-anchor="middle">SCDOC / 脚本上传</text>
+  <text class="purple-label" x="1082" y="424" text-anchor="middle">schtasks / 状态 / 清理</text>
+
+  <path class="arrow-green-dash" d="M1165 575 C1095 575, 1065 575, 1008 575"/>
+  <text class="green-label" x="1115" y="602" text-anchor="middle">反向隧道维护</text>
+  <text class="green-label" x="1115" y="624" text-anchor="middle">done / error / log / pid 轮询</text>
+
+  <path class="arrow-purple" d="M732 710 L732 755"/>
+  <text class="purple-label" x="796" y="742">日志广播 / WARNING+</text>
+
+  <path class="arrow-purple" d="M732 895 L732 925"/>
+  <text class="purple-label" x="790" y="915">Webhook POST</text>
+
+  <path class="arrow-green" d="M1008 972 C1125 972, 1110 160, 980 160"/>
+  <text class="green-label" x="1098" y="195">移动端告警</text>
+
+  <path class="arrow-green" d="M965 196 L965 138"/>
+
+  <!-- Runtime warning sources -->
+  <rect class="server-box" x="1048" y="700" width="96" height="165"/>
+  <text class="tiny" x="1096" y="724" text-anchor="middle">告警来源</text>
+  <text class="tiny" x="1096" y="752" text-anchor="middle">daemon 日志</text>
+  <text class="tiny" x="1096" y="780" text-anchor="middle">SSH 隧道异常</text>
+  <text class="tiny" x="1096" y="808" text-anchor="middle">工作站断连</text>
+  <text class="tiny" x="1096" y="836" text-anchor="middle">远程任务失败</text>
+  <text class="tiny" x="1096" y="858" text-anchor="middle">Fluent 错误</text>
+
+  <text class="caption" x="800" y="1120" text-anchor="middle">
+    服务器 daemon 负责任务调度、状态恢复、远程执行和告警编排；本机提供交互与 Windows-only 建模能力；工作站运行 Fluent 网格、求解与后处理。
+  </text>
+</svg>

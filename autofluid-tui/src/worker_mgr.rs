@@ -307,6 +307,12 @@ impl WorkerManager {
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if workstation_tunnel_ensure_needs_readiness_wait(&stdout) {
+                    log_buffer.push_info(
+                        "⏳ 工作站自持有 SSH 隧道修复已触发，继续等待隧道就绪".to_string(),
+                    );
+                    return self.wait_for_workstation_owned_tunnels_ready(project_dir, log_buffer);
+                }
                 let detail = if stderr.is_empty() { stdout } else { stderr };
                 log::error!("工作站自持有 SSH 隧道检查/修复失败: {}", detail);
                 log_buffer.push_info(format!(
@@ -1398,6 +1404,36 @@ fn workstation_tunnel_results_all_ok(stdout: &str) -> Result<(), String> {
     } else {
         Err(format!("未成功工作站: {}", not_ready.join(", ")))
     }
+}
+
+fn workstation_tunnel_ensure_needs_readiness_wait(stdout: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return false;
+    };
+    let Some(results) = payload.get("results").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    let mut saw_pending_repair = false;
+    for result in results {
+        if result.get("ok").and_then(|value| value.as_bool()) == Some(true) {
+            continue;
+        }
+        let ensure_action = result
+            .get("ensure_action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let repair_ok = result
+            .get("repair_result")
+            .and_then(|value| value.get("ok"))
+            .and_then(|value| value.as_bool())
+            == Some(true);
+        if ensure_action == "repair_not_ready" && repair_ok {
+            saw_pending_repair = true;
+            continue;
+        }
+        return false;
+    }
+    saw_pending_repair
 }
 
 fn truncate_detail(value: &str, max_chars: usize) -> String {
@@ -2964,6 +3000,38 @@ mod tests {
     }
 
     #[test]
+    fn workstation_owned_tunnel_ensure_repair_not_ready_waits_for_readiness() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock poisoned");
+        let project_dir = std::env::temp_dir().join(format!(
+            "autofluid-tui-worker-ensure-wait-{}",
+            crate::generate_request_id()
+        ));
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let marker = project_dir.join("worker-ensure-wait.log");
+        let python_exe = fake_python_ensure_not_ready_then_status_ready_exe(
+            &project_dir,
+            "fake_python_ensure_wait",
+            &marker,
+        );
+        std::env::set_var("PYTHON", &python_exe);
+        std::env::remove_var("AUTOFLUID_WORKSTATION_TUNNEL_OWNER");
+
+        let mut wm = WorkerManager::new();
+        let mut log_buffer = LogBuffer::new();
+        let result = wm.ensure_workstation_owned_tunnels(
+            project_dir.to_str().expect("utf8 temp path"),
+            &mut log_buffer,
+        );
+
+        assert!(result);
+        let marker_text = std::fs::read_to_string(&marker).expect("read marker");
+        assert!(marker_text.contains("tools.workstation_tunnel ensure"));
+        assert!(marker_text.contains("tools.workstation_tunnel status"));
+        std::env::remove_var("PYTHON");
+        let _ = std::fs::remove_dir_all(project_dir);
+    }
+
+    #[test]
     fn workstation_tunnel_results_all_ok_requires_every_result_ok() {
         let partial = r#"{"ok":true,"results":[{"id":"WS-A","ok":true},{"id":"WS-B","ok":false,"status":"not_ready"}]}"#;
         let ready = r#"{"ok":true,"results":[{"id":"WS-A","ok":true},{"id":"WS-B","ok":true}]}"#;
@@ -3280,7 +3348,7 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel status\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel uninstall\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
+                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel status\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel uninstall\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}& exit /b 0)\r\necho %* | findstr /C:\"tools.workstation_tunnel\" >nul && exit /b 0\r\necho %* | findstr /C:\"--worker\" >nul && echo worker %AUTOFLUID_WORKER_REACHABLE_HOST% %AUTOFLUID_WORKER_SSH_PORT% %AUTOFLUID_WORKER_CONNECTIVITY_MODE%>>\"{}\"\r\nexit /b 0\r\n",
                     marker.display(),
                     marker.display()
                 ),
@@ -3295,7 +3363,7 @@ mpi_bin_dir = "/tmp/mpi"
             std::fs::write(
                 &path,
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel status\"*|*\"tools.workstation_tunnel uninstall\"*) printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'; exit 0;; *\"tools.workstation_tunnel\"*) exit 0;; esac\nprintf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel status\"*|*\"tools.workstation_tunnel uninstall\"*) printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true}}]}}'; exit 0;; *\"tools.workstation_tunnel\"*) exit 0;; *\"--worker\"*) printf 'worker %s %s %s\\n' \"$AUTOFLUID_WORKER_REACHABLE_HOST\" \"$AUTOFLUID_WORKER_SSH_PORT\" \"$AUTOFLUID_WORKER_CONNECTIVITY_MODE\" >> '{}'; exit 0;; esac\nexit 0\n",
                     marker.display(),
                     marker.display()
                 ),
@@ -3342,6 +3410,41 @@ mpi_bin_dir = "/tmp/mpi"
                 ),
             )
             .expect("write fake python result marker exe");
+            make_executable(&path);
+            path
+        }
+    }
+
+    fn fake_python_ensure_not_ready_then_status_ready_exe(
+        project_dir: &std::path::Path,
+        name: &str,
+        marker: &std::path::Path,
+    ) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = project_dir.join(format!("{name}.cmd"));
+            std::fs::write(
+                &path,
+                format!(
+                    "@echo off\r\necho %*>>\"{}\"\r\necho %* | findstr /C:\"tools.workstation_tunnel ensure\" >nul && (echo {{\"ok\":false,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_ready\",\"ensure_action\":\"repair_not_ready\",\"repair_result\":{{\"ok\":true,\"status\":\"installed\"}}}}]}}& exit /b 1)\r\necho %* | findstr /C:\"tools.workstation_tunnel status\" >nul && (echo {{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true,\"status\":\"ok\"}}]}}& exit /b 0)\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake ensure wait exe");
+            path
+        }
+
+        #[cfg(not(windows))]
+        {
+            let path = project_dir.join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *\"tools.workstation_tunnel ensure\"*) printf '%s\\n' '{{\"ok\":false,\"results\":[{{\"id\":\"WS-A\",\"ok\":false,\"status\":\"not_ready\",\"ensure_action\":\"repair_not_ready\",\"repair_result\":{{\"ok\":true,\"status\":\"installed\"}}}}]}}'; exit 1;; *\"tools.workstation_tunnel status\"*) printf '%s\\n' '{{\"ok\":true,\"results\":[{{\"id\":\"WS-A\",\"ok\":true,\"status\":\"ok\"}}]}}'; exit 0;; esac\nexit 0\n",
+                    marker.display()
+                ),
+            )
+            .expect("write fake ensure wait exe");
             make_executable(&path);
             path
         }

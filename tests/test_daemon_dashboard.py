@@ -791,6 +791,8 @@ def test_dashboard_marks_stale_workstation_ssh_check_non_ok(monkeypatch):
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = None
     daemon.runner = _Runner({})
+    daemon._ssh_health_interval_seconds = 30.0
+    daemon._ssh_health_active_probe_interval_seconds = 120.0
     daemon._last_worker_ssh_checks = {"WS-A": "ok"}
     daemon._last_worker_ssh_check_times = {"WS-A": 800.0}
     daemon._config_warnings = []
@@ -800,6 +802,28 @@ def test_dashboard_marks_stale_workstation_ssh_check_non_ok(monkeypatch):
     assert health["server_to_workstation_ssh"] == "stale"
     assert health["workstation_ssh_details"] == {"WS-A": "stale"}
     assert health["workstation_ssh_checked_at"] == {"WS-A": 800.0}
+
+
+def test_dashboard_keeps_ok_until_next_active_probe_window(monkeypatch):
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{"id": "WS-A", "host": "172.17.135.240", "port": 22}],
+    )
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1_000.0)
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.local_worker_registry = None
+    daemon.runner = _Runner({})
+    daemon._ssh_health_interval_seconds = 30.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+    daemon._last_worker_ssh_checks = {"WS-A": "ok"}
+    daemon._last_worker_ssh_check_times = {"WS-A": 760.0}
+    daemon._config_warnings = []
+
+    health = daemon._build_health_snapshot()
+
+    assert health["server_to_workstation_ssh"] == "ok"
+    assert health["workstation_ssh_details"] == {"WS-A": "ok"}
 
 
 def test_dashboard_treats_stale_mixed_with_disconnected_as_stale(monkeypatch):
@@ -815,6 +839,8 @@ def test_dashboard_treats_stale_mixed_with_disconnected_as_stale(monkeypatch):
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.local_worker_registry = None
     daemon.runner = _Runner({})
+    daemon._ssh_health_interval_seconds = 30.0
+    daemon._ssh_health_active_probe_interval_seconds = 120.0
     daemon._last_worker_ssh_checks = {"WS-A": "ok", "WS-B": "disconnected"}
     daemon._last_worker_ssh_check_times = {"WS-A": 800.0, "WS-B": 995.0}
     daemon._config_warnings = []

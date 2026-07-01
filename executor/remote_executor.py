@@ -1813,9 +1813,9 @@ class RemoteExecutor:
         dat_file = f"{result_dir}/{dat_name}" if dat_name else None
 
         timeout = ENGINE_CONFIG["solver_timeout"]
-        startup_timeout_value = ENGINE_CONFIG.get("solver_startup_timeout", 900)
+        startup_timeout_value = ENGINE_CONFIG.get("solver_startup_timeout", 1800)
         if not isinstance(startup_timeout_value, str | int | float):
-            startup_timeout_value = 900
+            startup_timeout_value = 1800
         startup_timeout = float(startup_timeout_value)
         poll_interval = 30
         start_time = self._remote_task_start_time(

@@ -547,6 +547,7 @@ impl AppState {
                     let color = match part.color {
                         Some(InfoBarColor::Success) => self.theme.success,
                         Some(InfoBarColor::Error) => self.theme.error,
+                        Some(InfoBarColor::Warning) => self.theme.warning,
                         None => self.theme.gray_5,
                     };
                     let style = Style::default().fg(color);
@@ -590,9 +591,6 @@ impl AppState {
             ok_label(self.health_info.local_ipc_tunnel_ok)
         };
         let server_local = status_label(self.health_info.server_to_local_ssh.as_deref());
-        let server_workstation =
-            status_label(self.health_info.server_to_workstation_ssh.as_deref());
-
         let mut parts = vec![InfoBarPart::plain("  IPC:")];
         push_status_part(&mut parts, ipc);
         parts.push(InfoBarPart::plain(" │ LW:"));
@@ -602,7 +600,14 @@ impl AppState {
         parts.push(InfoBarPart::plain(" │ S→L:"));
         push_status_part(&mut parts, server_local);
         parts.push(InfoBarPart::plain(" │ S→W:"));
-        push_status_part(&mut parts, server_workstation);
+        if self.health_info.workstation_ssh_details.is_empty() {
+            push_status_part(
+                &mut parts,
+                status_label(self.health_info.server_to_workstation_ssh.as_deref()),
+            );
+        } else {
+            push_workstation_ssh_parts(&mut parts, &self.health_info.workstation_ssh_details);
+        }
         parts.push(InfoBarPart::plain(" │ 引擎:"));
 
         if !self.connected {
@@ -733,6 +738,7 @@ struct InfoBarPart {
 enum InfoBarColor {
     Success,
     Error,
+    Warning,
 }
 
 impl InfoBarPart {
@@ -747,7 +753,8 @@ impl InfoBarPart {
         let text = text.into();
         let color = match text.as_str() {
             "OK" | "运行中" | "已通过" => Some(InfoBarColor::Success),
-            "断" | "已停止" | "未通过" => Some(InfoBarColor::Error),
+            "断" | "已停止" | "未通过" | "错误" => Some(InfoBarColor::Error),
+            "旧" => Some(InfoBarColor::Warning),
             _ => None,
         };
         Self { text, color }
@@ -765,11 +772,40 @@ impl InfoBarPart {
     }
 }
 
+fn workstation_ssh_part(workstation_id: &str, status: &str) -> InfoBarPart {
+    let color = match status {
+        "ok" => Some(InfoBarColor::Success),
+        "stale" => Some(InfoBarColor::Warning),
+        "disconnected" => Some(InfoBarColor::Error),
+        value if value.starts_with("error:") => Some(InfoBarColor::Error),
+        _ => None,
+    };
+    InfoBarPart {
+        text: workstation_barrier_label(workstation_id),
+        color,
+    }
+}
+
 fn workstation_barrier_label(workstation_id: &str) -> String {
     workstation_id
         .strip_prefix("WS-")
         .unwrap_or(workstation_id)
         .to_string()
+}
+
+fn push_workstation_ssh_parts(parts: &mut Vec<InfoBarPart>, details: &HashMap<String, String>) {
+    let mut workstation_ids: Vec<&String> = details.keys().collect();
+    workstation_ids.sort();
+    for (idx, workstation_id) in workstation_ids.into_iter().enumerate() {
+        if idx > 0 {
+            parts.push(InfoBarPart::plain(" | "));
+        }
+        let status = details
+            .get(workstation_id)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        parts.push(workstation_ssh_part(workstation_id, status));
+    }
 }
 
 fn push_status_part(parts: &mut Vec<InfoBarPart>, label: &'static str) {
@@ -908,6 +944,63 @@ mod tests {
             status_label(state.health_info.server_to_workstation_ssh.as_deref()),
             "旧"
         );
+    }
+
+    #[test]
+    fn info_bar_text_shows_per_workstation_server_to_workstation_statuses() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state.health_info.server_to_workstation_ssh = Some("stale".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-A".to_string(), "ok".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-B".to_string(), "disconnected".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-C".to_string(), "stale".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-D".to_string(), "unknown".to_string());
+
+        let text = state.info_bar_text();
+
+        assert!(text.contains("S→W:A | B | C | D"));
+        assert!(!text.contains("S→W:旧"));
+    }
+
+    #[test]
+    fn info_bar_line_colors_per_workstation_server_to_workstation_statuses() {
+        let mut state = AppState::default();
+        state.connected = true;
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-A".to_string(), "ok".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-B".to_string(), "disconnected".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-C".to_string(), "stale".to_string());
+        state
+            .health_info
+            .workstation_ssh_details
+            .insert("WS-D".to_string(), "unknown".to_string());
+
+        let line = state.info_bar_line();
+
+        assert_span_color(&line, "A", Some(state.theme.success));
+        assert_span_color(&line, "B", Some(state.theme.error));
+        assert_span_color(&line, "C", Some(state.theme.warning));
+        assert_span_color(&line, "D", Some(state.theme.gray_5));
     }
 
     #[test]

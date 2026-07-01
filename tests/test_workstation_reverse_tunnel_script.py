@@ -132,6 +132,7 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     assert '"StrictHostKeyChecking=accept-new"' in source
     assert '"-i", $TunnelIdentityFile' in source
     assert "[int]$RemoteProbeFailureThreshold = 3" in source
+    assert "[int]$SshCommandTimeoutSeconds = 30" in source
     assert "-RemoteProbeFailureThreshold" in source
     assert '$forwardSpec = "${RemoteBindHost}:${RemoteBindPort}:${TargetHost}:${TargetPort}"' in source
     fn_start = source.index("function Get-ReverseTunnelArguments")
@@ -139,10 +140,12 @@ def test_workstation_owned_tunnel_script_reconnects_from_workstation_side() -> N
     body = source[fn_start:fn_end]
     assert body.index('"-i", $TunnelIdentityFile') < body.rindex("return $args")
     assert 'Register-TunnelFailure -Reason "ssh-exited-$exitCode"' in source
-    assert 'Register-TunnelFailure -Reason "remote-probe-failed"' in source
+    assert '$remoteStatus = "remote-probe-failed"' in source
+    assert "Register-TunnelFailure -Reason $remoteStatus" in source
     assert "[int]$failureState.Count -lt $RemoteProbeFailureThreshold" in source
     assert 'Register-TunnelFailure -Reason "local-target-unreachable"' in source
     assert "function Wait-RemoteTunnelEndpoint" in source
+    assert "$SshCommandTimeoutSeconds * 2" in source
     assert 'Register-TunnelFailure -Reason $startupStatus' in source
     assert "startup-probe-timeout" in source
 
@@ -184,9 +187,18 @@ $script:TunnelTarget = "root@example.invalid"
 $script:RemoteBindHost = "127.0.0.1"
 $script:RemoteBindPort = 2222
 $script:TunnelIdentityFile = "C:\Users\example\.ssh\autofluid_tunnel_ed25519"
+function Invoke-OwnedTunnelSshCommand {{
+    param(
+        [string]$SshExe,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = $script:SshCommandTimeoutSeconds
+    )
+    Set-Content -LiteralPath "{args_file}" -Value ($Arguments -join " ") -Encoding UTF8
+    return @{{ ExitCode = 0; TimedOut = $false; Stdout = ""; Stderr = "" }}
+}}
 $result = Test-RemoteTunnelEndpoint -SshExe "{fake_ssh}"
-if ($result -ne $true) {{
-    throw "Expected probe to return true, got $result"
+if ($result -ne "ready") {{
+    throw "Expected probe to return ready, got $result"
 }}
 """,
         encoding="utf-8",
@@ -235,7 +247,7 @@ $ErrorActionPreference = "Stop"
 $source = Get-Content -LiteralPath "{script_path}" -Raw
 $match = [regex]::Match(
     $source,
-    '(?s)function Invoke-OwnedTunnelSshCommand \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward.*?\r?\n\}}\r?\n\r?\nfunction Wait-RemoteTunnelEndpoint'
+    '(?s)function ConvertTo-WindowsCommandArgument \{{.*?\r?\n\}}\r?\n\r?\nfunction Invoke-OwnedTunnelSshCommand \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward.*?\r?\n\}}\r?\n\r?\nfunction Wait-RemoteTunnelEndpoint'
 )
 if (-not $match.Success) {{
     throw "Could not extract stale cleanup functions"
@@ -257,8 +269,8 @@ if ($source -notmatch "Invoke-OwnedTunnelSshCommand") {{
 if ($source -notmatch "Timed out clearing stale remote forward") {{
     throw "Expected timeout log message"
 }}
-if (-not $source.Contains('Remove-Item -LiteralPath $stdoutPath, $stderrPath')) {{
-    throw "Expected temp stdout/stderr cleanup"
+if ($source -notmatch '\$process\.Dispose\(\)') {{
+    throw "Expected process disposal"
 }}
 
 $start = Get-Date
@@ -290,6 +302,61 @@ Write-Output "bounded stale cleanup passed"
     assert "bounded stale cleanup passed" in result.stdout
 
 
+def test_workstation_owned_ssh_command_captures_exit_code_in_windows_powershell(
+    tmp_path: Path,
+) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        msg = "Windows PowerShell is required for this regression test"
+        raise AssertionError(msg)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
+    probe_script = tmp_path / "owned-exit-code.ps1"
+    probe_script.write_text(
+        rf"""
+$ErrorActionPreference = "Stop"
+$source = Get-Content -LiteralPath "{script_path}" -Raw
+$match = [regex]::Match(
+    $source,
+    '(?s)function ConvertTo-WindowsCommandArgument \{{.*?\r?\n\}}\r?\n\r?\nfunction Invoke-OwnedTunnelSshCommand \{{.*?\r?\n\}}\r?\n\r?\nfunction Clear-StaleRemoteForward'
+)
+if (-not $match.Success) {{
+    throw "Could not extract Invoke-OwnedTunnelSshCommand"
+}}
+$functionSource = $match.Value -replace '\r?\nfunction Clear-StaleRemoteForward\z', ''
+Invoke-Expression $functionSource
+$result = Invoke-OwnedTunnelSshCommand `
+    -SshExe "{powershell}" `
+    -Arguments @("-NoProfile", "-Command", "exit 0") `
+    -TimeoutSeconds 5
+if ($result.ExitCode -ne 0) {{
+    throw "Expected ExitCode 0, got $($result.ExitCode)"
+}}
+Write-Output "exit code captured"
+""",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe_script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "exit code captured" in result.stdout
+
+
 def test_workstation_owned_wait_probe_reports_ready_timeout_and_exit(
     tmp_path: Path,
 ) -> None:
@@ -304,6 +371,12 @@ def test_workstation_owned_wait_probe_reports_ready_timeout_and_exit(
     success_ssh.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
     fail_ssh = tmp_path / "fail-ssh.cmd"
     fail_ssh.write_text("@echo off\nexit /b 1\n", encoding="utf-8")
+    slow_once_ssh = tmp_path / "slow-once-ssh.cmd"
+    slow_once_counter = tmp_path / "slow-once-counter.txt"
+    slow_once_ssh.write_text(
+        f'@echo off\nif not exist "{slow_once_counter}" (echo first>"{slow_once_counter}" & powershell -NoProfile -Command "Start-Sleep -Seconds 2" & exit /b 0)\nexit /b 0\n',
+        encoding="utf-8",
+    )
 
     probe_script = tmp_path / "owned-wait-probe.ps1"
     probe_script.write_text(
@@ -324,6 +397,30 @@ $script:RemoteBindHost = "127.0.0.1"
 $script:RemoteBindPort = 2222
 $script:TunnelIdentityFile = ""
 $script:ProbeIntervalSeconds = 1
+$script:SshCommandTimeoutSeconds = 5
+$script:SlowProbeSeen = $false
+
+function Invoke-OwnedTunnelSshCommand {{
+    param(
+        [string]$SshExe,
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = $script:SshCommandTimeoutSeconds
+    )
+    if ($SshExe -like "*success-ssh*") {{
+        return @{{ ExitCode = 0; TimedOut = $false; Stdout = ""; Stderr = "" }}
+    }}
+    if ($SshExe -like "*fail-ssh*") {{
+        return @{{ ExitCode = 1; TimedOut = $false; Stdout = ""; Stderr = "" }}
+    }}
+    if ($SshExe -like "*slow-once-ssh*") {{
+        if (-not $script:SlowProbeSeen) {{
+            $script:SlowProbeSeen = $true
+            return @{{ ExitCode = 124; TimedOut = $true; Stdout = ""; Stderr = "" }}
+        }}
+        return @{{ ExitCode = 0; TimedOut = $false; Stdout = ""; Stderr = "" }}
+    }}
+    return @{{ ExitCode = 1; TimedOut = $false; Stdout = ""; Stderr = "" }}
+}}
 
 $ready = Wait-RemoteTunnelEndpoint `
     -SshExe "{success_ssh}" `
@@ -333,6 +430,16 @@ if ($ready -ne "ready") {{
     throw "Expected ready, got $ready"
 }}
 
+$script:SshCommandTimeoutSeconds = 1
+$slowReady = Wait-RemoteTunnelEndpoint `
+    -SshExe "{slow_once_ssh}" `
+    -SshProcess $null `
+    -TimeoutSeconds 5
+if ($slowReady -ne "ready") {{
+    throw "Expected retry after remote-probe-timeout to become ready, got $slowReady"
+}}
+
+$script:SshCommandTimeoutSeconds = 5
 $timeout = Wait-RemoteTunnelEndpoint `
     -SshExe "{fail_ssh}" `
     -SshProcess $null `
@@ -382,7 +489,7 @@ def test_workstation_owned_tunnel_uninstall_stops_processes_before_and_after_tas
     script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
     source = script_path.read_text(encoding="utf-8")
     fn_start = source.index("function Uninstall-OwnedTunnelTask")
-    fn_end = source.index("function Get-OwnedTunnelStatus")
+    fn_end = source.index("\nfunction Get-OwnedTunnelStatus ")
     body = source[fn_start:fn_end]
 
     assert body.count("Stop-OwnedTunnelProcesses") == 2
@@ -460,7 +567,7 @@ def test_workstation_owned_tunnel_uninstall_removes_hkcu_run_fallback() -> None:
     script_path = repo_root / "scripts" / "start_workstation_owned_reverse_tunnel.ps1"
     source = script_path.read_text(encoding="utf-8")
     fn_start = source.index("function Uninstall-OwnedTunnelTask")
-    fn_end = source.index("function Get-OwnedTunnelStatus")
+    fn_end = source.index("\nfunction Get-OwnedTunnelStatus ")
     body = source[fn_start:fn_end]
 
     assert "Remove-ItemProperty -Path (Get-OwnedTunnelRunKeyPath) -Name $taskName" in body

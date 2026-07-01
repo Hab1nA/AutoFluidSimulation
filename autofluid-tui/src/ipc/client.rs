@@ -468,6 +468,14 @@ impl IpcClient {
         self.send_request(&IpcRequest::new(super::protocol::CMD_WORKER_STOP))
             .await
     }
+
+    pub async fn worker_restart(&mut self) -> Result<IpcResponse, String> {
+        self.send_request_with_timeout(
+            &IpcRequest::new(super::protocol::CMD_WORKER_RESTART),
+            WORKER_TIMEOUT,
+        )
+        .await
+    }
 }
 
 fn default_host() -> String {
@@ -1040,6 +1048,68 @@ mod tests {
         assert!(
             result.is_ok(),
             "worker start should not use the default IPC timeout"
+        );
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn worker_restart_accepts_response_after_default_timeout_window() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"paused"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut worker_restart = String::new();
+            reader
+                .read_line(&mut worker_restart)
+                .expect("read worker restart");
+            let request: Value =
+                serde_json::from_str(worker_restart.trim()).expect("worker restart json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_WORKER_RESTART)
+            );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":{{"stop":{{"remote_tasks_cleared":false}},"start":{{"ssh_checks":{{"WS-A":"ok"}}}}}},"message":"Worker restarted","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write worker restart response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.worker_restart());
+
+        assert!(
+            result.is_ok(),
+            "worker restart should not use the default IPC timeout"
         );
         rt.block_on(client.disconnect());
         server.join().expect("server thread");

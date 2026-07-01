@@ -1755,7 +1755,15 @@ class PipelineDaemon:
         last_check_sources = getattr(self, "_last_worker_ssh_check_sources", {})
         if not isinstance(last_check_sources, dict):
             last_check_sources = {}
-        stale_after = max(120.0, float(getattr(self, "_ssh_health_interval_seconds", 30.0)) * 3)
+        health_interval = float(getattr(self, "_ssh_health_interval_seconds", 30.0))
+        active_probe_interval = float(
+            getattr(
+                self,
+                "_ssh_health_active_probe_interval_seconds",
+                _DEFAULT_WORKSTATION_SSH_ACTIVE_PROBE_INTERVAL_SECONDS,
+            )
+        )
+        stale_after = max(120.0, health_interval * 3, active_probe_interval + health_interval)
         now = time.time()
         workstation_checked_at: dict[str, float] = {}
         workstation_sources: dict[str, str] = {}

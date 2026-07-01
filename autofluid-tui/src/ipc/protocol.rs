@@ -38,8 +38,6 @@ pub const CMD_WORKER_STEP_ERROR: &str = "worker_step_error";
 // ---- Worker 生命周期管理命令 ----
 pub const CMD_WORKER_START: &str = "worker_start";
 pub const CMD_WORKER_STOP: &str = "worker_stop";
-/// 与 Python 侧协议同步，暂未使用。
-#[allow(dead_code)]
 pub const CMD_WORKER_RESTART: &str = "worker_restart";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
