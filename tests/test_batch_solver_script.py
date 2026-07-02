@@ -345,11 +345,7 @@ def test_launch_uses_configured_processor_count_and_reads_mesh(tmp_path, monkeyp
         str(Path(args.msh_dir, f"model_gen4_{args.config_id}.msh.h5"))
     ]
     assert session.read_case_calls == []
-    assert session.read_journal_calls == [
-        args.journal_path,
-        args.post_journal_path,
-        args.extra_post_journal_path,
-    ]
+    assert session.read_journal_calls == [args.journal_path]
     assert session.iterate_calls == [10]
     assert session.exit_calls == 1
 
@@ -368,7 +364,7 @@ def test_exit_failure_tries_force_exit(tmp_path, monkeypatch):
     assert session.force_exit_calls == 1
 
 
-def test_main_moves_animation_during_inline_postprocess_and_cleans_solver_logs(tmp_path, monkeypatch):
+def test_main_skips_animation_move_during_inline_postprocess_and_cleans_solver_logs(tmp_path, monkeypatch):
     session = _SuccessfulSolverSession()
     module = _load_batch_solver_module(monkeypatch, lambda **kwargs: session)
     args = _make_args(tmp_path)
@@ -391,10 +387,12 @@ def test_main_moves_animation_during_inline_postprocess_and_cleans_solver_logs(t
 
     module.main()
 
-    assert Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").read_bytes() == b"velocity"
-    assert Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").read_bytes() == b"temperature"
+    assert not Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").exists()
+    assert not Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").exists()
     assert not Path(args.working_dir, "fluent-20260618-115935-21428.trn").exists()
     assert not Path(args.working_dir, "report-def-v-rfile_2_1.out").exists()
+    assert not Path(args.working_dir_v, "animation-v.mp4").exists()
+    assert not Path(args.working_dir_t, "animation-t.mp4").exists()
     assert Path(args.working_dir, "user-result.out").exists()
     assert Path(args.working_dir, "keep.dat").exists()
 
@@ -443,11 +441,7 @@ def test_solver_runs_postprocess_in_same_fluent_session(tmp_path, monkeypatch):
 
     module.main()
 
-    assert session.read_journal_calls == [
-        args.journal_path,
-        args.post_journal_path,
-        args.extra_post_journal_path,
-    ]
+    assert session.read_journal_calls == [args.journal_path]
     assert session.write_case_data_calls == [
         str(Path(args.output_dir, f"model_gen4_{args.config_id}.cas.h5"))
     ]

@@ -12,6 +12,7 @@ import argparse
 import csv
 import importlib.util
 import re
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,6 +26,7 @@ INLET_FUEL = "inlet_fuel"
 REPORT_VALUE_RE = re.compile(r"^\s*(?:Net|\S+)\s+([-+0-9.Ee]+)\s*$")
 EXPRESSION_ROW_RE = re.compile(r"^\s*(\S+)\s+([-+0-9.Ee]+)\s+(?:\[.*\])?\s*$")
 REPORT_UNIT_RE = re.compile(r"\[([^\]]+)\]")
+EXPRESSION_WAIT_LOG_INTERVAL_SECONDS = 5.0
 LENGTH_TO_M = {
     "m": 1.0,
     "cm": 1.0e-2,
@@ -140,16 +142,41 @@ def _define_custom_field_function(solver: Any, name: str, definition: str) -> No
     solver.tui.define.custom_field_functions.define(f'"{name}"', f'"{definition}"')
 
 
-def _parse_expression_values(transcript: Path, names: set[str]) -> dict[str, float]:
-    values: dict[str, float] = {}
-    for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = EXPRESSION_ROW_RE.match(line)
-        if match and match.group(1) in names:
-            values[match.group(1)] = float(match.group(2))
-    missing = names - set(values)
-    if missing:
-        raise ValueError(f"missing expression values in transcript: {sorted(missing)}")
-    return values
+def _parse_expression_values(
+    transcript: Path,
+    names: set[str],
+    *,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 1.0,
+) -> dict[str, float]:
+    start = time.monotonic()
+    deadline = start + timeout_seconds
+    next_log_at = start
+    missing: set[str] = set(names)
+
+    while True:
+        values: dict[str, float] = {}
+        for line in transcript.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = EXPRESSION_ROW_RE.match(line)
+            if match and match.group(1) in names:
+                values[match.group(1)] = float(match.group(2))
+        missing = names - set(values)
+        if not missing:
+            return values
+
+        now = time.monotonic()
+        if now >= deadline:
+            raise ValueError(
+                "missing expression values in transcript "
+                f"after {timeout_seconds:g}s ({transcript}): {sorted(missing)}"
+            )
+        if now >= next_log_at:
+            print(
+                "waiting for expression values in transcript "
+                f"{transcript}: missing={sorted(missing)}"
+            )
+            next_log_at = now + EXPRESSION_WAIT_LOG_INTERVAL_SECONDS
+        time.sleep(min(poll_interval_seconds, max(0.0, deadline - now)))
 
 
 def _find_latest_transcript(run_dir: Path) -> Path:

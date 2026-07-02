@@ -85,6 +85,103 @@ def _read_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def test_parse_expression_values_waits_for_delayed_transcript_flush(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_postprocess_module(monkeypatch)
+    transcript = tmp_path / "fluent.trn"
+    transcript.write_text("phi_sum  1.5 [m^3]\n", encoding="utf-8")
+
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        transcript.write_text(
+            "phi_sum  1.5 [m^3]\nchamber_abs_pressure_sum  5544.6339 [Pa m^3]\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0, sleep=fake_sleep),
+        raising=False,
+    )
+
+    values = module._parse_expression_values(
+        transcript,
+        {"phi_sum", "chamber_abs_pressure_sum"},
+        timeout_seconds=5.0,
+        poll_interval_seconds=1.0,
+    )
+
+    assert values["phi_sum"] == 1.5
+    assert values["chamber_abs_pressure_sum"] == 5544.6339
+    assert sleep_calls == [1.0]
+
+
+def test_parse_expression_values_times_out_with_path_and_missing_names(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_postprocess_module(monkeypatch)
+    transcript = tmp_path / "fluent.trn"
+    transcript.write_text("phi_sum  1.5 [m^3]\n", encoding="utf-8")
+    times = iter([0.0, 0.0, 0.2])
+
+    monkeypatch.setattr(
+        module,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(times), sleep=lambda _seconds: None),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        module._parse_expression_values(
+            transcript,
+            {"phi_sum", "chamber_abs_pressure_sum"},
+            timeout_seconds=0.1,
+            poll_interval_seconds=0.1,
+        )
+
+    message = str(exc_info.value)
+    assert "chamber_abs_pressure_sum" in message
+    assert str(transcript) in message
+    assert "0.1s" in message
+
+
+def test_parse_expression_values_does_not_sleep_when_transcript_is_complete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_postprocess_module(monkeypatch)
+    transcript = tmp_path / "fluent.trn"
+    transcript.write_text(
+        "phi_sum  1.5 [m^3]\nchamber_abs_pressure_sum  5544.6339 [Pa m^3]\n",
+        encoding="utf-8",
+    )
+
+    def fail_sleep(_seconds: float) -> None:
+        raise AssertionError("complete transcripts should not wait")
+
+    monkeypatch.setattr(
+        module,
+        "time",
+        SimpleNamespace(monotonic=lambda: 0.0, sleep=fail_sleep),
+        raising=False,
+    )
+
+    values = module._parse_expression_values(
+        transcript,
+        {"phi_sum", "chamber_abs_pressure_sum"},
+        timeout_seconds=5.0,
+        poll_interval_seconds=1.0,
+    )
+
+    assert values == {"phi_sum": 1.5, "chamber_abs_pressure_sum": 5544.6339}
+
+
 def test_compute_metrics_from_export_tables(tmp_path: Path) -> None:
     module = _load_module()
     reports = tmp_path / "reports.csv"

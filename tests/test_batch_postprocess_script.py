@@ -111,65 +111,12 @@ class _SuccessfulPostprocessSession:
         self.force_exit_calls += 1
 
 
-def test_postprocess_runs_required_and_extra_journals_then_writes_flag(tmp_path, monkeypatch):
-    session = _SuccessfulPostprocessSession()
-    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: session)
-    args = _make_args(tmp_path)
-    monkeypatch.setattr(module, "parse_args", lambda: args)
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
-
-    module.main()
-
-    assert session.read_case_data_calls == [
-        str(Path(args.case_dir, f"model_gen4_{args.config_id}.cas.h5"))
-    ]
-    assert session.read_journal_calls == [
-        args.post_journal_path,
-        args.extra_post_journal_path,
-    ]
-    assert Path(args.flag_file).read_text(encoding="utf-8").strip() == "OK"
-    assert session.exit_calls == 1
-
-
-def test_postprocess_skips_missing_extra_journal(tmp_path, monkeypatch):
-    session = _SuccessfulPostprocessSession()
-    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: session)
-    args = _make_args(tmp_path)
-    Path(args.extra_post_journal_path).unlink()
-    monkeypatch.setattr(module, "parse_args", lambda: args)
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
-
-    module.main()
-
-    assert session.read_journal_calls == [args.post_journal_path]
-    assert Path(args.flag_file).exists()
-
-
-def test_postprocess_does_not_write_flag_when_journal_fails(tmp_path, monkeypatch):
-    class _FailingSession(_SuccessfulPostprocessSession):
-        def _read_journal(self, path: str) -> None:
-            raise RuntimeError("journal failed")
-
-    session = _FailingSession()
-    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: session)
-    args = _make_args(tmp_path)
-    monkeypatch.setattr(module, "parse_args", lambda: args)
-
-    with pytest.raises(RuntimeError, match="journal failed"):
-        module.main()
-
-    assert not Path(args.flag_file).exists()
-
-
-def test_postprocess_skips_video_journals_when_final_animations_exist(tmp_path, monkeypatch):
+def test_postprocess_skips_video_journals_by_default_then_writes_flag(tmp_path, monkeypatch):
     def fail_launch(**kwargs: object):
-        raise AssertionError("Fluent should not be launched when final videos already exist")
+        raise AssertionError("Fluent should not be launched for video export")
 
     module = _load_batch_postprocess_module(monkeypatch, fail_launch)
     args = _make_args(tmp_path)
-    Path(args.anim_dir).mkdir(parents=True)
-    Path(args.anim_dir, f"v_gen4_{args.config_id}.mp4").write_bytes(b"v")
-    Path(args.anim_dir, f"t_gen4_{args.config_id}.mp4").write_bytes(b"t")
     metrics_calls: list[tuple[str, int]] = []
     monkeypatch.setattr(module, "parse_args", lambda: args)
     monkeypatch.setattr(
@@ -186,24 +133,44 @@ def test_postprocess_skips_video_journals_when_final_animations_exist(tmp_path, 
     assert Path(args.flag_file).read_text(encoding="utf-8").strip() == "OK"
 
 
-def test_postprocess_continues_video_options_failure_when_final_animations_exist(
-    tmp_path,
-    monkeypatch,
-):
-    class _VideoOptionsFailingSession(_SuccessfulPostprocessSession):
-        def _read_journal(self, path: str) -> None:
-            self.read_journal_calls.append(path)
-            Path(self.anim_dir, f"v_gen4_{self.config_id}.mp4").write_bytes(b"v")
-            Path(self.anim_dir, f"t_gen4_{self.config_id}.mp4").write_bytes(b"t")
-            raise RuntimeError(
-                'cx-name-to-id: cannot find widget: "Video Options*Table1*IntegerEntry2(FPS)"'
-            )
+def test_postprocess_does_not_require_existing_video_journal_when_skipping_export(tmp_path, monkeypatch):
+    def fail_launch(**kwargs: object):
+        raise AssertionError("Fluent should not be launched for video export")
 
-    session = _VideoOptionsFailingSession()
-    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: session)
+    module = _load_batch_postprocess_module(monkeypatch, fail_launch)
     args = _make_args(tmp_path)
-    session.anim_dir = Path(args.anim_dir)
-    session.config_id = args.config_id
+    Path(args.post_journal_path).unlink()
+    Path(args.extra_post_journal_path).unlink()
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+    monkeypatch.setattr(module, "_run_metrics_postprocess", lambda parsed_args, case_path, config_id: None)
+
+    module.main()
+
+    assert Path(args.flag_file).exists()
+
+
+def test_postprocess_does_not_write_flag_when_metrics_fails(tmp_path, monkeypatch):
+    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: None)
+    args = _make_args(tmp_path)
+    monkeypatch.setattr(module, "parse_args", lambda: args)
+
+    def fail_metrics(parsed_args: argparse.Namespace, case_path: str, config_id: int) -> None:
+        raise RuntimeError("metrics failed")
+
+    monkeypatch.setattr(module, "_run_metrics_postprocess", fail_metrics)
+
+    with pytest.raises(RuntimeError, match="metrics failed"):
+        module.main()
+
+    assert not Path(args.flag_file).exists()
+
+
+def test_postprocess_skips_video_journals_even_when_final_animations_are_missing(tmp_path, monkeypatch):
+    def fail_launch(**kwargs: object):
+        raise AssertionError("Fluent should not be launched for video export")
+
+    module = _load_batch_postprocess_module(monkeypatch, fail_launch)
+    args = _make_args(tmp_path)
     metrics_calls: list[tuple[str, int]] = []
     monkeypatch.setattr(module, "parse_args", lambda: args)
     monkeypatch.setattr(
@@ -214,28 +181,27 @@ def test_postprocess_continues_video_options_failure_when_final_animations_exist
 
     module.main()
 
-    assert session.read_journal_calls == [args.post_journal_path]
-    assert metrics_calls
-    assert Path(args.flag_file).exists()
+    assert metrics_calls == [
+        (str(Path(args.case_dir, f"model_gen4_{args.config_id}.cas.h5")), args.config_id)
+    ]
+    assert Path(args.flag_file).read_text(encoding="utf-8").strip() == "OK"
 
 
-def test_postprocess_launch_uses_configured_fluent_path(tmp_path, monkeypatch):
-    launch_kwargs: dict[str, object] = {}
-    session = _SuccessfulPostprocessSession()
-
-    def launch_fluent(**kwargs: object):
-        launch_kwargs.update(kwargs)
-        return session
-
-    module = _load_batch_postprocess_module(monkeypatch, launch_fluent)
+def test_postprocess_skip_video_export_preserves_configured_fluent_path_for_metrics(tmp_path, monkeypatch):
+    module = _load_batch_postprocess_module(monkeypatch, lambda **kwargs: None)
     args = _make_args(tmp_path)
     args.fluent_path = r"D:\ANSYS Inc\v241\fluent\ntbin\win64\fluent.exe"
+    observed_fluent_paths: list[str] = []
     monkeypatch.setattr(module, "parse_args", lambda: args)
-    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        module,
+        "_run_metrics_postprocess",
+        lambda parsed_args, case_path, config_id: observed_fluent_paths.append(parsed_args.fluent_path),
+    )
 
     module.main()
 
-    assert launch_kwargs["fluent_path"] == args.fluent_path
+    assert observed_fluent_paths == [args.fluent_path]
 
 
 def test_postprocess_metrics_receives_configured_fluent_path(tmp_path, monkeypatch):

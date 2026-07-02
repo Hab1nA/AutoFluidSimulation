@@ -624,20 +624,7 @@ def main() -> None:
         _write_flag(args.solver_flag_file)
         print(f"[{config_id}] Solver 完成标志已写入: {args.solver_flag_file}")
 
-        # 6.5 同一 Fluent 会话内立即执行后处理，避免重新启动 Fluent。
-        print(f"[{config_id}] 正在执行后处理 Journal: {args.post_journal_path}")
-        solver_session.tui.file.read_journal(args.post_journal_path)
-        _ensure_session_healthy(solver_session, "执行后处理 Journal 后")
-
-        if args.extra_post_journal_path and os.path.isfile(args.extra_post_journal_path):
-            print(f"[{config_id}] 正在执行额外后处理 Journal: {args.extra_post_journal_path}")
-            solver_session.tui.file.read_journal(args.extra_post_journal_path)
-            _ensure_session_healthy(solver_session, "执行额外后处理 Journal 后")
-        elif args.extra_post_journal_path:
-            print(f"[{config_id}] 额外后处理 Journal 不存在，跳过: {args.extra_post_journal_path}")
-
-        time.sleep(2)
-        move_and_rename(config_id, args.working_dir_t, args.working_dir_v, args.anim_dir)
+        print(f"[{config_id}] 默认跳过视频导出 Journal，继续执行指标后处理")
         _run_metrics_postprocess_in_session(
             args,
             solver_session,

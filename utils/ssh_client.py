@@ -566,6 +566,72 @@ class RemoteWorkstation:
             logger.warning(f"[SSH] 列出远程目录失败: {remote_dir}: {e}")
             return []
 
+    def download_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        max_retries: int = 3,
+        *,
+        timeout: float | None = None,
+    ) -> bool:
+        """通过 SFTP 下载单个远程文件。"""
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
+        def _remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            return max(0.0, deadline - time.monotonic())
+
+        for attempt in range(max_retries):
+            try:
+                remaining_timeout = _remaining_timeout()
+                if remaining_timeout is not None and remaining_timeout <= 0:
+                    logger.error(f"[SSH] 文件下载超时: {remote_path}")
+                    return False
+                if not self.ensure_connected():
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5 * (2 ** attempt))
+                        continue
+                    return False
+                if self._sftp is None:
+                    raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
+
+                local_dir = os.path.dirname(local_path)
+                if local_dir:
+                    os.makedirs(local_dir, exist_ok=True)
+
+                channel = self._sftp.get_channel()
+                previous_timeout = None
+                if remaining_timeout is not None:
+                    try:
+                        previous_timeout = channel.gettimeout()
+                    except AttributeError:
+                        previous_timeout = None
+                    channel.settimeout(remaining_timeout)
+                try:
+                    normalized_remote_path = remote_path.replace("\\", "/")
+                    logger.info(f"[SSH] 正在下载: {remote_path} -> {local_path}")
+                    self._sftp.get(normalized_remote_path, local_path)
+                finally:
+                    if remaining_timeout is not None:
+                        channel.settimeout(previous_timeout)
+                logger.info(f"[SSH] 下载完成: {os.path.basename(local_path)}")
+                return True
+            except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+                logger.error(f"[SSH] 文件下载失败 (尝试 {attempt + 1}/{max_retries}): {e}")
+                self.disconnect()
+                if attempt < max_retries - 1:
+                    remaining_timeout = _remaining_timeout()
+                    sleep_seconds = 0.5 * (2 ** attempt)
+                    if remaining_timeout is not None:
+                        if remaining_timeout <= 0:
+                            return False
+                        sleep_seconds = min(sleep_seconds, remaining_timeout)
+                    time.sleep(sleep_seconds)
+                else:
+                    return False
+        return False
+
     # ------------------------------------------------------------------
     # 远程命令执行
     # ------------------------------------------------------------------

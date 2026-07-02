@@ -259,6 +259,9 @@ def main() -> None:
     print(f"[配置] 后处理 Journal: {args.post_journal_path}")
     print(f"[配置] 额外后处理 Journal: {args.extra_post_journal_path or '<none>'}")
     print(f"[配置] 后处理输出目录: {args.postprocess_output_dir}")
+    print(f"[{config_id}] 默认跳过视频导出 Journal，继续执行指标后处理")
+    _run_metrics_and_write_flag(args, case_path, config_id)
+    return
 
     if _final_animation_files_exist(config_id, args.anim_dir):
         print(f"[{config_id}] 最终动画已存在，跳过视频后处理 Journal")
