@@ -49,6 +49,42 @@ def test_check_uses_longer_timeout():
     assert client.calls == [("check", {}, autofluid_cli.CHECK_TIMEOUT_SECONDS)]
 
 
+def test_migrate_load_sends_migration_request():
+    client = _FakeClient()
+
+    result, payload = _run(["migrate-load", "1046", "WS-D"], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [(
+        "migrate_config_workstation",
+        {
+            "config_name": 1046,
+            "target_workstation_id": "WS-D",
+            "delete_source": True,
+        },
+        autofluid_cli.MIGRATE_TIMEOUT_SECONDS,
+    )]
+
+
+def test_migrate_load_keep_source_sends_delete_source_false():
+    client = _FakeClient()
+
+    result, payload = _run(["migrate-load", "1046", "WS-B", "--keep-source"], client=client)
+
+    assert result.exit_code == 0
+    assert payload["ok"] is True
+    assert client.calls == [(
+        "migrate_config_workstation",
+        {
+            "config_name": 1046,
+            "target_workstation_id": "WS-B",
+            "delete_source": False,
+        },
+        autofluid_cli.MIGRATE_TIMEOUT_SECONDS,
+    )]
+
+
 def test_clean_rejects_localworker_owned_steps_before_ipc():
     client = _FakeClient()
 

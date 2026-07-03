@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from engine.config import DEFAULT_WORKSTATION_ID, STATUS_COMPLETED, STATUS_RUNNING
+from engine.config import (
+    DEFAULT_WORKSTATION_ID,
+    STATUS_COMPLETED,
+    STATUS_RUNNING,
+    STATUS_WAITING,
+)
 from engine.scheduler.workstation_slots import WorkstationSlotCoordinator
 from engine.state_manager import StateManager
 
@@ -138,3 +143,44 @@ class TestWorkstationSlotCoordinator:
         slots.seed_from_state()
 
         assert slots.busy_workstations() == {}
+
+    def test_move_active_config_to_idle_slot_updates_reservation_and_state(self, tmp_db_path):
+        state = self._setup_state(tmp_db_path)
+        slots = WorkstationSlotCoordinator(state, ["WS-A", "WS-B"])
+        assert slots.claim(1) == "WS-A"
+        state.set_step_status(1, "meshing", STATUS_WAITING)
+
+        ok, message = slots.move_config(1, "WS-B")
+
+        assert ok is True
+        assert message == ""
+        assert slots.busy_workstations() == {"WS-B": 1}
+        assert state.get_config_workstation(1) == "WS-B"
+
+    def test_move_active_config_rejects_busy_target(self, tmp_db_path):
+        state = self._setup_state(tmp_db_path)
+        slots = WorkstationSlotCoordinator(state, ["WS-A", "WS-B"])
+        assert slots.claim(1) == "WS-A"
+        assert slots.claim(2) == "WS-B"
+        state.set_step_status(1, "meshing", STATUS_WAITING)
+
+        ok, message = slots.move_config(1, "WS-B")
+
+        assert ok is False
+        assert "WS-B" in message
+        assert slots.busy_workstations() == {"WS-A": 1, "WS-B": 2}
+        assert state.get_config_workstation(1) == "WS-A"
+
+    def test_move_completed_meshing_only_updates_state_without_slot(self, tmp_db_path):
+        state = self._setup_state(tmp_db_path)
+        state.set_config_workstation(1, "WS-A")
+        state.set_step_status(1, "meshing", STATUS_COMPLETED)
+        slots = WorkstationSlotCoordinator(state, ["WS-A", "WS-B"])
+        slots.seed_from_state()
+
+        ok, message = slots.move_config(1, "WS-B")
+
+        assert ok is True
+        assert message == ""
+        assert slots.busy_workstations() == {}
+        assert state.get_config_workstation(1) == "WS-B"

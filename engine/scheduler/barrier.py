@@ -74,7 +74,7 @@ class BarrierCoordinator:
         self._solver_active_by_workstation: dict[str, int] = {}
         self._workstation_solver_failures: dict[str, int] = {}
         self._workstation_quarantine_until: dict[str, float] = {}
-        self._restore_solver_quarantine_state()
+        self._quarantine_release_timers: dict[str, threading.Timer] = {}
         self._workstation_barriers_passed: set[str] = set()
         self._configured_workstation_ids = {
             str(workstation.get("id"))
@@ -85,6 +85,7 @@ class BarrierCoordinator:
             workstation_id != DEFAULT_WORKSTATION_ID
             for workstation_id in self._configured_workstation_ids
         )
+        self._restore_solver_quarantine_state()
 
         logger.info("全局屏障协调器初始化完成")
 
@@ -245,6 +246,7 @@ class BarrierCoordinator:
                 self._workstation_solver_failures[workstation_id] = int(failure_count)
             if float(until) > now:
                 self._workstation_quarantine_until[workstation_id] = float(until)
+                self._schedule_quarantine_release(workstation_id, float(until) - now)
         if self._workstation_quarantine_until:
             logger.warning(
                 "[Solver] 已恢复工作站 Solver 隔离状态: %s",
@@ -271,6 +273,39 @@ class BarrierCoordinator:
         }
         set_solver_quarantine(snapshot)
 
+    def _schedule_quarantine_release(self, workstation_id: str, delay: float) -> None:
+        if delay <= 0 or self._stopped.is_set():
+            return
+        self._cancel_quarantine_release(workstation_id)
+        timer = threading.Timer(
+            delay,
+            self._on_quarantine_release,
+            args=(workstation_id,),
+        )
+        timer.daemon = True
+        self._quarantine_release_timers[workstation_id] = timer
+        timer.start()
+
+    def _cancel_quarantine_release(self, workstation_id: str) -> None:
+        timer = self._quarantine_release_timers.pop(workstation_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _cancel_all_quarantine_releases(self) -> None:
+        for workstation_id in list(self._quarantine_release_timers):
+            self._cancel_quarantine_release(workstation_id)
+
+    def _on_quarantine_release(self, workstation_id: str) -> None:
+        self._quarantine_release_timers.pop(workstation_id, None)
+        if self._stopped.is_set():
+            return
+        if self._is_workstation_quarantined(workstation_id):
+            return
+        if self._paused.is_set():
+            return
+        logger.info("[Solver] 工作站 %s Solver 隔离到期，重新检查调度", workstation_id)
+        self.dispatch_solver_if_ready()
+
     def _is_workstation_quarantined(self, workstation_id: str) -> bool:
         until = self._workstation_quarantine_until.get(workstation_id)
         if until is None:
@@ -278,6 +313,7 @@ class BarrierCoordinator:
         if time.time() >= until:
             self._workstation_quarantine_until.pop(workstation_id, None)
             self._workstation_solver_failures.pop(workstation_id, None)
+            self._cancel_quarantine_release(workstation_id)
             self._persist_solver_quarantine_state()
             logger.info("[Solver] 工作站 %s Solver 隔离已到期，恢复调度", workstation_id)
             return False
@@ -296,6 +332,7 @@ class BarrierCoordinator:
         until = time.time() + quarantine_seconds
         self._workstation_quarantine_until[workstation_id] = until
         self._persist_solver_quarantine_state()
+        self._schedule_quarantine_release(workstation_id, quarantine_seconds)
         logger.error(
             "[Solver] 工作站 %s 连续 Solver 失败 %s 次，隔离 %.0f 秒",
             workstation_id,
@@ -306,6 +343,7 @@ class BarrierCoordinator:
     def _clear_solver_failures_for_workstation(self, workstation_id: str) -> None:
         self._workstation_solver_failures.pop(workstation_id, None)
         self._workstation_quarantine_until.pop(workstation_id, None)
+        self._cancel_quarantine_release(workstation_id)
         self._persist_solver_quarantine_state()
 
     def solver_quarantine_snapshot(self) -> dict[str, dict[str, int | float]]:
@@ -316,6 +354,7 @@ class BarrierCoordinator:
             if remaining <= 0:
                 self._workstation_quarantine_until.pop(workstation_id, None)
                 self._workstation_solver_failures.pop(workstation_id, None)
+                self._cancel_quarantine_release(workstation_id)
                 self._persist_solver_quarantine_state()
                 continue
             snapshot[workstation_id] = {
@@ -338,6 +377,8 @@ class BarrierCoordinator:
                 t.join(timeout=timeout)
         self._solver_threads.clear()
         self._solver_thread_workstations.clear()
+        if self._stopped.is_set():
+            self._cancel_all_quarantine_releases()
         self._solver_active_by_workstation.clear()
 
     # ------------------------------------------------------------------

@@ -68,6 +68,7 @@ _EXPECTED_COMMANDS = frozenset({
     "stop",
     "stop_step",
     "check",
+    "migrate_config_workstation",
     "reset_step",
     "clean_step",
     "get_all_status",

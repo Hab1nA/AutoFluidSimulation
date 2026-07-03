@@ -992,7 +992,12 @@ class PipelineScheduler:
                 f"{output_dir}/model_gen4_{cn}.json",
             ])
         if metrics_dir:
-            candidates.append(f"{metrics_dir}/model_gen4_{cn}.csv")
+            metrics_config_dir = f"{metrics_dir}/model_gen4_{cn}"
+            candidates.extend([
+                f"{metrics_dir}/model_gen4_{cn}.csv",
+                f"{metrics_config_dir}/model_gen4_{cn}.csv",
+                f"{metrics_config_dir}/metrics_summary.csv",
+            ])
         if animation_dir:
             candidates.extend([
                 f"{animation_dir}/t_gen4_{cn}.mp4",
@@ -1235,6 +1240,41 @@ class PipelineScheduler:
 
         self._file_monitor.reset_only()
         logger.info("[Scheduler] 已请求 STEP 文件监控器重置追踪状态")
+
+    def migrate_config_workstation(
+        self,
+        config_name: int,
+        target_workstation_id: str,
+    ) -> tuple[bool, str]:
+        """Persist a safe workstation reassignment after remote artifacts are copied."""
+        config_name = int(config_name)
+        source_workstation_id = self._workstation_for_config(config_name)
+        ok, message = self.workstation_slots.move_config(config_name, target_workstation_id)
+        if not ok:
+            return False, message
+
+        self._barrier_passed.clear()
+        if source_workstation_id:
+            self.barrier_coordinator.clear_workstation_barrier(source_workstation_id)
+        self.barrier_coordinator.clear_workstation_barrier(target_workstation_id)
+        self.state.set_global_barrier_met(False)
+        self.barrier_coordinator.reset_solver_terminal_reported()
+
+        delete_remote_tasks_for_config = getattr(
+            self.state,
+            "delete_remote_tasks_for_config",
+            None,
+        )
+        if callable(delete_remote_tasks_for_config):
+            delete_remote_tasks_for_config(config_name, "meshing")
+
+        logger.info(
+            "[Scheduler] 构型%s 工作站归属已迁移: %s -> %s",
+            config_name,
+            source_workstation_id,
+            target_workstation_id,
+        )
+        return True, ""
 
     def reset_config(self, config_name, step_name: str | None = None):
         """

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 import threading
 from contextlib import AbstractContextManager
@@ -713,6 +714,136 @@ class RemoteExecutor:
     # ------------------------------------------------------------------
     # 文件传输
     # ------------------------------------------------------------------
+
+    def _config_artifact_remote_path(
+        self,
+        config_name: int,
+        artifact: str,
+        remote_config: dict[str, object],
+    ) -> str:
+        """Return the remote path for a migratable config artifact."""
+        if artifact == "scdoc":
+            filename = get_step_filename("sc", config_name)
+            if not filename:
+                raise RuntimeError(f"构型{config_name} SCDOC 文件名配置错误")
+            return f"{remote_config['scdoc_dir']}/{filename}".replace("\\", "/")
+        if artifact == "msh":
+            path = self._meshing_mesh_file(config_name, remote_config)
+            if not path:
+                raise RuntimeError(f"构型{config_name} MSH 文件名配置错误")
+            return path
+        raise ValueError(f"不支持迁移的 artifact: {artifact}")
+
+    @staticmethod
+    def _remote_file_size(
+        ssh: "RemoteWorkstation",
+        remote_path: str,
+        timeout: float | None,
+    ) -> int | None:
+        try:
+            return ssh.get_remote_file_size(remote_path, timeout=timeout, quiet=True)
+        except TypeError:
+            try:
+                return ssh.get_remote_file_size(remote_path, timeout=timeout)
+            except TypeError:
+                return ssh.get_remote_file_size(remote_path)
+
+    def copy_config_artifact_between_workstations(
+        self,
+        config_name: int,
+        artifact: str,
+        source_workstation_id: str,
+        target_workstation_id: str,
+        *,
+        temp_parent: str | None = None,
+    ) -> dict[str, object]:
+        """Copy one config artifact from source workstation to target workstation."""
+        config_name = int(config_name)
+        artifact = str(artifact)
+        source_config = self._remote_config_for_workstation(source_workstation_id)
+        target_config = self._remote_config_for_workstation(target_workstation_id)
+        source_path = self._config_artifact_remote_path(config_name, artifact, source_config)
+        target_path = self._config_artifact_remote_path(config_name, artifact, target_config)
+        timeout = float(ENGINE_CONFIG.get("transfer_timeout", 600))
+
+        with tempfile.TemporaryDirectory(
+            prefix=f"autofluid_migrate_{config_name}_",
+            dir=temp_parent,
+        ) as temp_dir:
+            local_path = os.path.join(temp_dir, os.path.basename(source_path))
+            with self._ssh_guard(source_workstation_id):
+                try:
+                    source_ssh = self._get_ssh_for_workstation(source_workstation_id)
+                    source_size = self._remote_file_size(source_ssh, source_path, timeout)
+                    if source_size is None or source_size <= 0:
+                        raise RuntimeError(f"源文件不存在或为空: {source_path}")
+                    if not source_ssh.download_file(source_path, local_path, timeout=timeout):
+                        raise RuntimeError(f"下载源文件失败: {source_path}")
+                except (OSError, ConnectionError) as e:
+                    _raise_infra_on_ssh_error(e)
+
+            local_size = os.path.getsize(local_path)
+            if local_size != source_size:
+                raise RuntimeError(
+                    f"源文件下载大小不一致: remote={source_size}, local={local_size}"
+                )
+
+            with self._ssh_guard(target_workstation_id):
+                try:
+                    target_ssh = self._get_ssh_for_workstation(target_workstation_id)
+                    if not target_ssh.upload_file(
+                        local_path,
+                        target_path,
+                        max_retries=self._upload_max_retries(),
+                        timeout=timeout,
+                    ):
+                        raise RuntimeError(f"上传目标文件失败: {target_path}")
+                    target_size = self._remote_file_size(target_ssh, target_path, timeout)
+                    if target_size != source_size:
+                        raise RuntimeError(
+                            "目标文件大小不一致: "
+                            f"source={source_size}, target={target_size}"
+                        )
+                except (OSError, ConnectionError) as e:
+                    _raise_infra_on_ssh_error(e)
+
+        logger.info(
+            "[Transfer] 构型%s artifact=%s 已复制: %s/%s -> %s/%s",
+            config_name,
+            artifact,
+            source_workstation_id,
+            source_path,
+            target_workstation_id,
+            target_path,
+        )
+        return {
+            "artifact": artifact,
+            "source_workstation_id": source_workstation_id,
+            "target_workstation_id": target_workstation_id,
+            "source_path": source_path,
+            "target_path": target_path,
+            "size": source_size,
+        }
+
+    def delete_config_artifact(
+        self,
+        config_name: int,
+        artifact: str,
+        workstation_id: str,
+    ) -> bool:
+        """Delete one migrated artifact from its source workstation."""
+        remote_config = self._remote_config_for_workstation(workstation_id)
+        remote_path = self._config_artifact_remote_path(
+            int(config_name),
+            str(artifact),
+            remote_config,
+        )
+        with self._ssh_guard(workstation_id):
+            try:
+                ssh = self._get_ssh_for_workstation(workstation_id)
+                return bool(ssh.delete_remote_file(remote_path))
+            except (OSError, ConnectionError) as e:
+                _raise_infra_on_ssh_error(e)
 
     def execute_transfer(
         self,
@@ -1888,6 +2019,7 @@ class RemoteExecutor:
         file_grace_period = 60
         first_file_seen_time: float | None = None
         progress_seen = False
+        startup_running_warned = False
         self.last_solver_error = ""
 
         logger.info(f"[Solver] 开始轮询构型{config_name} 仿真求解状态 (超时: {timeout}s)")
@@ -2009,7 +2141,7 @@ class RemoteExecutor:
                     "solver",
                     workstation_id=workstation_id,
                 )
-                if status in {"lost", "failed", "running"}:
+                if status in {"lost", "failed"}:
                     self.last_solver_error = (
                         f"Solver 启动失败: 远程任务状态为 {status}，"
                         "启动窗口内未产生进度"
@@ -2018,6 +2150,13 @@ class RemoteExecutor:
                     self._kill_remote_task_for_config(config_name, "solver", workstation_id)
                     self._clear_solver_progress(progress_file, config_name=config_name)
                     return False
+                if status == "running" and not startup_running_warned:
+                    logger.warning(
+                        "[Solver] 构型%s 启动窗口内尚未产生进度，但远程任务仍在运行，"
+                        "继续等待",
+                        config_name,
+                    )
+                    startup_running_warned = True
 
             time.sleep(poll_interval)
 

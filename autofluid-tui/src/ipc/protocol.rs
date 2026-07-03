@@ -13,6 +13,8 @@ pub const CMD_PAUSE: &str = "pause";
 pub const CMD_STOP: &str = "stop";
 pub const CMD_STOP_STEP: &str = "stop_step";
 pub const CMD_CHECK: &str = "check";
+#[allow(dead_code)]
+pub const CMD_MIGRATE_CONFIG_WORKSTATION: &str = "migrate_config_workstation";
 pub const CMD_RESET_STEP: &str = "reset_step";
 pub const CMD_CLEAN_STEP: &str = "clean_step";
 pub const CMD_GET_ALL_STATUS: &str = "get_all_status";

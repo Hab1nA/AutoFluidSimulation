@@ -19,6 +19,7 @@ from ipc.protocol import (
     CMD_CLEAN_STEP,
     CMD_GET_DASHBOARD,
     CMD_GET_LOG_ENTRIES,
+    CMD_MIGRATE_CONFIG_WORKSTATION,
     CMD_PAUSE,
     CMD_RESET_STEP,
     CMD_START,
@@ -37,6 +38,7 @@ DEFAULT_IPC_PORT = 9527
 DEFAULT_TIMEOUT_SECONDS = 5.0
 CHECK_TIMEOUT_SECONDS = 60.0
 WORKER_TIMEOUT_SECONDS = 60.0
+MIGRATE_TIMEOUT_SECONDS = 1800.0
 DEFAULT_ALERT_LIMIT = 50
 DEFAULT_ALERT_INTERVAL_SECONDS = 5.0
 DEFAULT_ALERT_COOLDOWN_SECONDS = 600.0
@@ -369,6 +371,11 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("check")
     sub.add_parser("status")
 
+    migrate = sub.add_parser("migrate-load")
+    migrate.add_argument("config_name")
+    migrate.add_argument("target_workstation")
+    migrate.add_argument("--keep-source", action="store_true")
+
     clean = sub.add_parser("clean")
     clean.add_argument("step")
     clean.add_argument("--config", dest="config_name")
@@ -472,6 +479,20 @@ def run_cli(
             return _ipc_result("check", client.request(CMD_CHECK, timeout=CHECK_TIMEOUT_SECONDS))
         if args.command == "status":
             return _ipc_result("status", client.request(CMD_GET_DASHBOARD, {"since_log_id": 0, "log_limit": 0}))
+        if args.command == "migrate-load":
+            params = {
+                "config_name": int(args.config_name),
+                "target_workstation_id": str(args.target_workstation).upper(),
+                "delete_source": not bool(args.keep_source),
+            }
+            return _ipc_result(
+                "migrate-load",
+                client.request(
+                    CMD_MIGRATE_CONFIG_WORKSTATION,
+                    params,
+                    timeout=MIGRATE_TIMEOUT_SECONDS,
+                ),
+            )
         if args.command == "daemon":
             return _run_systemctl(args.action, settings, command_runner)
         if args.command == "worker":

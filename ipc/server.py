@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 from ipc.protocol import (
     deserialize, create_response, serialize,
     CMD_START, CMD_PAUSE, CMD_STOP, CMD_STOP_STEP, CMD_CHECK,
-    CMD_RESET_STEP, CMD_CLEAN_STEP,
+    CMD_MIGRATE_CONFIG_WORKSTATION, CMD_RESET_STEP, CMD_CLEAN_STEP,
     CMD_GET_ALL_STATUS, CMD_GET_STATISTICS, CMD_GET_ENGINE_STATUS,
     CMD_GET_LOG_ENTRIES, CMD_GET_DASHBOARD, CMD_RELOAD_CONFIG,
     CMD_WORKER_REGISTER, CMD_WORKER_HEARTBEAT,
@@ -109,6 +109,10 @@ class IPCServer:
         self.register_handler(CMD_STOP, daemon.handle_stop)
         self.register_handler(CMD_STOP_STEP, daemon.handle_stop_step)
         self.register_handler(CMD_CHECK, daemon.handle_check)
+        self.register_handler(
+            CMD_MIGRATE_CONFIG_WORKSTATION,
+            daemon.handle_migrate_config_workstation,
+        )
 
         # 查询
         self.register_handler(CMD_GET_ALL_STATUS, daemon.handle_get_all_status)

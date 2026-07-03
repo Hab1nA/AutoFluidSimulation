@@ -86,6 +86,38 @@ class WorkstationSlotCoordinator:
                 return
             self._busy_by_workstation.pop(workstation_id, None)
 
+    def move_config(self, config_name: int, target_workstation_id: str) -> tuple[bool, str]:
+        """Move one config assignment, preserving active slot exclusivity."""
+        config_name = int(config_name)
+        with self._lock:
+            if target_workstation_id not in self._workstation_ids:
+                return False, f"目标工作站无效或未配置: {target_workstation_id}"
+
+            source_workstation_id = self._workstation_for_active_config(config_name)
+            owns_active_slot = source_workstation_id is not None
+            if not owns_active_slot and self._is_config_slot_active(config_name):
+                persisted = self.state.get_config_workstation(config_name)
+                if persisted in self._workstation_ids:
+                    source_workstation_id = persisted
+                    owns_active_slot = True
+                    self._busy_by_workstation.setdefault(persisted, config_name)
+
+            target_owner = self._busy_by_workstation.get(target_workstation_id)
+            if target_owner is not None and target_owner != config_name:
+                return (
+                    False,
+                    f"目标工作站 {target_workstation_id} 已被构型{target_owner}占用",
+                )
+
+            if owns_active_slot:
+                for workstation_id, busy_config in list(self._busy_by_workstation.items()):
+                    if busy_config == config_name:
+                        self._busy_by_workstation.pop(workstation_id, None)
+                self._busy_by_workstation[target_workstation_id] = config_name
+
+            self.state.set_config_workstation(config_name, target_workstation_id)
+            return True, ""
+
     def clear(self) -> None:
         """Release all in-memory slot reservations."""
         with self._lock:

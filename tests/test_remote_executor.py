@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import threading
 
 import pytest
@@ -281,6 +282,141 @@ def test_execute_transfer_uses_workstation_specific_remote_dir(tmp_path, monkeyp
     assert executor.execute_transfer(1, workstation_id="WS-A") is True
     assert requested_workstations == ["WS-A"]
     assert uploaded == ["E:/ws-a scdoc/model_gen4_1.scdoc"]
+
+
+def test_copy_config_artifact_between_workstations_downloads_uploads_and_verifies_size(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scdoc_dir": rf"D:\{workstation_id}\scdoc",
+            "msh_dir": rf"D:\{workstation_id}\msh",
+        },
+    )
+
+    events: list[tuple[str, str, str]] = []
+    source_bytes = b"mesh-bytes"
+
+    class _SSH:
+        def __init__(self, workstation_id: str) -> None:
+            self.workstation_id = workstation_id
+
+        def get_remote_file_size(self, remote_path: str, **_kwargs) -> int | None:
+            if self.workstation_id == "WS-A":
+                return len(source_bytes)
+            if self.workstation_id == "WS-D" and remote_path == "D:/WS-D/msh/model_gen4_7.msh.h5":
+                return len(source_bytes)
+            return None
+
+        def download_file(self, remote_path: str, local_path: str, **_kwargs) -> bool:
+            events.append(("download", self.workstation_id, remote_path))
+            with open(local_path, "wb") as handle:
+                handle.write(source_bytes)
+            return True
+
+        def upload_file(self, local_path: str, remote_path: str, **_kwargs) -> bool:
+            events.append(("upload", self.workstation_id, remote_path))
+            assert open(local_path, "rb").read() == source_bytes
+            return True
+
+    executor = RemoteExecutor(
+        _StateRecorder(),
+        lambda workstation_id: _SSH(workstation_id),
+        threading.RLock(),
+    )
+
+    copied = executor.copy_config_artifact_between_workstations(
+        7,
+        "msh",
+        "WS-A",
+        "WS-D",
+        temp_parent=str(tmp_path),
+    )
+
+    assert copied == {
+        "artifact": "msh",
+        "source_workstation_id": "WS-A",
+        "target_workstation_id": "WS-D",
+        "source_path": "D:/WS-A/msh/model_gen4_7.msh.h5",
+        "target_path": "D:/WS-D/msh/model_gen4_7.msh.h5",
+        "size": len(source_bytes),
+    }
+    assert events == [
+        ("download", "WS-A", "D:/WS-A/msh/model_gen4_7.msh.h5"),
+        ("upload", "WS-D", "D:/WS-D/msh/model_gen4_7.msh.h5"),
+    ]
+
+
+def test_copy_config_artifact_rejects_size_mismatch_after_upload(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scdoc_dir": rf"D:\{workstation_id}\scdoc",
+            "msh_dir": rf"D:\{workstation_id}\msh",
+        },
+    )
+
+    class _SSH:
+        def __init__(self, workstation_id: str) -> None:
+            self.workstation_id = workstation_id
+
+        def get_remote_file_size(self, remote_path: str, **_kwargs) -> int | None:
+            return 10 if self.workstation_id == "WS-A" else 9
+
+        def download_file(self, remote_path: str, local_path: str, **_kwargs) -> bool:
+            with open(local_path, "wb") as handle:
+                handle.write(b"0123456789")
+            return True
+
+        def upload_file(self, local_path: str, remote_path: str, **_kwargs) -> bool:
+            return True
+
+    executor = RemoteExecutor(
+        _StateRecorder(),
+        lambda workstation_id: _SSH(workstation_id),
+        threading.RLock(),
+    )
+
+    with pytest.raises(RuntimeError, match="大小不一致"):
+        executor.copy_config_artifact_between_workstations(
+            7,
+            "msh",
+            "WS-A",
+            "WS-D",
+            temp_parent=str(tmp_path),
+        )
+
+
+def test_delete_config_artifact_uses_source_workstation_path(monkeypatch):
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "scdoc_dir": rf"D:\{workstation_id}\scdoc",
+            "msh_dir": rf"D:\{workstation_id}\msh",
+        },
+    )
+    deleted: list[str] = []
+
+    class _SSH:
+        def delete_remote_file(self, remote_path: str) -> bool:
+            deleted.append(remote_path)
+            return True
+
+    executor = RemoteExecutor(_StateRecorder(), lambda _workstation_id: _SSH(), threading.RLock())
+
+    assert executor.delete_config_artifact(4, "scdoc", "WS-A") is True
+    assert deleted == ["D:/WS-A/scdoc/model_gen4_4.scdoc"]
 
 
 def test_execute_transfer_uses_one_timeout_budget(tmp_path, monkeypatch):
@@ -1779,7 +1915,9 @@ def test_wait_solver_completion_fails_fast_when_remote_task_lost_during_startup(
     assert killed == [(5, "solver", DEFAULT_WORKSTATION_ID)]
 
 
-def test_wait_solver_completion_fails_fast_when_task_running_without_startup_progress(monkeypatch):
+def test_wait_solver_completion_keeps_waiting_when_task_running_without_startup_progress(
+    monkeypatch,
+):
     monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
     monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
     monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 28_800)
@@ -1796,26 +1934,40 @@ def test_wait_solver_completion_fails_fast_when_task_running_without_startup_pro
         "started_at": 1_000.0,
     }
     killed: list[tuple[int, str, str]] = []
+    startup_checked: list[tuple[int, str, str]] = []
+    after_startup_check = False
+    progress_payload = {"config_name": 5, "current_iter": 1, "total_iter": 100}
 
     class _SSH:
         def check_remote_file(self, remote_path: str) -> bool:
+            if after_startup_check:
+                return remote_path in {
+                    "D:/flags/solver_done_5.txt",
+                    "D:/result/model_gen4_5.cas.h5",
+                    "D:/result/model_gen4_5.dat.h5",
+                }
             return False
 
         def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            if after_startup_check:
+                return json.dumps(progress_payload)
             return None
 
-        def read_remote_pid_file(self, pid_file: str) -> int:
-            return 4242
-
-        def exec_command(self, command: str, timeout: int = 30):
-            if command.startswith("schtasks"):
-                return "TaskName: AutoFluid_running", "", 0
-            if command.startswith("tasklist"):
-                return "python.exe                   4242 Console                    1     20,000 K", "", 0
-            raise AssertionError(command)
+        def delete_remote_file(self, remote_path: str) -> bool:
+            return True
 
     executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
     executor._remote_tasks[5] = "AutoFluid_running"
+
+    def query_remote_task_status(
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> str:
+        startup_checked.append((config_name, step_name, workstation_id))
+        return "running"
+
+    monkeypatch.setattr(executor, "query_remote_task_status", query_remote_task_status)
     monkeypatch.setattr(
         executor,
         "_kill_remote_task_for_config",
@@ -1823,19 +1975,84 @@ def test_wait_solver_completion_fails_fast_when_task_running_without_startup_pro
             (config_name, step_name, workstation_id)
         ) or True,
     )
-    times = iter([1_360.0, 1_360.0, 1_360.0, 1_360.0])
+    times = iter([1_360.0, 1_360.0, 1_370.0])
     monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+
+    def sleep(_seconds: float) -> None:
+        nonlocal after_startup_check
+        after_startup_check = True
+
     monkeypatch.setattr(
         remote_executor_module.time,
         "sleep",
-        lambda _: (_ for _ in ()).throw(
-            AssertionError("startup failure must not wait for solver timeout")
-        ),
+        sleep,
     )
 
-    assert executor.wait_solver_completion(5) is False
-    assert "启动窗口内未产生进度" in executor.last_solver_error
-    assert killed == [(5, "solver", DEFAULT_WORKSTATION_ID)]
+    assert executor.wait_solver_completion(5) is True
+    assert startup_checked == [(5, "solver", DEFAULT_WORKSTATION_ID)]
+    assert killed == []
+    assert executor.last_solver_error == ""
+
+
+def test_wait_solver_completion_logs_startup_running_warning_once(monkeypatch, caplog):
+    monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\flags")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\result")
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_timeout", 28_800)
+    monkeypatch.setitem(ENGINE_CONFIG, "solver_startup_timeout", 300)
+
+    state = _StateRecorder()
+    state.remote_tasks[(5, "solver")] = {
+        "config_name": 5,
+        "step_name": "solver",
+        "task_name": "AutoFluid_running",
+        "flag_file": "D:/flags/solver_done_5.txt",
+        "error_flag_file": "D:/flags/solver_done_5.txt.error",
+        "pid_file": "D:/flags/autofluid_bg_running.pid",
+        "started_at": 1_000.0,
+    }
+    status_checks = 0
+    progress_payload = {"config_name": 5, "current_iter": 1, "total_iter": 100}
+
+    class _SSH:
+        def check_remote_file(self, remote_path: str) -> bool:
+            if status_checks >= 2:
+                return remote_path in {
+                    "D:/flags/solver_done_5.txt",
+                    "D:/result/model_gen4_5.cas.h5",
+                    "D:/result/model_gen4_5.dat.h5",
+                }
+            return False
+
+        def read_remote_text_file(self, remote_path: str, *, timeout: float | None = None):
+            if status_checks >= 2:
+                return json.dumps(progress_payload)
+            return None
+
+        def delete_remote_file(self, remote_path: str) -> bool:
+            return True
+
+    executor = RemoteExecutor(state, lambda: _SSH(), threading.RLock())
+    executor._remote_tasks[5] = "AutoFluid_running"
+
+    def query_remote_task_status(
+        config_name: int,
+        step_name: str,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+    ) -> str:
+        nonlocal status_checks
+        status_checks += 1
+        return "running"
+
+    monkeypatch.setattr(executor, "query_remote_task_status", query_remote_task_status)
+    times = iter([1_360.0, 1_360.0, 1_370.0, 1_370.0, 1_380.0])
+    monkeypatch.setattr(remote_executor_module.time, "time", lambda: next(times))
+    monkeypatch.setattr(remote_executor_module.time, "sleep", lambda _seconds: None)
+
+    with caplog.at_level(logging.WARNING):
+        assert executor.wait_solver_completion(5) is True
+
+    assert status_checks == 2
+    assert sum("启动窗口内尚未产生进度" in record.message for record in caplog.records) == 1
 
 
 def test_wait_meshing_completion_uses_persisted_started_at_for_timeout(monkeypatch):

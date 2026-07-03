@@ -38,7 +38,10 @@ from typing import Any, Mapping
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine.config import (
-    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS, STATUS_RUNNING, STATUS_ERROR,
+    DEFAULT_WORKSTATION_ID,
+    LOCAL_PATHS, IPC_CONFIG, STEP_NAMES, WORKSTATIONS,
+    STATUS_COMPLETED, STATUS_ERROR, STATUS_PAUSED, STATUS_RETRYING, STATUS_RUNNING,
+    STATUS_UNKNOWN_REMOTE, STATUS_WAITING,
     ensure_directories, get_step_filename, get_workstation_ssh_health_interval,
     is_server_mode, validate_config_details,
 )
@@ -2120,6 +2123,263 @@ class PipelineDaemon:
             "stopped": True,
         }
         return True, data, f"已停止构型{config_name}的 {step_name} 远程任务"
+
+    def handle_migrate_config_workstation(self, params: dict) -> tuple[bool, Any, str]:
+        """Safely migrate a config's workstation assignment and required artifact."""
+        params = params or {}
+        valid_config_name, config_name, config_error = self._normalize_config_name_for_mutation(
+            params.get("config_name"),
+            allow_none=False,
+        )
+        if not valid_config_name:
+            return False, None, config_error
+        if config_name == "all":
+            return False, None, "migrate_config_workstation 必须指定单个构型"
+
+        target_ok, target_workstation_id, target_error = self._normalize_target_workstation(
+            params.get("target_workstation_id"),
+        )
+        if not target_ok:
+            return False, None, target_error
+        delete_source = bool(params.get("delete_source", True))
+
+        state = getattr(self, "state", None)
+        runner = getattr(self, "runner", None)
+        scheduler = getattr(self, "scheduler", None)
+        if state is None or runner is None or scheduler is None:
+            return False, None, "Daemon 尚未初始化流水线组件"
+        if state.get_engine_status() == "running":
+            return False, None, "流水线运行中，迁移前请先 pause"
+
+        source_workstation_id = self._config_workstation_for_migration(config_name)
+        if not source_workstation_id or source_workstation_id == DEFAULT_WORKSTATION_ID:
+            return False, None, f"构型{config_name}尚未绑定到具体工作站"
+        if source_workstation_id == target_workstation_id:
+            return False, None, f"构型{config_name}已位于 {target_workstation_id}"
+
+        statuses = self._config_statuses_for_migration(config_name)
+        all_completed = all(
+            statuses.get(step_name) == STATUS_COMPLETED
+            for step_name in STEP_NAMES
+        )
+        if all_completed:
+            return False, None, f"构型{config_name}所有步骤已完成，不迁移"
+
+        unsafe_statuses = {
+            STATUS_RUNNING,
+            STATUS_PAUSED,
+            STATUS_RETRYING,
+            STATUS_UNKNOWN_REMOTE,
+        }
+        for step_name in ("transfer", "meshing", "solver", "postprocess"):
+            if statuses.get(step_name) in unsafe_statuses:
+                return (
+                    False,
+                    None,
+                    f"构型{config_name}的 {step_name} 状态为 {statuses.get(step_name)}，不允许迁移",
+                )
+
+        mode: str
+        artifact: str
+        if (
+            statuses.get("transfer") == STATUS_COMPLETED
+            and statuses.get("meshing") == STATUS_WAITING
+            and statuses.get("solver") == STATUS_WAITING
+            and statuses.get("postprocess") == STATUS_WAITING
+        ):
+            mode = "pre_meshing_scdoc"
+            artifact = "scdoc"
+        elif (
+            statuses.get("meshing") == STATUS_COMPLETED
+            and statuses.get("solver") == STATUS_WAITING
+            and statuses.get("postprocess") == STATUS_WAITING
+        ):
+            mode = "post_meshing_msh"
+            artifact = "msh"
+        else:
+            return (
+                False,
+                None,
+                "当前步骤窗口不支持迁移：仅支持 transfer Completed + meshing Waiting，"
+                "或 meshing Completed + solver Waiting",
+            )
+
+        health_ok, health_message = self._validate_migration_workstation_health(
+            source_workstation_id,
+            target_workstation_id,
+        )
+        if not health_ok:
+            return False, None, health_message
+
+        remote_ok, remote_message = self._validate_no_active_remote_task_for_migration(
+            config_name,
+        )
+        if not remote_ok:
+            return False, None, remote_message
+
+        get_remote_executor = getattr(runner, "get_remote_executor", None)
+        if not callable(get_remote_executor):
+            return False, None, "远程执行器不可用"
+        remote_executor = get_remote_executor()
+        copy_artifact = getattr(
+            remote_executor,
+            "copy_config_artifact_between_workstations",
+            None,
+        )
+        delete_artifact = getattr(remote_executor, "delete_config_artifact", None)
+        if not callable(copy_artifact) or not callable(delete_artifact):
+            return False, None, "远程 artifact 迁移接口不可用"
+
+        copied_files: list[dict[str, Any]] = []
+        deleted_source_files: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        try:
+            copied_files.append(dict(copy_artifact(
+                config_name,
+                artifact,
+                source_workstation_id,
+                target_workstation_id,
+            )))
+        except Exception as exc:
+            logger.warning(
+                "[IPC] migrate copy failed: config=%s artifact=%s source=%s target=%s error=%s",
+                config_name,
+                artifact,
+                source_workstation_id,
+                target_workstation_id,
+                exc,
+            )
+            return False, None, f"迁移文件复制失败: {exc}"
+
+        migrate_config_workstation = getattr(scheduler, "migrate_config_workstation", None)
+        if not callable(migrate_config_workstation):
+            return False, None, "调度器迁移接口不可用"
+        ok, message = migrate_config_workstation(config_name, target_workstation_id)
+        if not ok:
+            return False, None, message or "构型工作站归属迁移失败"
+
+        if delete_source:
+            try:
+                deleted = bool(delete_artifact(config_name, artifact, source_workstation_id))
+                if deleted:
+                    deleted_source_files.append({
+                        "artifact": artifact,
+                        "workstation_id": source_workstation_id,
+                        "path": copied_files[0].get("source_path"),
+                    })
+                else:
+                    warnings.append(
+                        f"源工作站 {source_workstation_id} 的 {artifact} 文件删除失败"
+                    )
+            except Exception as exc:
+                warning = (
+                    f"源工作站 {source_workstation_id} 的 {artifact} 文件删除异常: {exc}"
+                )
+                warnings.append(warning)
+                logger.warning("[IPC] migrate source cleanup warning: %s", warning)
+
+        data = {
+            "config_name": config_name,
+            "source_workstation_id": source_workstation_id,
+            "target_workstation_id": target_workstation_id,
+            "mode": mode,
+            "copied_files": copied_files,
+            "deleted_source_files": deleted_source_files,
+            "warnings": warnings,
+        }
+        return True, data, f"构型{config_name}已从 {source_workstation_id} 迁移到 {target_workstation_id}"
+
+    @staticmethod
+    def _normalize_target_workstation(value: Any) -> tuple[bool, str, str]:
+        target = str(value or "").strip().upper()
+        if not target:
+            return False, "", "请指定目标工作站 (target_workstation_id)"
+        configured: dict[str, str] = {
+            str(workstation.get("id")).upper(): str(workstation.get("id"))
+            for workstation in WORKSTATIONS
+            if workstation.get("id")
+        }
+        configured.update(
+            {workstation_id: workstation_id for workstation_id in ("WS-A", "WS-B", "WS-C", "WS-D")}
+        )
+        if target not in configured:
+            return False, target, f"无效目标工作站: {target}"
+        return True, configured[target], ""
+
+    def _config_workstation_for_migration(self, config_name: int) -> str | None:
+        state = getattr(self, "state", None)
+        get_config_workstation = getattr(state, "get_config_workstation", None)
+        if not callable(get_config_workstation):
+            return None
+        workstation_id = get_config_workstation(config_name)
+        return str(workstation_id) if workstation_id else None
+
+    def _config_statuses_for_migration(self, config_name: int) -> dict[str, str]:
+        state = getattr(self, "state", None)
+        get_all_steps_for_config = getattr(state, "get_all_steps_for_config", None)
+        if callable(get_all_steps_for_config):
+            raw = get_all_steps_for_config(config_name)
+            if isinstance(raw, dict):
+                statuses: dict[str, str] = {}
+                for step, value in raw.items():
+                    if isinstance(value, dict):
+                        statuses[str(step)] = str(value.get("status", STATUS_WAITING))
+                    else:
+                        statuses[str(step)] = str(value)
+                return statuses
+        return {
+            step_name: str(state.get_step_status(config_name, step_name))
+            for step_name in STEP_NAMES
+        }
+
+    def _validate_migration_workstation_health(
+        self,
+        source_workstation_id: str,
+        target_workstation_id: str,
+    ) -> tuple[bool, str]:
+        health = self._build_health_snapshot()
+        details = health.get("workstation_ssh_details")
+        if not isinstance(details, dict):
+            return False, "无法读取工作站 SSH 健康状态"
+        for workstation_id in (source_workstation_id, target_workstation_id):
+            status = str(details.get(workstation_id, "unknown"))
+            if status != "ok":
+                return False, f"工作站 {workstation_id} SSH 健康状态为 {status}，不允许迁移"
+        return True, ""
+
+    def _validate_no_active_remote_task_for_migration(
+        self,
+        config_name: int,
+    ) -> tuple[bool, str]:
+        state = getattr(self, "state", None)
+        runner = getattr(self, "runner", None)
+        get_all_remote_tasks = getattr(state, "get_all_remote_tasks", None)
+        get_remote_executor = getattr(runner, "get_remote_executor", None)
+        if not callable(get_all_remote_tasks) or not callable(get_remote_executor):
+            return True, ""
+        remote_executor = get_remote_executor()
+        query_remote_task_status = getattr(remote_executor, "query_remote_task_status", None)
+        if not callable(query_remote_task_status):
+            return True, ""
+        for task in get_all_remote_tasks():
+            try:
+                task_config = int(task.get("config_name"))
+            except (TypeError, ValueError):
+                continue
+            step_name = str(task.get("step_name") or "")
+            if task_config != config_name or step_name not in {"meshing", "solver", "postprocess"}:
+                continue
+            workstation_id = str(task.get("workstation_id", DEFAULT_WORKSTATION_ID))
+            try:
+                status = str(query_remote_task_status(config_name, step_name, workstation_id))
+            except Exception as exc:
+                return False, f"无法确认构型{config_name}的 {step_name} 远程任务状态: {exc}"
+            if status not in {"completed", "lost"}:
+                return (
+                    False,
+                    f"构型{config_name}的 {step_name} 远程任务状态为 {status}，不允许迁移",
+                )
+        return True, ""
 
     def _release_cleaned_workstation_slots(
         self,

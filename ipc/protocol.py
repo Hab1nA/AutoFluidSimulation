@@ -46,6 +46,7 @@ CMD_STOP_STEP = "stop_step"     # 停止指定构型指定远程步骤
 CMD_CHECK = "check"             # 系统自检
 
 # ---- 状态操作命令 ----
+CMD_MIGRATE_CONFIG_WORKSTATION = "migrate_config_workstation"  # 迁移构型工作站归属
 CMD_RESET_STEP = "reset_step"   # 重置指定构型指定步骤
 
 # ---- 清理命令 ----
