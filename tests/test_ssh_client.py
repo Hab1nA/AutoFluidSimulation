@@ -2,6 +2,7 @@ import base64
 import hashlib
 import stat
 import socket
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -915,6 +916,70 @@ def test_get_remote_file_size_returns_none_when_sftp_stat_times_out():
         assert host.get_remote_file_size("D:/remote/model.scdoc", timeout=11) is None
 
     assert timeouts == [11, None]
+
+
+def test_sftp_timeout_operations_are_serialized():
+    host = RemoteWorkstation("127.0.0.1", 22, "user", "pwd")
+    timeouts: list[float | None] = []
+    stat_started = threading.Event()
+    release_stat = threading.Event()
+    read_result: list[str | None] = []
+
+    class _Channel:
+        def settimeout(self, timeout):
+            timeouts.append(timeout)
+
+    class _RemoteFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    class _SFTP:
+        def __init__(self) -> None:
+            self.channel = _Channel()
+
+        def get_channel(self):
+            return self.channel
+
+        def stat(self, remote_path: str):
+            stat_started.set()
+            release_stat.wait(timeout=2)
+
+            class _Stat:
+                st_size = 42
+
+            return _Stat()
+
+        def open(self, remote_path: str, mode: str):
+            return _RemoteFile()
+
+    host._sftp = _SFTP()
+
+    with patch.object(host, "ensure_connected", return_value=True):
+        stat_thread = threading.Thread(
+            target=lambda: host.get_remote_file_size("D:/remote/model.scdoc", timeout=11)
+        )
+        read_thread = threading.Thread(
+            target=lambda: read_result.append(
+                host.read_remote_text_file("D:/flags/progress.json", timeout=7)
+            )
+        )
+        stat_thread.start()
+        assert stat_started.wait(timeout=1)
+        read_thread.start()
+        read_thread.join(timeout=0.05)
+        assert timeouts == [11]
+        release_stat.set()
+        stat_thread.join(timeout=1)
+        read_thread.join(timeout=1)
+
+    assert read_result == ['{"ok": true}']
+    assert timeouts == [11, None, 7, None]
 
 
 def test_get_remote_file_size_quiet_suppresses_warning_on_probe_timeout(caplog):

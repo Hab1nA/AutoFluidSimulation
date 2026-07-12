@@ -59,6 +59,53 @@ def test_spaceclaim_transit_uses_env_log_dir_and_slot_filename() -> None:
     assert "spaceclaim_transit_{}.log" in source
 
 
+def test_spaceclaim_transit_uses_only_2024r1_api() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    assert "_SPACECLAIM_API_VERSION" in source
+    assert '"V241"' in source
+    assert '"V23"' not in source
+    assert "_SPACECLAIM_API_VERSIONS" not in source
+    assert "for _api_version" not in source
+    assert "SpaceClaim.Api.{}" in source
+    assert "SpaceClaim.Api.V23 import *" not in source
+
+
+def test_bridge_sets_versioned_ansys_environment_from_spaceclaim_exe() -> None:
+    source = _source()
+
+    assert "private static string ResolveAwpRoot(string? spaceClaimExePath)" in source
+    assert "private static string ResolveAnsysVersionToken(string? awpRoot)" in source
+    assert "SetVersionedEnvironmentIfMissing" in source
+    assert '"AWP_ROOT{versionToken}"' in source
+    assert '"ANSYS{versionToken}_DIR"' in source
+    assert '"CADOE_LIBDIR{versionToken}"' in source
+    assert '@"C:\\Program Files\\ANSYS Inc\\v241"' in source
+    assert 'Environment.GetEnvironmentVariable("AWP_ROOT231")' not in source
+
+
+def test_bridge_auto_detects_only_spaceclaim_2024r1() -> None:
+    source = _source()
+    paths_start = source.index("private static readonly string[] SpaceClaimExePaths")
+    paths_end = source.index("};", paths_start)
+    paths_block = source[paths_start:paths_end]
+
+    assert r"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe" in paths_block
+    assert r"C:\Program Files\ANSYS Inc\v232\SCDM\SpaceClaim.exe" not in paths_block
+    assert r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe" not in paths_block
+
+
+def test_bridge_normalizes_filesystem_arguments_to_absolute_paths() -> None:
+    source = _source()
+
+    assert "private static void NormalizePathOptions(BridgeOptions options)" in source
+    assert "NormalizePathOptions(options);" in source
+    assert "options.ScriptPath = Path.GetFullPath(options.ScriptPath);" in source
+    assert "options.StepDir = Path.GetFullPath(options.StepDir);" in source
+    assert "options.ScdocDir = Path.GetFullPath(options.ScdocDir);" in source
+    assert "options.CmdDir = Path.GetFullPath(options.CmdDir);" in source
+
+
 def test_linux_daemon_unit_declares_lifecycle_boundaries() -> None:
     source = DEPLOY_SCRIPT_SOURCE.read_text(encoding="utf-8")
 
@@ -160,9 +207,9 @@ def test_bridge_normalizes_duplicate_path_environment_before_start() -> None:
     launch_start = source.index("private static Process? LaunchAndResolve")
     launch_end = source.index("private static void PrepareSpaceClaimEnvironment", launch_start)
     launch_block = source[launch_start:launch_end]
-    assert "PrepareSpaceClaimEnvironment(psi);" in launch_block
+    assert "PrepareSpaceClaimEnvironment(psi, scExe);" in launch_block
     assert "configureEnvironment(psi);" in launch_block
-    assert launch_block.index("PrepareSpaceClaimEnvironment(psi);") < launch_block.index(
+    assert launch_block.index("PrepareSpaceClaimEnvironment(psi, scExe);") < launch_block.index(
         "configureEnvironment(psi);"
     )
     normalize_start = source.index("private static void NormalizePathEnvironmentVariables")

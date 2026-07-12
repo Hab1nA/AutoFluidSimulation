@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # ============================================================================
-# SpaceClaim Transit Script — V23 兼容版本
+# SpaceClaim Transit Script — SpaceClaim 2024 R1 兼容版本
 # 功能：读取 STEP 文件 → 创建命名选择集 → 保存为 SCDOC
 #
 # 用法（通过本项目 Daemon 调用）：SpaceClaim.exe /RunScript=<本脚本路径> /ScriptArgs=<构型名> <STEP目录> <SCDOC输出目录>
@@ -13,7 +13,7 @@
 #   sys.argv = ["spaceclaim_transit.py", "6", r"<STEP目录>", r"<SCDOC输出目录>"]
 #   execfile(r"<脚本完整路径>")
 #
-# 兼容版本：SpaceClaim 2023 R1 (API V23)
+# 兼容版本：SpaceClaim 2024 R1 (API V241)
 # 说明：args 是 SpaceClaim 在 /RunScript 模式下自动注入的全局变量，
 #       包含 /ScriptArgs 中以空格分隔的参数列表。
 #
@@ -176,19 +176,27 @@ logger.info("Python: {}".format(sys.version))
 logger.info("sys.argv: {}".format(sys.argv))
 
 # --------------------------------------------------------------------------
-# 1. 导入 SpaceClaim API V23
+# 1. 导入 SpaceClaim API
 # --------------------------------------------------------------------------
 # 注意：Body1/Body2 等是 .scscript 格式独有的会话全局变量，
-#       无法通过 from SpaceClaim.Api.V23 import Body1 导入。
+#       无法通过 SpaceClaim API 模块 import Body1。
 #       在 .py 脚本中应使用 None（表示"所有体"），
 #       对于单体的 STEP 导入模型与 Body1 语义完全等价。
+_SPACECLAIM_API_VERSION = "V241"
+_sc_api = None
+# 动态 API 导入会填充这些全局名；预声明用于通过静态检查。
+Window = Command = Document = Selection = None
+PowerSelectOptions = NamedSelection = PowerSelection = MM2 = None
+_api_module_name = "SpaceClaim.Api.{}".format(_SPACECLAIM_API_VERSION)
 try:
-    import SpaceClaim.Api.V23 as _sc_api
-    from SpaceClaim.Api.V23 import *
-    logger.info("SpaceClaim.Api.V23 导入成功")
+    _sc_api = __import__(_api_module_name, globals(), locals(), ["*"])
+    for _api_name in dir(_sc_api):
+        if not _api_name.startswith("_"):
+            globals()[_api_name] = getattr(_sc_api, _api_name)
+    logger.info("{} 导入成功".format(_api_module_name))
 except ImportError as e:
-    logger.critical("无法导入 SpaceClaim.Api.V23: {}".format(e))
-    logger.critical("请确认 SpaceClaim 2023 R1 已正确安装，且脚本在 SpaceClaim 内部运行")
+    logger.critical("无法导入 {}: {}".format(_api_module_name, e))
+    logger.critical("请确认 SpaceClaim 2024 R1 已正确安装，且脚本在 SpaceClaim 内部运行")
     sys.exit(1)
 
 
@@ -273,7 +281,7 @@ _persistent_config_count = 0
 def _get_document_count():
     """获取 SpaceClaim 中当前打开的文档数量（通过所有窗口计数）。
 
-    SpaceClaim API V23 没有 Document.All 属性。正确的做法是通过
+    当前 SpaceClaim 脚本 API 没有 Document.All 属性。正确的做法是通过
     Window.AllWindows（ICollection<Window>）按窗口计数，
     每个窗口关联一个 Document。
 
@@ -312,7 +320,7 @@ def _force_gc():
 def _close_all_documents():
     """关闭 SpaceClaim 中所有打开的窗口/文档，并验证关闭结果。
 
-    SpaceClaim API V23 的正确做法：
+    当前 SpaceClaim 脚本 API 的正确做法：
     1. 通过 Window.AllWindows 获取所有窗口（ICollection<Window>）
     2. 逐窗口调用 Window.Close() 关闭
     3. 反复执行直到窗口数为 0
@@ -352,7 +360,7 @@ def _close_all_documents():
         logger.info("枚举到 {} 个窗口，逐窗口关闭...".format(len(all_windows)))
         for win in all_windows:
             try:
-                # Window.Close() — 这是 V23 API 中关闭窗口/文档的正确方法
+                # Window.Close() 是关闭窗口/文档的可靠方法。
                 win.Close()
                 close_count += 1
                 logger.debug("Window.Close() 调用成功 ({}/{})".format(
@@ -976,7 +984,7 @@ def Main():
         scdoc_name = script_args[3]
 
         logger.info("=" * 60)
-        logger.info("SpaceClaim Transit Script V23")
+        logger.info("SpaceClaim Transit Script V241")
         logger.info("构型编号: {}".format(config_name))
         logger.info("STEP 目录: {}".format(step_dir))
         logger.info("SCDOC 目录: {}".format(scdoc_dir))

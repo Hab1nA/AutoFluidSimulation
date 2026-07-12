@@ -104,6 +104,7 @@ print(json.dumps({
         "sw_model": cfg.LOCAL_PATHS["sw_model"],
         "excel": cfg.LOCAL_PATHS["excel"],
         "step_dir": cfg.LOCAL_PATHS["step_dir"],
+        "sc_exe": cfg.LOCAL_PATHS["sc_exe"],
         "scdoc_dir": cfg.LOCAL_PATHS["scdoc_dir"],
     },
     "remote_config": {
@@ -134,6 +135,7 @@ print(json.dumps({
         assert snapshot["local_paths"]["sw_model"] == str(repo_root / "data" / "model.SLDPRT")
         assert snapshot["local_paths"]["excel"] == str(repo_root / "data" / "model.xlsx")
         assert snapshot["local_paths"]["step_dir"] == str(repo_root / "data" / "step")
+        assert snapshot["local_paths"]["sc_exe"] == r"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe"
         assert snapshot["local_paths"]["scdoc_dir"] == str(repo_root / "data" / "scdoc")
         assert snapshot["remote_config"]["scripts_dir"] == r"D:\xkz_1020\scripts"
 

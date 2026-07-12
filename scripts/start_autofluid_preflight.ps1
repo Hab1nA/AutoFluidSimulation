@@ -92,8 +92,25 @@ function Start-AutoFluidServerDaemon {
     $target = Get-AutoFluidServerDaemonTarget
     $remoteCommand = Get-AutoFluidServerDaemonStartCommand
     Write-Host "Starting AutoFluid server daemon on ${target}..."
-    $remoteCommand | & $sshExe -o BatchMode=yes -o ConnectTimeout=10 $target bash -s
-    if ($LASTEXITCODE -ne 0) {
+    $stdinPath = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllBytes(
+            $stdinPath,
+            [System.Text.Encoding]::UTF8.GetBytes($remoteCommand + "`n")
+        )
+        $process = Start-Process `
+            -FilePath $sshExe `
+            -ArgumentList @("-o", "BatchMode=yes", "-o", "ConnectTimeout=10", $target, "bash", "-s") `
+            -RedirectStandardInput $stdinPath `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        Remove-Item -LiteralPath $stdinPath -Force -ErrorAction SilentlyContinue
+    }
+    if ($exitCode -ne 0) {
         throw "Failed to start AutoFluid server daemon on '$target'."
     }
 }

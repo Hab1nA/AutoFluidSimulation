@@ -1085,9 +1085,9 @@ class _MockTaskRunner:
         self._postprocess_wait_result = True
         self._postprocess_wait_count = 0
         self._postprocess_cleanup_calls: list[tuple[int, str]] = []
-        self._remote_executor = _MockRemoteExecutor(self.state)
         self._sw_in_flight = False
         self._ssh = _MockSSH()
+        self._remote_executor = _MockRemoteExecutor(self.state, self._ssh)
 
     def set_control_events(self, paused_event, stopped_event):
         self._paused_event = paused_event
@@ -1202,8 +1202,9 @@ class _MockSSH:
 class _MockRemoteExecutor:
     """轻量 RemoteExecutor Mock。"""
 
-    def __init__(self, state_manager):
+    def __init__(self, state_manager, ssh: _MockSSH | None = None):
         self.state = state_manager
+        self._ssh = ssh
         self._meshing_started: list[tuple[int, str]] = []
         self._meshing_output_exists = False
         self._meshing_output_checks: list[tuple[int, float | None, str]] = []
@@ -1216,6 +1217,8 @@ class _MockRemoteExecutor:
         self._meshing_waits: list[tuple[int, str]] = []
         self._cancel_all_calls = 0
         self._kill_remote_task_calls: list[tuple[int, str, str]] = []
+        self._output_checks: list[tuple[int, tuple[str, ...], str, float | None]] = []
+        self._output_check_results: dict[tuple[int, tuple[str, ...]], bool | None] = {}
 
     def start_meshing(self, config_name: int, workstation_id: str = "default") -> bool:
         self._meshing_started.append((config_name, workstation_id))
@@ -1247,6 +1250,71 @@ class _MockRemoteExecutor:
     ) -> bool:
         self._meshing_output_checks.append((config_name, timeout, workstation_id))
         return self._meshing_output_exists
+
+    def check_config_outputs_exist(
+        self,
+        config_name: int,
+        output_steps: tuple[str, ...],
+        *,
+        workstation_id: str = "default",
+        timeout: float | None = None,
+        lock_timeout: float | None = None,
+    ) -> bool | None:
+        self._output_checks.append((config_name, output_steps, workstation_id, timeout))
+        explicit = self._output_check_results.get((config_name, output_steps))
+        if explicit is not None or (config_name, output_steps) in self._output_check_results:
+            return explicit
+        if self._ssh is None or not self._ssh.connected:
+            return None
+
+        def _path_state(path: str) -> bool | None:
+            try:
+                size = self._ssh.get_remote_file_size(path, timeout=timeout)
+            except FileNotFoundError:
+                return False
+            except Exception:
+                return None
+            if size is None:
+                return None
+            return size > 0
+
+        def _require_path(path: str) -> bool | None:
+            state = _path_state(path)
+            if state is None:
+                return None
+            if state is False:
+                return False
+            return True
+
+        for output_step in output_steps:
+            if output_step == "transfer":
+                state = _require_path(f"D:/xkz_1020/scdoc/model_gen4_{config_name}.scdoc")
+                if state is not True:
+                    return state
+            elif output_step == "meshing":
+                state = _require_path(f"D:/xkz_1020/msh/model_gen4_{config_name}.msh.h5")
+                if state is not True:
+                    return state
+            elif output_step == "solver":
+                for path in (
+                    f"D:/xkz_1020/case/model_gen4_{config_name}.cas.h5",
+                    f"D:/xkz_1020/case/model_gen4_{config_name}.dat.h5",
+                ):
+                    state = _require_path(path)
+                    if state is not True:
+                        return state
+            elif output_step == "solverdata":
+                state = _require_path(f"D:/xkz_1020/case/model_gen4_{config_name}.dat.h5")
+                if state is not True:
+                    return state
+            elif output_step == "postprocess":
+                output_dir = str(
+                    ENGINE_CONFIG.get("postprocess_output_dir") or "D:/xkz_1020/case"
+                ).replace("\\", "/").rstrip("/")
+                state = _require_path(f"{output_dir}/model_gen4_{config_name}.csv")
+                if state is not True:
+                    return state
+        return True
 
     def query_remote_task_status(
         self,
@@ -1792,6 +1860,68 @@ class TestPipelineSchedulerStartRecovery:
 
         assert self.state.get_step_status(1, "solver") == STATUS_COMPLETED
 
+    def test_completed_transfer_kept_after_msh_migration_when_meshing_completed(self, monkeypatch):
+        """迁移 MSH 后目标工作站可能没有 SCDOC，不能因此重跑 Transfer/Meshing。"""
+        import engine.scheduler.main as scheduler_main
+
+        monkeypatch.setattr(
+            scheduler_main,
+            "get_workstation_config",
+            lambda workstation_id: {
+                "id": workstation_id,
+                "scdoc_dir": "D:/xkz_1020/scdoc",
+                "msh_dir": "D:/xkz_1020/msh",
+                "result_dir": "D:/xkz_1020/case",
+                "flag_dir": "D:/xkz_1020/flags",
+            },
+        )
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_WAITING)
+        self.runner._remote_executor._output_check_results[(1, ("meshing",))] = True
+
+        assert self.scheduler._completed_step_output_exists(
+            1,
+            "transfer",
+            "",
+            "",
+        ) is True
+        assert self.runner._remote_executor._output_checks == [
+            (1, ("meshing",), "WS-A", 5.0)
+        ]
+
+    def test_completed_transfer_kept_when_msh_probe_unknown_without_scdoc_probe(self):
+        """MSH 复核不确定时保留 Completed，不能再探测 SCDOC 后误重跑 Transfer。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-A")
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.runner._remote_executor._output_check_results[(1, ("meshing",))] = None
+        self.runner._remote_executor._output_check_results[(1, ("transfer",))] = False
+
+        assert self.scheduler._completed_step_output_exists(
+            1,
+            "transfer",
+            "",
+            "",
+        ) is None
+        assert self.runner._remote_executor._output_checks == [
+            (1, ("meshing",), "WS-A", 5.0)
+        ]
+
+    def test_remote_files_exist_delegates_to_executor_with_assigned_workstation(self):
+        """恢复扫描远程产物复核必须走 RemoteExecutor 工作站锁入口。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-B")
+        self.runner._remote_executor._output_check_results[(1, ("solver", "solverdata"))] = True
+
+        assert self.scheduler._remote_files_exist(1, ("solver", "solverdata")) is True
+        assert self.runner._remote_executor._output_checks == [
+            (1, ("solver", "solverdata"), "WS-B", 5.0)
+        ]
+
     def test_postprocess_artifact_exists_accepts_linux_absolute_path(self, monkeypatch):
         """多工作站支持 Linux 绝对路径时，PostProcess 产物探测不能被前导 / 过滤掉。"""
         monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", "")
@@ -2123,10 +2253,9 @@ class TestPipelineSchedulerStartRecovery:
         (step_dir / "model_gen4.SLDPRT_1.step").write_bytes(b"step")
         (scdoc_dir / "model_gen4_1.scdoc").write_bytes(b"scdoc")
         self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
-        for step in ["sw", "sc", "transfer", "meshing"]:
+        for step in ["sw", "sc", "transfer"]:
             self.state.set_step_status(1, step, STATUS_COMPLETED)
-
-        self._record_remote_outputs(1, meshing=True)
+        self.state.set_step_status(1, "meshing", STATUS_WAITING)
 
         self.scheduler._resume_paused_steps(log_prefix="[Test]")
 
@@ -2428,6 +2557,38 @@ class TestPipelineSchedulerStartRecovery:
             "所有待执行步骤均无现成输出文件" in record.getMessage()
             for record in caplog.records
         )
+
+    def test_scan_completed_downstream_uses_config_workstation_for_remote_outputs(self):
+        """迁移后下游现成输出扫描必须按构型当前工作站探测。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        self.state.set_config_workstation(1, "WS-C")
+        self.state.set_step_status(1, "sw", STATUS_COMPLETED)
+        self.state.set_step_status(1, "sc", STATUS_COMPLETED)
+        self.state.set_step_status(1, "transfer", STATUS_WAITING)
+        self.state.set_step_status(1, "meshing", STATUS_ERROR)
+        self.runner._remote_executor._output_check_results[(1, ("transfer",))] = True
+
+        self.scheduler.sw_phase_handler.scan_completed_downstream()
+
+        assert self.state.get_step_status(1, "transfer") == STATUS_COMPLETED
+        assert self.runner._remote_executor._output_checks == [
+            (1, ("transfer",), "WS-C", 5.0)
+        ]
+
+    def test_scan_completed_downstream_skips_running_remote_steps(self):
+        """启动前现成输出扫描不能抢先改写 Running 远程步骤。"""
+        self.state.load_configs({1: [1.0, 2.0, 3.0, 4.0]})
+        for step in ["sw", "sc", "transfer", "meshing"]:
+            self.state.set_step_status(1, step, STATUS_COMPLETED)
+        self.state.set_step_status(1, "solver", STATUS_RUNNING)
+        self.runner._remote_executor._output_check_results[
+            (1, ("solver", "solverdata"))
+        ] = True
+
+        self.scheduler.sw_phase_handler.scan_completed_downstream()
+
+        assert self.state.get_step_status(1, "solver") == STATUS_RUNNING
+        assert self.runner._remote_executor._output_checks == []
 
     def test_recursion_limit_marks_only_sw_error(self):
         """递归深度超限时只标记实际停止的 SW，后续未执行步骤保持 Waiting。"""

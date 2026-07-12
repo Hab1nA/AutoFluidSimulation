@@ -83,8 +83,11 @@ def test_preflight_remote_daemon_start_is_explicit_opt_in() -> None:
     assert "if ($StartDaemon)" in execution_block
     assert execution_block.index("if ($StartDaemon)") < execution_block.index("Start-AutoFluidServerDaemon")
     assert "if (-not $tcpReady)" not in execution_block
-    assert "$remoteCommand | & $sshExe" in start_fn
-    assert "$target bash -s" in start_fn
+    assert "[System.IO.Path]::GetTempFileName()" in start_fn
+    assert "[System.IO.File]::WriteAllBytes(" in start_fn
+    assert "-RedirectStandardInput $stdinPath" in start_fn
+    assert "Remove-Item -LiteralPath $stdinPath" in start_fn
+    assert '"ConnectTimeout=10", $target, "bash", "-s"' in start_fn
     assert "$target $remoteCommand" not in start_fn
 
 

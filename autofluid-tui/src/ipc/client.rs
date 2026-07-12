@@ -8,6 +8,8 @@ const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9527;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const DASHBOARD_TIMEOUT: Duration = Duration::from_secs(2);
+/// start 可能触发断点恢复扫描和远程任务状态复核，不能使用普通轮询级超时。
+const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// check 命令涉及远程 SSH 自检（含 conda/目录/文件/磁盘/进程检查），需要更长超时。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 /// reset 可能同步清理 SC/SW 资源或等待 LocalWorker，不能使用普通轮询级超时。
@@ -328,7 +330,7 @@ impl IpcClient {
     }
 
     pub async fn start_pipeline(&mut self) -> Result<IpcResponse, String> {
-        self.send_request(&IpcRequest::new(super::protocol::CMD_START))
+        self.send_request_with_timeout(&IpcRequest::new(super::protocol::CMD_START), START_TIMEOUT)
             .await
     }
 
@@ -823,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn command_timeout_does_not_add_default_reconnect_timeout() {
+    fn start_pipeline_accepts_response_after_default_timeout_window() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let port = listener.local_addr().expect("listener address").port();
         let server = std::thread::spawn(move || {
@@ -852,6 +854,66 @@ mod tests {
                 request.get("command").and_then(Value::as_str),
                 Some(super::super::protocol::CMD_START)
             );
+            let request_id = request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("request id");
+            std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_millis(250));
+            let response = format!(
+                r#"{{"status":"ok","data":null,"message":"流水线已启动","request_id":"{request_id}"}}"#
+            );
+            stream
+                .write_all(format!("{response}\n").as_bytes())
+                .expect("write start response");
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut client = IpcClient::new(Some("127.0.0.1"), Some(port));
+
+        rt.block_on(client.connect()).expect("connect");
+        let result = rt.block_on(client.start_pipeline());
+
+        assert!(
+            result.is_ok(),
+            "start should not use the default IPC timeout"
+        );
+        assert_eq!(result.expect("start response").message, "流水线已启动");
+        rt.block_on(client.disconnect());
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn command_timeout_does_not_add_default_reconnect_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).expect("read handshake");
+            let handshake_request: Value =
+                serde_json::from_str(handshake.trim()).expect("handshake json");
+            let handshake_id = handshake_request
+                .get("request_id")
+                .and_then(Value::as_str)
+                .expect("handshake request id");
+            let handshake_response = format!(
+                r#"{{"status":"ok","data":{{"engine_status":"running"}},"message":"","request_id":"{handshake_id}"}}"#
+            );
+            stream
+                .write_all(format!("{handshake_response}\n").as_bytes())
+                .expect("write handshake response");
+
+            let mut pause = String::new();
+            reader.read_line(&mut pause).expect("read pause");
+            let request: Value = serde_json::from_str(pause.trim()).expect("pause json");
+            assert_eq!(
+                request.get("command").and_then(Value::as_str),
+                Some(super::super::protocol::CMD_PAUSE)
+            );
             std::thread::sleep(DEFAULT_TIMEOUT + Duration::from_secs(3));
         });
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -862,7 +924,7 @@ mod tests {
 
         rt.block_on(client.connect()).expect("connect");
         let started = Instant::now();
-        let result = rt.block_on(client.start_pipeline());
+        let result = rt.block_on(client.pause_pipeline());
 
         assert!(result.is_err());
         assert!(

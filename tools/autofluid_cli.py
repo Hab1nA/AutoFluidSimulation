@@ -519,10 +519,10 @@ def run_cli(
                 )
             if step not in REMOTE_CLEAN_STEPS:
                 return _json_result(ok=False, command="clean", message=f"无效步骤名: {step}", exit_code=2)
-            params: dict[str, Any] = {"step_name": step}
+            clean_params: dict[str, Any] = {"step_name": step}
             if args.config_name is not None:
-                params["config_name"] = _safe_int_or_all(args.config_name)
-            return _ipc_result("clean", client.request(CMD_CLEAN_STEP, params))
+                clean_params["config_name"] = _safe_int_or_all(args.config_name)
+            return _ipc_result("clean", client.request(CMD_CLEAN_STEP, clean_params))
         if args.command == "reset":
             step = str(args.step or "all").lower()
             if step in LOCALWORKER_OWNED_STEPS:

@@ -153,6 +153,7 @@ def acquire_process_lock() -> bool:
     """
     stale_pid = read_pid_file(_DAEMON_PID_FILE)
 
+    stale_pid_cleanup_needs_alert = False
     if stale_pid is not None:
         if is_process_alive(stale_pid):
             if check_ipc_ready(IPC_CONFIG["host"], IPC_CONFIG["port"]):
@@ -166,10 +167,15 @@ def acquire_process_lock() -> bool:
                     f"PID 文件存在且进程存活 (PID: {stale_pid})，"
                     f"但 IPC 无响应，视为僵尸残留，清理后继续"
                 )
+                stale_pid_cleanup_needs_alert = True
         else:
             logger.info(f"PID 文件中的进程已退出 (PID: {stale_pid})，清理残留 PID 文件")
 
         remove_pid_file(_DAEMON_PID_FILE)
+        if stale_pid_cleanup_needs_alert:
+            logger.warning(
+                f"Daemon 僵尸残留 PID 文件已清理 (PID: {stale_pid})，继续获取进程锁"
+            )
 
     current_pid = os.getpid()
     write_pid_file(_DAEMON_PID_FILE, current_pid)
@@ -348,6 +354,9 @@ class PipelineDaemon:
                     f"重置为 stopped"
                 )
                 self.state.set_engine_status("stopped")
+                logger.warning(
+                    f"残留引擎状态 '{stale_status}' 已修复为 stopped"
+                )
 
         self.ipc_server = IPCServer()
         self.ipc_server.register_default_handlers(self)
@@ -507,6 +516,8 @@ class PipelineDaemon:
 
     def _start_alert_watcher(self) -> None:
         """Start the server-side alert watcher as a daemon-owned child process."""
+        recovery_log = bool(getattr(self, "_alert_watcher_next_start_recovery_log", False))
+        self._alert_watcher_next_start_recovery_log = False
         if not is_server_mode():
             return
         webhook_url = os.environ.get("AUTOFLUID_OPENCLAW_WEBHOOK_URL", "").strip()
@@ -558,7 +569,10 @@ class PipelineDaemon:
             return
 
         self._alert_watcher_process = process
-        logger.info("[AlertWatcher] 已启动: pid=%s, log=%s", process.pid, log_path)
+        if recovery_log:
+            logger.warning("[AlertWatcher] 重启成功: pid=%s, log=%s", process.pid, log_path)
+        else:
+            logger.info("[AlertWatcher] 已启动: pid=%s, log=%s", process.pid, log_path)
 
     def _check_child_process_health(self) -> None:
         """Periodically restart daemon-owned children that have exited."""
@@ -586,12 +600,14 @@ class PipelineDaemon:
         if alert_process is not None and alert_process.poll() is not None:
             logger.warning("[AlertWatcher] 子进程已退出，准备按退避策略重启")
             self._alert_watcher_process = None
+            self._alert_watcher_next_start_recovery_log = True
             self._start_alert_watcher()
 
         worker_process = getattr(self, "_local_worker_process", None)
         if worker_process is not None and worker_process.poll() is not None:
             logger.warning("[LocalWorker] 自动唤起的子进程已退出，准备按退避策略重启")
             self._local_worker_process = None
+            self._local_worker_next_start_recovery_log = True
             self._ensure_local_worker_autostarted()
 
     def _stop_alert_watcher(self) -> None:
@@ -812,6 +828,8 @@ class PipelineDaemon:
 
     def _ensure_local_worker_autostarted(self) -> None:
         """Start the local worker process once when server mode needs one."""
+        recovery_log = bool(getattr(self, "_local_worker_next_start_recovery_log", False))
+        self._local_worker_next_start_recovery_log = False
         if not is_server_mode():
             return
         autostart_override = os.environ.get("AUTOFLUID_LOCAL_WORKER_AUTOSTART", "").lower()
@@ -869,11 +887,18 @@ class PipelineDaemon:
 
         self._local_worker_process = process
         write_pid_file(worker_pid_file("local_worker"), process.pid)
-        logger.info(
-            "[LocalWorker] 已自动唤起本机 LocalWorker: pid=%s, log=%s",
-            process.pid,
-            log_path,
-        )
+        if recovery_log:
+            logger.warning(
+                "[LocalWorker] 自动重新唤起成功: pid=%s, log=%s",
+                process.pid,
+                log_path,
+            )
+        else:
+            logger.info(
+                "[LocalWorker] 已自动唤起本机 LocalWorker: pid=%s, log=%s",
+                process.pid,
+                log_path,
+            )
 
     @staticmethod
     def _local_worker_python_executable() -> str:
@@ -2135,6 +2160,8 @@ class PipelineDaemon:
             return False, None, config_error
         if config_name == "all":
             return False, None, "migrate_config_workstation 必须指定单个构型"
+        if not isinstance(config_name, int):
+            return False, None, "migrate_config_workstation 必须指定单个构型"
 
         target_ok, target_workstation_id, target_error = self._normalize_target_workstation(
             params.get("target_workstation_id"),
@@ -2316,6 +2343,8 @@ class PipelineDaemon:
 
     def _config_statuses_for_migration(self, config_name: int) -> dict[str, str]:
         state = getattr(self, "state", None)
+        if state is None:
+            return {step_name: STATUS_WAITING for step_name in STEP_NAMES}
         get_all_steps_for_config = getattr(state, "get_all_steps_for_config", None)
         if callable(get_all_steps_for_config):
             raw = get_all_steps_for_config(config_name)

@@ -11,7 +11,7 @@ import os
 
 from engine.config import (
     STATUS_WAITING, STATUS_RUNNING, STATUS_PAUSED, STATUS_COMPLETED, STATUS_ERROR, STATUS_RETRYING,
-    LOCAL_PATHS, REMOTE_CONFIG, STEP_NAMES, get_step_filename,
+    DEFAULT_WORKSTATION_ID, LOCAL_PATHS, STEP_NAMES, get_step_filename,
     is_server_mode,
 )
 from engine.state_manager import StateManager
@@ -72,6 +72,14 @@ class SWPhaseHandler:
         self.needs_recurse: bool = False
 
         logger.info("SW 阶段处理器初始化完成")
+
+    def _workstation_for_config(self, config_name: int) -> str:
+        get_config_workstation = getattr(self.state, "get_config_workstation", None)
+        if callable(get_config_workstation):
+            workstation_id = get_config_workstation(config_name)
+            if workstation_id:
+                return str(workstation_id)
+        return DEFAULT_WORKSTATION_ID
 
     def set_file_monitor(self, file_monitor: StepFileMonitor):
         """设置文件监控器引用。"""
@@ -424,18 +432,10 @@ class SWPhaseHandler:
 
         skipped_count = 0
         active_skip_count = 0
-        ssh = None
-
-        # 尝试获取 SSH 连接用于远程文件检查（失败不阻塞）
-        try:
-            ssh = self.runner.get_ssh()
-            if not ssh.is_connected():
-                ssh = None
-        except Exception:
-            ssh = None
 
         step_dir = LOCAL_PATHS["step_dir"]
         scdoc_dir = LOCAL_PATHS["scdoc_dir"]
+        remote_executor = self.runner.get_remote_executor()
 
         for cn in all_configs:
             for step in STEP_NAMES:
@@ -452,6 +452,9 @@ class SWPhaseHandler:
                     )
                     break
 
+                if status != STATUS_WAITING:
+                    continue
+
                 # ---- 依赖链检查：仅在上游步骤已完成时才检查下游 ----
                 if step == "transfer" and self.state.get_step_status(cn, "sc") != STATUS_COMPLETED:
                     continue
@@ -462,19 +465,30 @@ class SWPhaseHandler:
                 if step == "postprocess" and self.state.get_step_status(cn, "solver") != STATUS_COMPLETED:
                     continue
 
-                # ---- 远程步骤需要 SSH ----
-                if step in ("transfer", "meshing", "solver", "postprocess") and ssh is None:
-                    continue
+                if step in ("transfer", "meshing", "solver", "postprocess"):
+                    check_outputs = getattr(remote_executor, "check_config_outputs_exist", None)
+                    if not callable(check_outputs):
+                        continue
+                    output_steps = ("solver", "solverdata") if step == "solver" else (step,)
+                    outputs_exist = check_outputs(
+                        cn,
+                        output_steps,
+                        workstation_id=self._workstation_for_config(cn),
+                        timeout=5.0,
+                        lock_timeout=0.25,
+                    )
+                else:
+                    outputs_exist = check_step_output_exists(
+                        cn,
+                        step,
+                        step_dir,
+                        scdoc_dir,
+                        {},
+                        None,
+                        quiet=True,
+                    )
 
-                if check_step_output_exists(
-                    cn,
-                    step,
-                    step_dir,
-                    scdoc_dir,
-                    REMOTE_CONFIG,
-                    ssh,
-                    quiet=True,
-                ):
+                if outputs_exist is True:
                     self.state.set_step_status(cn, step, STATUS_COMPLETED)
                     skipped_count += 1
 

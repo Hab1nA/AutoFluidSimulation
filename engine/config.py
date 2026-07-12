@@ -248,9 +248,9 @@ LOCAL_PATHS: LocalPathsConfig = {
     # SpaceClaim 可执行文件
     "sc_exe": _env_override(
         "AUTOFLUID_SC_EXE",
-        _toml_or_default("local_paths", "sc_exe", r"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe"),
+        _toml_or_default("local_paths", "sc_exe", r"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe"),
     ),
-    # SpaceClaim 脚本文件（Python 格式，兼容 V23 API）
+    # SpaceClaim 脚本文件（Python 格式，兼容 V241 API）
     # 脚本位于项目 executor/ 目录下（固定相对于项目根目录）
     "sc_script": os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

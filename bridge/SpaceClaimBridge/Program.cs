@@ -49,8 +49,6 @@ namespace AutoFluidSimulation.Bridge
     {
         private static readonly string[] SpaceClaimExePaths =
         {
-            @"C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe",
-            @"C:\Program Files\ANSYS Inc\v232\SCDM\SpaceClaim.exe",
             @"C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe",
         };
 
@@ -207,7 +205,33 @@ namespace AutoFluidSimulation.Bridge
                 return null;
             }
 
+            NormalizePathOptions(options);
+
             return options;
+        }
+
+        /// <summary>
+        /// 将文件系统参数规范化为绝对路径，避免 SpaceClaim 进程工作目录不同导致相对路径失效。
+        /// </summary>
+        /// <param name="options">命令行选项对象</param>
+        private static void NormalizePathOptions(BridgeOptions options)
+        {
+            if (!string.IsNullOrWhiteSpace(options.ScriptPath))
+            {
+                options.ScriptPath = Path.GetFullPath(options.ScriptPath);
+            }
+            if (!string.IsNullOrWhiteSpace(options.StepDir))
+            {
+                options.StepDir = Path.GetFullPath(options.StepDir);
+            }
+            if (!string.IsNullOrWhiteSpace(options.ScdocDir))
+            {
+                options.ScdocDir = Path.GetFullPath(options.ScdocDir);
+            }
+            if (!string.IsNullOrWhiteSpace(options.CmdDir))
+            {
+                options.CmdDir = Path.GetFullPath(options.CmdDir);
+            }
         }
 
         /// <summary>
@@ -437,7 +461,7 @@ namespace AutoFluidSimulation.Bridge
                 Arguments = arguments,
                 UseShellExecute = false,
             };
-            PrepareSpaceClaimEnvironment(psi);
+            PrepareSpaceClaimEnvironment(psi, scExe);
             configureEnvironment(psi);
             Process started = Process.Start(psi);
             return ResolveStartedSpaceClaimProcess(started, launchBaseline, processAppearTimeout);
@@ -447,11 +471,14 @@ namespace AutoFluidSimulation.Bridge
         /// 准备 SpaceClaim 子进程环境变量：补齐系统变量、规范化 Path、设置 ANSYS 变量。
         /// </summary>
         /// <param name="psi">进程启动信息对象</param>
-        private static void PrepareSpaceClaimEnvironment(ProcessStartInfo psi)
+        /// <param name="spaceClaimExePath">SpaceClaim.exe 路径，用于推断 ANSYS 版本目录</param>
+        private static void PrepareSpaceClaimEnvironment(
+            ProcessStartInfo psi,
+            string? spaceClaimExePath)
         {
             BackfillProcessEnvironment(psi);
-            NormalizePathEnvironmentVariables(psi);
-            EnsureAnsysEnvironmentVariables(psi);
+            NormalizePathEnvironmentVariables(psi, spaceClaimExePath);
+            EnsureAnsysEnvironmentVariables(psi, spaceClaimExePath);
         }
 
         /// <summary>
@@ -506,7 +533,10 @@ namespace AutoFluidSimulation.Bridge
         /// 规范化子进程的 Path 环境变量：合并多个 Path 键并注入 SpaceClaim 所需路径。
         /// </summary>
         /// <param name="psi">进程启动信息对象</param>
-        private static void NormalizePathEnvironmentVariables(ProcessStartInfo psi)
+        /// <param name="spaceClaimExePath">SpaceClaim.exe 路径，用于推断 ANSYS 版本目录</param>
+        private static void NormalizePathEnvironmentVariables(
+            ProcessStartInfo psi,
+            string? spaceClaimExePath)
         {
             NormalizeCurrentProcessPathEnvironment();
 
@@ -529,7 +559,7 @@ namespace AutoFluidSimulation.Bridge
                 psi.EnvironmentVariables.Remove(key);
             }
 
-            string pathValue = BuildSpaceClaimPath(inheritedPath);
+            string pathValue = BuildSpaceClaimPath(inheritedPath, spaceClaimExePath);
             psi.EnvironmentVariables["Path"] = pathValue;
             Console.WriteLine("[BRIDGE] 已补齐 SpaceClaim 子进程 Path");
         }
@@ -538,37 +568,86 @@ namespace AutoFluidSimulation.Bridge
         /// 确保 ANSYS SpaceClaim 运行所需的环境变量已设置（AWP_ROOT、许可路径等）。
         /// </summary>
         /// <param name="psi">进程启动信息对象</param>
-        private static void EnsureAnsysEnvironmentVariables(ProcessStartInfo psi)
+        /// <param name="spaceClaimExePath">SpaceClaim.exe 路径，用于推断 ANSYS 版本目录</param>
+        private static void EnsureAnsysEnvironmentVariables(
+            ProcessStartInfo psi,
+            string? spaceClaimExePath)
         {
-            string awpRoot = ResolveAwpRoot();
-            SetEnvironmentIfMissing(psi, "AWP_ROOT231", awpRoot);
-            SetEnvironmentIfMissing(psi, "AWP_LOCALE231", "zh");
-            SetEnvironmentIfMissing(psi, "ANSYS231_DIR", Path.Combine(awpRoot, "ANSYS"));
+            string awpRoot = ResolveAwpRoot(spaceClaimExePath);
+            string versionToken = ResolveAnsysVersionToken(awpRoot);
+            SetVersionedEnvironmentIfMissing(psi, "AWP_ROOT{versionToken}", versionToken, awpRoot);
+            SetVersionedEnvironmentIfMissing(psi, "AWP_LOCALE{versionToken}", versionToken, "zh");
+            SetVersionedEnvironmentIfMissing(
+                psi,
+                "ANSYS{versionToken}_DIR",
+                versionToken,
+                Path.Combine(awpRoot, "ANSYS"));
             SetEnvironmentIfMissing(
                 psi,
                 "ANSYSLIC_DIR",
                 @"C:\Program Files\ANSYS Inc\Shared Files\Licensing");
             SetEnvironmentIfMissing(psi, "ANSYSLMD_LICENSE_FILE", "1055@localhost");
-            SetEnvironmentIfMissing(
+            SetVersionedEnvironmentIfMissing(
                 psi,
-                "CADOE_LIBDIR231",
+                "CADOE_LIBDIR{versionToken}",
+                versionToken,
                 Path.Combine(awpRoot, @"CommonFiles\Language\zh"));
             Console.WriteLine("[BRIDGE] 已补齐 ANSYS SpaceClaim 环境变量");
         }
 
         /// <summary>
-        /// 解析 ANSYS 安装根目录：优先使用环境变量 AWP_ROOT231，否则回退到默认路径。
+        /// 解析 ANSYS 安装根目录：优先使用 SpaceClaim.exe 所在版本目录，其次使用环境变量。
         /// </summary>
+        /// <param name="spaceClaimExePath">SpaceClaim.exe 路径</param>
         /// <returns>ANSYS 安装根目录路径</returns>
-        private static string ResolveAwpRoot()
+        private static string ResolveAwpRoot(string? spaceClaimExePath)
         {
-            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
-            if (!string.IsNullOrWhiteSpace(awpRoot) && Directory.Exists(awpRoot))
+            if (!string.IsNullOrWhiteSpace(spaceClaimExePath))
             {
-                return awpRoot;
+                var scdmDir = Path.GetDirectoryName(spaceClaimExePath);
+                string? versionDir = scdmDir == null ? null : Directory.GetParent(scdmDir)?.FullName;
+                if (!string.IsNullOrWhiteSpace(versionDir) && Directory.Exists(versionDir))
+                {
+                    return versionDir!;
+                }
             }
 
-            return @"C:\Program Files\ANSYS Inc\v231";
+            foreach (string versionToken in new[] { "241" })
+            {
+                string? awpRoot = Environment.GetEnvironmentVariable($"AWP_ROOT{versionToken}");
+                if (!string.IsNullOrWhiteSpace(awpRoot) && Directory.Exists(awpRoot))
+                {
+                    return awpRoot;
+                }
+            }
+
+            return @"C:\Program Files\ANSYS Inc\v241";
+        }
+
+        /// <summary>
+        /// 从 ANSYS 安装目录名推断版本环境变量后缀，例如 v241 -> 241。
+        /// </summary>
+        /// <param name="awpRoot">ANSYS 安装根目录路径</param>
+        /// <returns>环境变量版本后缀</returns>
+        private static string ResolveAnsysVersionToken(string? awpRoot)
+        {
+            if (string.IsNullOrWhiteSpace(awpRoot))
+            {
+                return "241";
+            }
+
+            string trimmedRoot = awpRoot!.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar);
+            string? directoryName = Path.GetFileName(trimmedRoot);
+            if (!string.IsNullOrWhiteSpace(directoryName) &&
+                directoryName.Length > 1 &&
+                (directoryName[0] == 'v' || directoryName[0] == 'V'))
+            {
+                return directoryName.Substring(1);
+            }
+
+            return "241";
         }
 
         /// <summary>
@@ -594,6 +673,25 @@ namespace AutoFluidSimulation.Bridge
         }
 
         /// <summary>
+        /// 设置带 ANSYS 版本号后缀的环境变量，例如 AWP_ROOT241。
+        /// </summary>
+        /// <param name="psi">进程启动信息对象</param>
+        /// <param name="namePattern">包含 {versionToken} 占位符的变量名</param>
+        /// <param name="versionToken">ANSYS 版本后缀</param>
+        /// <param name="value">默认值（当前进程同名变量优先）</param>
+        private static void SetVersionedEnvironmentIfMissing(
+            ProcessStartInfo psi,
+            string namePattern,
+            string versionToken,
+            string value)
+        {
+            SetEnvironmentIfMissing(
+                psi,
+                namePattern.Replace("{versionToken}", versionToken),
+                value);
+        }
+
+        /// <summary>
         /// 规范化当前进程的 Path 环境变量：消除 Path/PATH 双键冲突。
         /// </summary>
         private static void NormalizeCurrentProcessPathEnvironment()
@@ -616,15 +714,14 @@ namespace AutoFluidSimulation.Bridge
         /// 构建包含 SpaceClaim 所需路径的 PATH 值，合并继承路径并去重。
         /// </summary>
         /// <param name="inheritedPath">从父进程继承的 PATH 值</param>
+        /// <param name="spaceClaimExePath">SpaceClaim.exe 路径，用于推断 ANSYS 版本目录</param>
         /// <returns>规范化后的 PATH 字符串</returns>
-        private static string BuildSpaceClaimPath(string? inheritedPath)
+        private static string BuildSpaceClaimPath(
+            string? inheritedPath,
+            string? spaceClaimExePath)
         {
             var entries = new List<string>();
-            string? awpRoot = Environment.GetEnvironmentVariable("AWP_ROOT231");
-            if (string.IsNullOrWhiteSpace(awpRoot))
-            {
-                awpRoot = @"C:\Program Files\ANSYS Inc\v231";
-            }
+            string awpRoot = ResolveAwpRoot(spaceClaimExePath);
 
             AddPathIfDirectory(entries, Path.Combine(awpRoot, @"SCDM\Stride"));
             AddPathIfDirectory(entries, Path.Combine(awpRoot, "SCDM"));

@@ -91,8 +91,46 @@ function Get-WorkstationHealth {
     return "unknown"
 }
 
+function Assert-DaemonIpcReady {
+    if (Get-Command Assert-AutoFluidServerEndpoint -ErrorAction SilentlyContinue) {
+        Assert-AutoFluidServerEndpoint
+    }
+    if (Get-Command Write-AutoFluidEndpointSummary -ErrorAction SilentlyContinue) {
+        Write-AutoFluidEndpointSummary
+    }
+    if (Get-Command Test-AutoFluidIpcProtocolEndpoint -ErrorAction SilentlyContinue) {
+        if (Test-AutoFluidIpcProtocolEndpoint -TimeoutMs 3000) {
+            return
+        }
+    } else {
+        return
+    }
+
+    $serverHost = if (Get-Command Get-AutoFluidServerHost -ErrorAction SilentlyContinue) {
+        Get-AutoFluidServerHost
+    } else {
+        if ($env:AUTOFLUID_IPC_HOST) { $env:AUTOFLUID_IPC_HOST } else { "127.0.0.1" }
+    }
+    $serverPort = if (Get-Command Get-AutoFluidServerPort -ErrorAction SilentlyContinue) {
+        Get-AutoFluidServerPort
+    } else {
+        if ($env:AUTOFLUID_IPC_PORT) { [int]$env:AUTOFLUID_IPC_PORT } else { 9527 }
+    }
+
+    throw @"
+Daemon IPC 不可达: ${serverHost}:${serverPort}
+
+请先确认 daemon 正在运行且当前 PowerShell 能连接到 IPC 端点，然后重新执行迁移脚本。
+常用处理:
+1. 运行 scripts\start_autofluid_preflight.ps1 检查并启动服务器 daemon。
+2. 如果通过本地端口转发连接，先运行 scripts\start_server_ipc_tunnel.ps1，并确认 .env 中 AUTOFLUID_IPC_HOST/AUTOFLUID_IPC_PORT 指向该端点。
+3. 如果直接连接服务器，检查 .env 中 AUTOFLUID_SERVER_HOST 或 AUTOFLUID_IPC_HOST 是否正确。
+"@
+}
+
 Push-Location $ProjectRoot
 try {
+    Assert-DaemonIpcReady
     $dashboard = Get-DashboardStatus
 
     if (-not $ConfigName) {

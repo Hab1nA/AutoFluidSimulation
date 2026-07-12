@@ -17,7 +17,7 @@ import tempfile
 import time
 import threading
 from contextlib import AbstractContextManager
-from typing import Callable, NoReturn, TYPE_CHECKING
+from typing import Callable, NoReturn, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from utils.ssh_client import RemoteWorkstation
@@ -747,6 +747,172 @@ class RemoteExecutor:
                 return ssh.get_remote_file_size(remote_path, timeout=timeout)
             except TypeError:
                 return ssh.get_remote_file_size(remote_path)
+
+    @staticmethod
+    def _check_remote_file_size_state(
+        ssh: "RemoteWorkstation",
+        remote_path: str,
+        timeout: float | None,
+    ) -> bool | None:
+        """Return tri-state file existence using size when the SSH client supports it."""
+        try:
+            if hasattr(ssh, "get_remote_file_size"):
+                size = RemoteExecutor._remote_file_size(ssh, remote_path, timeout)
+                if size is None:
+                    return None
+                return size > 0
+            return RemoteExecutor._check_remote_file(
+                ssh,
+                remote_path,
+                timeout=timeout,
+                quiet=True,
+            )
+        except FileNotFoundError:
+            return False
+        except (OSError, ConnectionError, EOFError, TimeoutError):
+            return None
+
+    @staticmethod
+    def _postprocess_artifact_candidates(
+        config_name: int,
+        remote_config: dict[str, object],
+    ) -> list[str]:
+        paths = resolve_postprocess_paths(remote_config, allow_config_override=True)
+        candidates: list[str] = []
+        output_dir = paths["output_dir"]
+        metrics_dir = paths["metrics_dir"]
+        animation_dir = paths["animation_dir"]
+        if output_dir:
+            candidates.extend([
+                f"{output_dir}/model_gen4_{config_name}.csv",
+                f"{output_dir}/model_gen4_{config_name}.json",
+            ])
+        if metrics_dir:
+            metrics_config_dir = f"{metrics_dir}/model_gen4_{config_name}"
+            candidates.extend([
+                f"{metrics_dir}/model_gen4_{config_name}.csv",
+                f"{metrics_config_dir}/model_gen4_{config_name}.csv",
+                f"{metrics_config_dir}/metrics_summary.csv",
+            ])
+        if animation_dir:
+            candidates.extend([
+                f"{animation_dir}/t_gen4_{config_name}.mp4",
+                f"{animation_dir}/v_gen4_{config_name}.mp4",
+            ])
+        return candidates
+
+    def check_config_outputs_exist(
+        self,
+        config_name: int,
+        output_steps: tuple[str, ...],
+        *,
+        workstation_id: str = DEFAULT_WORKSTATION_ID,
+        timeout: float | None = 5.0,
+        lock_timeout: float | None = 0.25,
+    ) -> bool | None:
+        """Check durable remote outputs under the per-workstation SSH lock.
+
+        ``None`` means the probe could not be trusted, for example because the
+        workstation lock was busy or SSH/SFTP returned an indeterminate error.
+        Callers must preserve existing DB state in that case.
+        """
+        try:
+            remote_config = self._remote_config_for_workstation(workstation_id)
+        except Exception:
+            return None
+
+        guard = self._ssh_guard(workstation_id)
+        acquired_direct = False
+        entered_context = False
+        release: Any = None
+        try:
+            acquire = getattr(guard, "acquire", None)
+            release = getattr(guard, "release", None)
+            if lock_timeout is not None and callable(acquire) and callable(release):
+                try:
+                    acquired_direct = bool(acquire(timeout=lock_timeout))
+                except TypeError:
+                    acquired_direct = bool(acquire(True, lock_timeout))
+                if not acquired_direct:
+                    return None
+            else:
+                guard.__enter__()
+                entered_context = True
+
+            ssh = self._get_ssh_for_workstation(workstation_id)
+            try:
+                if not ssh.is_connected():
+                    return None
+            except Exception:
+                return None
+
+            checked_solver_pair = False
+            for output_step in output_steps:
+                if output_step == "solver" and not checked_solver_pair:
+                    result_dir = str(remote_config["result_dir"]).replace("\\", "/")
+                    filenames = [
+                        get_step_filename("solver", config_name),
+                        get_step_filename("solverdata", config_name),
+                    ]
+                    if not all(filenames):
+                        return False
+                    for filename in filenames:
+                        state = self._check_remote_file_size_state(
+                            ssh,
+                            f"{result_dir}/{filename}",
+                            timeout,
+                        )
+                        if state is None:
+                            return None
+                        if state is False:
+                            return False
+                    checked_solver_pair = True
+                    continue
+                if output_step == "solverdata" and checked_solver_pair:
+                    continue
+                if output_step == "postprocess":
+                    candidates = self._postprocess_artifact_candidates(
+                        config_name,
+                        remote_config,
+                    )
+                    for remote_path in candidates:
+                        state = self._check_remote_file_size_state(
+                            ssh,
+                            remote_path,
+                            timeout,
+                        )
+                        if state is None:
+                            return None
+                        if state is True:
+                            return True
+                    return False
+
+                filename_step = "sc" if output_step == "transfer" else output_step
+                filename = get_step_filename(filename_step, config_name)
+                if not filename:
+                    return False
+                if output_step == "transfer":
+                    directory_key = "scdoc_dir"
+                elif output_step == "meshing":
+                    directory_key = "msh_dir"
+                else:
+                    directory_key = "result_dir"
+                remote_dir = str(remote_config[directory_key]).replace("\\", "/")
+                state = self._check_remote_file_size_state(
+                    ssh,
+                    f"{remote_dir}/{filename}",
+                    timeout,
+                )
+                if state is None:
+                    return None
+                if state is False:
+                    return False
+            return True
+        finally:
+            if acquired_direct and callable(release):
+                release()
+            elif entered_context:
+                guard.__exit__(None, None, None)
 
     def copy_config_artifact_between_workstations(
         self,

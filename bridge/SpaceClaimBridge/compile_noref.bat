@@ -3,7 +3,7 @@ REM ============================================================================
 REM SpaceClaimBridge no-reference compile script
 REM
 REM Builds SpaceClaimBridge.NoRef.csproj, which has no SpaceClaim API Reference.
-REM The no-ref build reuses Program.cs and does not require SpaceClaim.Api.V23.dll.
+REM The no-ref build reuses Program.cs and does not require SpaceClaim.Api.V241.dll.
 REM
 REM Runtime still requires SpaceClaim to be installed.
 REM

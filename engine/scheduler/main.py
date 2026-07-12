@@ -589,6 +589,10 @@ class PipelineScheduler:
                             self._barrier_passed.clear()
                             self.barrier_coordinator.clear_workstation_barrier(workstation_id)
                             self.state.set_global_barrier_met(False)
+                        logger.warning(
+                            f"{log_prefix} 构型{cn} [{step}] 输出缺失修复已完成："
+                            "状态已重置为 Waiting，等待重新执行"
+                        )
                         status = STATUS_WAITING
                     else:
                         continue
@@ -678,6 +682,10 @@ class PipelineScheduler:
                         continue
                     else:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
+                        logger.warning(
+                            f"{log_prefix} 构型{cn} [{step}] 孤立 Running 已修复为 Waiting，"
+                            "准备重新执行"
+                        )
                         if step in ("meshing", "solver", "postprocess"):
                             self.runner.get_remote_executor().forget_remote_task(
                                 cn,
@@ -773,6 +781,10 @@ class PipelineScheduler:
                     retry_count = self.state.get_step_retry_count(cn, step)
                     if retry_count < max_retries:
                         self.state.set_step_status(cn, step, STATUS_WAITING)
+                        logger.warning(
+                            f"{log_prefix} 构型{cn} [{step}] 从 {status} 恢复为 Waiting，"
+                            f"将按重试预算重新执行 ({retry_count}/{max_retries})"
+                        )
                         # 注：SW 重试由 start_pipeline 的 SW 阶段统一处理，
                         # 此处重置为 WAITING 后，下次 start_pipeline 会检测到并重新执行
                         if step != "sw":
@@ -889,6 +901,12 @@ class PipelineScheduler:
                 return True
             return self._check_step_output_exists(cn, step, step_dir, scdoc_dir)
         if step == "transfer":
+            if self.state.get_step_status(cn, "meshing") == STATUS_COMPLETED:
+                meshing_exists = self._remote_files_exist(cn, ("meshing",))
+                if meshing_exists is True:
+                    return True
+                if meshing_exists is None:
+                    return None
             return self._remote_files_exist(cn, ("transfer",))
         if step == "meshing":
             return self._remote_files_exist(cn, ("meshing",))
@@ -901,67 +919,25 @@ class PipelineScheduler:
     def _remote_files_exist(self, cn: int, output_steps: tuple[str, ...]) -> bool | None:
         """Return True/False for confirmed remote output state, or None if SSH is indeterminate."""
         workstation_id = self._workstation_for_config(cn)
-        try:
-            remote_config = self._remote_config_for_workstation(workstation_id)
-        except Exception:
+        remote_executor = self.runner.get_remote_executor()
+        check_outputs = getattr(remote_executor, "check_config_outputs_exist", None)
+        if not callable(check_outputs):
             return None
-        ssh = None
         try:
-            ssh = self.runner.get_ssh(workstation_id)
-        except Exception:
-            return None
-
-        try:
-            if not ssh.is_connected():
-                return None
-        except Exception:
-            return None
-
-        for output_step in output_steps:
-            if output_step == "postprocess":
-                postprocess_exists = self._postprocess_artifact_exists(cn, remote_config, ssh)
-                if postprocess_exists is None:
-                    return None
-                if not postprocess_exists:
-                    return False
-                continue
-            filename_step = "sc" if output_step == "transfer" else output_step
-            filename = get_step_filename(filename_step, cn)
-            if not filename:
+            result = check_outputs(
+                cn,
+                output_steps,
+                workstation_id=workstation_id,
+                timeout=5.0,
+                lock_timeout=0.25,
+            )
+            if result is True:
+                return True
+            if result is False:
                 return False
-            if output_step == "transfer":
-                directory_key = "scdoc_dir"
-            elif output_step == "meshing":
-                directory_key = "msh_dir"
-            else:
-                directory_key = "result_dir"
-            remote_dir = str(remote_config[directory_key]).replace("\\", "/")
-            remote_path = f"{remote_dir}/{filename}"
-            try:
-                if hasattr(ssh, "get_remote_file_size"):
-                    try:
-                        size = ssh.get_remote_file_size(
-                            remote_path,
-                            timeout=5.0,
-                            quiet=True,
-                        )
-                    except TypeError:
-                        size = ssh.get_remote_file_size(remote_path, timeout=5.0)
-                    if size is None:
-                        return None
-                    if size <= 0:
-                        return False
-                    continue
-                if not ssh.check_remote_file(remote_path, timeout=5.0, quiet=True):
-                    return False
-            except TypeError:
-                if not ssh.check_remote_file(remote_path):
-                    return False
-            except FileNotFoundError:
-                return False
-            except Exception:
-                return None
-        return True
+            return None
+        except Exception:
+            return None
 
     def _postprocess_artifact_exists(
         self,

@@ -71,6 +71,7 @@ class RemoteWorkstation:
         self.auth_method = (auth_method or "password").lower()
         self._ssh: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
+        self._sftp_lock = threading.RLock()
         self._task_pid_files: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -235,35 +236,36 @@ class RemoteWorkstation:
 
                 if self._sftp is None:
                     raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
-                channel = self._sftp.get_channel()
-                previous_timeout = None
-                if remaining_timeout is not None:
-                    try:
-                        previous_timeout = channel.gettimeout()
-                    except AttributeError:
-                        previous_timeout = None
-                    channel.settimeout(remaining_timeout)
-
-                try:
-                    remote_dir = os.path.dirname(remote_path)
-                    self._ensure_remote_dir(remote_dir)
-
-                    logger.info(f"[SSH] 正在上传: {local_path} -> {remote_path}")
-
-                    def _check_upload_control(transferred: int, total: int) -> None:
-                        if stopped_event is not None and stopped_event.is_set():
-                            raise _UploadInterrupted("收到停止指令")
-                        if paused_event is not None and paused_event.is_set():
-                            raise _UploadInterrupted("收到暂停指令")
-
-                    self._sftp.put(
-                        local_path,
-                        remote_path,
-                        callback=_check_upload_control,
-                    )
-                finally:
+                with self._sftp_lock:
+                    channel = self._sftp.get_channel()
+                    previous_timeout = None
                     if remaining_timeout is not None:
-                        channel.settimeout(previous_timeout)
+                        try:
+                            previous_timeout = channel.gettimeout()
+                        except AttributeError:
+                            previous_timeout = None
+                        channel.settimeout(remaining_timeout)
+
+                    try:
+                        remote_dir = os.path.dirname(remote_path)
+                        self._ensure_remote_dir(remote_dir)
+
+                        logger.info(f"[SSH] 正在上传: {local_path} -> {remote_path}")
+
+                        def _check_upload_control(transferred: int, total: int) -> None:
+                            if stopped_event is not None and stopped_event.is_set():
+                                raise _UploadInterrupted("收到停止指令")
+                            if paused_event is not None and paused_event.is_set():
+                                raise _UploadInterrupted("收到暂停指令")
+
+                        self._sftp.put(
+                            local_path,
+                            remote_path,
+                            callback=_check_upload_control,
+                        )
+                    finally:
+                        if remaining_timeout is not None:
+                            channel.settimeout(previous_timeout)
                 logger.info(f"[SSH] 上传完成: {os.path.basename(local_path)}")
                 return True
             except _UploadInterrupted as e:
@@ -289,19 +291,20 @@ class RemoteWorkstation:
         """执行 SFTP stat，可选设置通道超时并在结束后恢复。"""
         if self._sftp is None:
             raise ConnectionError("SFTP 连接已断开，请先调用 connect()")
-        channel = self._sftp.get_channel()
-        previous_timeout = None
-        if timeout is not None:
-            try:
-                previous_timeout = channel.gettimeout()
-            except AttributeError:
-                previous_timeout = None
-            channel.settimeout(timeout)
-        try:
-            return self._sftp.stat(remote_path)
-        finally:
+        with self._sftp_lock:
+            channel = self._sftp.get_channel()
+            previous_timeout = None
             if timeout is not None:
-                channel.settimeout(previous_timeout)
+                try:
+                    previous_timeout = channel.gettimeout()
+                except AttributeError:
+                    previous_timeout = None
+                channel.settimeout(timeout)
+            try:
+                return self._sftp.stat(remote_path)
+            finally:
+                if timeout is not None:
+                    channel.settimeout(previous_timeout)
 
     def get_remote_file_size(
         self,
@@ -335,26 +338,27 @@ class RemoteWorkstation:
             return None
         if self._sftp is None:
             return None
-        channel = self._sftp.get_channel()
-        previous_timeout = None
-        if timeout is not None:
-            try:
-                previous_timeout = channel.gettimeout()
-            except AttributeError:
-                previous_timeout = None
-            channel.settimeout(timeout)
-        try:
-            with self._sftp.open(remote_path.replace("\\", "/"), "rb") as remote_file:
-                raw: bytes = remote_file.read()
-            return raw.decode("utf-8", errors="replace")
-        except FileNotFoundError:
-            return None
-        except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
-            logger.debug(f"[SSH] 读取远程文本文件失败: {remote_path}: {e}")
-            return None
-        finally:
+        with self._sftp_lock:
+            channel = self._sftp.get_channel()
+            previous_timeout = None
             if timeout is not None:
-                channel.settimeout(previous_timeout)
+                try:
+                    previous_timeout = channel.gettimeout()
+                except AttributeError:
+                    previous_timeout = None
+                channel.settimeout(timeout)
+            try:
+                with self._sftp.open(remote_path.replace("\\", "/"), "rb") as remote_file:
+                    raw: bytes = remote_file.read()
+                return raw.decode("utf-8", errors="replace")
+            except FileNotFoundError:
+                return None
+            except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
+                logger.debug(f"[SSH] 读取远程文本文件失败: {remote_path}: {e}")
+                return None
+            finally:
+                if timeout is not None:
+                    channel.settimeout(previous_timeout)
 
     def _ensure_remote_dir(self, remote_dir: str, _depth: int = 0):
         """
@@ -375,25 +379,26 @@ class RemoteWorkstation:
             raise ConnectionError("SFTP 未连接")
         # 规范化远程路径（统一使用正斜杠，SFTP 要求）
         remote_dir = remote_dir.replace("\\", "/")
-        try:
-            self._sftp.stat(remote_dir)
-        except FileNotFoundError:
-            # 递归创建父目录
-            parent = "/".join(remote_dir.rstrip("/").split("/")[:-1])
-            if parent and parent != remote_dir:
-                self._ensure_remote_dir(parent, _depth + 1)
+        with self._sftp_lock:
             try:
-                self._sftp.mkdir(remote_dir)
-                logger.debug(f"[SSH] 创建远程目录: {remote_dir}")
-            except OSError as e:
-                # 检查是否因目录已存在而失败（并发创建场景）
+                self._sftp.stat(remote_dir)
+            except FileNotFoundError:
+                # 递归创建父目录
+                parent = "/".join(remote_dir.rstrip("/").split("/")[:-1])
+                if parent and parent != remote_dir:
+                    self._ensure_remote_dir(parent, _depth + 1)
                 try:
-                    self._sftp.stat(remote_dir)
-                    logger.debug(f"[SSH] 远程目录已存在（并发创建）: {remote_dir}")
-                except FileNotFoundError:
-                    # 目录确实不存在但创建失败 → 真实错误
-                    logger.error(f"[SSH] 无法创建远程目录 {remote_dir}: {e}")
-                    raise
+                    self._sftp.mkdir(remote_dir)
+                    logger.debug(f"[SSH] 创建远程目录: {remote_dir}")
+                except OSError as e:
+                    # 检查是否因目录已存在而失败（并发创建场景）
+                    try:
+                        self._sftp.stat(remote_dir)
+                        logger.debug(f"[SSH] 远程目录已存在（并发创建）: {remote_dir}")
+                    except FileNotFoundError:
+                        # 目录确实不存在但创建失败 → 真实错误
+                        logger.error(f"[SSH] 无法创建远程目录 {remote_dir}: {e}")
+                        raise
 
     def check_remote_file(
         self,
@@ -438,7 +443,8 @@ class RemoteWorkstation:
         # SFTP 协议要求使用正斜杠
         normalized = remote_path.replace("\\", "/")
         try:
-            self._sftp.remove(normalized)
+            with self._sftp_lock:
+                self._sftp.remove(normalized)
             logger.info(
                 f"[SSH] 远程文件已删除: {remote_path}",
                 extra={"broadcast": False},
@@ -473,7 +479,8 @@ class RemoteWorkstation:
 
         normalized = remote_dir.replace("\\", "/").rstrip("/")
         try:
-            deleted_count, failed_count = self._clear_remote_directory_contents(normalized)
+            with self._sftp_lock:
+                deleted_count, failed_count = self._clear_remote_directory_contents(normalized)
         except FileNotFoundError:
             logger.info(f"[SSH] 远程目录不存在（跳过）: {remote_dir}")
             return (0, 0)
@@ -554,11 +561,12 @@ class RemoteWorkstation:
 
         normalized = remote_dir.replace("\\", "/").rstrip("/")
         try:
-            return [
-                entry.filename
-                for entry in self._sftp.listdir_attr(normalized)
-                if entry.filename not in {".", ".."}
-            ]
+            with self._sftp_lock:
+                return [
+                    entry.filename
+                    for entry in self._sftp.listdir_attr(normalized)
+                    if entry.filename not in {".", ".."}
+                ]
         except FileNotFoundError:
             logger.info(f"[SSH] 远程目录不存在（跳过列举）: {remote_dir}")
             return []
@@ -600,21 +608,22 @@ class RemoteWorkstation:
                 if local_dir:
                     os.makedirs(local_dir, exist_ok=True)
 
-                channel = self._sftp.get_channel()
-                previous_timeout = None
-                if remaining_timeout is not None:
-                    try:
-                        previous_timeout = channel.gettimeout()
-                    except AttributeError:
-                        previous_timeout = None
-                    channel.settimeout(remaining_timeout)
-                try:
-                    normalized_remote_path = remote_path.replace("\\", "/")
-                    logger.info(f"[SSH] 正在下载: {remote_path} -> {local_path}")
-                    self._sftp.get(normalized_remote_path, local_path)
-                finally:
+                with self._sftp_lock:
+                    channel = self._sftp.get_channel()
+                    previous_timeout = None
                     if remaining_timeout is not None:
-                        channel.settimeout(previous_timeout)
+                        try:
+                            previous_timeout = channel.gettimeout()
+                        except AttributeError:
+                            previous_timeout = None
+                        channel.settimeout(remaining_timeout)
+                    try:
+                        normalized_remote_path = remote_path.replace("\\", "/")
+                        logger.info(f"[SSH] 正在下载: {remote_path} -> {local_path}")
+                        self._sftp.get(normalized_remote_path, local_path)
+                    finally:
+                        if remaining_timeout is not None:
+                            channel.settimeout(previous_timeout)
                 logger.info(f"[SSH] 下载完成: {os.path.basename(local_path)}")
                 return True
             except (paramiko.SSHException, OSError, EOFError, socket.timeout) as e:
@@ -1071,9 +1080,10 @@ class RemoteWorkstation:
         if self._sftp is None:
             raise ConnectionError("SFTP 未连接")
         normalized = remote_path.replace("\\", "/")
-        self._ensure_remote_dir(self._remote_dirname(normalized))
-        with self._sftp.open(normalized, "wb") as remote_file:
-            remote_file.write(content.encode("utf-8"))
+        with self._sftp_lock:
+            self._ensure_remote_dir(self._remote_dirname(normalized))
+            with self._sftp.open(normalized, "wb") as remote_file:
+                remote_file.write(content.encode("utf-8"))
 
     def wait_for_flag(
         self,

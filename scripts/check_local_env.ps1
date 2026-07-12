@@ -205,8 +205,6 @@ Write-Host ""
 Write-Host "[4/8] ANSYS SpaceClaim" -ForegroundColor Yellow
 
 $scVersions = @(
-    @{ Ver = "v231"; Name = "2023 R1" },
-    @{ Ver = "v232"; Name = "2023 R2" },
     @{ Ver = "v241"; Name = "2024 R1" }
 )
 $scFound = $false
@@ -218,7 +216,7 @@ foreach ($sc in $scVersions) {
     }
 }
 if (-not $scFound) {
-    Write-Check "SpaceClaim" "Fail" "未检测到任何版本（v231/v232/v241）"
+    Write-Check "SpaceClaim" "Fail" "未检测到 SpaceClaim 2024 R1 (v241)"
 }
 
 # ===========================================================================

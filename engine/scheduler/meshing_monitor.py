@@ -208,6 +208,7 @@ class MeshingMonitor:
                 f"[MeshingMonitor] 断点续传扫描异常（已跳过）: {e}",
                 exc_info=True,
             )
+            logger.warning("[MeshingMonitor] 断点续传扫描已跳过，监控循环继续运行")
 
         busy_requeue_count = 0
         while not self._stopped.is_set():

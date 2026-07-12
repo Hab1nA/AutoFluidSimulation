@@ -60,7 +60,7 @@ obj/Debug/net48/
 Program.cs
 
 [metadataReferences]
-../../../../../../../Program Files/ANSYS Inc/v231/SCDM/SpaceClaim.Api.V23.dll
+../../../../../../../Program Files/ANSYS Inc/v241/SCDM/SpaceClaim.Api.V241.dll
 <NETFXREF>/v4.8/
  mscorlib.dll
  System.Core.dll

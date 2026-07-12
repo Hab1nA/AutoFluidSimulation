@@ -7,7 +7,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 WORKSTATION_ID = "WS-C"
@@ -63,9 +63,12 @@ def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"last_signature": "", "last_log_at": "", "consecutive_failures": 0, "first_failure_at": ""}
     try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
+        raw_state = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(raw_state, dict):
+            return cast(dict[str, Any], raw_state)
     except (OSError, json.JSONDecodeError):
-        return {"last_signature": "", "last_log_at": "", "consecutive_failures": 0, "first_failure_at": ""}
+        pass
+    return {"last_signature": "", "last_log_at": "", "consecutive_failures": 0, "first_failure_at": ""}
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:

@@ -621,6 +621,158 @@ def test_check_meshing_outputs_exist_uses_independent_workstation_locks(monkeypa
         thread_a.join(timeout=2)
 
 
+def test_check_config_outputs_exist_returns_none_when_workstation_lock_busy(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+    lock = threading.Lock()
+    lock.acquire()
+    ssh_requested = False
+
+    def _get_ssh():
+        nonlocal ssh_requested
+        ssh_requested = True
+        raise AssertionError("busy lock should skip SSH access")
+
+    executor = RemoteExecutor(_StateRecorder(), _get_ssh, lock)
+    try:
+        assert executor.check_config_outputs_exist(
+            4,
+            ("meshing",),
+            lock_timeout=0.01,
+        ) is None
+    finally:
+        lock.release()
+    assert ssh_requested is False
+
+
+def test_check_config_outputs_exist_holds_workstation_lock_and_passes_timeout(monkeypatch):
+    monkeypatch.setitem(REMOTE_CONFIG, "msh_dir", r"D:\msh")
+    inside_lock = False
+    calls: list[tuple[str, float | None, bool]] = []
+
+    class _Lock:
+        def __enter__(self):
+            nonlocal inside_lock
+            inside_lock = True
+
+        def __exit__(self, exc_type, exc, tb):
+            nonlocal inside_lock
+            inside_lock = False
+
+    class _SSH:
+        def is_connected(self) -> bool:
+            return True
+
+        def get_remote_file_size(
+            self,
+            remote_path: str,
+            *,
+            timeout: float | None = None,
+            quiet: bool = False,
+        ) -> int:
+            calls.append((remote_path, timeout, inside_lock))
+            return 1024
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), _Lock())
+
+    assert executor.check_config_outputs_exist(4, ("meshing",), timeout=13) is True
+    assert calls == [("D:/msh/model_gen4_4.msh.h5", 13, True)]
+
+
+def test_check_config_outputs_exist_postprocess_unknown_stops_candidate_scan(monkeypatch):
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_output_dir", "")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_metrics_dir", "")
+    monkeypatch.setitem(ENGINE_CONFIG, "postprocess_animation_dir", "")
+    monkeypatch.setitem(REMOTE_CONFIG, "result_dir", r"D:\case")
+    monkeypatch.setitem(REMOTE_CONFIG, "postprocess_output_dir", r"D:\post")
+    monkeypatch.setitem(REMOTE_CONFIG, "postprocess_metrics_dir", r"D:\metrics")
+    calls: list[str] = []
+
+    class _SSH:
+        def is_connected(self) -> bool:
+            return True
+
+        def get_remote_file_size(
+            self,
+            remote_path: str,
+            *,
+            timeout: float | None = None,
+            quiet: bool = False,
+        ) -> int | None:
+            calls.append(remote_path)
+            return None
+
+    executor = RemoteExecutor(_StateRecorder(), lambda: _SSH(), threading.RLock())
+
+    assert executor.check_config_outputs_exist(4, ("postprocess",), timeout=5) is None
+    assert calls == ["D:/post/model_gen4_4.csv"]
+
+
+def test_check_config_outputs_exist_uses_independent_workstation_locks(monkeypatch):
+    monkeypatch.setattr(
+        remote_executor_module,
+        "get_workstation_config",
+        lambda workstation_id: {
+            **REMOTE_CONFIG,
+            "id": workstation_id,
+            "msh_dir": rf"D:\{workstation_id}\msh",
+        },
+    )
+
+    entered: list[str] = []
+    release = threading.Event()
+
+    class _SSH:
+        def __init__(self, workstation_id: str) -> None:
+            self.workstation_id = workstation_id
+
+        def is_connected(self) -> bool:
+            return True
+
+        def get_remote_file_size(
+            self,
+            remote_path: str,
+            *,
+            timeout: float | None = None,
+            quiet: bool = False,
+        ) -> int:
+            entered.append(self.workstation_id)
+            if self.workstation_id == "WS-A":
+                release.wait(timeout=2)
+            return 1024
+
+    executor = RemoteExecutor(
+        _StateRecorder(),
+        lambda workstation_id: _SSH(workstation_id),
+        threading.RLock(),
+    )
+    thread_a = threading.Thread(
+        target=lambda: executor.check_config_outputs_exist(
+            1,
+            ("meshing",),
+            workstation_id="WS-A",
+        )
+    )
+    thread_a.start()
+
+    deadline = remote_executor_module.time.time() + 1.0
+    while entered != ["WS-A"] and remote_executor_module.time.time() < deadline:
+        remote_executor_module.time.sleep(0.01)
+
+    try:
+        started_at = remote_executor_module.time.monotonic()
+        assert executor.check_config_outputs_exist(
+            2,
+            ("meshing",),
+            workstation_id="WS-B",
+        ) is True
+        elapsed = remote_executor_module.time.monotonic() - started_at
+        assert "WS-B" in entered
+        assert elapsed < 0.5
+    finally:
+        release.set()
+        thread_a.join(timeout=2)
+
+
 def test_check_meshing_done_uses_workstation_specific_paths_and_lock(monkeypatch):
     monkeypatch.setitem(REMOTE_CONFIG, "flag_dir", r"D:\default_flags")
     monkeypatch.setattr(

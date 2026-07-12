@@ -171,7 +171,7 @@ AutoFluidSimulation/
 │   └── server.py            # TCP Socket 服务器
 │
 ├── executor/                # 外部执行脚本
-│   ├── spaceclaim_transit.py # SC 转换脚本（V23 API）
+│   ├── spaceclaim_transit.py # SC 转换脚本（V241 API）
 │   ├── sw_executor.py        # SolidWorks COM 执行器
 │   ├── remote_executor.py    # 远程 SSH 执行器
 │   ├── cleaner.py            # 中间文件清理器
@@ -258,7 +258,7 @@ AutoFluidSimulation/
 | **C# Bridge**  | .NET Framework 4.8 / MSBuild                         |
 | **COM 自动化** | pywin32 → SolidWorks COM API                        |
 | **远程连接**   | paramiko SSH/SFTP                                    |
-| **外部依赖**   | SolidWorks 2020+, SpaceClaim 2023 R1, Fluent 2024 R1 |
+| **外部依赖**   | SolidWorks 2020+, SpaceClaim 2024 R1, Fluent 2024 R1 |
 
 ### Python 依赖
 
@@ -413,19 +413,17 @@ python -c "import win32com.client; sw = win32com.client.Dispatch('SldWorks.Appli
 
 | 要求                                              | 说明                                           |
 | ------------------------------------------------- | ---------------------------------------------- |
-| **ANSYS SpaceClaim 2023 R1 (v231)**         | 命令行模式 `/RunScript` 执行 Python 转换脚本 |
+| **ANSYS SpaceClaim 2024 R1 (v241)**         | 命令行模式 `/RunScript` 执行 Python 转换脚本 |
 | **IronPython 解释器**（随 SpaceClaim 内置） | SpaceClaim 内嵌的脚本引擎，非系统 Python       |
-| **SpaceClaim API V23 DLL**（可选）          | 仅强类型编译需要；纯进程检测模式无需此 DLL     |
+| **SpaceClaim API V241 DLL**（可选）         | 脚本运行时由 SpaceClaim 内部加载；Bridge 编译不依赖此 DLL |
 
 **支持的版本**（`bridge/SpaceClaimBridge/Program.cs` 自动探测）：
 
-- v231（2023 R1）
-- v232（2023 R2）
 - v241（2024 R1）
 
 **配置**（`autofluid_config.toml` → `[local_paths]`）：
 
-- `sc_exe`: `SpaceClaim.exe` 完整路径（如 `C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe`）
+- `sc_exe`: `SpaceClaim.exe` 完整路径（如 `C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe`）
 - `sc_script`: 转换脚本路径（`executor/spaceclaim_transit.py`）
 - `sc_bridge`: C# 桥接程序路径（`bridge/SpaceClaimBridge.exe`）
 - `scdoc_dir`: SCDOC 输出目录
@@ -520,7 +518,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 3  | Rust 工具链         | `rustc --version` && `cargo --version`                                             |
 | 4  | MSBuild 可用        | 运行 `rebuild.bat`（自动探测）                                                       |
 | 5  | SolidWorks COM      | `python -c "from win32com.client import Dispatch; Dispatch('SldWorks.Application')"` |
-| 6  | SpaceClaim 路径存在 | `Test-Path 'C:\Program Files\ANSYS Inc\v231\SCDM\SpaceClaim.exe'`                    |
+| 6  | SpaceClaim 路径存在 | `Test-Path 'C:\Program Files\ANSYS Inc\v241\SCDM\SpaceClaim.exe'`                    |
 | 7  | SSH 远程可达        | `ssh ps@<remote-host> "echo OK"`                                                     |
 | 8  | 端口 9527 空闲      | `netstat -ano \| findstr :9527`（应为空）                                             |
 | 9  | 目录结构就位        | 确认 `step_dir` / `scdoc_dir` / `.env` / `Excel` / `.SLDPRT` 均已存在        |
@@ -859,7 +857,7 @@ cargo build --release
 
 ```powershell
 cd bridge\SpaceClaimBridge
-compile.bat          # 强类型版本（需 SpaceClaim API DLL）
+compile.bat          # 标准版本（不引用 SpaceClaim API DLL）
 compile_noref.bat    # 免引用版本
 ```
 

@@ -127,6 +127,11 @@ class SCProcessPool:
             if self._persistent_slots.get(slot.slot_id) is slot:
                 self._cleanup_persistent_slot(slot)
                 self._persistent_slots.pop(slot.slot_id, None)
+                logger.warning(
+                    "[SC-Pool] 常驻槽位%s 已废弃并清理，后续请求将重建槽位",
+                    slot.slot_id,
+                    extra=self._sc_log_extra(config_name, slot),
+                )
 
     # ==================================================================
     # 执行入口
@@ -173,6 +178,7 @@ class SCProcessPool:
                             reason, config_name,
                             extra=self._sc_log_extra(config_name),
                         )
+                        self._oneshot_fallback_reason = reason
                         return self._run_oneshot_bridge(config_name)
                     return self._fail(reason)
 
@@ -188,6 +194,7 @@ class SCProcessPool:
                         reason, config_name,
                         extra=self._sc_log_extra(config_name, slot),
                     )
+                    self._oneshot_fallback_reason = reason
                     return self._run_oneshot_bridge(config_name)
                 return self._fail(reason)
 
@@ -239,6 +246,8 @@ class SCProcessPool:
 
     def _run_oneshot_bridge(self, config_name: int) -> bool:
         """使用一次性 Bridge 执行当前构型，作为常驻启动失败的兜底。"""
+        fallback_reason = str(getattr(self, "_oneshot_fallback_reason", "") or "")
+        self._oneshot_fallback_reason = ""
         if not self._bridge_path or not os.path.exists(self._bridge_path):
             return self._fail("一次性 Bridge 需要 SpaceClaimBridge.exe")
 
@@ -292,11 +301,19 @@ class SCProcessPool:
             return self._fail(f"一次性 Bridge 执行失败: {exc}")
 
         if completed.returncode == 0:
-            logger.info(
-                "[SC-Pool] 一次性 Bridge 完成构型%s",
-                config_name,
-                extra=self._sc_log_extra(config_name),
-            )
+            if fallback_reason:
+                logger.warning(
+                    "[SC-Pool] 一次性 Bridge 兜底完成构型%s（常驻槽位恢复原因: %s）",
+                    config_name,
+                    fallback_reason,
+                    extra=self._sc_log_extra(config_name),
+                )
+            else:
+                logger.info(
+                    "[SC-Pool] 一次性 Bridge 完成构型%s",
+                    config_name,
+                    extra=self._sc_log_extra(config_name),
+                )
             return True
 
         return self._fail(
@@ -414,6 +431,10 @@ class SCProcessPool:
                     self._cleanup_persistent_slot(slot)
                     # 从字典中移除孤立槽位，防止长期累积
                     self._persistent_slots.pop(slot.slot_id, None)
+                    logger.warning(
+                        "[SC-Pool] 死亡常驻槽位%s 已清理，后续请求将创建新槽位",
+                        slot.slot_id,
+                    )
             elif slot.status == "busy":
                 if slot.process is not None and slot.process.poll() is not None:
                     logger.warning(
@@ -426,6 +447,11 @@ class SCProcessPool:
                     #    空等 300s 超时。重新启动后 slot 进入 "starting" 状态，
                     #    run_config() 会通过 _wait_for_slot_ready 等待就绪。
                     if self._launch_persistent_process(slot):
+                        logger.warning(
+                            "[SC-Pool] 常驻槽位%s 重启成功: Bridge PID=%s",
+                            slot.slot_id,
+                            slot.pid,
+                        )
                         return slot
                     else:
                         # 启动失败，移除槽位，让后续逻辑创建新槽位

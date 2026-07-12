@@ -128,7 +128,7 @@ class RetryManager:
                             config_name, step_name, STATUS_RETRYING,
                             f"重试 {attempt + 1}/{max_retries}（已重试 {retry_count} 次）"
                         )
-                        logger.info(f"将在 {5 * attempt}s 后重试 (已重试 {retry_count} 次)")
+                        logger.warning(f"将在 {5 * attempt}s 后重试 (已重试 {retry_count} 次)")
                         # ★ 使用暂停感知 sleep：若暂停被触发，sleep 期间状态
                         #    会被 set_all_running_to_paused() 改为 Paused，
                         #    恢复后下一轮迭代会检测 _paused 并正确等待
