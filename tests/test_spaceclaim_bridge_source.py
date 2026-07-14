@@ -64,11 +64,69 @@ def test_spaceclaim_transit_uses_only_2024r1_api() -> None:
 
     assert "_SPACECLAIM_API_VERSION" in source
     assert '"V241"' in source
+    assert "from SpaceClaim.Api.V241 import *" in source
     assert '"V23"' not in source
     assert "_SPACECLAIM_API_VERSIONS" not in source
     assert "for _api_version" not in source
-    assert "SpaceClaim.Api.{}" in source
     assert "SpaceClaim.Api.V23 import *" not in source
+    assert "__import__" not in source
+    assert "dir(_sc_api)" not in source
+
+
+def test_spaceclaim_transit_fails_closed_before_saving_invalid_scdoc() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+    processing_failure_start = source.index("def _fail_closed_processing")
+    save_start = source.index("doc.SaveAs(temp_path)", processing_failure_start)
+    named_selection_block = source[processing_failure_start:save_start]
+
+    assert "remaining = _close_all_documents()" in named_selection_block
+    assert "os.remove(temp_path)" in named_selection_block
+    assert "return False" in named_selection_block
+    assert "result is None or not result.Success" in named_selection_block
+    assert "result.CreatedNamedSelection is None" in named_selection_block
+    assert "return result.CreatedNamedSelection" in named_selection_block
+    assert "merge_result is None or not merge_result.Success" in named_selection_block
+    assert "rename_result is None or not rename_result.Success" in named_selection_block
+    assert "组{} 创建失败" in named_selection_block
+    assert "合并 组4+组5 命令未成功" in named_selection_block
+    assert "选择集创建失败" in named_selection_block
+    assert "重命名 {} → {} 命令未成功" in named_selection_block
+    assert "将以默认名称保存" not in source
+    assert "将跳过合并" not in source
+
+
+def test_spaceclaim_transit_removes_stale_output_before_opening_step() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    step_exists_check = source.index("if not os.path.exists(step_path)")
+    out_path_build = source.index(
+        "out_path = os.path.join(scdoc_dir, scdoc_name)", step_exists_check
+    )
+    stale_output_remove = source.index("os.remove(stale_path)", out_path_build)
+    document_open = source.index("Document.Open(step_path, None)", stale_output_remove)
+    document_save = source.index("doc.SaveAs(temp_path)", document_open)
+
+    assert step_exists_check < out_path_build < stale_output_remove
+    assert stale_output_remove < document_open < document_save
+    assert source.count("out_path = os.path.join(scdoc_dir, scdoc_name)") == 1
+    stale_output_block = source[out_path_build:document_open]
+    assert "except (OSError, IOError) as e:" in stale_output_block
+    assert "return False" in stale_output_block
+
+
+def test_spaceclaim_transit_atomically_publishes_only_after_close() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    temp_save = source.index("doc.SaveAs(temp_path)")
+    temp_nonempty_check = source.index("os.path.getsize(temp_path) <= 0", temp_save)
+    close_documents = source.index("remaining = _close_all_documents()", temp_save)
+    atomic_publish = source.index("os.rename(temp_path, out_path)", close_documents)
+    final_nonempty_check = source.index("os.path.getsize(out_path) <= 0", atomic_publish)
+
+    assert temp_save < temp_nonempty_check < close_documents
+    assert close_documents < atomic_publish < final_nonempty_check
+    assert 'out_basename + ".autofluid_tmp.scdoc"' in source
+    assert "doc.SaveAs(out_path)" not in source
 
 
 def test_bridge_sets_versioned_ansys_environment_from_spaceclaim_exe() -> None:

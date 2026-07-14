@@ -15,6 +15,7 @@ import sys
 import tempfile
 import shutil
 import logging
+import zipfile
 from pathlib import Path
 import pytest
 from engine.state_manager import StateManager
@@ -26,6 +27,45 @@ from engine.scheduler.retry import RetryManager
 from engine.scheduler.utils import pause_aware_sleep
 from engine.task_runner import TaskRunner
 from utils.infrastructure import InfrastructureUnavailableError
+
+
+def _write_scdoc(path: Path, named_selections: tuple[str, ...]) -> None:
+    definitions = "".join(
+        f"<NamedSelectionDef><name>{name}</name></NamedSelectionDef>"
+        for name in named_selections
+    )
+    document_xml = f'<Document xmlns="urn:autofluid:test">{definitions}</Document>'
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("SpaceClaim/document.xml", document_xml)
+
+
+def test_is_valid_scdoc_accepts_all_required_named_selections(tmp_path: Path) -> None:
+    from engine.scheduler import worker_pool
+
+    scdoc_path = tmp_path / "valid.scdoc"
+    names = tuple(worker_pool._REQUIRED_SCDOC_NAMED_SELECTIONS)
+    _write_scdoc(scdoc_path, names)
+
+    assert worker_pool._is_valid_scdoc_output(scdoc_path) is True
+
+
+def test_is_valid_scdoc_rejects_missing_named_selection(tmp_path: Path) -> None:
+    from engine.scheduler import worker_pool
+
+    scdoc_path = tmp_path / "missing-name.scdoc"
+    names = tuple(worker_pool._REQUIRED_SCDOC_NAMED_SELECTIONS)
+    _write_scdoc(scdoc_path, names[:-1])
+
+    assert worker_pool._is_valid_scdoc_output(scdoc_path) is False
+
+
+def test_is_valid_scdoc_rejects_bad_zip(tmp_path: Path) -> None:
+    from engine.scheduler import worker_pool
+
+    scdoc_path = tmp_path / "corrupt.scdoc"
+    scdoc_path.write_bytes(b"not a zip archive")
+
+    assert worker_pool._is_valid_scdoc_output(scdoc_path) is False
 
 
 # ====================================================================

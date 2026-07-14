@@ -183,19 +183,14 @@ logger.info("sys.argv: {}".format(sys.argv))
 #       在 .py 脚本中应使用 None（表示"所有体"），
 #       对于单体的 STEP 导入模型与 Body1 语义完全等价。
 _SPACECLAIM_API_VERSION = "V241"
-_sc_api = None
-# 动态 API 导入会填充这些全局名；预声明用于通过静态检查。
-Window = Command = Document = Selection = None
-PowerSelectOptions = NamedSelection = PowerSelection = MM2 = None
-_api_module_name = "SpaceClaim.Api.{}".format(_SPACECLAIM_API_VERSION)
 try:
-    _sc_api = __import__(_api_module_name, globals(), locals(), ["*"])
-    for _api_name in dir(_sc_api):
-        if not _api_name.startswith("_"):
-            globals()[_api_name] = getattr(_sc_api, _api_name)
-    logger.info("{} 导入成功".format(_api_module_name))
+    # IronPython 的 CLR 命名空间不会可靠地通过 dir()/getattr() 暴露类型。
+    # 必须使用静态 import *，由 IronPython 直接绑定 SpaceClaim API 符号。
+    from SpaceClaim.Api.V241 import *
+    logger.info("SpaceClaim.Api.{} 导入成功".format(_SPACECLAIM_API_VERSION))
 except ImportError as e:
-    logger.critical("无法导入 {}: {}".format(_api_module_name, e))
+    logger.critical("无法导入 SpaceClaim.Api.{}: {}".format(
+        _SPACECLAIM_API_VERSION, e))
     logger.critical("请确认 SpaceClaim 2024 R1 已正确安装，且脚本在 SpaceClaim 内部运行")
     sys.exit(1)
 
@@ -456,6 +451,21 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     file_size = os.path.getsize(step_path)
     logger.info("文件大小: {} bytes".format(file_size))
 
+    # 在打开 STEP 前移除同名旧输出与临时输出，避免旧文件被误判为成功产物。
+    out_path = os.path.join(scdoc_dir, scdoc_name)
+    out_basename = os.path.splitext(scdoc_name)[0]
+    temp_path = os.path.join(
+        scdoc_dir, out_basename + ".autofluid_tmp.scdoc")
+    for stale_path in (out_path, temp_path):
+        try:
+            if os.path.exists(stale_path):
+                os.remove(stale_path)
+                logger.info("已删除旧输出: {}".format(stale_path))
+        except (OSError, IOError) as e:
+            logger.error("删除旧输出失败 {}: {}: {}".format(
+                stale_path, type(e).__name__, e))
+            return False
+
     # ------------------------------------------------------------------
     # 2. 打开文档
     # ------------------------------------------------------------------
@@ -471,19 +481,38 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         traceback.print_exc()
         return False
 
+    def _fail_closed_processing(message):
+        """中止当前处理，尽力关闭文档并移除未发布的临时输出。"""
+        logger.error(message)
+        try:
+            remaining = _close_all_documents()
+            logger.info("失败后的文档清理完成，残留文档数: {}".format(remaining))
+        except Exception as cleanup_error:
+            logger.warning("失败后的文档清理异常: {}: {}".format(
+                type(cleanup_error).__name__, cleanup_error))
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                logger.info("已删除未发布的临时输出: {}".format(temp_path))
+        except (OSError, IOError) as cleanup_error:
+            logger.warning("删除未发布的临时输出失败: {}: {}".format(
+                type(cleanup_error).__name__, cleanup_error))
+        _force_gc()
+        return False
+
     # ------------------------------------------------------------------
     # 3. 获取主部件 + 构造体选择集（替代 .scscript 的 Body1 隐式转换）
     # ------------------------------------------------------------------
     try:
         part = doc.MainPart
         if part is None:
-            logger.error("无法获取文档主部件 (MainPart 为 None)")
-            return False
+            return _fail_closed_processing(
+                "无法获取文档主部件 (MainPart 为 None)")
         logger.info("已获取主部件")
     except Exception as e:
-        logger.error("获取 MainPart 失败: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
-        return False
+        return _fail_closed_processing(
+            "获取 MainPart 失败: {}: {}".format(type(e).__name__, e))
 
     # PowerSelectOptions 第二参数类型为 ISelection，非 IBody。
     # .scscript 中 Body1 被 SpaceClaim 引擎隐式转换为 ISelection；
@@ -508,6 +537,10 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     # 选择集自动命名：组1~组N；合并后重命名为英文名。
     logger.info("正在创建命名选择集...")
 
+    def _fail_closed_named_selection_stage(message):
+        """中止命名选择处理，并尽力释放当前 SpaceClaim 文档。"""
+        return _fail_closed_processing(message)
+
     def _create_named_selection(min_area_mm2, max_area_mm2):
         """创建一个基于面面积的命名选择集。
 
@@ -529,7 +562,13 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
                 ),
                 Selection.Empty(),
             )
-            return result
+            if (result is None or not result.Success or
+                    result.CreatedNamedSelection is None):
+                logger.warning(
+                    "创建选择集命令未成功 (面积 {}-{})".format(
+                        min_area_mm2, max_area_mm2))
+                return None
+            return result.CreatedNamedSelection
         except Exception as e:
             logger.warning("创建选择集失败 (面积 {}-{}): {}: {}".format(min_area_mm2, max_area_mm2, type(e).__name__, e))
             return None
@@ -548,18 +587,24 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         if result is not None:
             logger.info("组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
         else:
-            logger.error("组{} 创建失败 (面积 {}-{} mm²)".format(i, lo, hi))
+            return _fail_closed_named_selection_stage(
+                "组{} 创建失败 (面积 {}-{} mm²)，中止且不保存 SCDOC".format(
+                    i, lo, hi))
 
     # ------------------------------------------------------------------
     # 4b. 合并组4和组5（wall_chamber 和 wall_throat 的过渡段合并）
     # ------------------------------------------------------------------
     logger.info("正在合并 组4 和 组5...")
     try:
-        NamedSelection.Merge("组4", "组5")
+        merge_result = NamedSelection.Merge("组4", "组5")
+        if merge_result is None or not merge_result.Success:
+            return _fail_closed_named_selection_stage(
+                "合并 组4+组5 命令未成功，中止且不保存 SCDOC")
         logger.info("组4+组5 合并成功")
     except Exception as e:
-        logger.warning("合并 组4+组5 失败: {}: {}".format(type(e).__name__, e))
-        logger.warning("将跳过合并，这可能导致后续重命名映射偏移")
+        return _fail_closed_named_selection_stage(
+            "合并 组4+组5 失败: {}: {}，中止且不保存 SCDOC".format(
+                type(e).__name__, e))
 
     # ------------------------------------------------------------------
     # 4c. 继续创建剩余选择集
@@ -576,7 +621,9 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         if result is not None:
             logger.info("选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
         else:
-            logger.error("选择集创建失败 (面积 {}-{} mm²)".format(lo, hi))
+            return _fail_closed_named_selection_stage(
+                "选择集创建失败 (面积 {}-{} mm²)，中止且不保存 SCDOC".format(
+                    lo, hi))
 
     # ------------------------------------------------------------------
     # 5. 重命名选择集为英文名
@@ -595,25 +642,22 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         "组8": "wall_top",
     }
 
-    rename_success = 0
-    rename_fail = 0
     for old_name, new_name in rename_map.items():
         try:
-            result = NamedSelection.Rename(old_name, new_name)
+            rename_result = NamedSelection.Rename(old_name, new_name)
+            if rename_result is None or not rename_result.Success:
+                return _fail_closed_named_selection_stage(
+                    "重命名 {} → {} 命令未成功，中止且不保存 SCDOC".format(
+                        old_name, new_name))
             logger.info("  {} → {}".format(old_name, new_name))
-            rename_success += 1
         except Exception as e:
-            logger.warning("重命名 {} → {} 失败: {}: {}".format(old_name, new_name, type(e).__name__, e))
-            rename_fail += 1
-
-    if rename_fail > 0:
-        logger.warning("{} 个选择集重命名失败，将以默认名称保存".format(rename_fail))
+            return _fail_closed_named_selection_stage(
+                "重命名 {} → {} 失败: {}: {}，中止且不保存 SCDOC".format(
+                    old_name, new_name, type(e).__name__, e))
 
     # ------------------------------------------------------------------
     # 6. 保存文档为 SCDOC
     # ------------------------------------------------------------------
-    out_path = os.path.join(scdoc_dir, scdoc_name)
-
     # 确保输出目录存在（Python 2.7 无 exist_ok 参数）
     try:
         if not os.path.isdir(scdoc_dir):
@@ -621,47 +665,65 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     except (OSError, IOError):
         pass
 
-    logger.info("正在保存文档: {}".format(out_path))
+    logger.info("正在保存临时文档: {}".format(temp_path))
     try:
-        doc.SaveAs(out_path)
-        logger.info("文档已保存")
+        doc.SaveAs(temp_path)
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) <= 0:
+            return _fail_closed_processing(
+                "临时 SCDOC 未生成或为空: {}".format(temp_path))
+        logger.info("临时文档已保存并验证非空: {}".format(temp_path))
     except Exception as e:
-        logger.error("保存文档失败: {}: {}".format(type(e).__name__, e))
         traceback.print_exc()
-        return False
+        return _fail_closed_processing(
+            "保存临时文档失败: {}: {}".format(type(e).__name__, e))
 
     # ------------------------------------------------------------------
-    # 7. 验证输出文件
-    # ------------------------------------------------------------------
-    if os.path.exists(out_path):
-        out_size = os.path.getsize(out_path)
-        logger.info("输出文件验证通过: {} ({} bytes)".format(out_path, out_size))
-    else:
-        logger.error("输出文件未生成: {}".format(out_path))
-        return False
-
-    # ------------------------------------------------------------------
-    # 8. 关闭文档释放资源
+    # 7. 关闭文档释放句柄，再原子发布最终输出
     # ------------------------------------------------------------------
     # 不关闭文档会导致 SpaceClaim 内部文档句柄/内存累积，
     # 约 2-3 个文档后进程因资源耗尽崩溃。
     # 使用 _close_all_documents() 确保所有文档（不仅是当前处理的）
     # 都被关闭，防止残留文档累积。
     try:
-        if doc is not None:
-            # ★ 先关闭所有文档（防止前次迭代的残留文档未释放）
-            remaining = _close_all_documents()
-            logger.info("文档关闭完成，残留文档数: {}".format(remaining))
-
-            # ★ 释放本地引用，帮助 IronPython GC 回收 .NET 对象
-            #    将 doc/part/body_selection 等引用置 None，
-            #    避免 IronPython 持有引用阻止 .NET GC
-            doc = None
-            part = None
-            body_selection = None
-            _force_gc()
+        remaining = _close_all_documents()
+        if remaining != 0:
+            return _fail_closed_processing(
+                "文档关闭后仍有 {} 个残留窗口，不发布临时输出".format(remaining))
+        logger.info("文档关闭完成，残留文档数: 0")
     except Exception as e:
-        logger.warning("关闭文档失败（不影响结果）: {}: {}".format(type(e).__name__, e))
+        return _fail_closed_processing(
+            "关闭文档失败，不发布临时输出: {}: {}".format(
+                type(e).__name__, e))
+
+    # 释放本地引用，确保 Windows 文件句柄在重命名前完成回收。
+    doc = None
+    part = None
+    body_selection = None
+    _force_gc()
+
+    try:
+        os.rename(temp_path, out_path)
+        if not os.path.exists(out_path) or os.path.getsize(out_path) <= 0:
+            logger.error("最终 SCDOC 发布后不存在或为空: {}".format(out_path))
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except (OSError, IOError) as cleanup_error:
+                logger.warning("删除无效最终输出失败: {}: {}".format(
+                    type(cleanup_error).__name__, cleanup_error))
+            return False
+        logger.info("最终 SCDOC 已原子发布: {}".format(out_path))
+    except (OSError, IOError) as e:
+        for failed_path in (temp_path, out_path):
+            try:
+                if os.path.exists(failed_path):
+                    os.remove(failed_path)
+            except (OSError, IOError) as cleanup_error:
+                logger.warning("发布失败后删除输出失败 {}: {}: {}".format(
+                    failed_path, type(cleanup_error).__name__, cleanup_error))
+        logger.error("原子发布最终 SCDOC 失败: {}: {}".format(
+            type(e).__name__, e))
+        return False
 
     logger.info("构型 {} 处理完成: {}".format(file_index, scdoc_name))
     return True

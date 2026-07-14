@@ -15,6 +15,8 @@ import threading
 import queue
 import os
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Callable
 
 from engine.config import (
@@ -31,6 +33,46 @@ from engine.scheduler.work_queue import UniqueWorkQueue
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
+
+_REQUIRED_SCDOC_NAMED_SELECTIONS = frozenset((
+    "inlet_oxidizer",
+    "inlet_fuel",
+    "wall_gap",
+    "wall_chamber",
+    "wall_throat",
+    "wall_nozzle",
+    "outlet",
+    "wall_top",
+))
+
+
+def _local_xml_tag(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _is_valid_scdoc_output(path: str | os.PathLike[str]) -> bool:
+    """检查 SCDOC 的结构及网格工作流要求的全部命名选择。"""
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            document_root = ET.fromstring(archive.read("SpaceClaim/document.xml"))
+    except (
+        OSError,
+        KeyError,
+        ET.ParseError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ):
+        return False
+
+    named_selections = set()
+    for definition in document_root.iter():
+        if _local_xml_tag(definition.tag) != "NamedSelectionDef":
+            continue
+        for child in definition.iter():
+            if _local_xml_tag(child.tag) == "name" and child.text:
+                named_selections.add(child.text.strip())
+
+    return _REQUIRED_SCDOC_NAMED_SELECTIONS.issubset(named_selections)
 
 
 class WorkerPoolManager:
@@ -402,12 +444,16 @@ class WorkerPoolManager:
             scdoc_name = get_step_filename("sc", config_name)
             if scdoc_name:
                 scdoc_path = os.path.join(LOCAL_PATHS["scdoc_dir"], scdoc_name)
-                if os.path.exists(scdoc_path) and os.path.getsize(scdoc_path) > 0:
+                if _is_valid_scdoc_output(scdoc_path):
                     logger.info(
-                        f"构型{config_name} SC: SCDOC 文件已存在，跳过执行"
+                        f"构型{config_name} SC: SCDOC 已通过内容校验，跳过执行"
                     )
                     self.state.set_step_status(config_name, "sc", STATUS_COMPLETED)
                 else:
+                    if os.path.exists(scdoc_path):
+                        logger.warning(
+                            f"构型{config_name} SC: 已有 SCDOC 无效或缺少必需命名选择，重新执行"
+                        )
                     success = self._retry_manager.execute_with_retry(
                         config_name,
                         "sc",
