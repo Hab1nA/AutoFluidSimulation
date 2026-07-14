@@ -84,7 +84,7 @@ def test_spaceclaim_transit_fails_closed_before_saving_invalid_scdoc() -> None:
     assert "return False" in named_selection_block
     assert "result is None or not result.Success" in named_selection_block
     assert "result.CreatedNamedSelection is None" in named_selection_block
-    assert "return result.CreatedNamedSelection" in named_selection_block
+    assert "return True" in named_selection_block
     assert "merge_result is None or not merge_result.Success" in named_selection_block
     assert "rename_result is None or not rename_result.Success" in named_selection_block
     assert "组{} 创建失败" in named_selection_block
@@ -95,19 +95,39 @@ def test_spaceclaim_transit_fails_closed_before_saving_invalid_scdoc() -> None:
     assert "将跳过合并" not in source
 
 
-def test_spaceclaim_transit_uses_fresh_body_selection_for_each_group() -> None:
+def test_spaceclaim_transit_normalizes_v241_aggregated_face_areas() -> None:
     source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
     helper_start = source.index("def _create_named_selection")
     helper_end = source.index("selection_specs = [", helper_start)
     helper = source[helper_start:helper_end]
 
-    assert "bodies = list(part.Bodies)" in helper
-    assert "if not bodies:" in helper
-    assert "fresh_body_selection = Selection.Create(bodies[0])" in helper
-    assert "if fresh_body_selection is None:" in helper
-    assert "PowerSelectOptions(False, fresh_body_selection)" in helper
-    assert "PowerSelectOptions(False)" not in helper
-    assert "body_selection" not in source.replace("fresh_body_selection", "")
+    assert "faces = list(design_body.Faces)" in helper
+    assert "matching_faces = [" in helper
+    assert "if min_area <= face.Area <= max_area" in helper
+    assert "if 2 * min_area <= face.Area <= 2 * max_area" in helper
+    assert "normalized_count = len(matching_faces) * area_scale" in helper
+    assert "if normalized_count != expected_count:" in helper
+    assert "primary_selection = FaceSelection.Create(matching_faces)" in helper
+    assert "primary_selection.Count != len(matching_faces)" in helper
+    assert "PowerSelectOptions" not in helper
+    assert "return True" in helper
+
+
+def test_spaceclaim_transit_requires_exactly_one_body_for_face_selection() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    assert "bodies = list(part.Bodies)" in source
+    assert "if len(bodies) != 1:" in source
+
+
+def test_spaceclaim_transit_writes_ascii_json_as_binary() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+
+    assert 'with open(tmp_file, "wb") as f:' in source
+    assert 'f.write(json_text.encode("ascii"))' in source
+    assert '"conversion_succeeded" if success else' in source
+    assert '"conversion_failed"' in source
+    assert "except BaseException:" in source
 
 
 def test_spaceclaim_transit_removes_stale_output_before_opening_step() -> None:

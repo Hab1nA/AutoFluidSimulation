@@ -501,13 +501,18 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         return False
 
     # ------------------------------------------------------------------
-    # 3. 获取主部件 + 构造体选择集（替代 .scscript 的 Body1 隐式转换）
+    # 3. 获取并验证单体主部件
     # ------------------------------------------------------------------
     try:
         part = doc.MainPart
         if part is None:
             return _fail_closed_processing(
                 "无法获取文档主部件 (MainPart 为 None)")
+        bodies = list(part.Bodies)
+        if len(bodies) != 1:
+            return _fail_closed_processing(
+                "当前模型包含 {} 个 body，无法安全使用全体搜索".format(
+                    len(bodies)))
         logger.info("已获取主部件")
     except Exception as e:
         traceback.print_exc()
@@ -526,58 +531,95 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         """中止命名选择处理，并尽力释放当前 SpaceClaim 文档。"""
         return _fail_closed_processing(message)
 
-    def _create_named_selection(min_area_mm2, max_area_mm2):
+    def _create_named_selection(min_area_mm2, max_area_mm2, expected_count):
         """创建一个基于面面积的命名选择集。
 
-        .py 与 .scscript 的关键差异：
-        PowerSelectOptions(append, selection) 第二参数是 ISelection。
-        .scscript 中 Body1 (IBody) 被引擎隐式转换为 ISelection；
-        .py 中必须用 Selection.Create(body) 显式构造 ISelection。
-        SpaceClaim 命令可能使传入的 Selection 失效，因此每次调用都必须
-        从当前 part.Bodies 重新构造，不能跨命令复用。
+        V241 会把部分历史成对面聚合为一个 DesignFace，其面积等于两张
+        历史面的总面积。精确面积优先；仅在零命中时允许二倍面积匹配，
+        并用“选择数 × 聚合倍率”严格校验历史面数量。
         """
         try:
-            bodies = list(part.Bodies)
-            if not bodies:
-                logger.warning("创建选择集失败：当前主部件不包含 body")
+            current_part = doc.MainPart
+            if current_part is None:
+                logger.warning("创建选择集失败：当前文档 MainPart 为 None")
+                return None
+            current_bodies = list(current_part.Bodies)
+            if len(current_bodies) != 1:
+                logger.warning(
+                    "创建选择集失败：当前模型包含 {} 个 body".format(
+                        len(current_bodies)))
                 return None
 
-            fresh_body_selection = Selection.Create(bodies[0])
-            if fresh_body_selection is None:
-                logger.warning("创建选择集失败：Selection.Create 返回 None")
+            design_body = current_bodies[0]
+            min_area = MM2(min_area_mm2)
+            max_area = MM2(max_area_mm2)
+            faces = list(design_body.Faces)
+            matching_faces = [
+                face for face in faces
+                if min_area <= face.Area <= max_area
+            ]
+            area_scale = 1
+            if not matching_faces:
+                matching_faces = [
+                    face for face in faces
+                    if 2 * min_area <= face.Area <= 2 * max_area
+                ]
+                if matching_faces:
+                    area_scale = 2
+
+            normalized_count = len(matching_faces) * area_scale
+            if normalized_count != expected_count:
+                nearest = sorted(
+                    [face.Area for face in faces],
+                    key=lambda area: min(
+                        abs(area - min_area), abs(area - max_area)),
+                )[:3]
+                logger.warning(
+                    "面积 {}-{} mm² 命中 {} 个 DesignFace (倍率 {})，"
+                    "归一化数量 {}，期望 {}；"
+                    "最近面积(m²): {}".format(
+                        min_area_mm2, max_area_mm2,
+                        len(matching_faces), area_scale,
+                        normalized_count, expected_count, nearest))
                 return None
 
-            opts = PowerSelectOptions(False, fresh_body_selection)
-
+            logger.debug(
+                "面积 {}-{} mm² 命中 {} 个 DesignFace (V241 面积倍率 {})".format(
+                    min_area_mm2, max_area_mm2,
+                    len(matching_faces), area_scale))
+            primary_selection = FaceSelection.Create(matching_faces)
+            if (primary_selection is None or
+                    not primary_selection.IsValid() or
+                    primary_selection.Count != len(matching_faces)):
+                logger.warning(
+                    "FaceSelection 合同校验失败 (期望 {} 个 V241 面)".format(
+                        len(matching_faces)))
+                return None
+            secondary_selection = Selection.Empty()
             result = NamedSelection.Create(
-                PowerSelection.Faces.ByAreaRange(
-                    MM2(min_area_mm2), MM2(max_area_mm2),
-                    opts,
-                ),
-                Selection.Empty(),
-            )
+                primary_selection, secondary_selection)
             if (result is None or not result.Success or
                     result.CreatedNamedSelection is None):
                 logger.warning(
                     "创建选择集命令未成功 (面积 {}-{})".format(
                         min_area_mm2, max_area_mm2))
                 return None
-            return result.CreatedNamedSelection
+            return True
         except Exception as e:
             logger.warning("创建选择集失败 (面积 {}-{}): {}: {}".format(min_area_mm2, max_area_mm2, type(e).__name__, e))
             return None
 
     # 按原始脚本顺序创建选择集
     selection_specs = [
-        (8.55, 8.56),      # → 组1
-        (6.71, 6.72),      # → 组2
-        (9.54, 9.55),      # → 组3
-        (17222, 17223),    # → 组4
-        (28520, 28521),    # → 组5
+        (8.55, 8.56, 60),      # → 组1
+        (6.71, 6.72, 60),      # → 组2
+        (9.54, 9.55, 60),      # → 组3
+        (17222, 17223, 2),     # → 组4
+        (28520, 28521, 2),     # → 组5
     ]
 
-    for i, (lo, hi) in enumerate(selection_specs, 1):
-        result = _create_named_selection(lo, hi)
+    for i, (lo, hi, count) in enumerate(selection_specs, 1):
+        result = _create_named_selection(lo, hi, count)
         if result is not None:
             logger.info("组{} 创建成功 (面积 {}-{} mm²)".format(i, lo, hi))
         else:
@@ -604,14 +646,14 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     # 4c. 继续创建剩余选择集
     # ------------------------------------------------------------------
     remaining_specs = [
-        (2116, 2117),      # Merge 后自动命名为 组5
-        (33927, 33928),    # → 组6
-        (25409, 25410),    # → 组7
-        (12196, 12197),    # → 组8
+        (2116, 2117, 2),      # Merge 后自动命名为 组5
+        (33927, 33928, 2),    # → 组6
+        (25409, 25410, 1),    # → 组7
+        (12196, 12197, 1),    # → 组8
     ]
 
-    for lo, hi in remaining_specs:
-        result = _create_named_selection(lo, hi)
+    for lo, hi, count in remaining_specs:
+        result = _create_named_selection(lo, hi, count)
         if result is not None:
             logger.info("选择集创建成功 (面积 {}-{} mm²)".format(lo, hi))
         else:
@@ -827,7 +869,7 @@ def _persistent_loop():
             if not config_name or not step_dir or not scdoc_dir or not scdoc_name:
                 logger.error("常驻模式: 命令缺少必要字段: {}".format(cmd_data))
                 _write_result(result_file, config_name, False,
-                              "命令缺少必要字段", run_id=run_id)
+                              "missing_required_fields", run_id=run_id)
                 try:
                     os.remove(cmd_file)
                 except (IOError, OSError):
@@ -870,7 +912,8 @@ def _persistent_loop():
             #   _write_result 内部已有 4 层降级保护，此处仅兜底极端编码异常
             try:
                 _write_result(result_file, config_name, success,
-                              "转换成功" if success else "转换失败",
+                              "conversion_succeeded" if success else
+                              "conversion_failed",
                               run_id=run_id)
             except (UnicodeEncodeError, UnicodeDecodeError) as write_err:
                 # 编码异常：_write_result 的降级路径可能已写入部分结果，
@@ -967,11 +1010,10 @@ def _write_result(result_file, config_name, success, message="",
 
     try:
         tmp_file = result_file + ".tmp"
-        # ★ 使用 codecs.open 替代 io.open：
-        #    IronPython 2.7 的 io.open 不一定将 errors 参数传递到底层
-        #    StreamWriter；codecs.open 对 errors 参数的支持更可靠。
-        with codecs.open(tmp_file, "w", encoding="utf-8", errors="replace") as f:
-            f.write(json_text)
+        # json.dumps 的默认 ensure_ascii=True 保证内容为 ASCII；直接以
+        # 二进制写入，避免 IronPython codecs writer 对 str 的隐式解码。
+        with open(tmp_file, "wb") as f:
+            f.write(json_text.encode("ascii"))
             f.flush()
             # ★ fsync 单独包裹：.fileno() 在 IronPython 中可能返回
             #    .NET 对象而非 int，导致 os.fsync 失败。
@@ -988,7 +1030,11 @@ def _write_result(result_file, config_name, success, message="",
         except (IOError, OSError):
             pass
         os.rename(tmp_file, result_file)
-        logger.debug("结果文件已写入: {}".format(result_file))
+        try:
+            logger.debug("结果文件已写入: {}".format(result_file))
+        except BaseException:
+            # 结果已原子发布；日志编码问题不得把成功写入上抛为失败。
+            pass
 
     except Exception as e:
         # 捕获所有异常（包括 UnicodeEncodeError），确保不会因编码问题
