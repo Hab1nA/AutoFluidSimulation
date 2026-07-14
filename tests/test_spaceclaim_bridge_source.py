@@ -95,6 +95,21 @@ def test_spaceclaim_transit_fails_closed_before_saving_invalid_scdoc() -> None:
     assert "将跳过合并" not in source
 
 
+def test_spaceclaim_transit_uses_fresh_body_selection_for_each_group() -> None:
+    source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
+    helper_start = source.index("def _create_named_selection")
+    helper_end = source.index("selection_specs = [", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "bodies = list(part.Bodies)" in helper
+    assert "if not bodies:" in helper
+    assert "fresh_body_selection = Selection.Create(bodies[0])" in helper
+    assert "if fresh_body_selection is None:" in helper
+    assert "PowerSelectOptions(False, fresh_body_selection)" in helper
+    assert "PowerSelectOptions(False)" not in helper
+    assert "body_selection" not in source.replace("fresh_body_selection", "")
+
+
 def test_spaceclaim_transit_removes_stale_output_before_opening_step() -> None:
     source = SPACECLAIM_TRANSIT_SOURCE.read_text(encoding="utf-8")
 

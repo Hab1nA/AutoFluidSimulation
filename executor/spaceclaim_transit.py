@@ -514,21 +514,6 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         return _fail_closed_processing(
             "获取 MainPart 失败: {}: {}".format(type(e).__name__, e))
 
-    # PowerSelectOptions 第二参数类型为 ISelection，非 IBody。
-    # .scscript 中 Body1 被 SpaceClaim 引擎隐式转换为 ISelection；
-    # .py 中必须手动通过 Selection.Create(body) 构造。
-    body_selection = None
-    try:
-        bodies = list(part.Bodies)
-        if bodies:
-            body_selection = Selection.Create(bodies[0])
-            logger.info("已构造体选择集 (Bodies[0])")
-    except Exception as e:
-        logger.warning("构造体选择集失败: {}: {}".format(type(e).__name__, e))
-
-    if body_selection is None:
-        logger.warning("无体选择集，PowerSelectOptions 将不传第二参数（全选）")
-
     # ------------------------------------------------------------------
     # 4. 几何处理 — 创建命名选择集
     # ------------------------------------------------------------------
@@ -548,12 +533,21 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
         PowerSelectOptions(append, selection) 第二参数是 ISelection。
         .scscript 中 Body1 (IBody) 被引擎隐式转换为 ISelection；
         .py 中必须用 Selection.Create(body) 显式构造 ISelection。
+        SpaceClaim 命令可能使传入的 Selection 失效，因此每次调用都必须
+        从当前 part.Bodies 重新构造，不能跨命令复用。
         """
         try:
-            if body_selection is not None:
-                opts = PowerSelectOptions(False, body_selection)
-            else:
-                opts = PowerSelectOptions(False)
+            bodies = list(part.Bodies)
+            if not bodies:
+                logger.warning("创建选择集失败：当前主部件不包含 body")
+                return None
+
+            fresh_body_selection = Selection.Create(bodies[0])
+            if fresh_body_selection is None:
+                logger.warning("创建选择集失败：Selection.Create 返回 None")
+                return None
+
+            opts = PowerSelectOptions(False, fresh_body_selection)
 
             result = NamedSelection.Create(
                 PowerSelection.Faces.ByAreaRange(
@@ -698,7 +692,6 @@ def process_step_file(config_name, step_dir, scdoc_dir, scdoc_name):
     # 释放本地引用，确保 Windows 文件句柄在重命名前完成回收。
     doc = None
     part = None
-    body_selection = None
     _force_gc()
 
     try:
