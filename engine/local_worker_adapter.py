@@ -84,6 +84,10 @@ class LocalWorkerAdapter:
             return {"ok": False, "error": self.last_error or "LocalWorker 任务失败"}
         return dict(result)
 
+    def has_online_worker(self) -> bool:
+        """Return whether the registry currently has an online LocalWorker."""
+        return self._registry.has_online_worker()
+
     def has_active_task(
         self,
         step: str,

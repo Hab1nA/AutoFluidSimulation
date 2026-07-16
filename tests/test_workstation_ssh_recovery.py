@@ -28,8 +28,10 @@ class _Runner:
     def __init__(self, connected_by_id: dict[str, bool]) -> None:
         self._connected_by_id = connected_by_id
         self.disconnect_calls: list[str | None] = []
+        self.get_ssh_calls: list[str] = []
 
     def get_ssh(self, workstation_id: str = "default", *, log_failure: bool = True) -> _Ssh:
+        self.get_ssh_calls.append(workstation_id)
         return _Ssh(self._connected_by_id[workstation_id])
 
     def disconnect_ssh(
@@ -39,6 +41,27 @@ class _Runner:
         lock_timeout: float | None = None,
     ) -> None:
         self.disconnect_calls.append(workstation_id)
+
+
+class _State:
+    def __init__(
+        self,
+        engine_status: str,
+        remote_tasks: list[dict] | None = None,
+        statuses: dict[int, dict[str, str]] | None = None,
+    ) -> None:
+        self.engine_status = engine_status
+        self.remote_tasks = list(remote_tasks or [])
+        self.statuses = dict(statuses or {})
+
+    def get_engine_status(self) -> str:
+        return self.engine_status
+
+    def get_all_remote_tasks(self) -> list[dict]:
+        return list(self.remote_tasks)
+
+    def get_all_statuses(self) -> dict[int, dict[str, str]]:
+        return dict(self.statuses)
 
 
 class _FlippingRunner:
@@ -226,6 +249,9 @@ def test_local_worker_repairer_delegates_to_local_worker_adapter() -> None:
         def __init__(self) -> None:
             self.calls = []
 
+        def has_online_worker(self) -> bool:
+            return True
+
         def ensure_workstation_tunnel(self, workstation_id: str, *, timeout_seconds: float):
             self.calls.append((workstation_id, timeout_seconds))
             return {"ok": True, "results": [{"id": workstation_id, "ok": True}]}
@@ -242,6 +268,30 @@ def test_local_worker_repairer_delegates_to_local_worker_adapter() -> None:
     assert result["ok"] is True
     assert result["status"] == "repair_succeeded"
     assert adapter.calls == [("WS-C", 12.0)]
+
+
+def test_local_worker_repairer_skips_offline_adapter_dispatch() -> None:
+    class _OfflineAdapter:
+        def has_online_worker(self) -> bool:
+            return False
+
+        def ensure_workstation_tunnel(self, workstation_id: str, *, timeout_seconds: float):
+            raise AssertionError("offline LocalWorker must not receive tunnel tasks")
+
+    repairer = LocalWorkerWorkstationTunnelRepairer(_OfflineAdapter())
+
+    result = repairer.repair(
+        "WS-C",
+        {"connectivity_mode": "reverse_tunnel"},
+        timeout_seconds=12.0,
+    )
+
+    assert result == {
+        "ok": False,
+        "status": "local_worker_unavailable",
+        "detail": "没有在线 LocalWorker",
+        "target": {"connectivity_mode": "reverse_tunnel"},
+    }
 
 
 def test_composite_repairer_prefers_local_worker_before_subprocess() -> None:
@@ -548,6 +598,67 @@ def test_worker_start_all_failed_still_starts_health_monitor_for_recovery(monkey
     assert daemon._last_worker_ssh_active_probe_time == 0.0
 
 
+def test_worker_start_partial_failure_forces_followup_recovery(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [
+            {
+                "id": "WS-A",
+                "host": "172.17.135.240",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2222,
+                "connectivity_mode": "reverse_tunnel",
+            },
+            {
+                "id": "WS-C",
+                "host": "172.17.135.115",
+                "port": 22,
+                "reachable_host": "127.0.0.1",
+                "reachable_port": 2225,
+                "connectivity_mode": "reverse_tunnel",
+            },
+        ],
+    )
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    events = []
+    repairer = _Repairer()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = _Runner({"WS-A": True, "WS-C": False})
+    daemon.state = _State("stopped")
+    daemon.local_worker_registry = type(
+        "_Registry",
+        (),
+        {"clear_online_workers": lambda self: events.append("registry_cleared")},
+    )()
+    daemon._workstation_ssh_recovery = WorkstationSshRecoveryManager(
+        policy=WorkstationSshRecoveryPolicy(enabled=True, failure_threshold=2),
+        repairer=repairer,
+        clock=lambda: 1000.0,
+    )
+    daemon._last_worker_ssh_active_probe_time = 1000.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+    request_active_probe = daemon._request_workstation_ssh_active_probe
+
+    def request_probe() -> None:
+        events.append("probe_requested")
+        request_active_probe()
+
+    daemon._request_workstation_ssh_active_probe = request_probe
+    daemon._start_workstation_ssh_health_monitor = lambda: events.append("monitor_started")
+
+    ok, data, message = daemon.handle_worker_start({})
+    followup = daemon._run_workstation_ssh_health_check_once()
+
+    assert ok is True
+    assert "部分工作站 SSH 连通检查失败" in message
+    assert data["ssh_checks"] == {"WS-A": "ok", "WS-C": "disconnected"}
+    assert events == ["registry_cleared", "probe_requested", "monitor_started"]
+    assert followup["ssh_recovery"]["WS-C"]["repair"]["status"] == "repair_succeeded"
+    assert [call[0] for call in repairer.calls] == ["WS-C"]
+
+
 def test_health_monitor_runs_initial_active_probe_when_forced(monkeypatch) -> None:
     calls = []
     daemon = PipelineDaemon.__new__(PipelineDaemon)
@@ -556,7 +667,7 @@ def test_health_monitor_runs_initial_active_probe_when_forced(monkeypatch) -> No
     daemon._ssh_health_stop_event.set()
     daemon._ssh_health_interval_seconds = 30.0
     daemon._ssh_health_active_probe_interval_seconds = 300.0
-    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._last_worker_ssh_active_probe_time = 1000.0
 
     monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
 
@@ -565,10 +676,174 @@ def test_health_monitor_runs_initial_active_probe_when_forced(monkeypatch) -> No
         return {"ssh_checks": {}, "ssh_targets": {}}
 
     daemon._refresh_workstation_ssh_checks = fake_refresh
+    daemon._request_workstation_ssh_active_probe()
 
     daemon._workstation_ssh_health_loop()
 
     assert calls == [{"connect": True, "source": "active_probe"}]
+
+
+def test_stopped_pipeline_health_is_passive_without_recovery_demand(monkeypatch) -> None:
+    monkeypatch.setattr(
+        daemon_module,
+        "WORKSTATIONS",
+        [{
+            "id": "WS-C",
+            "host": "172.17.135.115",
+            "port": 22,
+            "reachable_host": "127.0.0.1",
+            "reachable_port": 2225,
+            "connectivity_mode": "reverse_tunnel",
+        }],
+    )
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    runner = _Runner({"WS-C": False})
+    repairer = _Repairer()
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = runner
+    daemon.state = _State("stopped")
+    daemon._last_worker_ssh_checks = {"WS-C": "disconnected"}
+    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+    daemon._workstation_ssh_recovery = WorkstationSshRecoveryManager(
+        policy=WorkstationSshRecoveryPolicy(enabled=True, failure_threshold=1),
+        repairer=repairer,
+        clock=lambda: 1000.0,
+    )
+
+    result = daemon._run_workstation_ssh_health_check_once()
+
+    assert result["ssh_checks"] == {"WS-C": "disconnected"}
+    assert runner.get_ssh_calls == []
+    assert repairer.calls == []
+    assert "ssh_recovery" not in result
+
+
+def test_running_and_paused_pipelines_keep_active_ssh_recovery(monkeypatch) -> None:
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    for engine_status in ("running", "paused"):
+        calls = []
+        daemon = PipelineDaemon.__new__(PipelineDaemon)
+        daemon.runner = object()
+        daemon.state = _State(engine_status)
+        daemon._last_worker_ssh_active_probe_time = 0.0
+        daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+        def fake_refresh(*, connect=True, source="active_probe"):
+            calls.append({"connect": connect, "source": source})
+            return {"ssh_checks": {}, "ssh_targets": {}}
+
+        daemon._refresh_workstation_ssh_checks = fake_refresh
+
+        daemon._run_workstation_ssh_health_check_once()
+
+        assert calls == [{"connect": True, "source": "active_probe"}]
+
+
+def test_stopped_pipeline_with_remote_tasks_keeps_active_ssh_recovery(monkeypatch) -> None:
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    calls = []
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = object()
+    daemon.state = _State(
+        "stopped",
+        [{"workstation_id": "WS-C", "config_name": 1, "step_name": "solver"}],
+    )
+    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+    def fake_refresh(*, connect=True, source="active_probe"):
+        calls.append({"connect": connect, "source": source})
+        return {"ssh_checks": {}, "ssh_targets": {}}
+
+    daemon._refresh_workstation_ssh_checks = fake_refresh
+
+    daemon._run_workstation_ssh_health_check_once()
+
+    assert calls == [{"connect": True, "source": "active_probe"}]
+
+
+def test_stopped_pipeline_with_active_remote_status_keeps_recovery(monkeypatch) -> None:
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    calls = []
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = object()
+    daemon.state = _State(
+        "stopped",
+        statuses={1: {"sw": "Completed", "solver": "UnknownRemote"}},
+    )
+    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+    def fake_refresh(*, connect=True, source="active_probe"):
+        calls.append({"connect": connect, "source": source})
+        return {"ssh_checks": {}, "ssh_targets": {}}
+
+    daemon._refresh_workstation_ssh_checks = fake_refresh
+
+    daemon._run_workstation_ssh_health_check_once()
+
+    assert calls == [{"connect": True, "source": "active_probe"}]
+
+
+def test_recovery_demand_read_failure_fails_open_and_logs_once(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    calls = []
+
+    class _BrokenState:
+        def get_engine_status(self) -> str:
+            raise RuntimeError("database unavailable")
+
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = object()
+    daemon.state = _BrokenState()
+    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+    def fake_refresh(*, connect=True, source="active_probe"):
+        calls.append({"connect": connect, "source": source})
+        return {"ssh_checks": {}, "ssh_targets": {}}
+
+    daemon._refresh_workstation_ssh_checks = fake_refresh
+
+    daemon._run_workstation_ssh_health_check_once()
+    daemon._last_worker_ssh_active_probe_time = 0.0
+    daemon._run_workstation_ssh_health_check_once()
+    daemon.state = _State("stopped")
+    daemon._run_workstation_ssh_health_check_once()
+
+    assert calls == [
+        {"connect": True, "source": "active_probe"},
+        {"connect": True, "source": "active_probe"},
+        {"connect": False, "source": "active_probe"},
+    ]
+    assert caplog.text.count("无法判断工作站 SSH 主动恢复需求") == 1
+    assert caplog.text.count("工作站 SSH 主动恢复需求检查已恢复") == 1
+
+
+def test_forced_probe_bypasses_stopped_pipeline_gate_once(monkeypatch) -> None:
+    monkeypatch.setattr(daemon_module.time, "time", lambda: 1000.0)
+    calls = []
+    daemon = PipelineDaemon.__new__(PipelineDaemon)
+    daemon.runner = object()
+    daemon.state = _State("stopped")
+    daemon._last_worker_ssh_active_probe_time = 1000.0
+    daemon._ssh_health_active_probe_interval_seconds = 300.0
+
+    def fake_refresh(*, connect=True, source="active_probe"):
+        calls.append({"connect": connect, "source": source})
+        return {"ssh_checks": {}, "ssh_targets": {}}
+
+    daemon._refresh_workstation_ssh_checks = fake_refresh
+
+    daemon._request_workstation_ssh_active_probe()
+    daemon._run_workstation_ssh_health_check_once()
+    daemon._run_workstation_ssh_health_check_once()
+
+    assert calls == [
+        {"connect": True, "source": "active_probe"},
+        {"connect": False, "source": "active_probe"},
+    ]
 
 
 def test_forced_active_probe_wakes_running_health_monitor(monkeypatch) -> None:

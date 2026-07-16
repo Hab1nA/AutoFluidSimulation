@@ -883,6 +883,14 @@ def test_background_ssh_health_runs_low_frequency_active_probe(monkeypatch):
     runner = _RefreshRunner({"WS-A": _Ssh(True)})
     daemon = PipelineDaemon.__new__(PipelineDaemon)
     daemon.runner = runner
+    daemon.state = type(
+        "_RunningState",
+        (),
+        {
+            "get_engine_status": lambda self: "running",
+            "get_all_remote_tasks": lambda self: [],
+        },
+    )()
     daemon._last_worker_ssh_checks = {"WS-A": "stale"}
     daemon._last_worker_ssh_check_times = {"WS-A": 600.0}
     daemon._last_worker_ssh_check_sources = {"WS-A": "worker_start"}

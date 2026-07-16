@@ -273,6 +273,14 @@ class LocalWorkerWorkstationTunnelRepairer:
                 "detail": "LocalWorker adapter cannot repair workstation tunnels",
                 "target": dict(target),
             }
+        has_online_worker = getattr(self.local_worker_adapter, "has_online_worker", None)
+        if callable(has_online_worker) and not bool(has_online_worker()):
+            return {
+                "ok": False,
+                "status": "local_worker_unavailable",
+                "detail": "没有在线 LocalWorker",
+                "target": dict(target),
+            }
         result = ensure(workstation_id, timeout_seconds=timeout_seconds)
         ok = bool(result.get("ok")) if isinstance(result, Mapping) else False
         return {

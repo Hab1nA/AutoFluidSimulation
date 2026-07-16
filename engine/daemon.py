@@ -240,6 +240,7 @@ class PipelineDaemon:
         self._ssh_health_wake_event = threading.Event()
         self._last_worker_ssh_active_probe_time = time.time()
         self._last_worker_ssh_check_sources: dict[str, str] = {}
+        self._ssh_recovery_demand_error_logged = False
         self._workstation_ssh_recovery = default_recovery_manager(
             _PROJECT_ROOT,
             local_worker_adapter=self.local_worker_adapter,
@@ -1322,10 +1323,14 @@ class PipelineDaemon:
             for ws_id, status in ssh_checks.items()
             if status != "ok"
         }
-        if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
-            self.local_worker_registry.clear_online_workers()
-            logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
+        # Drop stale registrations before waking recovery. A running health
+        # monitor must never dispatch repair work to a worker from the previous
+        # lifecycle window.
+        self.local_worker_registry.clear_online_workers()
+        if failed_ssh_checks:
             self._request_workstation_ssh_active_probe()
+        if ssh_checks and len(failed_ssh_checks) == len(ssh_checks):
+            logger.warning("[Worker] worker_start 失败，所有工作站 SSH 连通检查失败: %s", ssh_checks)
             self._start_workstation_ssh_health_monitor()
             target_summary = ", ".join(
                 f"{ws_id}={target['host']}:{target['port']}({target['connectivity_mode']})"
@@ -1336,8 +1341,6 @@ class PipelineDaemon:
                 f"实际检查目标: {target_summary}"
             )
 
-        # 清除旧的在线 worker 标记（允许重新注册）
-        self.local_worker_registry.clear_online_workers()
         results["registry_ready"] = True
         self._start_workstation_ssh_health_monitor()
 
@@ -1402,6 +1405,63 @@ class PipelineDaemon:
                 self._last_worker_ssh_active_probe_time = now
                 return True
             return False
+
+    def _has_workstation_ssh_recovery_demand(self) -> bool:
+        """Return whether daemon state currently requires active SSH recovery.
+
+        The health monitor remains alive for passive dashboard reporting while
+        the pipeline is idle. Active probes are reserved for explicit forced
+        checks, running/paused pipelines, and preserved remote work.
+        """
+        lock, force_event = self._ensure_ssh_health_probe_controls()
+        with lock:
+            if force_event.is_set():
+                return True
+
+        state = getattr(self, "state", None)
+        if state is None:
+            return False
+
+        try:
+            engine_status = str(state.get_engine_status())
+            if engine_status in {"running", "paused"}:
+                self._clear_ssh_recovery_demand_error()
+                return True
+
+            get_all_remote_tasks = getattr(state, "get_all_remote_tasks", None)
+            if callable(get_all_remote_tasks) and bool(get_all_remote_tasks()):
+                self._clear_ssh_recovery_demand_error()
+                return True
+
+            get_all_statuses = getattr(state, "get_all_statuses", None)
+            if callable(get_all_statuses):
+                remote_steps = {"transfer", "meshing", "solver", "postprocess"}
+                active_statuses = {STATUS_RUNNING, STATUS_UNKNOWN_REMOTE}
+                statuses = get_all_statuses()
+                if any(
+                    step_name in remote_steps and step_status in active_statuses
+                    for step_statuses in statuses.values()
+                    for step_name, step_status in step_statuses.items()
+                ):
+                    self._clear_ssh_recovery_demand_error()
+                    return True
+        except Exception as exc:
+            if not bool(getattr(self, "_ssh_recovery_demand_error_logged", False)):
+                logger.warning(
+                    "[Worker] 无法判断工作站 SSH 主动恢复需求，按需恢复以保护在途任务: %s",
+                    exc,
+                )
+                self._ssh_recovery_demand_error_logged = True
+            return True
+
+        self._clear_ssh_recovery_demand_error()
+        return False
+
+    def _clear_ssh_recovery_demand_error(self) -> None:
+        """Close the warning lifecycle after recovery-demand reads recover."""
+        if bool(getattr(self, "_ssh_recovery_demand_error_logged", False)):
+            logger.warning("[Worker] 工作站 SSH 主动恢复需求检查已恢复")
+        self._ssh_recovery_demand_error_logged = False
 
     def _refresh_workstation_ssh_checks(
         self,
@@ -1574,7 +1634,10 @@ class PipelineDaemon:
             interval = float(
                 getattr(self, "_ssh_health_active_probe_interval_seconds", 300.0)
             )
-            if self._should_run_workstation_ssh_active_probe(now, interval):
+            if (
+                self._has_workstation_ssh_recovery_demand()
+                and self._should_run_workstation_ssh_active_probe(now, interval)
+            ):
                 return self._refresh_workstation_ssh_checks(
                     connect=True,
                     source="active_probe",
